@@ -294,6 +294,6 @@ projector Notes {
 ";
     assert_eq!(
         parse(source).expect_err("expected a rejection").message,
-        "a String field cannot default to an interpolated string"
+        "a String default cannot be an interpolated string"
     );
 }

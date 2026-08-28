@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 
-use crate::ir::{EntityField, EnumDef, EventPath, Ident, Literal, Type};
+use crate::ir::{EntityField, EnumDef, EventPath, Ident, Literal, RecordDef, Type};
 use crate::scaled::{self, Rounding};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +22,10 @@ pub enum Value {
     Enum {
         ty: Ident,
         variant: Ident,
+    },
+    Record {
+        ty: Ident,
+        fields: BTreeMap<Ident, Value>,
     },
     Rounding(Rounding),
     Json(Json),
@@ -82,6 +86,19 @@ impl Value {
         }
     }
 
+    pub fn record(
+        ty: impl Into<Ident>,
+        fields: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
+    ) -> Self {
+        Value::Record {
+            ty: ty.into(),
+            fields: fields
+                .into_iter()
+                .map(|(name, value)| (name.into(), value))
+                .collect(),
+        }
+    }
+
     pub fn map(key: Type, value: Type, entries: impl IntoIterator<Item = (Key, Value)>) -> Self {
         Value::Map {
             key,
@@ -100,6 +117,7 @@ impl Value {
             Value::Timestamp(_) => Type::Timestamp,
             Value::Money { scale, .. } => Type::Money(*scale),
             Value::Enum { ty, .. } => Type::Enum(ty.clone()),
+            Value::Record { ty, .. } => Type::Record(ty.clone()),
             Value::Rounding(_) => Type::Rounding,
             Value::Json(_) => Type::Json,
             Value::Response { .. } => Type::Response,
@@ -125,6 +143,7 @@ impl fmt::Display for Value {
             Value::Uuid(value) => write!(f, "{value}"),
             Value::Timestamp(micros) => write!(f, "{micros}"),
             Value::Enum { variant, .. } => f.write_str(variant),
+            Value::Record { .. } => write!(f, "{}", Json::from_value(self)),
             // No currency code: an amount carries a scale and nothing else, so a
             // program that needs one declares an ordinary field beside it.
             Value::Money { units, scale } => scaled::write(f, *units, *scale),
@@ -200,10 +219,29 @@ impl Record {
     }
 }
 
+/// The declarations a zero value has to consult: an enum for its default variant, a
+/// record for its fields. A projector's own enums shadow the module's, which is the
+/// same precedence the parser applies.
+#[derive(Debug, Clone, Copy)]
+pub struct Defs<'a> {
+    pub local: &'a [EnumDef],
+    pub enums: &'a [EnumDef],
+    pub records: &'a [RecordDef],
+}
+
+impl Defs<'_> {
+    pub fn enum_def(&self, name: &str) -> Option<&EnumDef> {
+        self.local
+            .iter()
+            .chain(self.enums)
+            .find(|def| def.name == name)
+    }
+}
+
 /// The initial value a `patch` materializes a missing row from. `None` for `Uuid`
 /// and `Timestamp`, whose nil and epoch-zero values are real data rather than an
 /// absence, which is what makes a field of either type without a default an error.
-pub fn zero(ty: &Type, enums: &[EnumDef]) -> Option<Value> {
+pub fn zero(ty: &Type, defs: Defs<'_>) -> Option<Value> {
     Some(match ty {
         Type::Bool => Value::Bool(false),
         Type::Int => Value::Int(0),
@@ -211,11 +249,24 @@ pub fn zero(ty: &Type, enums: &[EnumDef]) -> Option<Value> {
         Type::String => Value::Str(String::new()),
         Type::Money(scale) => Value::money(0, *scale),
         Type::Enum(name) => {
-            let def = enums.iter().find(|def| &def.name == name)?;
+            let def = defs.enum_def(name)?;
             let variant = def.default_variant()?;
             Value::Enum {
                 ty: name.clone(),
                 variant: variant.clone(),
+            }
+        }
+        // A record's zero is its fields' zeros, so a record column materializes the
+        // same way every other column does rather than being a special case.
+        Type::Record(name) => {
+            let def = defs.records.iter().find(|def| &def.name == name)?;
+            let mut fields = BTreeMap::new();
+            for field in &def.fields {
+                fields.insert(field.name.clone(), zero(&field.ty, defs)?);
+            }
+            Value::Record {
+                ty: name.clone(),
+                fields,
             }
         }
         Type::Opt(inner) => Value::none(inner.as_ref().clone()),
@@ -230,10 +281,10 @@ pub fn zero(ty: &Type, enums: &[EnumDef]) -> Option<Value> {
 
 /// The value a field starts at: its declared default, or its zero. `None` only when
 /// the parser let through a field with neither, which it does not.
-pub fn initial(field: &EntityField, enums: &[EnumDef]) -> Option<Value> {
+pub fn initial(field: &EntityField, defs: Defs<'_>) -> Option<Value> {
     match &field.default {
         Some(lit) => Some(literal(lit)),
-        None => zero(&field.ty, enums),
+        None => zero(&field.ty, defs),
     }
 }
 
@@ -255,8 +306,15 @@ pub fn literal(lit: &Literal) -> Value {
         },
         Literal::None(inner) => Value::none(inner.clone()),
         Literal::Rounding(mode) => Value::Rounding(*mode),
-        Literal::EmptyList(inner) => Value::list(inner.clone(), []),
+        Literal::List { inner, items } => Value::list(inner.clone(), items.iter().map(literal)),
         Literal::EmptyMap(key, value) => Value::map(key.clone(), value.clone(), []),
+        Literal::Record { ty, fields } => Value::Record {
+            ty: ty.clone(),
+            fields: fields
+                .iter()
+                .map(|(name, value)| (name.clone(), literal(value)))
+                .collect(),
+        },
     }
 }
 
@@ -374,6 +432,12 @@ impl Json {
             Value::Str(value) | Value::Uuid(value) => Json::Str(value.clone()),
             Value::Timestamp(micros) => Json::Int(*micros),
             Value::Enum { variant, .. } => Json::Str(variant.clone()),
+            Value::Record { fields, .. } => Json::Obj(
+                fields
+                    .iter()
+                    .map(|(name, value)| (name.clone(), Json::from_value(value)))
+                    .collect(),
+            ),
             Value::Rounding(mode) => Json::Str(mode.to_string()),
             Value::Json(json) => json.clone(),
             Value::Response { status, body } => {

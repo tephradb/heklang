@@ -19,9 +19,12 @@ parse_files([
 
 A command may use an event declared in another file, a projector may reference events it is compiled
 alongside, an effect may invoke a command from a third file, and the files may be passed in any
-order. This is the two-pass declaration collection that already made order irrelevant inside one
-file, applied to every module at once: pass one collects event, entity and enum declarations and
-command signatures across the whole program, pass two parses the bodies.
+order. This is the layered declaration collection that already made order irrelevant inside one
+file, applied to every module at once: the earlier passes collect declarations across the whole
+program, the last one parses the bodies. There are four of them, and `docs/declarations.md` has the
+table of what each reads and why. What matters here is that every pass runs over **every module**
+before the next one starts, so a record in one file may name an enum in another and an event in a
+third may name that record.
 
 There is no import syntax and no dependency order to get right, because there is nothing to order.
 
@@ -32,7 +35,8 @@ declare `@order.placed` or a command named `Place`; that is the same "declared t
 one file, and it names the module of the first declaration.
 
 An effect may invoke a command declared in another module, and a command's signature is collected in
-the same pass that collects events, so there is nothing to order there either.
+the same pass that collects events, so there is nothing to order there either. Enums, records and
+constants are collected earlier still, for the same reason: an event field may name any of them.
 
 The one scoped namespace is a projector's own: entities and enums belong to the projector that
 declares them, so two projectors may each have a `Customer` (see `docs/projectors.md`, rule on

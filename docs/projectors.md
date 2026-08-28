@@ -230,6 +230,12 @@ set cannot be written at all. The runtime's `one_of` validates membership on com
 a projector write, so a bad variant there lands in the column and only fails later at bind time. That
 hole cannot exist here.
 
+**Enums are now declared at module scope as well** (`docs/declarations.md`), which closes the other
+half of the same hole. While they were projector-scoped, a bad variant could not reach the read model
+but could still reach the **event**, because an event field could not have an enum type at all and had
+to be a `String`. The same enum on the event, on the command parameter and on the column means there
+is no boundary left for a wrong value to cross. A projector's own enum still shadows a module one.
+
 ## 8. Indexes
 
 Field-level `@index` with no name declares a single-column index. Entity-level `index (a, b)`

@@ -414,7 +414,12 @@ fn a_default_or_a_zero_always_has_the_declared_type() {
                 if index == entity.key {
                     continue;
                 }
-                let value = heklang::value::initial(field, &projector.enums).unwrap_or_else(|| {
+                let defs = heklang::value::Defs {
+                    local: &projector.enums,
+                    enums: &program.enums,
+                    records: &program.records,
+                };
+                let value = heklang::value::initial(field, defs).unwrap_or_else(|| {
                     panic!(
                         "{}.{} has neither default nor zero",
                         entity.name, field.name

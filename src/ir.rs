@@ -46,6 +46,7 @@ pub enum Type {
     /// currency is not in the type, the value or the config.
     Money(u8),
     Enum(Ident),
+    Record(Ident),
     Rounding,
     Json,
     Response,
@@ -81,7 +82,7 @@ impl fmt::Display for Type {
             Type::Uuid => f.write_str("Uuid"),
             Type::Timestamp => f.write_str("Timestamp"),
             Type::Money(scale) => write!(f, "Money({scale})"),
-            Type::Enum(name) => f.write_str(name),
+            Type::Enum(name) | Type::Record(name) => f.write_str(name),
             Type::Rounding => f.write_str("Rounding"),
             Type::Json => f.write_str("Json"),
             Type::Response => f.write_str("Response"),
@@ -125,6 +126,10 @@ pub struct Program {
     pub commands: Vec<Command>,
     pub projectors: Vec<Projector>,
     pub effects: Vec<Effect>,
+    /// Module scope, shadowed inside a projector by one of its own.
+    pub enums: Vec<EnumDef>,
+    pub records: Vec<RecordDef>,
+    pub consts: Vec<ConstDef>,
 }
 
 impl Program {
@@ -145,6 +150,45 @@ impl Program {
     pub fn effect(&self, name: &str) -> Option<&Effect> {
         self.effects.iter().find(|effect| effect.name == name)
     }
+
+    pub fn record(&self, name: &str) -> Option<&RecordDef> {
+        self.records.iter().find(|def| def.name == name)
+    }
+
+    pub fn constant(&self, name: &str) -> Option<&ConstDef> {
+        self.consts.iter().find(|def| def.name == name)
+    }
+}
+
+/// A named product type at module scope. Unlike an entity it is an ordinary value:
+/// it can be a field, a parameter, a fold's state and an element of a container.
+#[derive(Debug, Clone)]
+pub struct RecordDef {
+    pub name: Ident,
+    pub module: Option<Ident>,
+    pub fields: Vec<RecordField>,
+}
+
+impl RecordDef {
+    pub fn field(&self, name: &str) -> Option<&RecordField> {
+        self.fields.iter().find(|field| field.name == name)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RecordField {
+    pub name: Ident,
+    pub ty: Type,
+}
+
+/// A module-scope constant. The value is a literal, so the declaration needs no
+/// expression arena, which is the same reason an entity default is a literal.
+#[derive(Debug, Clone)]
+pub struct ConstDef {
+    pub name: Ident,
+    pub module: Option<Ident>,
+    pub ty: Type,
+    pub value: Literal,
 }
 
 #[derive(Debug, Clone)]
@@ -497,6 +541,10 @@ pub enum Expr {
     /// this is a join over one uniform list rather than two interleaved ones.
     Interp(Vec<ExprId>),
     List(Vec<ExprId>),
+    Record {
+        ty: Ident,
+        fields: Vec<(Ident, ExprId)>,
+    },
     /// `[yields for bindings in over if cond]`. The bindings are ordinary frame slots,
     /// filled once per element, so nothing about a comprehension is a new scope kind.
     Comp {
@@ -601,10 +649,17 @@ pub enum Literal {
         variant: Ident,
     },
     Rounding(Rounding),
-    /// An empty container is a constant, so it is a literal: usable as a seed, a
-    /// default and a const, not only as an expression.
-    EmptyList(Type),
+    /// A container of literals is itself a literal, so it can be a seed, a default
+    /// and a const rather than only an expression.
+    List {
+        inner: Type,
+        items: Vec<Literal>,
+    },
     EmptyMap(Type, Type),
+    Record {
+        ty: Ident,
+        fields: Vec<(Ident, Literal)>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

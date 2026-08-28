@@ -3,9 +3,10 @@ use std::mem;
 
 use crate::build::Builder;
 use crate::ir::{
-    Arm, BinOp, Bind, Builtin, Command, Effect, EntityDef, EntityField, EnumDef, EnvField,
-    EventDef, EventPath, Expr, ExprId, Exprs, FieldDef, Filter, Handler, Ident, Index, Iter,
-    Literal, Number, Program, Projector, Return, Slot, Span, Stmt, Type, UnOp, Update,
+    Arm, BinOp, Bind, Builtin, Command, ConstDef, Effect, EntityDef, EntityField, EnumDef,
+    EnvField, EventDef, EventPath, Expr, ExprId, Exprs, FieldDef, Filter, Handler, Ident, Index,
+    Iter, Literal, Number, Program, Projector, RecordDef, RecordField, Return, Slot, Span, Stmt,
+    Type, UnOp, Update,
 };
 use crate::lex::{Keyword, Spanned, Sym, SyntaxError, Token, lex};
 use crate::scaled::Rounding;
@@ -60,6 +61,14 @@ struct Parser {
     /// The enclosing projector's declarations; empty outside one.
     enums: Vec<EnumDef>,
     entities: Vec<EntityDef>,
+    /// Module scope, collected before anything that could name one. A projector's own
+    /// enum shadows one of these, which is why they are two lists rather than one.
+    module_enums: Vec<EnumDef>,
+    records: Vec<RecordDef>,
+    consts: Vec<ConstDef>,
+    /// Set while parsing an `if` or `for` header, where the `{` that follows opens a
+    /// block. Without it `if plan { ... }` reads as a record literal.
+    no_record_literal: bool,
     /// The handler being parsed: its event, and the name its `as` clause bound.
     event: Option<EventDef>,
     envelope: Option<Ident>,
@@ -123,6 +132,10 @@ impl Parser {
             in_body: false,
             enums: Vec::new(),
             entities: Vec::new(),
+            module_enums: Vec::new(),
+            records: Vec::new(),
+            consts: Vec::new(),
+            no_record_literal: false,
             event: None,
             envelope: None,
             stored: None,
@@ -322,14 +335,76 @@ impl Parser {
         }
     }
 
+    /// Four passes over the same token stream, each doing only what the one before it
+    /// made possible. A record field may name an enum, an event field may name a
+    /// record, and a body may name anything, so the boundaries are not arbitrary.
     fn program(&mut self) -> Result<Program, SyntaxError> {
+        // A: enums, and the names of records, so a record field may name a record.
         self.pos = 0;
         let items = self.pos;
+        loop {
+            match self.peek() {
+                Token::End => break,
+                Token::Word(Keyword::Enum) => {
+                    let def = self.enum_decl()?;
+                    if self.module_enums.iter().any(|other| other.name == def.name) {
+                        return self.fail(format!("enum `{}` is declared twice", def.name));
+                    }
+                    self.module_enums.push(def);
+                }
+                Token::Word(Keyword::Record) => {
+                    let module = self.module_at(self.pos).map(str::to_string);
+                    self.bump();
+                    let (line, col) = self.here();
+                    let name = self.expect_ident()?;
+                    if self.records.iter().any(|other| other.name == name) {
+                        return Err(self.err(
+                            format!("record `{name}` is declared twice"),
+                            line,
+                            col,
+                        ));
+                    }
+                    self.records.push(RecordDef {
+                        name,
+                        module,
+                        fields: Vec::new(),
+                    });
+                    self.skip_braced()?;
+                }
+                _ => self.skip_item()?,
+            }
+        }
+
+        // B: record fields, now that every type they might name has a name.
+        self.pos = items;
+        let mut index = 0usize;
+        loop {
+            match self.peek() {
+                Token::End => break,
+                Token::Word(Keyword::Record) => {
+                    let fields = self.record_fields()?;
+                    self.records[index].fields = fields;
+                    index += 1;
+                }
+                _ => self.skip_item()?,
+            }
+        }
+
+        // C: everything whose declaration is a signature rather than a body.
+        self.pos = items;
         let mut events: Vec<EventDef> = Vec::new();
         let mut projectors: Vec<Projector> = Vec::new();
         loop {
             match self.peek() {
                 Token::End => break,
+                Token::Word(Keyword::Enum) | Token::Word(Keyword::Record) => self.skip_item()?,
+                Token::Word(Keyword::Const) => {
+                    let def = self.const_decl()?;
+                    if self.consts.iter().any(|other| other.name == def.name) {
+                        return self.fail(format!("const `{}` is declared twice", def.name));
+                    }
+                    self.consts.push(def);
+                }
                 Token::Word(Keyword::Event) => {
                     let event = self.event_decl()?;
                     if events.iter().any(|def| def.path == event.path) {
@@ -351,6 +426,7 @@ impl Parser {
             }
         }
 
+        // D: bodies.
         self.pos = items;
         let mut commands = Vec::new();
         let mut effects: Vec<Effect> = Vec::new();
@@ -358,7 +434,10 @@ impl Parser {
         loop {
             match self.peek() {
                 Token::End => break,
-                Token::Word(Keyword::Event) => self.skip_item()?,
+                Token::Word(Keyword::Event)
+                | Token::Word(Keyword::Enum)
+                | Token::Word(Keyword::Record)
+                | Token::Word(Keyword::Const) => self.skip_item()?,
                 Token::Word(Keyword::Command) => {
                     let command = self.command_decl(&events)?;
                     commands.push(command);
@@ -386,6 +465,9 @@ impl Parser {
             commands,
             projectors,
             effects,
+            enums: mem::take(&mut self.module_enums),
+            records: mem::take(&mut self.records),
+            consts: mem::take(&mut self.consts),
         };
         self.check_cycles(&program)?;
         Ok(program)
@@ -419,7 +501,76 @@ impl Parser {
     }
 
     fn expected_item(found: &Token) -> String {
-        format!("expected `event`, `command`, `projector` or `effect`, found {found}")
+        format!(
+            "expected `enum`, `record`, `const`, `event`, `command`, `projector` or `effect`, found {found}"
+        )
+    }
+
+    /// Pass B. The name was taken in pass A, so this reads only the body.
+    fn record_fields(&mut self) -> Result<Vec<RecordField>, SyntaxError> {
+        self.expect_word(Keyword::Record)?;
+        let name = self.expect_ident()?;
+        self.expect_sym(Sym::LBrace)?;
+
+        let mut fields: Vec<RecordField> = Vec::new();
+        while !self.at_sym(Sym::RBrace) {
+            let (line, col) = self.here();
+            let field = self.expect_ident()?;
+            if fields.iter().any(|other| other.name == field) {
+                return Err(self.err(
+                    format!("record `{name}` declares `{field}` twice"),
+                    line,
+                    col,
+                ));
+            }
+            self.expect_sym(Sym::Colon)?;
+            let ty = self.type_ref()?;
+            fields.push(RecordField { name: field, ty });
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RBrace)?;
+        if fields.is_empty() {
+            return self.fail(format!("record `{name}` declares no fields"));
+        }
+        Ok(fields)
+    }
+
+    /// `const NAME: Type = <literal>`. Literals and literal aggregates only, for the
+    /// reason an entity default is: no expression arena hangs off a declaration.
+    fn const_decl(&mut self) -> Result<ConstDef, SyntaxError> {
+        let module = self.module_at(self.pos).map(str::to_string);
+        self.expect_word(Keyword::Const)?;
+        let name = self.expect_ident()?;
+        self.expect_sym(Sym::Colon)?;
+        let ty = self.type_ref()?;
+        self.expect_sym(Sym::Assign)?;
+        let value = self.default_literal("const", &ty)?;
+        Ok(ConstDef {
+            name,
+            module,
+            ty,
+            value,
+        })
+    }
+
+    /// The declarations a zero value consults, with the projector's enums shadowing
+    /// the module's.
+    fn defs(&self) -> value::Defs<'_> {
+        value::Defs {
+            local: &self.enums,
+            enums: &self.module_enums,
+            records: &self.records,
+        }
+    }
+
+    fn record_def(&self, name: &str) -> Option<&RecordDef> {
+        self.records.iter().find(|def| def.name == name)
+    }
+
+    fn const_def(&self, name: &str) -> Option<&ConstDef> {
+        self.consts.iter().find(|def| def.name == name)
     }
 
     /// Collects a projector's `enum` and `entity` declarations, leaving its handlers
@@ -675,7 +826,7 @@ impl Parser {
                         "`{field_name}` is optional, so it is already `none` by default"
                     ));
                 }
-                field.default = Some(self.default_literal(&ty)?);
+                field.default = Some(self.default_literal("default", &ty)?);
             }
 
             if is_key {
@@ -735,7 +886,7 @@ impl Parser {
                     col,
                 ));
             }
-            if value::zero(&field.ty, &self.enums).is_none() {
+            if value::zero(&field.ty, self.defs()).is_none() {
                 let ty = &field.ty;
                 return Err(self.err(
                     format!(
@@ -785,12 +936,11 @@ impl Parser {
     /// A field default is a literal, resolved here against the declared type, so
     /// nothing unresolved reaches the IR and a default always agrees in type with the
     /// zero it replaces.
-    fn default_literal(&mut self, ty: &Type) -> Result<Literal, SyntaxError> {
+    fn default_literal(&mut self, what: &str, ty: &Type) -> Result<Literal, SyntaxError> {
         let negated = self.eat_sym(Sym::Minus);
         let spanned = self.bump();
         let (line, col) = (spanned.line, spanned.col);
-        let bad =
-            |found: &str| self.err(format!("a {ty} field cannot default to {found}"), line, col);
+        let bad = |found: &str| format!("a {ty} {what} cannot be {found}");
 
         let lit = match spanned.token {
             Token::Number(number) => {
@@ -803,16 +953,82 @@ impl Parser {
                     .resolve(ty)
                     .map_err(|err| self.err(err.to_string(), line, col))?
             }
-            _ if negated => return Err(bad("a negated value")),
+            _ if negated => return Err(self.err(bad("a negated value"), line, col)),
+            // The only way to write a `Uuid` down. There is no Uuid literal token,
+            // because a bare hex-and-dashes word is not one, so the target type is
+            // what decides that this string is one.
+            Token::Text(text) if matches!(ty, Type::Uuid) => {
+                if uuid::Uuid::parse_str(&text).is_err() {
+                    return Err(self.err(format!("`{text}` is not a Uuid"), line, col));
+                }
+                Literal::Uuid(text)
+            }
             Token::Text(text) => Literal::Str(text),
+            Token::Sym(Sym::LBracket) => {
+                let Type::List(inner) = ty else {
+                    return Err(self.err(bad("a list"), line, col));
+                };
+                let mut items = Vec::new();
+                while !self.at_sym(Sym::RBracket) {
+                    items.push(self.default_literal(what, inner)?);
+                    if !self.eat_sym(Sym::Comma) {
+                        break;
+                    }
+                }
+                self.expect_sym(Sym::RBracket)?;
+                Literal::List {
+                    inner: inner.as_ref().clone(),
+                    items,
+                }
+            }
+            Token::Ident(name) if name == "Map" && self.at_sym(Sym::Dot) => {
+                let Type::Map(key, value) = ty else {
+                    return Err(self.err(bad("a map"), line, col));
+                };
+                self.expect_sym(Sym::Dot)?;
+                let member = self.expect_ident()?;
+                if member != "empty" {
+                    return Err(self.err(bad(&format!("`Map.{member}`")), line, col));
+                }
+                Literal::EmptyMap(key.as_ref().clone(), value.as_ref().clone())
+            }
+            Token::Ident(name) if self.record_def(&name).is_some() => {
+                let def = self.record_def(&name).cloned().expect("checked just above");
+                self.expect_sym(Sym::LBrace)?;
+                let mut fields: Vec<(Ident, Literal)> = Vec::new();
+                while !self.at_sym(Sym::RBrace) {
+                    let (line, col) = self.here();
+                    let field = self.expect_ident()?;
+                    let Some(declared) = def.field(&field) else {
+                        return Err(self.err(
+                            format!("record `{name}` has no field `{field}`"),
+                            line,
+                            col,
+                        ));
+                    };
+                    let declared = declared.ty.clone();
+                    self.expect_sym(Sym::Colon)?;
+                    fields.push((field, self.default_literal(what, &declared)?));
+                    if !self.eat_sym(Sym::Comma) {
+                        break;
+                    }
+                }
+                self.expect_sym(Sym::RBrace)?;
+                for declared in &def.fields {
+                    if !fields.iter().any(|(given, _)| given == &declared.name) {
+                        return self.fail(format!("record `{name}` needs `{}`", declared.name));
+                    }
+                }
+                Literal::Record { ty: name, fields }
+            }
             Token::Word(Keyword::True) => Literal::Bool(true),
             Token::Word(Keyword::False) => Literal::Bool(false),
             Token::Ident(variant) => {
                 let Type::Enum(enum_name) = ty else {
-                    return Err(bad(&format!("`{variant}`")));
+                    return Err(self.err(bad(&format!("`{variant}`")), line, col));
                 };
                 let Some(def) = self.enum_def(enum_name) else {
-                    return Err(bad(&format!("`{variant}`")));
+                    return Err(self.err(bad(&format!("`{variant}`")), line, col));
                 };
                 if !def.has(&variant) {
                     return Err(self.err(
@@ -826,22 +1042,26 @@ impl Parser {
                     variant,
                 }
             }
-            other => return Err(bad(&other.to_string())),
+            other => return Err(self.err(bad(&other.to_string()), line, col)),
         };
 
         let found = value::literal(&lit).ty();
         if &found != ty {
-            return Err(self.err(
-                format!("a {ty} field cannot default to a {found}"),
-                line,
-                col,
-            ));
+            return Err(self.err(format!("a {ty} {what} cannot be a {found}"), line, col));
         }
         Ok(lit)
     }
 
+    /// Every enum a name could resolve against here: the projector's own first, then
+    /// the module's.
+    fn visible_enums(&self) -> impl Iterator<Item = &EnumDef> {
+        self.enums.iter().chain(&self.module_enums)
+    }
+
+    /// A projector's own enum shadows a module-scope one of the same name, which is
+    /// the same precedence a local binding has over a builtin.
     fn enum_def(&self, name: &str) -> Option<&EnumDef> {
-        self.enums.iter().find(|def| def.name == name)
+        self.visible_enums().find(|def| def.name == name)
     }
 
     fn entity_def(&self, name: &str) -> Option<&EntityDef> {
@@ -1089,7 +1309,10 @@ impl Parser {
             }
             other => match self.enum_def(other) {
                 Some(def) => Type::Enum(def.name.clone()),
-                None => return self.fail(format!("unknown type `{other}`")),
+                None => match self.record_def(other) {
+                    Some(def) => Type::Record(def.name.clone()),
+                    None => return self.fail(format!("unknown type `{other}`")),
+                },
             },
         };
 
@@ -1204,7 +1427,7 @@ impl Parser {
         let name = self.expect_ident()?;
         self.expect_sym(Sym::Assign)?;
         let value = self.expr(lower, None)?;
-        let ty = type_of(lower, value);
+        let ty = self.type_of(lower, value);
         lower.b.hoist(&name, value, ty);
         Ok(())
     }
@@ -1360,7 +1583,7 @@ impl Parser {
         match self.peek() {
             Token::Word(Keyword::If) => {
                 self.bump();
-                let cond = self.expr(lower, Some(Type::Bool))?;
+                let cond = self.header_expr(lower, Some(Type::Bool))?;
                 let then = self.block(lower, events)?;
                 let otherwise = if self.eat_word(Keyword::Else) {
                     // `else if` is one statement rather than a block, so a chain of
@@ -1527,7 +1750,7 @@ impl Parser {
                 let name = self.expect_ident()?;
                 self.expect_sym(Sym::Assign)?;
                 let value = self.expr(lower, None)?;
-                let ty = type_of(lower, value);
+                let ty = self.type_of(lower, value);
                 let slot = lower.b.alloc(&name, ty);
                 Ok(Stmt::Assign { slot, value })
             }
@@ -1657,7 +1880,8 @@ impl Parser {
             let name = self.expect_ident()?;
 
             if self.eat_sym(Sym::LParen) {
-                let receiver = type_of(lower, value);
+                let receiver = self.type_of(lower, value);
+                let outer = mem::replace(&mut self.no_record_literal, false);
                 let mut args = Vec::new();
                 while !self.at_sym(Sym::RParen) {
                     let hint = receiver
@@ -1669,6 +1893,7 @@ impl Parser {
                     }
                 }
                 self.expect_sym(Sym::RParen)?;
+                self.no_record_literal = outer;
                 lower.b.at(span);
                 value = lower.b.method(value, &name, args);
                 continue;
@@ -1677,11 +1902,22 @@ impl Parser {
             // Parenless, so a field rather than a method. Only a `Response` has any,
             // and where the receiver's type is known the mistake is caught here rather
             // than at run time, which is where `total.trim` used to be caught.
-            match type_of(lower, value) {
+            match self.type_of(lower, value) {
                 Some(Type::Response) if response_field(&name).is_some() => {}
                 Some(Type::Response) => {
                     return Err(self.err(
                         format!("a Response carries `status` and `body`, not `{name}`"),
+                        line,
+                        col,
+                    ));
+                }
+                Some(Type::Record(record))
+                    if self
+                        .record_def(&record)
+                        .is_some_and(|def| def.field(&name).is_some()) => {}
+                Some(Type::Record(record)) => {
+                    return Err(self.err(
+                        format!("record `{record}` has no field `{name}`"),
                         line,
                         col,
                     ));
@@ -1714,7 +1950,7 @@ impl Parser {
             Token::Word(Keyword::True) => Ok(lower.b.bool(true)),
             Token::Word(Keyword::False) => Ok(lower.b.bool(false)),
             Token::Word(Keyword::If) => {
-                let cond = self.expr(lower, Some(Type::Bool))?;
+                let cond = self.header_expr(lower, Some(Type::Bool))?;
                 self.expect_sym(Sym::LBrace)?;
                 let then = self.expr(lower, expect.clone())?;
                 self.expect_sym(Sym::RBrace)?;
@@ -1726,7 +1962,9 @@ impl Parser {
                 Ok(lower.b.if_expr(cond, then, otherwise))
             }
             Token::Sym(Sym::LParen) => {
+                let outer = mem::replace(&mut self.no_record_literal, false);
                 let value = self.expr(lower, expect)?;
+                self.no_record_literal = outer;
                 self.expect_sym(Sym::RParen)?;
                 Ok(value)
             }
@@ -1798,6 +2036,16 @@ impl Parser {
                 if let Some(value) = self.builtin(lower, &name, expect.as_ref(), span)? {
                     return Ok(value);
                 }
+                if !self.no_record_literal
+                    && self.at_sym(Sym::LBrace)
+                    && self.record_def(&name).is_some()
+                {
+                    return self.record_literal(lower, name, span);
+                }
+                if let Some(def) = self.const_def(&name) {
+                    let value = def.value.clone();
+                    return Ok(lower.b.lit(value));
+                }
                 if let Some(Type::Enum(enum_name)) = expect.as_ref().map(inner_of)
                     && let Some(def) = self.enum_def(enum_name)
                 {
@@ -1814,11 +2062,10 @@ impl Parser {
                 if let Some(mode) = rounding_mode(&name) {
                     return Ok(lower.b.rounding(mode));
                 }
-                match self.enums.iter().filter(|def| def.has(&name)).count() {
+                match self.visible_enums().filter(|def| def.has(&name)).count() {
                     1 => {
                         let ty = self
-                            .enums
-                            .iter()
+                            .visible_enums()
                             .find(|def| def.has(&name))
                             .expect("counted one")
                             .name
@@ -1828,8 +2075,7 @@ impl Parser {
                     0 => Err(self.not_in_scope(&name, spanned.line, spanned.col)),
                     _ => {
                         let candidates: Vec<&str> = self
-                            .enums
-                            .iter()
+                            .visible_enums()
                             .filter(|def| def.has(&name))
                             .map(|def| def.name.as_str())
                             .collect();
@@ -1880,7 +2126,7 @@ impl Parser {
         if lower.defaults.contains_key(&id) {
             return None;
         }
-        type_of(lower, id)
+        self.type_of(lower, id)
     }
 
     fn settle(&self, lower: &mut Lower, lhs: ExprId, rhs: ExprId) {
@@ -1896,12 +2142,12 @@ impl Parser {
                 }
             }
             (Some(_), None) => {
-                if let Some(ty) = type_of(lower, rhs) {
+                if let Some(ty) = self.type_of(lower, rhs) {
                     self.retype(lower, lhs, &ty);
                 }
             }
             (None, Some(_)) => {
-                if let Some(ty) = type_of(lower, lhs) {
+                if let Some(ty) = self.type_of(lower, lhs) {
                     self.retype(lower, rhs, &ty);
                 }
             }
@@ -1963,39 +2209,49 @@ fn rounding_mode(name: &str) -> Option<Rounding> {
     })
 }
 
-fn type_of(lower: &Lower, id: ExprId) -> Option<Type> {
-    match lower.b.exprs().get(id)? {
-        Expr::Lit(lit) => Some(value::literal(lit).ty()),
-        Expr::Load(slot) => lower.b.slot_type(*slot).cloned(),
-        Expr::Unary { operand, .. } => type_of(lower, *operand),
-        Expr::Binary { op, lhs, rhs } => match op {
-            BinOp::Eq
-            | BinOp::Ne
-            | BinOp::Lt
-            | BinOp::Le
-            | BinOp::Gt
-            | BinOp::Ge
-            | BinOp::And
-            | BinOp::Or => Some(Type::Bool),
-            _ => type_of(lower, *lhs).or_else(|| type_of(lower, *rhs)),
-        },
-        Expr::Method {
-            receiver, method, ..
-        } => method_type(&type_of(lower, *receiver)?, method),
-        Expr::If { then, .. } => type_of(lower, *then),
-        Expr::Field { name, .. } => response_field(name),
-        Expr::Object(_) => Some(Type::Json),
-        Expr::Interp(_) => Some(Type::String),
-        Expr::List(items) => Some(Type::list(
-            items.first().and_then(|id| type_of(lower, *id))?,
-        )),
-        Expr::Comp { yields, .. } => Some(Type::list(type_of(lower, *yields)?)),
-        Expr::Call { builtin, .. } => Some(match builtin {
-            Builtin::UuidDerive => Type::Uuid,
-            _ => Type::Response,
-        }),
-        Expr::Invoke { .. } => Some(Type::Outcome),
-        Expr::Reveal { .. } => Some(Type::String),
+impl Parser {
+    /// A static type where one is knowable. `None` is not an error: it means the
+    /// expression's type is only decided at run time, which most of them are.
+    fn type_of(&self, lower: &Lower, id: ExprId) -> Option<Type> {
+        match lower.b.exprs().get(id)? {
+            Expr::Lit(lit) => Some(value::literal(lit).ty()),
+            Expr::Load(slot) => lower.b.slot_type(*slot).cloned(),
+            Expr::Unary { operand, .. } => self.type_of(lower, *operand),
+            Expr::Binary { op, lhs, rhs } => match op {
+                BinOp::Eq
+                | BinOp::Ne
+                | BinOp::Lt
+                | BinOp::Le
+                | BinOp::Gt
+                | BinOp::Ge
+                | BinOp::And
+                | BinOp::Or => Some(Type::Bool),
+                _ => self
+                    .type_of(lower, *lhs)
+                    .or_else(|| self.type_of(lower, *rhs)),
+            },
+            Expr::Method {
+                receiver, method, ..
+            } => method_type(&self.type_of(lower, *receiver)?, method),
+            Expr::If { then, .. } => self.type_of(lower, *then),
+            Expr::Field { receiver, name } => match self.type_of(lower, *receiver)? {
+                Type::Record(ty) => self.record_def(&ty)?.field(name).map(|f| f.ty.clone()),
+                _ => response_field(name),
+            },
+            Expr::Object(_) => Some(Type::Json),
+            Expr::Interp(_) => Some(Type::String),
+            Expr::List(items) => Some(Type::list(
+                items.first().and_then(|id| self.type_of(lower, *id))?,
+            )),
+            Expr::Comp { yields, .. } => Some(Type::list(self.type_of(lower, *yields)?)),
+            Expr::Call { builtin, .. } => Some(match builtin {
+                Builtin::UuidDerive => Type::Uuid,
+                _ => Type::Response,
+            }),
+            Expr::Invoke { .. } => Some(Type::Outcome),
+            Expr::Record { ty, .. } => Some(Type::Record(ty.clone())),
+            Expr::Reveal { .. } => Some(Type::String),
+        }
     }
 }
 
@@ -2513,6 +2769,18 @@ impl Parser {
             _ => None,
         };
 
+        let outer = mem::replace(&mut self.no_record_literal, false);
+        let value = self.bracketed_inner(lower, inner, span);
+        self.no_record_literal = outer;
+        value
+    }
+
+    fn bracketed_inner(
+        &mut self,
+        lower: &mut Lower,
+        inner: Option<Type>,
+        span: Span,
+    ) -> Result<ExprId, SyntaxError> {
         if let Some(at) = self.comprehension_for() {
             return self.comprehension(lower, inner, at, span);
         }
@@ -2526,7 +2794,10 @@ impl Parser {
                 ));
             };
             lower.b.at(span);
-            return Ok(lower.b.lit(Literal::EmptyList(inner)));
+            return Ok(lower.b.lit(Literal::List {
+                inner,
+                items: Vec::new(),
+            }));
         }
 
         let mut items = Vec::new();
@@ -2608,9 +2879,9 @@ impl Parser {
         };
         self.expect_word(Keyword::In)?;
         let (over_line, over_col) = self.here();
-        let over = self.expr(lower, None)?;
+        let over = self.header_expr(lower, None)?;
 
-        let (index_ty, item_ty) = match type_of(lower, over) {
+        let (index_ty, item_ty) = match self.type_of(lower, over) {
             Some(Type::List(item)) => (second.as_ref().map(|_| Type::Int), item.as_ref().clone()),
             Some(Type::Map(key, value)) => {
                 if second.is_none() {
@@ -2675,6 +2946,72 @@ impl Parser {
         let lit = Literal::EmptyMap(key.as_ref().clone(), value.as_ref().clone());
         lower.b.at(span);
         Ok(lower.b.lit(lit))
+    }
+
+    /// `Name { field: value }`, with the same bare-name shorthand `emit` and `put`
+    /// already use. Only reached when `Name` is a declared record and no `if` or `for`
+    /// header is waiting for its block, so the `{` cannot be misread.
+    fn record_literal(
+        &mut self,
+        lower: &mut Lower,
+        name: Ident,
+        span: Span,
+    ) -> Result<ExprId, SyntaxError> {
+        let def = self.record_def(&name).cloned().expect("checked by caller");
+        self.expect_sym(Sym::LBrace)?;
+
+        let outer = mem::replace(&mut self.no_record_literal, false);
+        let mut fields: Vec<(Ident, ExprId)> = Vec::new();
+        while !self.at_sym(Sym::RBrace) {
+            let (line, col) = self.here();
+            let field = self.expect_ident()?;
+            let Some(declared) = def.field(&field) else {
+                return Err(self.err(format!("record `{name}` has no field `{field}`"), line, col));
+            };
+            if fields.iter().any(|(seen, _)| seen == &field) {
+                return Err(self.err(format!("`{field}` is given twice"), line, col));
+            }
+            let expected = declared.ty.clone();
+            let value = if self.eat_sym(Sym::Colon) {
+                self.expr(lower, Some(expected))?
+            } else {
+                if lower.b.lookup(&field).is_none() {
+                    return Err(self.not_in_scope(&field, line, col));
+                }
+                lower.b.at(Span::new(line, col));
+                lower.b.load(&field)
+            };
+            fields.push((field, value));
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RBrace)?;
+        self.no_record_literal = outer;
+
+        // Every field, always. A record with a hole would need a zero for the missing
+        // one, and a partial record is what record update exists for, which is out.
+        for declared in &def.fields {
+            if !fields.iter().any(|(given, _)| given == &declared.name) {
+                return self.fail(format!("record `{name}` needs `{}`", declared.name));
+            }
+        }
+        lower.b.at(span);
+        Ok(lower.b.expr(Expr::Record { ty: name, fields }))
+    }
+
+    /// An `if` or `for` header, where the `{` that follows opens a block rather than a
+    /// record literal. Nested delimiters clear the restriction again, so a record
+    /// literal inside a call in a header still works.
+    fn header_expr(
+        &mut self,
+        lower: &mut Lower,
+        expect: Option<Type>,
+    ) -> Result<ExprId, SyntaxError> {
+        let outer = mem::replace(&mut self.no_record_literal, true);
+        let value = self.expr(lower, expect);
+        self.no_record_literal = outer;
+        value
     }
 
     fn object_literal(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, SyntaxError> {
@@ -2981,6 +3318,7 @@ fn children(expr: &Expr) -> Vec<ExprId> {
         Expr::Object(fields) => fields.iter().map(|(_, id)| *id).collect(),
         Expr::Interp(parts) => parts.clone(),
         Expr::List(items) => items.clone(),
+        Expr::Record { fields, .. } => fields.iter().map(|(_, id)| *id).collect(),
         Expr::Comp {
             iter, cond, yields, ..
         } => {

@@ -205,6 +205,7 @@ fn there_is_no_currency_item() {
         .message;
     assert_eq!(
         message,
-        "expected `event`, `command`, `projector` or `effect`, found `currency`"
+        "expected `enum`, `record`, `const`, `event`, `command`, `projector` or `effect`, \
+         found `currency`"
     );
 }

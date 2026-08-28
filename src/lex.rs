@@ -7,6 +7,7 @@ use crate::ir::Number;
 pub enum Keyword {
     As,
     Command,
+    Const,
     Delete,
     Effect,
     Else,
@@ -28,6 +29,7 @@ pub enum Keyword {
     Patch,
     Projector,
     Put,
+    Record,
     Reject,
     Return,
     State,
@@ -39,6 +41,7 @@ impl Keyword {
         Some(match word {
             "as" => Keyword::As,
             "command" => Keyword::Command,
+            "const" => Keyword::Const,
             "delete" => Keyword::Delete,
             "effect" => Keyword::Effect,
             "else" => Keyword::Else,
@@ -60,6 +63,7 @@ impl Keyword {
             "patch" => Keyword::Patch,
             "projector" => Keyword::Projector,
             "put" => Keyword::Put,
+            "record" => Keyword::Record,
             "reject" => Keyword::Reject,
             "return" => Keyword::Return,
             "state" => Keyword::State,
@@ -72,6 +76,7 @@ impl Keyword {
         match self {
             Keyword::As => "as",
             Keyword::Command => "command",
+            Keyword::Const => "const",
             Keyword::Delete => "delete",
             Keyword::Effect => "effect",
             Keyword::Else => "else",
@@ -93,6 +98,7 @@ impl Keyword {
             Keyword::Patch => "patch",
             Keyword::Projector => "projector",
             Keyword::Put => "put",
+            Keyword::Record => "record",
             Keyword::Reject => "reject",
             Keyword::Return => "return",
             Keyword::State => "state",

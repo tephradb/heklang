@@ -956,7 +956,7 @@ fn exec_stmt(
             // a prior value for `.field` to read.
             let mut row = match store.get(entity, &key) {
                 Some(row) => row.clone(),
-                None => materialize(def, projector, &key, *span)?,
+                None => materialize(def, projector, program, &key, *span)?,
             };
             for load in loads {
                 let value = row.0.get(&load.field).cloned().ok_or_else(|| {
@@ -1158,15 +1158,21 @@ fn row_key(def: &EntityDef, row: &Row, span: Span) -> Result<Key, Error> {
 fn materialize(
     def: &EntityDef,
     projector: &Projector,
+    program: &Program,
     key: &Key,
     span: Span,
 ) -> Result<Row, Error> {
+    let defs = value::Defs {
+        local: &projector.enums,
+        enums: &program.enums,
+        records: &program.records,
+    };
     let mut row = Row::default();
     for field in &def.fields {
         let value = if field.name == def.key_field().name {
             key_value(key)
         } else {
-            value::initial(field, &projector.enums).ok_or_else(|| {
+            value::initial(field, defs).ok_or_else(|| {
                 Error::at(
                     ErrorKind::MissingEntityField {
                         entity: def.name.clone(),
@@ -1256,6 +1262,9 @@ fn eval(
             match (&value, name.as_str()) {
                 (Value::Response { status, .. }, "status") => Ok(Value::Int(*status)),
                 (Value::Response { body, .. }, "body") => Ok(Value::Json(body.clone())),
+                (Value::Record { fields, .. }, field) if fields.contains_key(field) => {
+                    Ok(fields[field].clone())
+                }
                 _ => Err(at(ErrorKind::NoSuchField {
                     ty: value.ty(),
                     field: name.clone(),
@@ -1308,6 +1317,17 @@ fn eval(
             Ok(Value::List {
                 inner: inner.unwrap_or(Type::Json),
                 items,
+            })
+        }
+        Expr::Record { ty, fields } => {
+            let mut values = BTreeMap::new();
+            for (name, value) in fields {
+                let value = eval(exprs, frame, *value, ctx.as_deref_mut())?;
+                values.insert(name.clone(), value);
+            }
+            Ok(Value::Record {
+                ty: ty.clone(),
+                fields: values,
             })
         }
         Expr::Interp(parts) => {
