@@ -967,3 +967,28 @@ fn a_subject_propagates_from_the_event_into_the_entity_field() {
         "a field written from an unbound value carries no subject"
     );
 }
+
+#[test]
+fn a_handler_may_omit_the_destructure_block() {
+    // One block is the body. The same form an effect arm uses, so the two kinds do not
+    // differ on the same construct.
+    let store = project(
+        "  on @order.placed as e {
+    put Order {
+      order_id: e.order_id,
+      customer_id: e.customer_id,
+      total: e.total,
+      status: Placed,
+      tracking: none,
+    }
+  }",
+        vec![placed(1, 7, 2_599)],
+    );
+    assert_eq!(store.len("Order"), 1);
+
+    let message = err("  on @order.placed { order_id, total }");
+    assert_eq!(
+        message,
+        "this looks like a destructure block; a handler with one needs a body block after it"
+    );
+}

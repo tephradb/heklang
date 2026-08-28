@@ -44,6 +44,9 @@ pub enum Type {
     Money,
     Enum(Ident),
     Rounding,
+    Json,
+    Response,
+    Outcome,
     Opt(Box<Type>),
 }
 
@@ -65,6 +68,9 @@ impl fmt::Display for Type {
             Type::Money => f.write_str("Money"),
             Type::Enum(name) => f.write_str(name),
             Type::Rounding => f.write_str("Rounding"),
+            Type::Json => f.write_str("Json"),
+            Type::Response => f.write_str("Response"),
+            Type::Outcome => f.write_str("Outcome"),
             Type::Opt(inner) => write!(f, "{inner}?"),
         }
     }
@@ -102,6 +108,7 @@ pub struct Program {
     pub events: Vec<EventDef>,
     pub commands: Vec<Command>,
     pub projectors: Vec<Projector>,
+    pub effects: Vec<Effect>,
 }
 
 impl Program {
@@ -117,6 +124,10 @@ impl Program {
         self.projectors
             .iter()
             .find(|projector| projector.name == name)
+    }
+
+    pub fn effect(&self, name: &str) -> Option<&Effect> {
+        self.effects.iter().find(|effect| effect.name == name)
     }
 }
 
@@ -302,6 +313,40 @@ pub struct EnvBind {
 }
 
 #[derive(Debug, Clone)]
+pub struct Effect {
+    pub name: Ident,
+    pub module: Option<Ident>,
+    pub arms: Vec<Arm>,
+}
+
+impl Effect {
+    /// The arm one event selects. Rule 1 makes this at most one, so it is a lookup
+    /// rather than a filter.
+    pub fn arm(&self, event: &EventPath) -> Option<&Arm> {
+        self.arms.iter().find(|arm| &arm.event == event)
+    }
+}
+
+/// One `on @path [as name] [{ destructure }] { body }` of an effect. A command minus
+/// its params, plus a trigger binding: the same prologue, slices and arena.
+#[derive(Debug, Clone)]
+pub struct Arm {
+    pub event: EventPath,
+    pub binds: Vec<Bind>,
+    pub envelope: Vec<EnvBind>,
+    pub frame: usize,
+    pub exprs: Exprs,
+    pub prologue: Vec<Assign>,
+    pub slices: Vec<Slice>,
+    pub states: Vec<StateVar>,
+    /// Rule 11: `now()` is one slot filled before the body runs, so two calls in one
+    /// body are two reads of one value.
+    pub now: Option<Slot>,
+    pub body: Vec<Stmt>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
 pub struct Command {
     pub name: Ident,
     /// The module this was declared in, for error messages. `None` for an unnamed source.
@@ -309,6 +354,8 @@ pub struct Command {
     pub params: Vec<Param>,
     pub frame: usize,
     pub exprs: Exprs,
+    /// Rule 11: the request's append time, pinned once. See [`Arm::now`].
+    pub now: Option<Slot>,
     pub prologue: Vec<Assign>,
     pub slices: Vec<Slice>,
     pub states: Vec<StateVar>,
@@ -423,6 +470,73 @@ pub enum Expr {
         then: ExprId,
         otherwise: ExprId,
     },
+    /// `response.status`, `response.body`. Parenless, unlike a method call.
+    Field {
+        receiver: ExprId,
+        name: Ident,
+    },
+    /// A JSON object literal, for an HTTP request body only (rule 8).
+    Object(Vec<(Ident, ExprId)>),
+    Call {
+        builtin: Builtin,
+        args: Vec<ExprId>,
+    },
+    Invoke {
+        command: Ident,
+        args: Vec<(Ident, ExprId)>,
+    },
+    /// Rule 12. The subject field and value are recovered by the parser, because
+    /// subject-ness is a property of the schema path rather than of the value.
+    Reveal {
+        value: ExprId,
+        field: Ident,
+        subject: Ident,
+        subject_value: ExprId,
+    },
+}
+
+/// The builtins that are ordinary calls. `now()` is not among them: it lowers to a
+/// pre-filled slot, so it is pinned once per invocation rather than once per call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Builtin {
+    HttpGet,
+    HttpPost,
+    HttpPut,
+    HttpPatch,
+    HttpDelete,
+    Uuid5,
+}
+
+impl Builtin {
+    pub fn verb(name: &str) -> Option<Self> {
+        Some(match name {
+            "get" => Builtin::HttpGet,
+            "post" => Builtin::HttpPost,
+            "put" => Builtin::HttpPut,
+            "patch" => Builtin::HttpPatch,
+            "delete" => Builtin::HttpDelete,
+            _ => return None,
+        })
+    }
+
+    /// Whether this verb carries a request body.
+    pub fn has_body(self) -> bool {
+        matches!(
+            self,
+            Builtin::HttpPost | Builtin::HttpPut | Builtin::HttpPatch
+        )
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Builtin::HttpGet => "http.get",
+            Builtin::HttpPost => "http.post",
+            Builtin::HttpPut => "http.put",
+            Builtin::HttpPatch => "http.patch",
+            Builtin::HttpDelete => "http.delete",
+            Builtin::Uuid5 => "uuid5",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -534,6 +648,24 @@ pub enum Stmt {
         entity: Ident,
         key: ExprId,
     },
+    /// Rule 4: the author's terminal outcome, and the only one.
+    Fail {
+        message: ExprId,
+        span: Span,
+    },
+    Log {
+        message: ExprId,
+    },
+    /// Rule 9 keeps `erase` a statement, so an erase can only appear where the
+    /// control-flow join is precise.
+    Erase {
+        subject: Ident,
+        value: ExprId,
+        span: Span,
+    },
+    /// A bare `invoke` or `http.*` whose result is unused. A closed rule, not general
+    /// expression statements.
+    Discard(ExprId),
     Return(Return),
 }
 

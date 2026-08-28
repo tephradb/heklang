@@ -18,17 +18,21 @@ parse_files([
 ## 1. Order does not matter
 
 A command may use an event declared in another file, a projector may reference events it is compiled
-alongside, and the files may be passed in any order. This is the two-pass declaration collection that
-already made order irrelevant inside one file, applied to every module at once: pass one collects
-event, entity and enum declarations across the whole program, pass two parses the bodies.
+alongside, an effect may invoke a command from a third file, and the files may be passed in any
+order. This is the two-pass declaration collection that already made order irrelevant inside one
+file, applied to every module at once: pass one collects event, entity and enum declarations and
+command signatures across the whole program, pass two parses the bodies.
 
 There is no import syntax and no dependency order to get right, because there is nothing to order.
 
 ## 2. A module is not a namespace
 
-Event paths, command names and projector names are global. Two modules cannot both declare
-`@order.placed` or a command named `Place`; that is the same "declared twice" error as within one
-file, and it names the module of the first declaration.
+Event paths, command names, projector names and effect names are global. Two modules cannot both
+declare `@order.placed` or a command named `Place`; that is the same "declared twice" error as within
+one file, and it names the module of the first declaration.
+
+An effect may invoke a command declared in another module, and a command's signature is collected in
+the same pass that collects events, so there is nothing to order there either.
 
 The one scoped namespace is a projector's own: entities and enums belong to the projector that
 declares them, so two projectors may each have a `Customer` (see `docs/projectors.md`, rule on

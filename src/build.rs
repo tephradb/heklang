@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::currency::Currency;
 use crate::ir::{
-    Assign, BinOp, Bind, Command, EnvBind, EnvField, EventPath, Expr, ExprId, Exprs, Filter,
+    Arm, Assign, BinOp, Bind, Command, EnvBind, EnvField, EventPath, Expr, ExprId, Exprs, Filter,
     Handler, Ident, Literal, Number, Param, Slice, SliceId, Slot, Span, StateVar, Stmt, Type, UnOp,
     Update,
 };
@@ -22,6 +22,7 @@ pub struct Builder {
     scopes: Vec<HashMap<Ident, Slot>>,
     binds: Vec<Bind>,
     envelope: Vec<EnvBind>,
+    now: Option<Slot>,
 }
 
 impl Builder {
@@ -40,6 +41,7 @@ impl Builder {
             scopes: vec![HashMap::new()],
             binds: Vec::new(),
             envelope: Vec::new(),
+            now: None,
         }
     }
 
@@ -231,6 +233,7 @@ impl Builder {
             params: self.params,
             frame: self.frame as usize,
             exprs: self.exprs,
+            now: self.now,
             prologue: self.prologue,
             slices: self.slices,
             states: self.states,
@@ -275,6 +278,36 @@ impl Builder {
 
     pub fn none(&mut self, inner: Type) -> ExprId {
         self.lit(Literal::None(inner))
+    }
+
+    /// Rule 11: one slot for `now()`, however many times the body calls it, filled
+    /// before the body runs. That is what makes "pinned once" structural rather than a
+    /// promise: two calls are two reads of the same slot.
+    pub fn now(&mut self) -> Slot {
+        match self.now {
+            Some(slot) => slot,
+            None => {
+                let slot = self.alloc("@@now", Some(Type::Timestamp));
+                self.now = Some(slot);
+                slot
+            }
+        }
+    }
+
+    pub fn finish_arm(self, event: EventPath, span: Span, body: Vec<Stmt>) -> Arm {
+        Arm {
+            event,
+            binds: self.binds,
+            envelope: self.envelope,
+            frame: self.frame as usize,
+            exprs: self.exprs,
+            prologue: self.prologue,
+            slices: self.slices,
+            states: self.states,
+            now: self.now,
+            body,
+            span,
+        }
     }
 
     pub fn finish_handler(self, event: EventPath, body: Vec<Stmt>) -> Handler {

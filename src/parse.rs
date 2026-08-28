@@ -4,9 +4,9 @@ use std::mem;
 use crate::build::Builder;
 use crate::currency::Currency;
 use crate::ir::{
-    BinOp, Bind, Command, EntityDef, EntityField, EnumDef, EnvField, EventDef, EventPath, Expr,
-    ExprId, FieldDef, Filter, Handler, Ident, Index, Literal, Number, Program, Projector, Return,
-    Slot, Span, Stmt, Type, UnOp, Update,
+    Arm, BinOp, Bind, Builtin, Command, Effect, EntityDef, EntityField, EnumDef, EnvField,
+    EventDef, EventPath, Expr, ExprId, Exprs, FieldDef, Filter, Handler, Ident, Index, Literal,
+    Number, Program, Projector, Return, Slot, Span, Stmt, Type, UnOp, Update,
 };
 use crate::lex::{Keyword, Spanned, Sym, SyntaxError, Token, lex};
 use crate::scaled::Rounding;
@@ -45,7 +45,20 @@ struct Parser {
     modules: Vec<(usize, Option<String>)>,
     pos: usize,
     prologue: bool,
+    /// Set while parsing a filter, a `state` seed or a fold arm. Narrower than
+    /// `prologue`, which also covers a hoisted `let`: that runs once per request,
+    /// before the fold, so it may read the pinned clock while a fold may not.
+    folding: bool,
     command_end: usize,
+    /// Which declaration kind is being parsed, so a statement in the wrong one can be
+    /// rejected with a message about that kind rather than a generic one.
+    kind: Kind,
+    /// Command signatures, collected in pass 1 so an `invoke` can be checked against a
+    /// command declared later or in another module (rule 7).
+    commands: Vec<Signature>,
+    /// Set only while parsing an `http.*` body argument, which is what makes an object
+    /// literal structurally illegal anywhere else (rule 8).
+    in_body: bool,
     /// The enclosing projector's declarations; empty outside one.
     enums: Vec<EnumDef>,
     entities: Vec<EntityDef>,
@@ -61,6 +74,19 @@ struct Stored {
     entity: EntityDef,
     loads: Vec<Bind>,
     slots: HashMap<Ident, Slot>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Command,
+    Projector,
+    Effect,
+}
+
+#[derive(Debug, Clone)]
+struct Signature {
+    name: Ident,
+    params: Vec<(Ident, Type)>,
 }
 
 impl Parser {
@@ -92,7 +118,11 @@ impl Parser {
             modules,
             pos: 0,
             prologue: false,
+            folding: false,
             command_end: 0,
+            kind: Kind::Command,
+            commands: Vec::new(),
+            in_body: false,
             enums: Vec::new(),
             entities: Vec::new(),
             event: None,
@@ -350,7 +380,8 @@ impl Parser {
                     }
                     projectors.push(projector);
                 }
-                Token::Word(Keyword::Command) => self.skip_item()?,
+                Token::Word(Keyword::Command) => self.command_signature()?,
+                Token::Word(Keyword::Effect) => self.skip_item()?,
                 Token::Word(Keyword::Currency) => self.skip_currency(),
                 other => return self.fail(Self::expected_item(other)),
             }
@@ -358,6 +389,7 @@ impl Parser {
 
         self.pos = items;
         let mut commands = Vec::new();
+        let mut effects: Vec<Effect> = Vec::new();
         let mut seen = 0usize;
         loop {
             match self.peek() {
@@ -366,12 +398,6 @@ impl Parser {
                 Token::Word(Keyword::Currency) => self.skip_currency(),
                 Token::Word(Keyword::Command) => {
                     let command = self.command_decl(&events, &currency)?;
-                    if commands
-                        .iter()
-                        .any(|other: &Command| other.name == command.name)
-                    {
-                        return self.fail(format!("command `{}` is declared twice", command.name));
-                    }
                     commands.push(command);
                 }
                 Token::Word(Keyword::Projector) => {
@@ -381,16 +407,53 @@ impl Parser {
                     projectors[seen].entities = entities;
                     seen += 1;
                 }
+                Token::Word(Keyword::Effect) => {
+                    let effect = self.effect_decl(&events, &currency)?;
+                    if effects.iter().any(|other| other.name == effect.name) {
+                        return self.fail(format!("effect `{}` is declared twice", effect.name));
+                    }
+                    effects.push(effect);
+                }
                 other => return self.fail(Self::expected_item(other)),
             }
         }
 
-        Ok(Program {
+        let program = Program {
             currency,
             events,
             commands,
             projectors,
-        })
+            effects,
+        };
+        self.check_cycles(&program)?;
+        Ok(program)
+    }
+
+    /// Pass 1: a command's name and parameter types, so rule 7 can check an `invoke`
+    /// against a command declared later or in another module. A parameter list is
+    /// `name: Type` and nothing else, with no defaults and no literals, so this needs
+    /// neither the currency nor the event table. That is what keeps it a pass-1 job.
+    fn command_signature(&mut self) -> Result<(), SyntaxError> {
+        self.expect_word(Keyword::Command)?;
+        let (line, col) = self.here();
+        let name = self.expect_ident()?;
+        if self.commands.iter().any(|other| other.name == name) {
+            return Err(self.err(format!("command `{name}` is declared twice"), line, col));
+        }
+
+        let mut params = Vec::new();
+        self.expect_sym(Sym::LParen)?;
+        while !self.at_sym(Sym::RParen) {
+            let param = self.expect_ident()?;
+            self.expect_sym(Sym::Colon)?;
+            params.push((param, self.type_ref()?));
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RParen)?;
+        self.commands.push(Signature { name, params });
+        self.skip_braced()
     }
 
     fn skip_currency(&mut self) {
@@ -399,7 +462,7 @@ impl Parser {
     }
 
     fn expected_item(found: &Token) -> String {
-        format!("expected `event`, `command`, `projector` or `currency`, found {found}")
+        format!("expected `event`, `command`, `projector`, `effect` or `currency`, found {found}")
     }
 
     /// Collects a projector's `enum` and `entity` declarations, leaving its handlers
@@ -521,9 +584,18 @@ impl Parser {
         }
     }
 
-    /// A handler is two adjacent blocks: the destructure and the body.
+    /// A handler is one or two adjacent blocks: an optional destructure, then the
+    /// body. Scans to the first block before asking which form this is.
     fn skip_handler(&mut self) -> Result<(), SyntaxError> {
-        self.skip_braced()?;
+        while !self.at_sym(Sym::LBrace) {
+            if matches!(self.peek(), Token::End) {
+                return self.fail("expected `{`, found end of file");
+            }
+            self.bump();
+        }
+        if self.has_destructure() {
+            self.skip_braced()?;
+        }
         self.skip_braced()
     }
 
@@ -844,6 +916,35 @@ impl Parser {
             None
         };
 
+        self.destructure_block(&mut lower, &def)?;
+
+        self.expect_sym(Sym::LBrace)?;
+        self.command_end = self.command_end();
+        self.event = Some(def);
+        self.envelope = envelope;
+        self.kind = Kind::Projector;
+        let body = self.statements(&mut lower, events)?;
+        self.expect_sym(Sym::RBrace)?;
+        self.event = None;
+        self.envelope = None;
+        self.kind = Kind::Command;
+
+        Ok(lower.b.finish_handler(path, body))
+    }
+
+    /// The optional `{ field, field }` block, shared by projector handlers and effect
+    /// arms so the two kinds cannot drift apart on the same construct.
+    fn destructure_block(&mut self, lower: &mut Lower, def: &EventDef) -> Result<(), SyntaxError> {
+        if !self.has_destructure() {
+            if self.looks_like_destructure() {
+                return self.fail(
+                    "this looks like a destructure block; a handler with one needs a body block after it",
+                );
+            }
+            return Ok(());
+        }
+
+        let path = &def.path;
         self.expect_sym(Sym::LBrace)?;
         while !self.at_sym(Sym::RBrace) {
             let field = self.expect_ident()?;
@@ -855,22 +956,52 @@ impl Parser {
                 break;
             }
         }
-        self.expect_sym(Sym::RBrace)?;
-
-        self.expect_sym(Sym::LBrace)?;
-        self.command_end = self.command_end();
-        self.event = Some(def);
-        self.envelope = envelope;
-        let body = self.statements(&mut lower, events)?;
-        self.expect_sym(Sym::RBrace)?;
-        self.event = None;
-        self.envelope = None;
-
-        Ok(lower.b.finish_handler(path, body))
+        self.expect_sym(Sym::RBrace)
     }
 
-    fn in_handler(&self) -> bool {
-        self.event.is_some()
+    /// Whether the block starting here is a destructure rather than a body: it is when
+    /// another block follows it. No statement can begin with `{`, so this decides.
+    fn has_destructure(&self) -> bool {
+        if !self.at_sym(Sym::LBrace) {
+            return false;
+        }
+        let mut depth = 0u32;
+        for (index, spanned) in self.tokens.iter().enumerate().skip(self.pos) {
+            match &spanned.token {
+                Token::Sym(Sym::LBrace) => depth += 1,
+                Token::Sym(Sym::RBrace) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return matches!(
+                            self.tokens.get(index + 1).map(|next| &next.token),
+                            Some(Token::Sym(Sym::LBrace))
+                        );
+                    }
+                }
+                Token::End => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// A lone block holding only names and commas is a destructure whose body was
+    /// forgotten, which is worth saying rather than reporting the first name as a bad
+    /// statement.
+    fn looks_like_destructure(&self) -> bool {
+        if !self.at_sym(Sym::LBrace) {
+            return false;
+        }
+        let mut names = 0usize;
+        for spanned in self.tokens.iter().skip(self.pos + 1) {
+            match &spanned.token {
+                Token::Ident(_) => names += 1,
+                Token::Sym(Sym::Comma) => {}
+                Token::Sym(Sym::RBrace) => return names > 0,
+                _ => return false,
+            }
+        }
+        false
     }
 
     /// `e.at` / `e.id` / `e.position` become envelope slots; anything else is a
@@ -1059,7 +1190,9 @@ impl Parser {
                 "`{name}` is a fold over the log, so `=` introduces a seed rather than a value; write `= fold <seed>`"
             ));
         }
+        self.folding = true;
         let init = self.expr(lower, Some(ty.clone()))?;
+        self.folding = false;
         let slot = lower.b.state(&name, ty.clone(), init);
 
         while self.eat_word(Keyword::On) {
@@ -1083,7 +1216,9 @@ impl Parser {
             }
 
             self.expect_sym(Sym::Arrow)?;
+            self.folding = true;
             let value = self.expr(lower, Some(ty.clone()))?;
+            self.folding = false;
             lower.b.pop_scope();
             lower
                 .b
@@ -1120,15 +1255,20 @@ impl Parser {
                 return self.fail(format!("{path} has no field `{field}`"));
             };
             let expected = declared.ty.clone();
+            // A filter is lowered once per invocation, before the fold, so it is held
+            // to the same rule the fold is: no clock, no call out.
+            self.folding = true;
             let value = if self.eat_sym(Sym::Colon) {
                 self.expr(lower, Some(expected))?
             } else {
                 if lower.b.lookup(&field).is_none() {
+                    self.folding = false;
                     return Err(self.not_in_scope(&field, line, col));
                 }
                 lower.b.at(Span::new(line, col));
                 lower.b.load(&field)
             };
+            self.folding = false;
             filters.push(Filter::new(field, value));
             if !self.eat_sym(Sym::Comma) {
                 break;
@@ -1264,6 +1404,23 @@ impl Parser {
             }
             Token::Word(Keyword::Return) => {
                 self.bump();
+                if self.kind != Kind::Command
+                    && (self.at_word(Keyword::Invalid) || self.at_word(Keyword::Reject))
+                {
+                    let outcome = if self.at_word(Keyword::Invalid) {
+                        "invalid"
+                    } else {
+                        "reject"
+                    };
+                    return self.fail(match self.kind {
+                        Kind::Effect => format!(
+                            "`{outcome}` is a command's outcome; an effect's terminal outcome is `fail(...)`"
+                        ),
+                        _ => format!(
+                            "`{outcome}` is a command's outcome; a projector write cannot fail in a way the program observes"
+                        ),
+                    });
+                }
                 let ret = if self.eat_word(Keyword::Invalid) {
                     self.expect_sym(Sym::LParen)?;
                     let message = self.expr(lower, Some(Type::String))?;
@@ -1282,9 +1439,17 @@ impl Parser {
                 Ok(Stmt::Return(ret))
             }
             Token::Word(Keyword::Emit) => {
-                if self.in_handler() {
-                    return self
-                        .fail("`emit` appends an event, so it can only appear in a command");
+                match self.kind {
+                    Kind::Command => {}
+                    Kind::Projector => {
+                        return self
+                            .fail("`emit` appends an event, so it can only appear in a command");
+                    }
+                    Kind::Effect => {
+                        return self.fail(
+                            "an effect never appends events; call a command with `invoke`, which appends under its own guard",
+                        );
+                    }
                 }
                 let span = self.span_here();
                 self.bump();
@@ -1323,7 +1488,7 @@ impl Parser {
                 })
             }
             Token::Word(Keyword::Put) => {
-                if !self.in_handler() {
+                if self.kind != Kind::Projector {
                     return self
                         .fail("`put` writes an entity, so it can only appear in a projector");
                 }
@@ -1339,7 +1504,7 @@ impl Parser {
                 })
             }
             Token::Word(Keyword::Patch) => {
-                if !self.in_handler() {
+                if self.kind != Kind::Projector {
                     return self
                         .fail("`patch` writes an entity, so it can only appear in a projector");
                 }
@@ -1369,7 +1534,7 @@ impl Parser {
                 })
             }
             Token::Word(Keyword::Delete) => {
-                if !self.in_handler() {
+                if self.kind != Kind::Projector {
                     return self
                         .fail("`delete` writes an entity, so it can only appear in a projector");
                 }
@@ -1389,8 +1554,17 @@ impl Parser {
                 let slot = lower.b.alloc(&name, ty);
                 Ok(Stmt::Assign { slot, value })
             }
+            Token::Word(Keyword::Invoke) => {
+                let span = self.span_here();
+                self.bump();
+                let value = self.invoke_expr(lower, span)?;
+                Ok(Stmt::Discard(value))
+            }
             Token::Word(Keyword::State) | Token::Word(Keyword::Guard) => {
                 self.fail("`state` and `guard` must come before the first statement")
+            }
+            Token::Ident(name) if self.starts_effect_statement(name) => {
+                self.effect_statement(lower, events)
             }
             other => self.fail(format!("expected a statement, found {other}")),
         }
@@ -1494,18 +1668,49 @@ impl Parser {
         let mut value = self.primary(lower, expect)?;
         while self.eat_sym(Sym::Dot) {
             let span = self.span_here();
-            let method = self.expect_ident()?;
-            self.expect_sym(Sym::LParen)?;
-            let mut args = Vec::new();
-            while !self.at_sym(Sym::RParen) {
-                args.push(self.expr(lower, None)?);
-                if !self.eat_sym(Sym::Comma) {
-                    break;
+            let (line, col) = self.here();
+            let name = self.expect_ident()?;
+
+            if self.eat_sym(Sym::LParen) {
+                let mut args = Vec::new();
+                while !self.at_sym(Sym::RParen) {
+                    args.push(self.expr(lower, None)?);
+                    if !self.eat_sym(Sym::Comma) {
+                        break;
+                    }
                 }
+                self.expect_sym(Sym::RParen)?;
+                lower.b.at(span);
+                value = lower.b.method(value, &name, args);
+                continue;
             }
-            self.expect_sym(Sym::RParen)?;
+
+            // Parenless, so a field rather than a method. Only a `Response` has any,
+            // and where the receiver's type is known the mistake is caught here rather
+            // than at run time, which is where `total.trim` used to be caught.
+            match type_of(lower, value) {
+                Some(Type::Response) if response_field(&name).is_some() => {}
+                Some(Type::Response) => {
+                    return Err(self.err(
+                        format!("a Response carries `status` and `body`, not `{name}`"),
+                        line,
+                        col,
+                    ));
+                }
+                Some(ty) => {
+                    return Err(self.err(
+                        format!("no field `{name}` on {ty}; did you mean `{name}()`?"),
+                        line,
+                        col,
+                    ));
+                }
+                None => {}
+            }
             lower.b.at(span);
-            value = lower.b.method(value, &method, args);
+            value = lower.b.expr(Expr::Field {
+                receiver: value,
+                name,
+            });
         }
         Ok(value)
     }
@@ -1549,6 +1754,8 @@ impl Parser {
                     spanned.col,
                 )),
             },
+            Token::Word(Keyword::Invoke) => self.invoke_expr(lower, span),
+            Token::Sym(Sym::LBrace) => self.object_literal(lower, span),
             Token::Sym(Sym::Dot) => {
                 let (line, col) = self.here();
                 let field = self.expect_ident()?;
@@ -1596,6 +1803,9 @@ impl Parser {
                 }
                 if lower.b.lookup(&name).is_some() {
                     return Ok(lower.b.load(&name));
+                }
+                if let Some(value) = self.builtin(lower, &name, span)? {
+                    return Ok(value);
                 }
                 if let Some(Type::Enum(enum_name)) = expect.as_ref().map(inner_of)
                     && let Some(def) = self.enum_def(enum_name)
@@ -1780,7 +1990,25 @@ fn type_of(lower: &Lower, id: ExprId) -> Option<Type> {
         },
         Expr::Method { .. } => None,
         Expr::If { then, .. } => type_of(lower, *then),
+        Expr::Field { name, .. } => response_field(name),
+        Expr::Object(_) => Some(Type::Json),
+        Expr::Call { builtin, .. } => Some(match builtin {
+            Builtin::Uuid5 => Type::Uuid,
+            _ => Type::Response,
+        }),
+        Expr::Invoke { .. } => Some(Type::Outcome),
+        Expr::Reveal { .. } => Some(Type::String),
     }
+}
+
+/// The two fields a `Response` carries. Parenless field access exists for these and
+/// nothing else, so this doubles as the check.
+fn response_field(name: &str) -> Option<Type> {
+    Some(match name {
+        "status" => Type::Int,
+        "body" => Type::Json,
+        _ => return None,
+    })
 }
 
 /// Rule 9: the two subject checks are not implemented yet. When they are, this is
@@ -1790,3 +2018,790 @@ fn type_of(lower: &Lower, id: ExprId) -> Option<Type> {
 /// propagation that feeds them is live, and every handler stays in the IR, so the
 /// checker can recover both spans; only the checking is deferred.
 fn check_subject(_target: &EntityField, _incoming: &Ident) {}
+
+impl Parser {
+    fn effect_decl(
+        &mut self,
+        events: &[EventDef],
+        currency: &Currency,
+    ) -> Result<Effect, SyntaxError> {
+        let module = self.module_at(self.pos).map(str::to_string);
+        self.expect_word(Keyword::Effect)?;
+        let name = self.expect_ident()?;
+        self.expect_sym(Sym::LBrace)?;
+
+        let mut arms: Vec<Arm> = Vec::new();
+        let mut at: Vec<usize> = Vec::new();
+        while !self.at_sym(Sym::RBrace) && !matches!(self.peek(), Token::End) {
+            if !self.at_word(Keyword::On) {
+                return self.fail(format!("expected `on`, found {}", self.peek()));
+            }
+            let start = self.pos;
+            let arm = self.arm(&name, events, currency)?;
+            // Rule 1: one event selects exactly one arm, so two arms on a type would
+            // make declaration order decide what a replay does.
+            if let Some(index) = arms.iter().position(|other| other.event == arm.event) {
+                let first = self.location(at[index]);
+                return Err(self.err(
+                    format!(
+                        "`{name}` already has an arm on {} at {first}; one event selects exactly one arm",
+                        arm.event
+                    ),
+                    arm.span.line,
+                    arm.span.col,
+                ));
+            }
+            arms.push(arm);
+            at.push(start);
+        }
+        self.expect_sym(Sym::RBrace)?;
+
+        if arms.is_empty() {
+            return self.fail(format!("effect `{name}` declares no arms"));
+        }
+        Ok(Effect { name, module, arms })
+    }
+
+    fn arm(
+        &mut self,
+        effect: &Ident,
+        events: &[EventDef],
+        currency: &Currency,
+    ) -> Result<Arm, SyntaxError> {
+        let span = self.span_here();
+        self.expect_word(Keyword::On)?;
+        let path = self.expect_path()?;
+        let def = self.event_def(events, &path)?.clone();
+
+        let mut lower = Lower {
+            b: Builder::new(effect),
+            defaults: HashMap::new(),
+            currency: currency.clone(),
+        };
+
+        let envelope = if self.eat_word(Keyword::As) {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+        // Rule 2: the trigger binding is in scope for the arm's `state` filters as well
+        // as its body, so it is registered before the prologue runs.
+        self.event = Some(def.clone());
+        self.envelope = envelope;
+        self.kind = Kind::Effect;
+
+        self.destructure_block(&mut lower, &def)?;
+
+        self.expect_sym(Sym::LBrace)?;
+        self.command_end = self.command_end();
+
+        // An arm's prologue is `state` alone. A command hoists a leading `let` so a
+        // filter can name it; rule 2 gives an arm's filters the trigger binding
+        // instead, so a `let` here is an ordinary body statement and can call out.
+        self.prologue = true;
+        loop {
+            match self.peek() {
+                Token::Word(Keyword::State) => self.state_decl(&mut lower, events)?,
+                Token::Word(Keyword::Guard) => {
+                    return self.fail(
+                        "an effect has no `guard`; it appends nothing, so there is no append condition to build",
+                    );
+                }
+                _ => break,
+            }
+        }
+        self.prologue = false;
+
+        let body = self.statements(&mut lower, events)?;
+        self.expect_sym(Sym::RBrace)?;
+        self.event = None;
+        self.envelope = None;
+        self.kind = Kind::Command;
+
+        let arm = lower.b.finish_arm(path, span, body);
+        if let Err((erase, reveal)) = erase_last(&arm.exprs, &arm.body) {
+            return Err(self.err(
+                format!(
+                    "`reveal` at {reveal} can run after the `erase` at {erase}; `erase` is journaled and `reveal` is not, so a replay skips the erase and re-runs the reveal against a key that is gone"
+                ),
+                reveal.line,
+                reveal.col,
+            ));
+        }
+        Ok(arm)
+    }
+
+    /// Whether a statement begins with one of the soft-named effect builtins. They are
+    /// not keywords (rule 10), so this is recognised by shape rather than by token.
+    fn starts_effect_statement(&self, name: &str) -> bool {
+        let next = self.tokens.get(self.pos + 1).map(|next| &next.token);
+        match name {
+            "fail" | "log" | "erase" => matches!(next, Some(Token::Sym(Sym::LParen))),
+            "http" => matches!(next, Some(Token::Sym(Sym::Dot))),
+            _ => false,
+        }
+    }
+
+    fn effect_statement(
+        &mut self,
+        lower: &mut Lower,
+        events: &[EventDef],
+    ) -> Result<Stmt, SyntaxError> {
+        let span = self.span_here();
+        let Token::Ident(name) = self.peek().clone() else {
+            return self.fail("expected a statement");
+        };
+
+        match name.as_str() {
+            "fail" => {
+                self.gate(
+                    "`fail` is an effect's terminal outcome; a command returns `invalid(...)` or `reject(...)`",
+                    "`fail` is an effect's terminal outcome; a projector write cannot fail in a way the program observes",
+                    span,
+                )?;
+                self.bump();
+                self.expect_sym(Sym::LParen)?;
+                let message = self.expr(lower, Some(Type::String))?;
+                self.expect_sym(Sym::RParen)?;
+                Ok(Stmt::Fail { message, span })
+            }
+            "log" => {
+                self.gate(
+                    "`log` is an effect builtin; a command's decision is already visible in what it emits",
+                    "`log` is an effect builtin; a projector runs once per rebuild, so its lines are not a trace",
+                    span,
+                )?;
+                self.bump();
+                self.expect_sym(Sym::LParen)?;
+                let message = self.expr(lower, Some(Type::String))?;
+                self.expect_sym(Sym::RParen)?;
+                Ok(Stmt::Log { message })
+            }
+            "erase" => {
+                self.gate(
+                    "only an effect crosses the decrypt boundary; a command decides from state without reaching personal data",
+                    "only an effect crosses the decrypt boundary; a projector stores what the event carries",
+                    span,
+                )?;
+                self.bump();
+                self.expect_sym(Sym::LParen)?;
+                let (line, col) = self.here();
+                let value = self.expr(lower, None)?;
+                self.expect_sym(Sym::RParen)?;
+
+                let subject = self.subject_source(lower, value, line, col, "erase")?;
+                let scoped = events.iter().any(|def| {
+                    def.fields
+                        .iter()
+                        .any(|field| field.subject.as_deref() == Some(subject.as_str()))
+                });
+                if !scoped {
+                    return Err(self.err(
+                        format!(
+                            "nothing is scoped to `{subject}`, so there is no key to erase; `erase` takes the subject id that a field is declared `@subject(...)` of"
+                        ),
+                        line,
+                        col,
+                    ));
+                }
+                Ok(Stmt::Erase {
+                    subject,
+                    value,
+                    span,
+                })
+            }
+            // `http.*`, whose result this statement discards.
+            _ => {
+                let value = self.expr(lower, None)?;
+                Ok(Stmt::Discard(value))
+            }
+        }
+    }
+
+    /// Rule 5's gating. Each wrong context gets a message about that context, so the
+    /// error teaches the rule at the point of violation rather than naming a category.
+    /// Rule 3: a `state` fold is not journaled, because every attempt re-folds and
+    /// gets the same answer. That only holds if the fold cannot call out or decrypt.
+    fn not_in_fold(&self, what: &str, span: Span) -> Result<(), SyntaxError> {
+        if self.folding {
+            return Err(self.err(
+                format!("`state` folds the log, so it cannot {what}"),
+                span.line,
+                span.col,
+            ));
+        }
+        Ok(())
+    }
+
+    fn gate(&self, command: &str, projector: &str, span: Span) -> Result<(), SyntaxError> {
+        match self.kind {
+            Kind::Effect => Ok(()),
+            Kind::Command => Err(self.err(command, span.line, span.col)),
+            Kind::Projector => Err(self.err(projector, span.line, span.col)),
+        }
+    }
+
+    /// The soft-named builtins, resolved after the scope lookup so a local shadows one.
+    /// That is what lets `log` and the rest stay usable as ordinary names (rule 10).
+    fn builtin(
+        &mut self,
+        lower: &mut Lower,
+        name: &str,
+        span: Span,
+    ) -> Result<Option<ExprId>, SyntaxError> {
+        let called = self.at_sym(Sym::LParen);
+        match name {
+            "http" if self.at_sym(Sym::Dot) => self.http_call(lower, span).map(Some),
+            "reveal" if called => self.reveal_call(lower, span).map(Some),
+            "now" if called => {
+                // Rule 11's clock rule: a clock exists where its result is pinned or
+                // journaled, and is absent where replay demands determinism.
+                if self.kind == Kind::Projector {
+                    return Err(self.err(
+                        "a projector has no clock, because a rebuild must reproduce every value it writes",
+                        span.line,
+                        span.col,
+                    ));
+                }
+                self.not_in_fold("read a clock", span)?;
+                self.bump();
+                self.expect_sym(Sym::RParen)?;
+                let slot = lower.b.now();
+                lower.b.at(span);
+                Ok(Some(lower.b.read(slot)))
+            }
+            "uuid5" if called => {
+                self.bump();
+                let namespace = self.expr(lower, Some(Type::Uuid))?;
+                self.expect_sym(Sym::Comma)?;
+                let name = self.expr(lower, Some(Type::String))?;
+                self.expect_sym(Sym::RParen)?;
+                lower.b.at(span);
+                Ok(Some(lower.b.expr(Expr::Call {
+                    builtin: Builtin::Uuid5,
+                    args: vec![namespace, name],
+                })))
+            }
+            "erase" if called => Err(self.err(
+                "`erase` is a statement rather than a value; it returns nothing, because there is nothing an author could do differently on either answer",
+                span.line,
+                span.col,
+            )),
+            "fail" | "log" if called => Err(self.err(
+                format!("`{name}` is a statement rather than a value"),
+                span.line,
+                span.col,
+            )),
+            "uuid4" | "random" if called => Err(self.err(
+                format!(
+                    "there is no `{name}` in heklang: a command retry and an effect replay have to derive the same id they derived the first time, so use `uuid5(namespace, name)`"
+                ),
+                span.line,
+                span.col,
+            )),
+            _ => Ok(None),
+        }
+    }
+
+    fn http_call(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, SyntaxError> {
+        self.expect_sym(Sym::Dot)?;
+        let (line, col) = self.here();
+        let verb = self.expect_ident()?;
+        let Some(builtin) = Builtin::verb(&verb) else {
+            return Err(self.err(
+                format!("`http` has no verb `{verb}`; it has get, post, put, patch and delete"),
+                line,
+                col,
+            ));
+        };
+        self.gate(
+            "a command decides from state and appends; only an effect can call out, because only an effect journals the call",
+            "a projector is a pure fold over the log, so it cannot make an HTTP call",
+            span,
+        )?;
+        self.not_in_fold("call out", span)?;
+
+        self.expect_sym(Sym::LParen)?;
+        let mut args = vec![self.expr(lower, Some(Type::String))?];
+        if builtin.has_body() {
+            self.expect_sym(Sym::Comma)?;
+            let outer = self.in_body;
+            self.in_body = true;
+            args.push(self.expr(lower, Some(Type::Json))?);
+            self.in_body = outer;
+        }
+        if self.at_sym(Sym::Comma) {
+            // Rule 13: a timeout belongs to configuration, not to the call site.
+            let (line, col) = self.here();
+            let plural = if args.len() == 1 { "" } else { "s" };
+            return Err(self.err(
+                format!(
+                    "`{}` takes {} argument{plural}; a timeout is configuration rather than a call argument",
+                    builtin.name(),
+                    args.len()
+                ),
+                line,
+                col,
+            ));
+        }
+        self.expect_sym(Sym::RParen)?;
+        lower.b.at(span);
+        Ok(lower.b.expr(Expr::Call { builtin, args }))
+    }
+
+    fn reveal_call(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, SyntaxError> {
+        self.gate(
+            "only an effect crosses the decrypt boundary; a command decides from state without reaching personal data",
+            "only an effect crosses the decrypt boundary; a projector stores what the event carries",
+            span,
+        )?;
+        self.not_in_fold("decrypt", span)?;
+        self.expect_sym(Sym::LParen)?;
+        let (line, col) = self.here();
+        let value = self.expr(lower, None)?;
+        self.expect_sym(Sym::RParen)?;
+
+        let field = self.subject_source(lower, value, line, col, "reveal")?;
+        let def = self.event.clone().expect("only inside an arm");
+        let Some(declared) = def.field(&field) else {
+            return Err(self.err(format!("{} has no field `{field}`", def.path), line, col));
+        };
+        let Some(subject) = declared.subject.clone() else {
+            return Err(self.err(
+                format!(
+                    "`{field}` is not subject-encrypted, so there is nothing to reveal; only a field declared `@subject(...)` needs it"
+                ),
+                line,
+                col,
+            ));
+        };
+        let Some(id) = def.field(&subject) else {
+            return Err(self.err(
+                format!(
+                    "`@subject({subject})` on `{field}` names no field of {}",
+                    def.path
+                ),
+                line,
+                col,
+            ));
+        };
+
+        let slot = lower.b.payload(&subject, Some(id.ty.clone()));
+        let subject_value = lower.b.read(slot);
+        lower.b.at(span);
+        Ok(lower.b.expr(Expr::Reveal {
+            value,
+            field,
+            subject,
+            subject_value,
+        }))
+    }
+
+    /// The event field an expression loads. `reveal` and `erase` both name a value and
+    /// recover the schema fact from it, because subject-ness is a property of the path
+    /// rather than of the value.
+    fn subject_source(
+        &self,
+        lower: &Lower,
+        value: ExprId,
+        line: u32,
+        col: u32,
+        what: &str,
+    ) -> Result<Ident, SyntaxError> {
+        let bound = match lower.b.exprs().get(value) {
+            Some(Expr::Load(slot)) => lower.b.bound_field(*slot),
+            _ => None,
+        };
+        match bound {
+            Some(field) => Ok(field.to_string()),
+            None => Err(self.err(
+                format!("`{what}` takes a field of the triggering event, like `e.email`"),
+                line,
+                col,
+            )),
+        }
+    }
+
+    fn object_literal(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, SyntaxError> {
+        if !self.in_body {
+            return Err(self.err(
+                "an object literal is an HTTP request body; `invoke` takes a typed struct, checked against the command's parameters",
+                span.line,
+                span.col,
+            ));
+        }
+
+        let mut fields: Vec<(Ident, ExprId)> = Vec::new();
+        while !self.at_sym(Sym::RBrace) {
+            let (line, col) = self.here();
+            let key = match self.bump().token {
+                Token::Text(text) => text,
+                other => {
+                    return Err(self.err(
+                        format!("an object key is a quoted string, found {other}"),
+                        line,
+                        col,
+                    ));
+                }
+            };
+            if fields.iter().any(|(seen, _)| seen == &key) {
+                return Err(self.err(format!("`{key}` is given twice"), line, col));
+            }
+            self.expect_sym(Sym::Colon)?;
+            let value = self.expr(lower, None)?;
+            fields.push((key, value));
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RBrace)?;
+        lower.b.at(span);
+        Ok(lower.b.expr(Expr::Object(fields)))
+    }
+
+    fn invoke_expr(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, SyntaxError> {
+        self.gate(
+            "`invoke` calls a command, so it can only appear in an effect; a command that needs another command's work emits, and an effect reacts",
+            "`invoke` calls a command, so it can only appear in an effect; a projector is a pure fold",
+            span,
+        )?;
+        self.not_in_fold("call a command", span)?;
+
+        let (line, col) = self.here();
+        let name = self.expect_ident()?;
+        let Some(signature) = self
+            .commands
+            .iter()
+            .find(|other| other.name == name)
+            .cloned()
+        else {
+            return Err(self.err(format!("command `{name}` is not declared"), line, col));
+        };
+
+        // Rule 7: the input is a typed struct, checked against the declared parameters.
+        self.expect_sym(Sym::LBrace)?;
+        let mut args: Vec<(Ident, ExprId)> = Vec::new();
+        while !self.at_sym(Sym::RBrace) {
+            let (line, col) = self.here();
+            let field = self.expect_ident()?;
+            let Some((_, declared)) = signature.params.iter().find(|(param, _)| param == &field)
+            else {
+                return Err(self.err(
+                    format!("command `{name}` has no parameter `{field}`"),
+                    line,
+                    col,
+                ));
+            };
+            if args.iter().any(|(seen, _)| seen == &field) {
+                return Err(self.err(format!("`{field}` is given twice"), line, col));
+            }
+
+            let expected = declared.clone();
+            let value = if self.eat_sym(Sym::Colon) {
+                self.expr(lower, Some(expected))?
+            } else {
+                if lower.b.lookup(&field).is_none() {
+                    return Err(self.not_in_scope(&field, line, col));
+                }
+                lower.b.at(Span::new(line, col));
+                lower.b.load(&field)
+            };
+            args.push((field, value));
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RBrace)?;
+
+        for (param, declared) in &signature.params {
+            // An omitted optional parameter binds `none`, exactly as it does for a
+            // command called from outside.
+            if matches!(declared, Type::Opt(_)) {
+                continue;
+            }
+            if !args.iter().any(|(given, _)| given == param) {
+                return Err(self.err(
+                    format!("command `{name}` needs `{param}`"),
+                    span.line,
+                    span.col,
+                ));
+            }
+        }
+
+        lower.b.at(span);
+        Ok(lower.b.expr(Expr::Invoke {
+            command: name,
+            args,
+        }))
+    }
+
+    /// No effect may trigger itself, directly or through a chain of invokes. An edge
+    /// `trigger -> emitted` for every (arm, command it invokes, event that command
+    /// emits); a cycle in that graph is an unbounded event stream.
+    fn check_cycles(&self, program: &Program) -> Result<(), SyntaxError> {
+        let mut edges: Vec<Edge> = Vec::new();
+        for effect in &program.effects {
+            for arm in &effect.arms {
+                for command in invoked(&arm.exprs, &arm.body) {
+                    let Some(target) = program.command(&command) else {
+                        continue;
+                    };
+                    for event in emitted(&target.body) {
+                        edges.push(Edge {
+                            from: arm.event.clone(),
+                            to: event,
+                            effect: effect.name.clone(),
+                            command: command.clone(),
+                            module: effect.module.clone(),
+                            span: arm.span,
+                        });
+                    }
+                }
+            }
+        }
+
+        let Some(cycle) = find_cycle(&edges) else {
+            return Ok(());
+        };
+
+        let mut path = cycle[0].from.to_string();
+        for edge in &cycle {
+            path.push_str(" -> ");
+            path.push_str(&edge.effect);
+            path.push_str(" -> ");
+            path.push_str(&edge.command);
+            path.push_str(" -> ");
+            path.push_str(&edge.to.to_string());
+        }
+        let error = SyntaxError::new(
+            format!("{path}: this effect can trigger itself, so the log would grow without end"),
+            cycle[0].span.line,
+            cycle[0].span.col,
+        );
+        Err(match &cycle[0].module {
+            Some(module) => error.in_file(module),
+            None => error,
+        })
+    }
+}
+
+struct Edge {
+    from: EventPath,
+    to: EventPath,
+    effect: Ident,
+    command: Ident,
+    module: Option<Ident>,
+    span: Span,
+}
+
+fn find_cycle(edges: &[Edge]) -> Option<Vec<&Edge>> {
+    for start in edges {
+        let mut nodes = vec![start.from.clone()];
+        let mut path: Vec<&Edge> = Vec::new();
+        if let Some(found) = descend(edges, &mut nodes, &mut path) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn descend<'a>(
+    edges: &'a [Edge],
+    nodes: &mut Vec<EventPath>,
+    path: &mut Vec<&'a Edge>,
+) -> Option<Vec<&'a Edge>> {
+    let node = nodes.last().expect("never empty").clone();
+    for edge in edges.iter().filter(|edge| edge.from == node) {
+        if let Some(start) = nodes.iter().position(|seen| seen == &edge.to) {
+            let mut found: Vec<&Edge> = path[start..].to_vec();
+            found.push(edge);
+            return Some(found);
+        }
+        nodes.push(edge.to.clone());
+        path.push(edge);
+        if let Some(found) = descend(edges, nodes, path) {
+            return Some(found);
+        }
+        path.pop();
+        nodes.pop();
+    }
+    None
+}
+
+fn emitted(body: &[Stmt]) -> Vec<EventPath> {
+    let mut found = Vec::new();
+    walk_stmts(body, &mut |stmt| {
+        if let Stmt::Emit { event, .. } = stmt {
+            found.push(event.clone());
+        }
+    });
+    found
+}
+
+fn invoked(exprs: &Exprs, body: &[Stmt]) -> Vec<Ident> {
+    let mut found = Vec::new();
+    walk_stmts(body, &mut |stmt| {
+        for root in roots(stmt) {
+            collect(exprs, root, &mut found, &|_, expr, out| {
+                if let Expr::Invoke { command, .. } = expr {
+                    out.push(command.clone());
+                }
+            });
+        }
+    });
+    found
+}
+
+fn walk_stmts<'a>(stmts: &'a [Stmt], visit: &mut impl FnMut(&'a Stmt)) {
+    for stmt in stmts {
+        visit(stmt);
+        if let Stmt::If {
+            then, otherwise, ..
+        } = stmt
+        {
+            walk_stmts(then, visit);
+            walk_stmts(otherwise, visit);
+        }
+    }
+}
+
+fn collect<T>(
+    exprs: &Exprs,
+    id: ExprId,
+    out: &mut Vec<T>,
+    take: &impl Fn(ExprId, &Expr, &mut Vec<T>),
+) {
+    let Some(expr) = exprs.get(id) else {
+        return;
+    };
+    take(id, expr, out);
+    for child in children(expr) {
+        collect(exprs, child, out, take);
+    }
+}
+
+/// The expressions one statement owns, not counting the bodies of a nested `if`, whose
+/// statements the caller walks separately.
+fn roots(stmt: &Stmt) -> Vec<ExprId> {
+    match stmt {
+        Stmt::Assign { value, .. } => vec![*value],
+        Stmt::If { cond, .. } => vec![*cond],
+        Stmt::Emit { fields, .. } | Stmt::Put { fields, .. } => {
+            fields.iter().map(|(_, id)| *id).collect()
+        }
+        Stmt::Patch { key, fields, .. } => {
+            let mut ids = vec![*key];
+            ids.extend(fields.iter().map(|(_, id)| *id));
+            ids
+        }
+        Stmt::Delete { key, .. } => vec![*key],
+        Stmt::Fail { message, .. } | Stmt::Log { message } => vec![*message],
+        Stmt::Erase { value, .. } | Stmt::Discard(value) => vec![*value],
+        Stmt::Return(Return::Ok) => Vec::new(),
+        Stmt::Return(Return::Invalid(message)) => vec![*message],
+        Stmt::Return(Return::Reject { code, message }) => vec![*code, *message],
+    }
+}
+
+fn children(expr: &Expr) -> Vec<ExprId> {
+    match expr {
+        Expr::Lit(_) | Expr::Load(_) => Vec::new(),
+        Expr::Unary { operand, .. } => vec![*operand],
+        Expr::Binary { lhs, rhs, .. } => vec![*lhs, *rhs],
+        Expr::Method { receiver, args, .. } => {
+            let mut ids = vec![*receiver];
+            ids.extend(args.iter().copied());
+            ids
+        }
+        Expr::If {
+            cond,
+            then,
+            otherwise,
+        } => vec![*cond, *then, *otherwise],
+        Expr::Field { receiver, .. } => vec![*receiver],
+        Expr::Object(fields) => fields.iter().map(|(_, id)| *id).collect(),
+        Expr::Call { args, .. } => args.clone(),
+        Expr::Invoke { args, .. } => args.iter().map(|(_, id)| *id).collect(),
+        Expr::Reveal {
+            value,
+            subject_value,
+            ..
+        } => vec![*value, *subject_value],
+    }
+}
+
+/// Rule 9. `Err((erase, reveal))` names the erase that may already have run and the
+/// reveal that is still reachable from it. Reachability rather than lexical order, so
+/// an erase on a path that ends in `fail` does not poison what follows the `if`.
+fn erase_last(exprs: &Exprs, body: &[Stmt]) -> Result<(), (Span, Span)> {
+    scan(exprs, body, None).map(|_| ())
+}
+
+struct Reach {
+    erased: Option<Span>,
+    falls_through: bool,
+}
+
+fn scan(exprs: &Exprs, stmts: &[Stmt], incoming: Option<Span>) -> Result<Reach, (Span, Span)> {
+    let mut erased = incoming;
+    for stmt in stmts {
+        // Every reveal in one statement is checked against the same incoming state,
+        // which is what keeping `erase` a statement buys: their order cannot matter.
+        if let Some(at) = erased
+            && let Some(reveal) = first_reveal(exprs, stmt)
+        {
+            return Err((at, reveal));
+        }
+
+        match stmt {
+            Stmt::Erase { span, .. } => erased = erased.or(Some(*span)),
+            Stmt::Fail { .. } | Stmt::Return(_) => {
+                return Ok(Reach {
+                    erased,
+                    falls_through: false,
+                });
+            }
+            Stmt::If {
+                then, otherwise, ..
+            } => {
+                let taken = scan(exprs, then, erased)?;
+                let skipped = scan(exprs, otherwise, erased)?;
+                erased = match (taken.falls_through, skipped.falls_through) {
+                    (true, true) => taken.erased.or(skipped.erased),
+                    (true, false) => taken.erased,
+                    (false, true) => skipped.erased,
+                    // Neither branch falls through, so nothing after the `if` runs.
+                    (false, false) => {
+                        return Ok(Reach {
+                            erased: None,
+                            falls_through: false,
+                        });
+                    }
+                };
+            }
+            _ => {}
+        }
+    }
+
+    Ok(Reach {
+        erased,
+        falls_through: true,
+    })
+}
+
+/// The earliest `reveal` among a statement's own expressions. The arena is built in
+/// parse order, so the smallest id is the first one in the source.
+fn first_reveal(exprs: &Exprs, stmt: &Stmt) -> Option<Span> {
+    let mut found: Vec<ExprId> = Vec::new();
+    for root in roots(stmt) {
+        collect(exprs, root, &mut found, &|id, expr, out| {
+            if matches!(expr, Expr::Reveal { .. }) {
+                out.push(id);
+            }
+        });
+    }
+    found
+        .into_iter()
+        .min_by_key(|id| id.0)
+        .map(|id| exprs.span(id))
+}

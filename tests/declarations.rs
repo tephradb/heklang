@@ -144,3 +144,25 @@ command C(y: Int) {
          write `= fold <seed>`"
     );
 }
+
+#[test]
+fn an_effect_may_precede_the_command_it_invokes() {
+    let source = "currency USD
+effect Notify {
+  on @order.placed as e {
+    invoke Record { order_id: e.order_id }
+  }
+}
+
+command Record(order_id: Uuid) {
+  emit @order.recorded { order_id }
+}
+
+event @order.placed { order_id: Uuid }
+event @order.recorded { order_id: Uuid }
+";
+    let program =
+        parse(source).expect("command signatures are collected before effect bodies are parsed");
+    assert_eq!(program.effects.len(), 1);
+    assert_eq!(program.effects[0].arms.len(), 1);
+}

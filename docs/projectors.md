@@ -50,8 +50,13 @@ entities from its own module scope, so a shared entity is not expressible there 
 
 ## 1. Handler form
 
-`on @event.path [as name] { destructure } { body }`. Two adjacent brace blocks: the first
-destructures payload fields into slots, the second is the body.
+`on @event.path [as name] [{ destructure }] { body }`. One or two adjacent brace blocks: with two,
+the first destructures payload fields into slots and the second is the body; with one, there is
+nothing to destructure and the block is the body. Which form a handler is in is decided by whether a
+block follows the first one, and no statement can begin with `{`, so this is unambiguous.
+
+An effect arm has exactly the same shape (`docs/effects.md`, rule 1). The two kinds share one
+construct rather than each having a slightly different one.
 
 `as name` is optional and binds the envelope. Through it: `.at` (the append timestamp), `.id` (the
 event's stable identity) and `.position` (its position in the log), plus payload access, so `e.total`

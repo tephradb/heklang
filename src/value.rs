@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::fmt;
+use std::fmt::{self, Write as _};
 
 use crate::currency::Currency;
 use crate::ir::{EntityField, EnumDef, EventPath, Ident, Literal, Type};
@@ -22,6 +22,12 @@ pub enum Value {
         variant: Ident,
     },
     Rounding(Rounding),
+    Json(Json),
+    Response {
+        status: i64,
+        body: Json,
+    },
+    Invoked(Invoked),
     Opt {
         inner: Type,
         value: Option<Box<Value>>,
@@ -63,6 +69,9 @@ impl Value {
             Value::Money(_) => Type::Money,
             Value::Enum { ty, .. } => Type::Enum(ty.clone()),
             Value::Rounding(_) => Type::Rounding,
+            Value::Json(_) => Type::Json,
+            Value::Response { .. } => Type::Response,
+            Value::Invoked(_) => Type::Outcome,
             Value::Opt { inner, .. } => Type::opt(inner.clone()),
         }
     }
@@ -99,6 +108,9 @@ impl fmt::Display for ValueDisplay<'_> {
                 write!(f, " {}", self.currency.code)
             }
             Value::Rounding(mode) => write!(f, "{mode}"),
+            Value::Json(json) => write!(f, "{json}"),
+            Value::Response { status, .. } => write!(f, "<{status}>"),
+            Value::Invoked(outcome) => write!(f, "{outcome}"),
             Value::Opt { value, .. } => match value {
                 Some(value) => write!(f, "{}", value.display(self.currency)),
                 None => f.write_str("none"),
@@ -198,6 +210,9 @@ pub fn zero(ty: &Type, enums: &[EnumDef]) -> Option<Value> {
         }
         Type::Opt(inner) => Value::none(inner.as_ref().clone()),
         Type::Uuid | Type::Timestamp | Type::Rounding => return None,
+        // Never reachable from a declaration: there is no syntax that writes one of
+        // these as an entity field type.
+        Type::Json | Type::Response | Type::Outcome => return None,
     })
 }
 
@@ -277,4 +292,160 @@ pub fn can_key(ty: &Type) -> bool {
         ty,
         Type::Int | Type::String | Type::Uuid | Type::Timestamp | Type::Enum(_)
     )
+}
+
+/// A JSON value, for HTTP bodies (rule 8). Hand-rolled rather than a dependency,
+/// because the interpreter constructs responses and never parses one. `Obj` is
+/// ordered, which is where rule 14's defined iteration order comes from: the same
+/// object built twice serialises byte for byte the same.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Json {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Str(String),
+    Arr(Vec<Json>),
+    Obj(BTreeMap<String, Json>),
+}
+
+impl Json {
+    pub fn str(value: impl Into<String>) -> Self {
+        Json::Str(value.into())
+    }
+
+    pub fn obj(fields: impl IntoIterator<Item = (impl Into<String>, Json)>) -> Self {
+        Json::Obj(
+            fields
+                .into_iter()
+                .map(|(name, value)| (name.into(), value))
+                .collect(),
+        )
+    }
+
+    pub fn get(&self, key: &str) -> Option<&Json> {
+        match self {
+            Json::Obj(fields) => fields.get(key),
+            _ => None,
+        }
+    }
+
+    /// Rule 8's conversion table, total so that an object literal always serialises.
+    /// `Money` and `Decimal` become strings at their scale rather than numbers, so no
+    /// precision is lost to a float on the far side.
+    pub fn from_value(value: &Value, currency: &Currency) -> Json {
+        match value {
+            Value::Bool(value) => Json::Bool(*value),
+            Value::Int(value) => Json::Int(*value),
+            Value::Decimal { units, scale } => Json::Str(scaled::text(*units, *scale)),
+            Value::Money(units) => Json::Str(scaled::text(*units, currency.scale)),
+            Value::Str(value) | Value::Uuid(value) => Json::Str(value.clone()),
+            Value::Timestamp(micros) => Json::Int(*micros),
+            Value::Enum { variant, .. } => Json::Str(variant.clone()),
+            Value::Rounding(mode) => Json::Str(mode.to_string()),
+            Value::Json(json) => json.clone(),
+            Value::Response { status, body } => {
+                Json::obj([("body", body.clone()), ("status", Json::Int(*status))])
+            }
+            Value::Invoked(outcome) => Json::obj([
+                ("ok", Json::Bool(outcome.ok())),
+                ("code", outcome.code().map_or(Json::Null, Json::str)),
+                ("message", outcome.message().map_or(Json::Null, Json::str)),
+            ]),
+            Value::Opt { value, .. } => match value {
+                Some(value) => Json::from_value(value, currency),
+                None => Json::Null,
+            },
+        }
+    }
+}
+
+impl fmt::Display for Json {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Json::Null => f.write_str("null"),
+            Json::Bool(value) => write!(f, "{value}"),
+            Json::Int(value) => write!(f, "{value}"),
+            Json::Str(value) => write_json_str(f, value),
+            Json::Arr(items) => {
+                f.write_str("[")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(",")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                f.write_str("]")
+            }
+            Json::Obj(fields) => {
+                f.write_str("{")?;
+                for (i, (name, value)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(",")?;
+                    }
+                    write_json_str(f, name)?;
+                    write!(f, ":{value}")?;
+                }
+                f.write_str("}")
+            }
+        }
+    }
+}
+
+fn write_json_str(f: &mut fmt::Formatter<'_>, value: &str) -> fmt::Result {
+    f.write_str("\"")?;
+    for c in value.chars() {
+        match c {
+            '"' => f.write_str("\\\"")?,
+            '\\' => f.write_str("\\\\")?,
+            '\n' => f.write_str("\\n")?,
+            '\r' => f.write_str("\\r")?,
+            '\t' => f.write_str("\\t")?,
+            c if (c as u32) < 0x20 => write!(f, "\\u{:04x}", c as u32)?,
+            c => f.write_char(c)?,
+        }
+    }
+    f.write_str("\"")
+}
+
+/// What an `invoke` returns (rule 6): hekla's six-variant `CommandOutcome` cut to the
+/// three an author can act on differently. Distinct from [`crate::interp::Outcome`],
+/// which also carries the emitted events; the difference between the two is the cut.
+/// `Conflict` and `Unavailable` have no variant here at all, so a retryable outcome is
+/// unrepresentable rather than filtered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Invoked {
+    Ok,
+    Invalid(String),
+    Reject { code: String, message: String },
+}
+
+impl Invoked {
+    pub fn ok(&self) -> bool {
+        matches!(self, Invoked::Ok)
+    }
+
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            Invoked::Reject { code, .. } => Some(code),
+            _ => None,
+        }
+    }
+
+    pub fn message(&self) -> Option<&str> {
+        match self {
+            Invoked::Ok => None,
+            Invoked::Invalid(message) => Some(message),
+            Invoked::Reject { message, .. } => Some(message),
+        }
+    }
+}
+
+impl fmt::Display for Invoked {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Invoked::Ok => f.write_str("ok"),
+            Invoked::Invalid(message) => write!(f, "invalid: {message}"),
+            Invoked::Reject { code, message } => write!(f, "reject {code}: {message}"),
+        }
+    }
 }

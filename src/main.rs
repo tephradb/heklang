@@ -2,11 +2,14 @@ use std::fs;
 use std::process::ExitCode;
 
 use heklang::{
-    Currency, Event, EventPath, Interpreter, Key, Outcome, Program, Store, Value, parse_files,
+    Currency, Event, EventPath, Interpreter, Invocation, Journal, Key, Outcome, Program, Reply,
+    Store, Value, parse_files,
 };
 
 const COMMANDS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/place_order.hk");
 const PROJECTORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/orders.hk");
+const EFFECTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/notify.hk");
+const CONFIRM: &str = "https://mail.example/confirm";
 
 fn order_placed() -> EventPath {
     EventPath::new(["order", "placed"])
@@ -134,9 +137,11 @@ fn read(path: &str) -> Result<String, String> {
 fn load() -> Result<Program, String> {
     let commands = read(COMMANDS)?;
     let projectors = read(PROJECTORS)?;
+    let effects = read(EFFECTS)?;
     parse_files([
         ("commands/place_order.hk", commands.as_str()),
         ("projectors/orders.hk", projectors.as_str()),
+        ("effects/notify.hk", effects.as_str()),
     ])
     .map_err(|err| err.to_string())
 }
@@ -152,10 +157,11 @@ fn main() -> ExitCode {
 
     let mut interpreter = Interpreter::with_log(&program, seed());
     println!(
-        "parsed {} events, {} commands and {} projectors, currency {}, seeded log of {} events\n",
+        "parsed {} events, {} commands, {} projectors and {} effects, currency {}, seeded log of {} events\n",
         program.events.len(),
         program.commands.len(),
         program.projectors.len(),
+        program.effects.len(),
         program.currency.code,
         interpreter.log().len()
     );
@@ -294,8 +300,138 @@ fn main() -> ExitCode {
     println!("\nprojector Notes");
     project(&interpreter, "note too long", "Notes");
 
+    println!("\neffect NotifyCustomer");
+    // The runtime absorbs the 503 and re-sends, so the handler only ever sees the 200.
+    interpreter.script(CONFIRM, [Reply::Status(503), Reply::Status(200)]);
+    let mut journal = Journal::default();
+    notify(&mut interpreter, "notify order 1", 0, &mut journal);
+    for (call, _) in journal.calls() {
+        println!("{:16}          journaled {call}", "");
+    }
+
+    // The same journal makes this a replay: journaled calls return their recorded
+    // result and are not performed again, while `reveal` and `log` run every time.
+    println!();
+    notify(&mut interpreter, "replay order 1", 0, &mut journal);
+
+    println!();
+    counters(&program);
+
+    println!();
+    rejected("erase last", ERASE_LAST);
+    rejected("bad invoke", BAD_INVOKE);
+    rejected("triggers itself", SELF_TRIGGER);
+
     ExitCode::SUCCESS
 }
+
+/// Rule 4's counters, on their own small log so the three stay legible. An effect
+/// quietly failing every event looks exactly like one quietly succeeding unless
+/// `failed` is separate from `wedged`.
+fn counters(program: &Program) {
+    let log = vec![
+        placed(30, 20, "ok@example.com", 1_000),
+        placed(31, 21, "rejected@example.com", 1_000),
+    ];
+    let mut interpreter = Interpreter::with_log(program, log);
+    interpreter.script(CONFIRM, [Reply::Status(200), Reply::Status(422)]);
+
+    match interpreter.drive("NotifyCustomer") {
+        Ok(counts) => {
+            println!(
+                "{:16} {:8} {} done, {} failed, {} skipped, {} wedged",
+                "two orders",
+                "counts",
+                counts.done,
+                counts.failed(),
+                counts.skipped(),
+                usize::from(counts.wedged.is_some())
+            );
+            for message in &counts.failures {
+                println!("{:16}          failed: {message}", "");
+            }
+        }
+        Err(err) => println!("{:16} error    {err}", "two orders"),
+    }
+}
+
+fn notify(interpreter: &mut Interpreter<'_>, label: &str, position: u64, journal: &mut Journal) {
+    let calls = interpreter.http_calls();
+    let absorbed = interpreter.absorbed();
+    let events = interpreter.log().len();
+    let lines = interpreter.lines().len();
+
+    match interpreter.deliver("NotifyCustomer", position, journal) {
+        Ok(outcome) => {
+            let (kind, detail) = match &outcome {
+                Invocation::Done => ("ok", String::new()),
+                Invocation::Ignored => ("ignored", String::new()),
+                Invocation::Failed(message) => ("failed", message.clone()),
+                Invocation::Skipped(message) => ("skipped", message.clone()),
+            };
+            println!("{}", format!("{label:16} {kind:8} {detail}").trim_end());
+            println!(
+                "{:16}          {} http call(s), {} absorbed, events {events} -> {}, {} log line(s)",
+                "",
+                interpreter.http_calls() - calls,
+                interpreter.absorbed() - absorbed,
+                interpreter.log().len(),
+                interpreter.lines().len() - lines
+            );
+        }
+        // A wedge does not advance, and the script cannot observe it.
+        Err(err) => println!("{label:16} wedged   {err}"),
+    }
+}
+
+/// Each of these is a program the checker refuses, printed with its location so the
+/// rejection is something you can see rather than something the spec claims.
+fn rejected(label: &str, arm: &str) {
+    let source = format!("{REJECTED_PRELUDE}{arm}");
+    match parse_files([("effects/notify.hk", source.as_str())]) {
+        Ok(_) => println!("{label:16} ok       unexpectedly parsed"),
+        Err(err) => println!("{label:16} error    {err}"),
+    }
+}
+
+const REJECTED_PRELUDE: &str = "currency USD
+event @order.placed {
+  order_id: Uuid,
+  customer_id: Int,
+  email: String @subject(customer_id),
+}
+event @order.notified { order_id: Uuid }
+
+command RecordNotified(order_id: Uuid) {
+  emit @order.notified { order_id }
+}
+";
+
+/// Rule 9: `erase` is journaled and `reveal` is not, so the replay re-runs the reveal
+/// against a key that is gone.
+const ERASE_LAST: &str = "effect NotifyCustomer {
+  on @order.placed as e {
+    erase(e.customer_id)
+    log(reveal(e.email))
+  }
+}
+";
+
+/// Rule 7: checked against the command's declared parameters, at compile time.
+const BAD_INVOKE: &str = "effect NotifyCustomer {
+  on @order.placed as e {
+    invoke RecordNotified { order: e.order_id }
+  }
+}
+";
+
+/// An effect that reacts to what it causes is an unbounded event stream.
+const SELF_TRIGGER: &str = "effect Loop {
+  on @order.notified as e {
+    invoke RecordNotified { order_id: e.order_id }
+  }
+}
+";
 
 fn short(key: &Key) -> String {
     match key {
