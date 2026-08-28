@@ -616,12 +616,16 @@ fn a_default_or_a_zero_always_has_the_declared_type() {
                         entity.name, field.name
                     )
                 });
-                assert_eq!(
-                    value.ty(),
-                    field.ty,
-                    "{}.{} starts at the wrong type",
+                // `has_type` rather than `==`: a sealed column stores a plain value,
+                // because the store holds plaintext and the seal is a parse-time
+                // rule. See `docs/effects.md` rule 12.
+                assert!(
+                    value.has_type(&field.ty),
+                    "{}.{} starts at {} rather than {}",
                     entity.name,
-                    field.name
+                    field.name,
+                    value.ty(),
+                    field.ty
                 );
             }
         }
@@ -1212,4 +1216,50 @@ fn a_handler_may_omit_the_destructure_block() {
         message,
         "this looks like a destructure block; a handler with one needs a body block after it"
     );
+}
+
+/// Rule 9's second check, which was the literal empty function
+/// `fn check_subject(_target: &EntityField, _incoming: &Ident) {}` until the seal
+/// became a type. A column is filed under one key, so it can hold one subject.
+#[test]
+fn two_handlers_cannot_seal_one_column_under_two_subjects() {
+    let message = parse(
+        "event @order.placed { order_id: Uuid, customer_id: Int, email: String @subject(customer_id) }
+event @shop.noted { order_id: Uuid, shop_id: Int, note: String @subject(shop_id) }
+
+projector P {
+  entity Row { order_id: Uuid @key, text: String }
+
+  on @order.placed as e { order_id, email } { put Row { order_id, text: email } }
+  on @shop.noted as e { order_id, note } { put Row { order_id, text: note } }
+}",
+    )
+    .expect_err("one column, one subject")
+    .message;
+    assert!(
+        message.contains("`Row.text` already holds content sealed under `customer_id`"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("one column holds one subject"),
+        "got: {message}"
+    );
+}
+
+/// The same column written by two handlers under the **same** subject is the ordinary
+/// case, and is what a read model of a shop's credentials looks like.
+#[test]
+fn two_handlers_may_seal_one_column_under_one_subject() {
+    parse(
+        "event @order.placed { order_id: Uuid, customer_id: Int, email: String @subject(customer_id) }
+event @order.reconfirmed { order_id: Uuid, customer_id: Int, email: String @subject(customer_id) }
+
+projector P {
+  entity Row { order_id: Uuid @key, email: String }
+
+  on @order.placed as e { order_id, email } { put Row { order_id, email } }
+  on @order.reconfirmed as e { order_id, email } { put Row { order_id, email } }
+}",
+    )
+    .unwrap_or_else(|err| panic!("expected this to parse: {err}"));
 }

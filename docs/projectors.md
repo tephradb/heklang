@@ -369,23 +369,32 @@ the real store.
 
 ## 9. Subject propagation, not declaration
 
-Entity fields do not restate `@subject`. Subject binding is a property of the value: it propagates
-from the event field, through destructuring, into the entity field the value is written to.
+Entity fields do not restate `@subject`. The seal is a property of the value's **type**, and it
+propagates from the event field, through destructuring and through a `let`, onto the column written
+from it. Writing sealed content into a column seals the column.
 
-The propagation is live: parsing a `put` or `patch` field whose value came from a subject-bound event
-field records that subject on the entity field, so `EntityField::subject` is populated without any
-author writing it.
+That is why a projector can store a credential it may never read: only an effect crosses the decrypt
+boundary, and a projector never `reveal`s, yet storing personal data into a read model is most of
+what a real port's projectors do. Moving sealed content is not reading it.
 
-The two checks over it are not (see "Checker obligations"):
+**Both checks over it are now implemented**, where the second used to be the literal empty function
+`fn check_subject(_target: &EntityField, _incoming: &Ident) {}`:
 
-- a field written with subject-bound values from two handlers with different subjects is a conflict
-  error;
-- assigning a subject-bound value into a context that discards the binding is an error.
+- **One column, one subject.** Two handlers writing content sealed under different subjects into one
+  column is an error naming both, because a key is filed under exactly one subject and a column
+  holding two would have nothing static to say which it needs. This is the same sentence
+  `docs/effects.md` rule 12 says about a `state` fold, one level out.
 
-The first of those **is** implemented for the other place subjects propagate, a `state` fold
-(`docs/effects.md` rule 12), where the same sentence appears about a fold arm rather than a handler.
-The projector side is still a no-op, so this is a gap in the checker rather than a disagreement about
-the rule.
+  > `Row.text` already holds content sealed under `customer_id`, so it cannot also hold content
+  > sealed under `shop_id`; one column holds one subject, because `erase` files a key under exactly
+  > one
+
+- **Sealed content cannot be written where the seal is discarded.** That is rule 12's boundary rule
+  and it now applies here too: a column takes sealed content by propagating the seal onto itself, and
+  every other position takes it out from behind the boundary.
+
+Two handlers writing the same subject into one column is the ordinary case, and is exactly what a
+read model of a shop's credentials looks like.
 
 ## 10. Scoping
 
@@ -480,18 +489,18 @@ enforces once beats a discipline every handler has to keep.
 
 ## Checker obligations
 
-Two static checks are specified here, recorded in the IR, and not yet enforced. Both are backstopped
-at runtime or are outright no-ops, and both belong to the eventual checker rather than the parser:
+One static check is specified here, recorded in the IR, and not yet enforced. It is backstopped at
+runtime, and it belongs to the eventual checker rather than the parser:
 
 1. **The `@max` invariant** above. Backstopped by a spanned runtime error, and only on the writes
    that actually land: an `update` against an absent row evaluates nothing, so the backstop is now
    data-dependent as well as late.
-2. **Rule 9's subject checks.** Both are static, and both are an explicit no-op today rather than a
-   panic, so ordinary parsing runs through them. hekla's `enforce_subject_columns` is the reference
-   for what they assert: a subject-bound value may only be written into a subject-bound field, the
-   field's declared subject must agree, and the subject value must equal the row's own subject-id
-   column. Nothing is lost by deferring them, because every handler stays in the IR alongside the
-   event definitions, so the checker can recompute both subjects and report both spans.
+
+**Rule 9's subject checks are no longer on this list.** Both landed with the seal moving into the
+type: one column holds one subject, and sealed content may not be written where the seal is
+discarded. hekla's `enforce_subject_columns` remains the reference for the one part still outstanding,
+that the subject value must equal the row's own subject-id column, which needs the row rather than
+the write.
 
 ## Known gaps
 

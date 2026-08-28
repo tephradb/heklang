@@ -2128,35 +2128,52 @@ impl Parser {
         Ok(stmts)
     }
 
-    /// Rule 9: `@subject` is a property of the value, so it propagates from the
-    /// event field, through the destructured slot, into the entity field written
-    /// from it. Recorded here rather than authored on the entity.
-    fn propagate_subject(&mut self, lower: &Lower, entity: &str, field: &str, value: ExprId) {
-        let Some(Expr::Load(slot)) = lower.b.exprs().get(value) else {
-            return;
-        };
-        let Some(source) = lower.b.bound_field(*slot) else {
-            return;
-        };
+    /// Rule 9: the seal propagates from the value into the entity column written from
+    /// it, so a column is never authored `@subject`. Read off the value's **type**
+    /// rather than the slot it loaded from, which is what makes it survive a `let` and
+    /// what makes the conflict below checkable.
+    fn propagate_subject(
+        &mut self,
+        lower: &Lower,
+        entity: &str,
+        field: &str,
+        value: ExprId,
+        line: u32,
+        col: u32,
+    ) -> Result<(), SyntaxError> {
         let Some(subject) = self
-            .event
+            .type_of(lower, value)
             .as_ref()
-            .and_then(|event| event.field(source))
-            .and_then(|declared| declared.subject.clone())
+            .and_then(Type::subject)
+            .cloned()
         else {
-            return;
+            return Ok(());
         };
-
         let Some(target) = self
             .entities
             .iter_mut()
             .find(|def| def.name == entity)
             .and_then(|def| def.fields.iter_mut().find(|def| def.name == field))
         else {
-            return;
+            return Ok(());
         };
-        check_subject(target, &subject);
-        target.subject.get_or_insert(subject);
+        // Rule 9's second check, which was a no-op until the seal was a type: one
+        // column holds one subject, because a key is filed under exactly one and a
+        // column with two would have nothing static to say which it needs. The same
+        // sentence rule 12 says about a `state` fold.
+        if let Some(seen) = &target.subject
+            && seen != &subject
+        {
+            let message = format!(
+                "`{entity}.{field}` already holds content sealed under `{seen}`, so it cannot also hold content sealed under `{subject}`; one column holds one subject, because `erase` files a key under exactly one"
+            );
+            return Err(self.err(message, line, col));
+        }
+        if target.subject.is_none() {
+            target.ty = seal(target.ty.clone(), subject.clone());
+            target.subject = Some(subject);
+        }
+        Ok(())
     }
     fn entity_ref(&mut self) -> Result<(Ident, EntityDef), SyntaxError> {
         let (line, col) = self.here();
@@ -2720,7 +2737,7 @@ impl Parser {
                 lower.b.load(&name)
             };
             self.propagating = outer;
-            self.propagate_subject(lower, &def.name, &name, value);
+            self.propagate_subject(lower, &def.name, &name, value, line, col)?;
             fields.push((name, value));
             if !self.eat_sym(Sym::Comma) {
                 break;
@@ -3664,8 +3681,6 @@ fn response_field(name: &str) -> Option<Type> {
 /// subject-bound value may not land in a field that discards the binding. The
 /// propagation that feeds them is live, and every handler stays in the IR, so the
 /// checker can recover both spans; only the checking is deferred.
-fn check_subject(_target: &EntityField, _incoming: &Ident) {}
-
 /// What a condition proves about one optional, and on which branch: `true` means the
 /// value is present in the `then` branch. Recognised on a single test, because a
 /// conjunction and a disjunction narrow in opposite directions and getting that wrong

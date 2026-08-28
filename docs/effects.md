@@ -879,18 +879,21 @@ optional-out covers the fold, and narrowing covers the guard.
 
 ## Checker obligations
 
-The two recorded in `docs/projectors.md` still stand (the `@max` tightening invariant and rule 9's
-subject checks). Three checks are **implemented** and live in the parser only because nothing
-else exists yet:
+The one recorded in `docs/projectors.md` still stands (the `@max` tightening invariant). Four checks
+are **implemented** and live in the parser only because nothing else exists yet:
 
 1. **Erase-last reachability** (rule 9). Needs one arm's body, so the parser can host it, but it is a
    flow analysis and belongs with the others.
 2. **The self-trigger cycle check.** Needs the whole program, and is the first thing heklang has that
    does. When the checker splits out, this one moves first.
 3. **The fold subject checks** (rule 12): one variable holds one subject, and a plain arm may not
-   join subject-bound ones. Needs one declaration, so the parser can host it, but it is the same
-   check `docs/projectors.md` rule 9 states for a projector write and still does not perform.
-   Whichever of the two moves out first should take the other with it.
+   join subject-bound ones. Needs one declaration, so the parser can host it.
+4. **The decrypt boundary** (rule 12): sealed content may only be moved, asked about, or revealed.
+   This one is a type rule rather than an analysis, so it is the one with the best claim to stay
+   where it is; it fires wherever a type meets a value, which is everywhere the parser already looks.
+
+The projector half of check 3 landed with it, so `docs/projectors.md` rule 9 no longer records a
+no-op.
 
 **Narrowing** (`docs/optionals.md`) is deliberately not on this list. It is a property of the
 statement tree the parser is already walking, and it has to be known while lowering rather than after
@@ -901,7 +904,8 @@ it, because a narrowed load lowers differently.
 - **Response headers.** Request headers are `http.post(url, body, headers = { ... })`; nothing reads
   the response's yet.
 - **Retry configuration** (rule 13).
-- **Opaque subject values**, above.
+- **Ciphertext at rest**: the log and the store hold plain values, because what rules 9 and 12 turn
+  on is whether a key is alive. The decrypt **boundary** is enforced; the bytes are not modelled.
 - **The second erase rule** (rule 9), for an id that round-trips through an HTTP response. The
   `reveal` case is now checked where it can be written.
 - **Arrays** in a JSON body can be carried but not taken apart (rule 8).
