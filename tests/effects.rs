@@ -1139,6 +1139,41 @@ fn a_transformed_arm_drops_the_binding() {
     assert!(message.contains("drops the binding"), "got: {message}");
 }
 
+/// The rules are about the variable, so they hold in a command as well as an effect.
+/// A command cannot `reveal`, so what it records is inert; keeping one rule is worth an
+/// unread field.
+#[test]
+fn the_fold_rules_hold_in_a_command_too() {
+    let good = source(
+        "command Check(customer_id: Int) {
+  state secret: String? = fold none
+    on @order.placed(customer_id) { email } => email
+
+  if secret.is_none() {
+    return reject(\"unknown\", \"no orders\")
+  }
+  return
+}",
+    );
+    parse(&good).expect("a command may fold a subject-bound value");
+
+    let message = parse(&source(
+        "command Check(customer_id: Int, order_id: Uuid) {
+  state secret: String? = fold none
+    on @order.placed(customer_id) { email } => email
+    on @order.audited(order_id) { tool } => tool
+
+  return
+}",
+    ))
+    .expect_err("a plain arm is a plain arm here too")
+    .message;
+    assert!(
+        message.contains("cannot fold a plain one into it"),
+        "got: {message}"
+    );
+}
+
 /// `erase` names a subject id rather than a subject-bound value, so it stays on the
 /// trigger: an id folded off an earlier event is not one this arm can be sure of.
 #[test]
