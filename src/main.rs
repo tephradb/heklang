@@ -585,8 +585,16 @@ fn catalog_demo(program: &Program) {
         program.consts.len(),
         program.enums.len(),
     );
-    if let Some(def) = program.constant("HOUSE_ITEM") {
-        println!("  HOUSE_ITEM = {}", heklang::value::literal(&def.value));
+    // Resolved at parse time, so what the program holds is the finished literal: a
+    // record built from another const, and both spellings of an optional.
+    for name in ["HOUSE_ITEM", "NO_SKU", "FALLBACK_SKU"] {
+        if let Some(def) = program.constant(name) {
+            println!(
+                "  {name}: {} = {}",
+                def.ty,
+                heklang::value::literal(&def.value)
+            );
+        }
     }
 
     let mut interpreter = Interpreter::new(program);

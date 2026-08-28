@@ -715,6 +715,13 @@ pub enum Literal {
     Uuid(String),
     Timestamp(i64),
     None(Type),
+    /// A present optional. It carries the inner type for the reason `None` does: a
+    /// `Value::Opt` needs one, and by the time a literal is evaluated there is no
+    /// target left to consult.
+    Some {
+        inner: Type,
+        value: Box<Literal>,
+    },
     Money {
         units: i64,
         scale: u8,

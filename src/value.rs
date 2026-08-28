@@ -305,6 +305,10 @@ pub fn literal(lit: &Literal) -> Value {
             variant: variant.clone(),
         },
         Literal::None(inner) => Value::none(inner.clone()),
+        Literal::Some { inner, value } => Value::Opt {
+            inner: inner.clone(),
+            value: Some(Box::new(literal(value))),
+        },
         Literal::Rounding(mode) => Value::Rounding(*mode),
         Literal::List { inner, items } => Value::list(inner.clone(), items.iter().map(literal)),
         Literal::EmptyMap(key, value) => Value::map(key.clone(), value.clone(), []),

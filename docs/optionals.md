@@ -31,18 +31,25 @@ and it holds at **every** position that declares a type:
 | a record literal field | `Facts { note }` where `note` is declared `String?` |
 | a list or map element | `xs.push(name)` where `xs` is a `List(String?)` |
 | a test's `given` field and expected value | `expect Order[id] { tracking: "TRK-1" }` against a `String?` column |
+| a `const` | `const HOUSE_SKU: String? = "house"` |
+| an entity field default | `note: String? = "x"` in an `entity` declaration |
 
 It wraps an **exact** inner-type match and nothing more, so a `Uuid` still does not fill a `String?`
 and a `List(String)` still does not fill a `List(String?)`: the wrap is one level at the outside of
 the declared type, not a conversion that recurses.
 
 **Why the list is exhaustive rather than illustrative.** Each of these is a separate site in the
-interpreter, and the rule is only worth anything if it holds at all of them. It has twice not: a
-`state` seed and a fold arm each stored a bare value into an optional slot until they were fixed, and
-the record and container positions did the same until the sweep that produced this table. The failure
-is silent, because nothing type-checks a frame slot: the wrong shape sits there until an
-`.is_none()` reaches it and reports that a `String` has no such method, naming a symptom several
-statements away from the write.
+interpreter, and the rule is only worth anything if it holds at all of them. It has three times not:
+a `state` seed and a fold arm each stored a bare value into an optional slot until they were fixed;
+the record and container positions did the same until the sweep that produced this table; and the
+last two rows failed differently again, by rejecting the write outright, so that an optional-typed
+constant had no writable value at all. The first two failures are silent, because nothing
+type-checks a frame slot: the wrong shape sits there until an `.is_none()` reaches it and reports
+that a `String` has no such method, naming a symptom several statements away from the write.
+
+The last two rows are also why the rule now lives in one place. Every literal position funnels
+through one function in the parser, so the wrap happens where a declared type meets a found type and
+nowhere else; adding an arm to that function cannot forget it.
 
 A test's expected value is on the list for a different reason. Nothing there is silent: the
 comparison fails loudly. But it fails as `expected "TRK-1", got "TRK-1"`, because an optional prints

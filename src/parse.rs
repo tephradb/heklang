@@ -1171,7 +1171,11 @@ impl Parser {
             }
 
             if self.eat_sym(Sym::Assign) {
-                if matches!(ty, Type::Opt(_)) {
+                // Only `none` is refused, and only here: an optional column already
+                // starts absent, so writing it is a second spelling of the zero. A
+                // present default is the ordinary rule, the one every other declared
+                // position follows.
+                if self.at_word(Keyword::None) {
                     return self.fail(format!(
                         "`{field_name}` is optional, so it is already `none` by default"
                     ));
@@ -1291,6 +1295,10 @@ impl Parser {
         let spanned = self.bump();
         let (line, col) = (spanned.line, spanned.col);
         let bad = |found: &str| format!("a {ty} {what} cannot be {found}");
+        // Every shape below resolves against the inner type, so a bare literal in an
+        // optional position reads exactly as it does anywhere else. The wrap happens
+        // once, at the end.
+        let target = inner_of(ty);
 
         let lit = match spanned.token {
             Token::Number(number) => {
@@ -1300,14 +1308,14 @@ impl Parser {
                     number.digits
                 };
                 Number::new(digits, number.scale)
-                    .resolve(ty)
+                    .resolve(target)
                     .map_err(|err| self.err(err.to_string(), line, col))?
             }
             _ if negated => return Err(self.err(bad("a negated value"), line, col)),
             // The only way to write a `Uuid` down. There is no Uuid literal token,
             // because a bare hex-and-dashes word is not one, so the target type is
             // what decides that this string is one.
-            Token::Text(text) if matches!(ty, Type::Uuid) => {
+            Token::Text(text) if matches!(target, Type::Uuid) => {
                 if uuid::Uuid::parse_str(&text).is_err() {
                     return Err(self.err(format!("`{text}` is not a Uuid"), line, col));
                 }
@@ -1315,7 +1323,7 @@ impl Parser {
             }
             Token::Text(text) => Literal::Str(text),
             Token::Sym(Sym::LBracket) => {
-                let Type::List(inner) = ty else {
+                let Type::List(inner) = target else {
                     return Err(self.err(bad("a list"), line, col));
                 };
                 let mut items = Vec::new();
@@ -1332,7 +1340,7 @@ impl Parser {
                 }
             }
             Token::Ident(name) if name == "Map" && self.at_sym(Sym::Dot) => {
-                let Type::Map(key, value) = ty else {
+                let Type::Map(key, value) = target else {
                     return Err(self.err(bad("a map"), line, col));
                 };
                 self.expect_sym(Sym::Dot)?;
@@ -1371,6 +1379,14 @@ impl Parser {
                 }
                 Literal::Record { ty: name, fields }
             }
+            // Against `ty` rather than `target`: absence needs an optional to be
+            // absent from, and the wrap at the end has nothing to wrap.
+            Token::Word(Keyword::None) => {
+                let Type::Opt(inner) = ty else {
+                    return Err(self.err(bad("`none`"), line, col));
+                };
+                Literal::None(inner.as_ref().clone())
+            }
             Token::Word(Keyword::True) => Literal::Bool(true),
             Token::Word(Keyword::False) => Literal::Bool(false),
             // Ahead of the enum-variant arm below, which is the precedence `primary`
@@ -1379,7 +1395,7 @@ impl Parser {
                 let declared = self.shell_of(&name).expect("checked just above").ty.clone();
                 // Checked from the shell rather than from the resolved value, so a
                 // mismatch names the const, and reports even inside a reference cycle.
-                if &declared != ty {
+                if !fills(&declared, ty) {
                     return Err(self.err(
                         format!("a {ty} {what} cannot be `{name}`, which is a {declared}"),
                         line,
@@ -1389,7 +1405,7 @@ impl Parser {
                 self.resolve_const(&name)?
             }
             Token::Ident(variant) => {
-                let Type::Enum(enum_name) = ty else {
+                let Type::Enum(enum_name) = target else {
                     return Err(self.err(bad(&format!("`{variant}`")), line, col));
                 };
                 let Some(def) = self.enum_def(enum_name) else {
@@ -1411,10 +1427,10 @@ impl Parser {
         };
 
         let found = value::literal(&lit).ty();
-        if &found != ty {
+        if !fills(&found, ty) {
             return Err(self.err(format!("a {ty} {what} cannot be a {found}"), line, col));
         }
-        Ok(lit)
+        Ok(wrap(lit, &found, ty))
     }
 
     /// Every enum a name could resolve against here: the projector's own first, then
@@ -3348,6 +3364,24 @@ fn inner_of(ty: &Type) -> &Type {
     match ty {
         Type::Opt(inner) => inner,
         _ => ty,
+    }
+}
+
+/// Whether a `found` literal may be written where `ty` is declared: the same type, or
+/// a bare `T` filling a `T?`. See `docs/optionals.md`.
+fn fills(found: &Type, ty: &Type) -> bool {
+    found == ty || matches!(ty, Type::Opt(inner) if inner.as_ref() == found)
+}
+
+/// One level, at the outside of the declared type, so a `List(String)` still does not
+/// become a `List(String?)`. Only ever called where `fills` already holds.
+fn wrap(lit: Literal, found: &Type, ty: &Type) -> Literal {
+    match ty {
+        Type::Opt(_) if found != ty => Literal::Some {
+            inner: found.clone(),
+            value: Box::new(lit),
+        },
+        _ => lit,
     }
 }
 

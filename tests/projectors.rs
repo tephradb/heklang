@@ -589,12 +589,38 @@ projector P {
     );
 }
 
+/// `= none` is the one spelling refused, because an optional column already starts
+/// absent. A present default is the ordinary rule every declared position follows.
 #[test]
-fn an_optional_field_takes_no_default() {
-    let message = err_entity("tracking2: String? = \"x\"");
+fn an_optional_field_takes_no_none_default() {
+    let message = err_entity("tracking2: String? = none");
     assert!(
         message.contains("is optional, so it is already `none` by default"),
         "got: {message}"
+    );
+}
+
+#[test]
+fn an_optional_field_takes_a_present_default() {
+    let store = project(
+        "  entity Thing {
+    id: Uuid @key,
+    note: String? = \"held\",
+    seen: Int,
+  }
+
+  on @order.placed { order_id } {
+    patch Thing[order_id] { seen: .seen + 1 }
+  }",
+        vec![placed(1, 1, 1_000)],
+    );
+    let row = store
+        .get("Thing", &Key::Uuid("order-1".into()))
+        .expect("the patch materialized");
+    assert_eq!(
+        row.field("note"),
+        Some(&Value::some(Value::str("held"))),
+        "a bare String fills the String? column, wrapped once"
     );
 }
 

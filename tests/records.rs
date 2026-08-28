@@ -477,6 +477,134 @@ projector P {
     assert_eq!(row.field("seen"), Some(&Value::Int(1)));
 }
 
+/// `Literal::None` had been in the IR since optionals landed with nothing able to
+/// reach it, so an optional-typed const had no writable value at all: not `none`, and
+/// not a present one either.
+#[test]
+fn an_optional_const_may_be_none_or_a_value() {
+    let source = "const NO_SKU: String? = none
+const HOUSE_SKU: String? = \"house\"
+event @a.b { x: Int }
+";
+    let program = parse(source).expect("both spellings are writable");
+    assert_eq!(
+        heklang::value::literal(&program.constant("NO_SKU").expect("declared").value),
+        Value::none(Type::String)
+    );
+    assert_eq!(
+        heklang::value::literal(&program.constant("HOUSE_SKU").expect("declared").value),
+        Value::some(Value::str("house")),
+        "a bare String is wrapped once, not stored bare"
+    );
+}
+
+/// The wrap is what this is really testing. A bare `Literal::Str` in the slot type
+/// checks nowhere and fails much later, at `UnknownMethod` on a `String`.
+#[test]
+fn an_optional_const_answers_is_none() {
+    let source = "const NO_SKU: String? = none
+const HOUSE_SKU: String? = \"house\"
+event @a.b { missing: Bool, present: Bool }
+command C(x: Int) {
+  emit @a.b { missing: NO_SKU.is_none(), present: HOUSE_SKU.is_some() }
+}
+";
+    let program = parse(source).expect("parses");
+    let mut interpreter = Interpreter::new(&program);
+    let execution = interpreter
+        .run("C", vec![("x", Value::Int(1))])
+        .expect("runs");
+    let Outcome::Ok(events) = execution.outcome else {
+        panic!("expected an append, got {:?}", execution.outcome);
+    };
+    assert_eq!(events[0].field("missing"), Some(&Value::Bool(true)));
+    assert_eq!(events[0].field("present"), Some(&Value::Bool(true)));
+}
+
+/// A record const resolves each field against its declared type, so until an optional
+/// was writable no record with an optional field could be a const at all.
+#[test]
+fn a_record_const_may_have_an_optional_field() {
+    let source = "record Facts { sku: String?, note: String }
+const NO_FACTS: Facts = Facts { sku: none, note: \"unknown\" }
+const HELD: Facts = Facts { sku: \"house\", note: \"held\" }
+event @a.b { x: Int }
+";
+    let program = parse(source).expect("a record const resolves each field on its own");
+    for (name, sku) in [
+        ("NO_FACTS", Value::none(Type::String)),
+        ("HELD", Value::some(Value::str("house"))),
+    ] {
+        let value = heklang::value::literal(&program.constant(name).expect("declared").value);
+        let Value::Record { fields, .. } = &value else {
+            panic!("expected a record for {name}, got {value:?}");
+        };
+        assert_eq!(fields.get("sku"), Some(&sku), "for {name}");
+    }
+}
+
+/// The wrap is one level at the outside of the declared type, not a conversion that
+/// recurses, which is what `docs/optionals.md` says and what keeps it one rule. Each
+/// item of a list literal is its own declared position, though, so `["a"]` into a
+/// `List(String?)` wraps per item: that is the rule applying, not recursing.
+#[test]
+fn the_optional_wrap_does_not_recurse() {
+    let items = parse("const XS: List(String?) = [\"a\"]\nevent @a.b { x: Int }\n")
+        .expect("each item is its own position");
+    assert_eq!(
+        heklang::value::literal(&items.constant("XS").expect("declared").value),
+        Value::list(Type::opt(Type::String), [Value::some(Value::str("a"))])
+    );
+
+    let whole = parse(
+        "const XS: List(String) = [\"a\"]\nconst YS: List(String?) = XS\nevent @a.b { x: Int }\n",
+    )
+    .expect_err("expected a rejection")
+    .message;
+    assert_eq!(
+        whole,
+        "a List(String?) const cannot be `XS`, which is a List(String)"
+    );
+
+    let bad = parse("const N: Int? = \"x\"\nevent @a.b { x: Int }\n")
+        .expect_err("expected a rejection")
+        .message;
+    assert_eq!(bad, "a Int? const cannot be a String");
+}
+
+/// `none` needs an optional to be absent from, so it is the one shape checked against
+/// the declared type rather than through it.
+#[test]
+fn none_needs_an_optional_target() {
+    let message = parse("const N: Int = none\nevent @a.b { x: Int }\n")
+        .expect_err("expected a rejection")
+        .message;
+    assert_eq!(message, "a Int const cannot be `none`");
+}
+
+/// Every shape resolves against the inner type, so a `Uuid` const stays spellable
+/// through an optional and so does an enum variant.
+#[test]
+fn an_optional_const_resolves_through_its_inner_type() {
+    let source = "enum Tier { @default Free, Paid }
+const MAYBE_ID: Uuid? = \"6ba7b810-9dad-11d1-80b4-00c04fd430c8\"
+const MAYBE_TIER: Tier? = Paid
+event @a.b { x: Int }
+";
+    let program = parse(source).expect("the target's inner type is what decides the shape");
+    assert_eq!(
+        heklang::value::literal(&program.constant("MAYBE_ID").expect("declared").value),
+        Value::some(Value::uuid("6ba7b810-9dad-11d1-80b4-00c04fd430c8"))
+    );
+    assert_eq!(
+        heklang::value::literal(&program.constant("MAYBE_TIER").expect("declared").value),
+        Value::some(Value::Enum {
+            ty: "Tier".into(),
+            variant: "Paid".into(),
+        })
+    );
+}
+
 // ---------------------------------------------------------------------------------
 // Declaration order and duplicates.
 

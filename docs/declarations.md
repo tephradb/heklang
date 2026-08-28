@@ -219,6 +219,25 @@ and nothing in either file said so.
 with the plain reference, and it gives up both properties the literal restriction buys. A reference
 is the part authors reach for; arithmetic over constants is not.
 
+### An optional const is written `none` or a value
+
+```
+const NO_SKU: String?    = none
+const HOUSE_SKU: String? = "house"
+```
+
+Both spellings work. The second is the one rule `docs/optionals.md` states for every position
+that declares a type: a bare `T` fills a `T?`, wrapped once at the outside.
+
+Until this an optional-typed const had **no writable value at all**, neither `none` nor a present
+one, which meant no record with an optional field could be a const either, since a record const
+resolves each field against its declared type. `Literal::None` had been in the IR the whole time
+with nothing able to reach it.
+
+An entity field is the one place `= none` stays rejected, and the reason does not carry over: an
+optional column already starts at `none`, so writing it is a second spelling of the zero. A present
+default there (`note: String? = "x"`) is accepted like anywhere else.
+
 ## Six passes
 
 Declaration order does not matter anywhere, which now takes six passes over the token stream rather

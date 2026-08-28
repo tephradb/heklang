@@ -30,6 +30,7 @@ fn describe(lit: &Literal) -> String {
         Literal::Uuid(value) => format!("Uuid({value})"),
         Literal::Timestamp(micros) => format!("Timestamp({micros})"),
         Literal::None(inner) => format!("None({inner})"),
+        Literal::Some { inner, value } => format!("Some({inner}, {})", describe(value)),
         Literal::Money { units, scale } => format!("Money({units}, scale {scale})"),
         Literal::Enum { ty, variant } => format!("{ty}.{variant}"),
         Literal::Rounding(mode) => format!("Rounding({mode})"),
