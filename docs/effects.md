@@ -568,6 +568,46 @@ a bug.
 | self-triggering | rejected statically | unguarded |
 | `erase` | a statement, no result (rule 9) | an expression returning a bool |
 
+## Open problem: `reveal` beyond the trigger, and the sentinel it forces
+
+This is not a missing feature with a known shape. It needs its own design pass, and it is recorded
+here with what a real port had to do instead, because the workaround is the evidence.
+
+**`reveal` requires its argument to be a field of the triggering event.** `subject_source` in the
+parser insists on a load of a bound trigger field, so a value that reached the arm any other way
+cannot be revealed. Real credentials do not arrive that way: an access token is folded off the
+`@shop.connected` that happened long before the event now being handled. **Eight of eleven effects in
+that port are blocked on this outright.**
+
+The mechanism is not the hard part. Subject binding would propagate through a `state` fold, so a value
+folded from a `@subject(...)` field stays subject-bound, which is the same propagation rule 9 of
+`docs/projectors.md` already performs through a projector write. Two things make it a design question
+rather than an implementation:
+
+**The seed is not subject-bound.** `state token: String = fold ""` seeds with a plain `""` and folds a
+subject-bound value into it. Something has to say that a non-subject *seed* is allowed while a
+non-subject *arm* is not, and that rule does not exist yet.
+
+**`reveal` on an optional has no defined meaning, so the port used sentinels.** It wrote `""` and `0`
+for "no credential", in a language whose zero-value table in `docs/projectors.md` exists to argue
+against exactly that. It reads well (`if token.is_empty() { ... }`) and it is still a sentinel, and
+the reason it was reached for is that `String?` had nowhere to go: `reveal` takes a `String`.
+
+The design question is therefore sharper than "let `reveal` see more values". **`reveal` has to
+distinguish two absences that must not collapse:**
+
+- the field was **absent** (no token was ever folded, so nothing was ever encrypted), and
+- the key was **shredded** (a token existed and its subject has since been erased).
+
+The first is an ordinary optional. The second is rule 12's terminal skip, which is loud on purpose.
+Returning an optional for both would turn a shredded key into a quiet `none` and lose the whole point
+of rule 12; failing terminally for both would wedge on shops that simply have no token yet.
+
+**A related gap, which the same pass should settle:** there is no way to consume an optional the code
+has already proved present. The port carries `NO_..._FACTS` constants that exist only to satisfy
+`unwrap_or` on a branch that cannot be taken, three lines below the `is_some()` that proved it. Those
+constants are a bug waiting to be read as data, and they exist because narrowing does not.
+
 ## Checker obligations
 
 The two recorded in `docs/projectors.md` still stand (the `@max` tightening invariant and rule 9's

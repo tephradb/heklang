@@ -93,6 +93,22 @@ fn first_error(items: List(Json)) -> String {
 }
 ```
 
+## What a `fn` makes possible, and is therefore not in the language
+
+**`Timestamp.add_months(n)` is deliberately deferred.** A real port carries 33 lines of calendar
+arithmetic to compute a warranty's expiry, implementing the semantics where 2026-01-31 plus one month
+is 2026-02-28. Getting month-end clamping wrong is a real bug and the argument for a builtin is a
+good one.
+
+It is still the wrong place for it. **Month-end clamping is one calendar opinion among several**, and
+a builtin commits the language to it forever: clamp to the last day, roll into the next month, or
+refuse. Different jurisdictions and different contracts want different ones, and a language that
+picks cannot be argued with.
+
+Now that `fn` exists, that helper belongs in a shipped `lib/` where an application can read it,
+disagree with it and replace it. That is the general shape of the rule: **a `fn` is where an opinion
+goes, and the language is for what has no defensible alternative.**
+
 ## Calls, order, and what is absent
 
 A call is `name(args)`, resolved after a local binding and after the builtin names, so a local still

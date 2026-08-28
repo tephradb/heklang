@@ -307,6 +307,35 @@ runtime's envelope timestamp is an RFC 3339 string and its timestamp column stor
 formatting or arithmetic defined on it. Both orderings agree, so this is safe, but it means a
 conversion at the runtime boundary.
 
+## Open problem: `patch` on an absent row
+
+Rule 5 materializes a missing row from zeros, and that is right for the case it was written for: a
+counter incremented by an event that arrives before the row exists should not need the author to
+think about ordering.
+
+It is wrong for the case a real port hit. A warranty sale arrives for a plan that was deleted. There
+is no general read, so the handler cannot check; the `patch` materializes a `Plan` row from zeros and
+fills in the sale's columns. The result is a row with a real id, a real revenue figure, an empty
+title and a zero price, sitting in a merchant-facing catalogue. **It looks like a plan.**
+
+This is `docs/projectors.md`'s own "`delete` is not a tombstone" landing on production-shaped data.
+The original read the row first and returned early when it was missing; with no general reads that
+option is gone, so the write always happens.
+
+**What the read model needs is a way to say "drop this write if the row is absent."** That is a
+language addition distinct from `patch`, not a variation of it: `patch` means "change these columns,
+materializing if needed" and this means "change these columns only if there is something to change".
+Both are wanted, and neither is the other's default.
+
+**Rejected as the answer: making plan deletion a soft delete.** It works, and it pushes the problem
+into every projector: every read of every entity has to remember to filter the tombstone, and the one
+that forgets is a bug that looks exactly like this one. A rule the read model enforces once beats a
+discipline every handler has to keep.
+
+Recorded rather than implemented because the shape is not obvious. It is not clear yet whether this
+is a second statement, a modifier on `patch`, or a property of the entity, and picking wrong here
+adds surface that cannot be taken back.
+
 ## Checker obligations
 
 Two static checks are specified here, recorded in the IR, and not yet enforced. Both are backstopped
