@@ -598,6 +598,50 @@ unreadable rather than the local the source happened to reveal, because the fiel
 carries. That is what this document always showed, and it is the more useful of the two now that a
 value can travel.
 
+### What may be done to sealed content
+
+Three things, and the port is where the list comes from: across 32 `reveal` sites it reveals at the
+point of use and passes plaintext onward, and not one moves sealed content into a container, a record
+or a `fn`.
+
+| | Why it is safe |
+| --- | --- |
+| **Move it** into a position sealed under the same subject: a `let`, a `state` fold, an entity column, another event field | the content is never read |
+| **Ask if it is there**: `.is_some()` / `.is_none()` | presence is not content |
+| **`reveal` it** | the boundary itself |
+
+Everything else is a compile error, and each of these used to pass:
+
+```
+http.post(url, { "email": e.email })     // cannot be sent in a request body
+log("email is {e.email}")                // cannot be interpolated into a string
+log(e.email)                             // a String is not sealed content
+invoke RecordCopy { note: e.email }      // takes it out from behind the boundary
+if e.email == "x" { }                    // cannot be compared
+e.email.trim()                           // `trim` reads content sealed under `customer_id`
+e.email.unwrap_or("")                    // a plaintext default and sealed content in one slot
+```
+
+`unwrap_or` gets its own reason because it is the mistake a real port makes: a sentinel standing in
+for content that has a key. It is the same argument `mixed_fold` makes about a fold, one level down.
+
+**Writing plain content into a seal is free**, because that is the encrypting direction. A command
+holding an ordinary `String` may `emit` it into a `@subject(...)` field with no ceremony; only reading
+back out needs `reveal`.
+
+**Two positions propagate instead of reading**: a `state` fold and an entity column. Both take sealed
+content and become sealed themselves, which is why a projector can store a credential it may never
+`reveal`. That is `docs/projectors.md` rule 9, and it is what the port's read models depend on.
+
+**Rejected: tainting slots instead of typing values.** The check would live on the slot an expression
+loaded from, which is where subject-ness used to live. One `let`, one record field or one list
+launders it, and an unsound security check is worse than a documented gap, because it reads as a
+guarantee.
+
+**Rejected: reveal-before-use, with no exceptions.** It is the shorter rule and it makes a projector
+impossible: a projector may never `reveal`, and storing personal data into a read model is most of
+what the port's projectors do.
+
 #### One variable, one subject
 
 Two arms folding subject-bound values under **different** subject fields into one variable is an

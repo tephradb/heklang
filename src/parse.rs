@@ -69,6 +69,10 @@ struct Parser {
     /// Set only while parsing an `http.*` body argument, which is what makes an object
     /// literal structurally illegal anywhere else (rule 8).
     in_body: bool,
+    /// Set while parsing a value written into an entity column, the one position that
+    /// takes sealed content by propagating the seal onto itself rather than reading
+    /// what is behind it. A `state` fold is the other, and uses `folding`.
+    propagating: bool,
     /// The enclosing projector's declarations; empty outside one.
     enums: Vec<EnumDef>,
     entities: Vec<EntityDef>,
@@ -180,6 +184,7 @@ impl Parser {
             in_effect: None,
             returns: None,
             in_body: false,
+            propagating: false,
             enums: Vec::new(),
             entities: Vec::new(),
             module_enums: Vec::new(),
@@ -2704,6 +2709,7 @@ impl Parser {
                 ));
             };
             let expected = declared.ty.clone();
+            let outer = mem::replace(&mut self.propagating, true);
             let value = if self.eat_sym(Sym::Colon) {
                 self.expr(lower, Some(expected))?
             } else {
@@ -2713,6 +2719,7 @@ impl Parser {
                 lower.b.at(Span::new(line, col));
                 lower.b.load(&name)
             };
+            self.propagating = outer;
             self.propagate_subject(lower, &def.name, &name, value);
             fields.push((name, value));
             if !self.eat_sym(Sym::Comma) {
@@ -3010,7 +3017,13 @@ impl Parser {
     }
 
     fn expr(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
-        self.or_expr(lower, expect)
+        let (line, col) = self.here();
+        let value = self.or_expr(lower, expect.clone())?;
+        // Rule 12, at the one place every declared position funnels through.
+        if let Some(want) = &expect {
+            self.check_seal(lower, value, want, line, col)?;
+        }
+        Ok(value)
     }
 
     fn or_expr(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
@@ -3047,7 +3060,13 @@ impl Parser {
         };
 
         let hint = self.hint_from(lower, lhs);
+        let (line, col) = self.here();
         let rhs = self.add_expr(lower, hint)?;
+        // Rule 12: an equality on sealed content leaks whether two ciphertexts hold the
+        // same thing, and under a real cipher it would not even answer. `reveal` both
+        // sides, or compare something plaintext.
+        self.no_seal(lower, lhs, "be compared", span.line, span.col)?;
+        self.no_seal(lower, rhs, "be compared", line, col)?;
         self.settle(lower, lhs, rhs);
         lower.b.at(span);
         Ok(lower.b.binary(op, lhs, rhs))
@@ -4126,6 +4145,66 @@ impl Parser {
         )
     }
 
+    /// Rule 12: sealed content may be written only where the same seal is declared.
+    /// Everywhere else it would leave the boundary without `reveal`, which is the one
+    /// thing the seal exists to stop. A `state` fold and an entity column are the
+    /// exceptions: both take it by propagating the seal onto themselves.
+    fn check_seal(
+        &self,
+        lower: &Lower,
+        value: ExprId,
+        want: &Type,
+        line: u32,
+        col: u32,
+    ) -> Result<(), SyntaxError> {
+        if self.folding || self.propagating {
+            return Ok(());
+        }
+        let Some(found) = self.type_of(lower, value) else {
+            return Ok(());
+        };
+        let Some(subject) = found.subject() else {
+            return Ok(());
+        };
+        if want.subject() == Some(subject) {
+            return Ok(());
+        }
+        Err(self.err(
+            format!(
+                "this is content sealed under `{subject}` and a {want} is not; `reveal` it first, because writing it here takes it out from behind the decrypt boundary"
+            ),
+            line,
+            col,
+        ))
+    }
+
+    /// The same rule where nothing declares a type: an interpolation hole, a
+    /// comparison, an HTTP body. Reading content into any of them is reading it.
+    fn no_seal(
+        &self,
+        lower: &Lower,
+        value: ExprId,
+        what: &str,
+        line: u32,
+        col: u32,
+    ) -> Result<(), SyntaxError> {
+        let Some(subject) = self
+            .type_of(lower, value)
+            .as_ref()
+            .and_then(Type::subject)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        Err(self.err(
+            format!(
+                "this is content sealed under `{subject}`, so it cannot {what} without `reveal`"
+            ),
+            line,
+            col,
+        ))
+    }
+
     /// `reveal` and `erase` stay in the arm. Not for purity, since an effect-local
     /// `fn` may call out, but because rule 9 checks that no reveal is reachable from
     /// an erase over one arm's statement tree. See `docs/functions.md`.
@@ -4405,7 +4484,10 @@ impl Parser {
         lower.b.at(span);
         let mut parts = vec![lower.b.str(&head)];
         loop {
-            parts.push(self.expr(lower, None)?);
+            let (line, col) = self.here();
+            let hole = self.expr(lower, None)?;
+            self.no_seal(lower, hole, "be interpolated into a string", line, col)?;
+            parts.push(hole);
             let spanned = self.bump();
             match spanned.token {
                 Token::TextPart(text) => {
@@ -4804,7 +4886,9 @@ impl Parser {
                 return Err(self.err(format!("`{key}` is given twice"), line, col));
             }
             self.expect_sym(Sym::Colon)?;
+            let (at_line, at_col) = self.here();
             let value = self.expr(lower, None)?;
+            self.no_seal(lower, value, "be sent in a request body", at_line, at_col)?;
             fields.push((key, value));
             if !self.eat_sym(Sym::Comma) {
                 break;

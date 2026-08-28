@@ -2777,3 +2777,95 @@ fn an_optional_subject_bound_field_seals_inside_the_optional() {
     assert_eq!(comment.subject().map(String::as_str), Some("customer_id"));
     assert_eq!(comment.unsealed(), Type::opt(Type::String));
 }
+
+// ---------------------------------------------------------------------------------
+// Rule 12: content behind the seal cannot be read without `reveal`. Each of these
+// passed `hek check` before the seal moved into the type, and each is broken in hekla,
+// where the field is a handle. See `docs/effects.md`.
+
+fn leaks(body: &str) -> String {
+    err(&format!(
+        "effect E {{\n  on @order.placed as e {{ customer_id }} {{\n    {body}\n  }}\n}}"
+    ))
+}
+
+#[test]
+fn sealed_content_cannot_be_sent_in_a_body() {
+    let message = leaks("http.post(\"https://mail.example/confirm\", { \"email\": e.email })");
+    assert!(
+        message.contains("cannot be sent in a request body without `reveal`"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("sealed under `customer_id`"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn sealed_content_cannot_be_interpolated() {
+    let message = leaks("log(\"email is {e.email}\")");
+    assert!(
+        message.contains("cannot be interpolated into a string without `reveal`"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn sealed_content_cannot_be_logged() {
+    let message = leaks("log(e.email)");
+    assert!(message.contains("and a String is not"), "got: {message}");
+}
+
+#[test]
+fn sealed_content_cannot_be_passed_to_a_command() {
+    let message = leaks("invoke RecordNotified { order_id: e.order_id, notification_id: e.email }");
+    assert!(
+        message.contains("takes it out from behind the decrypt boundary"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn sealed_content_cannot_be_compared() {
+    let message = leaks("if e.email == \"ada@example.com\" { log(\"hi\") }");
+    assert!(
+        message.contains("cannot be compared without `reveal`"),
+        "got: {message}"
+    );
+}
+
+/// The other direction is free, because it is the encrypting one: a plain value written
+/// into a sealed field needs no ceremony, and sealed content written into the same seal
+/// is only moving.
+#[test]
+fn sealed_content_may_be_written_into_the_same_seal() {
+    program(
+        "command Reconfirm(order_id: Uuid, customer_id: Int) {
+  guard @order.reconfirmed(order_id)
+
+  state held: String = fold \"\"
+    on @order.placed(customer_id) { email } => email
+
+  emit @order.reconfirmed { order_id, customer_id, email: held }
+}",
+    );
+}
+
+/// The path the port depends on: a projector may never `reveal`, and stores
+/// subject-bound columns constantly. Rule 9's propagation is what makes it legal.
+#[test]
+fn a_projector_may_store_sealed_content_without_revealing() {
+    program(
+        "projector Orders {
+  entity Row {
+    order_id: Uuid @key,
+    email: String,
+  }
+
+  on @order.placed as e { order_id, email } {
+    put Row { order_id, email }
+  }
+}",
+    );
+}
