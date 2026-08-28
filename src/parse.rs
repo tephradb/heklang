@@ -1,12 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::mem;
 
 use crate::build::Builder;
 use crate::ir::{
     Arm, BinOp, Bind, Builtin, Command, ConstDef, Effect, EntityDef, EntityField, EnumDef,
-    EnvField, EventDef, EventPath, Expr, ExprId, Exprs, FieldDef, Filter, Handler, Ident, Index,
-    Iter, Literal, Number, Program, Projector, RecordDef, RecordField, Return, Slot, Span, Stmt,
-    Type, UnOp, Update,
+    EnvField, EventDef, EventPath, Expr, ExprId, Exprs, FieldDef, Filter, Function, Handler, Ident,
+    Index, Iter, Literal, Number, Program, Projector, RecordDef, RecordField, Return, Slot, Span,
+    Stmt, Type, UnOp, Update,
 };
 use crate::lex::{Keyword, Spanned, Sym, SyntaxError, Token, lex};
 use crate::scaled::Rounding;
@@ -52,9 +52,13 @@ struct Parser {
     /// Which declaration kind is being parsed, so a statement in the wrong one can be
     /// rejected with a message about that kind rather than a generic one.
     kind: Kind,
-    /// Command signatures, collected in pass 1 so an `invoke` can be checked against a
-    /// command declared later or in another module (rule 7).
+    /// Command signatures, collected before any body so an `invoke` can be checked
+    /// against a command declared later or in another module (rule 7).
     commands: Vec<Signature>,
+    /// The same, for `fn`, so a helper may call one declared below it.
+    functions: Vec<Signature>,
+    /// The declared result of the `fn` being parsed, so `return` has a target type.
+    returns: Option<Type>,
     /// Set only while parsing an `http.*` body argument, which is what makes an object
     /// literal structurally illegal anywhere else (rule 8).
     in_body: bool,
@@ -88,12 +92,16 @@ enum Kind {
     Command,
     Projector,
     Effect,
+    Function,
 }
 
 #[derive(Debug, Clone)]
 struct Signature {
     name: Ident,
     params: Vec<(Ident, Type)>,
+    /// A `fn`'s declared result. `None` for a command, which returns an outcome
+    /// rather than a value.
+    ret: Option<Type>,
 }
 
 impl Parser {
@@ -129,6 +137,8 @@ impl Parser {
             command_end: 0,
             kind: Kind::Command,
             commands: Vec::new(),
+            functions: Vec::new(),
+            returns: None,
             in_body: false,
             enums: Vec::new(),
             entities: Vec::new(),
@@ -421,6 +431,7 @@ impl Parser {
                     projectors.push(projector);
                 }
                 Token::Word(Keyword::Command) => self.command_signature()?,
+                Token::Word(Keyword::Fn) => self.fn_signature()?,
                 Token::Word(Keyword::Effect) => self.skip_item()?,
                 other => return self.fail(Self::expected_item(other)),
             }
@@ -430,6 +441,7 @@ impl Parser {
         self.pos = items;
         let mut commands = Vec::new();
         let mut effects: Vec<Effect> = Vec::new();
+        let mut functions = Vec::new();
         let mut seen = 0usize;
         loop {
             match self.peek() {
@@ -442,6 +454,7 @@ impl Parser {
                     let command = self.command_decl(&events)?;
                     commands.push(command);
                 }
+                Token::Word(Keyword::Fn) => functions.push(self.fn_decl(&events)?),
                 Token::Word(Keyword::Projector) => {
                     let (handlers, entities) =
                         self.projector_handlers(&projectors[seen], &events)?;
@@ -468,7 +481,9 @@ impl Parser {
             enums: mem::take(&mut self.module_enums),
             records: mem::take(&mut self.records),
             consts: mem::take(&mut self.consts),
+            functions,
         };
+        self.check_recursion(&program)?;
         self.check_cycles(&program)?;
         Ok(program)
     }
@@ -485,6 +500,36 @@ impl Parser {
             return Err(self.err(format!("command `{name}` is declared twice"), line, col));
         }
 
+        let params = self.param_list()?;
+        self.commands.push(Signature {
+            name,
+            params,
+            ret: None,
+        });
+        self.skip_braced()
+    }
+
+    /// Pass C. Parameters and the result type only, so a call can be checked against a
+    /// `fn` declared later or in another module.
+    fn fn_signature(&mut self) -> Result<(), SyntaxError> {
+        self.expect_word(Keyword::Fn)?;
+        let (line, col) = self.here();
+        let name = self.expect_ident()?;
+        if self.functions.iter().any(|other| other.name == name) {
+            return Err(self.err(format!("fn `{name}` is declared twice"), line, col));
+        }
+        let params = self.param_list()?;
+        self.expect_sym(Sym::To)?;
+        let ret = self.type_ref()?;
+        self.functions.push(Signature {
+            name,
+            params,
+            ret: Some(ret),
+        });
+        self.skip_braced()
+    }
+
+    fn param_list(&mut self) -> Result<Vec<(Ident, Type)>, SyntaxError> {
         let mut params = Vec::new();
         self.expect_sym(Sym::LParen)?;
         while !self.at_sym(Sym::RParen) {
@@ -496,13 +541,96 @@ impl Parser {
             }
         }
         self.expect_sym(Sym::RParen)?;
-        self.commands.push(Signature { name, params });
-        self.skip_braced()
+        Ok(params)
+    }
+
+    /// Pass D. A `fn` has a command's frame and arena and none of its prologue, since
+    /// `state`, `guard` and a hoisted clock are all things a pure helper cannot have.
+    fn fn_decl(&mut self, events: &[EventDef]) -> Result<Function, SyntaxError> {
+        let module = self.module_at(self.pos).map(str::to_string);
+        self.expect_word(Keyword::Fn)?;
+        let name = self.expect_ident()?;
+        let mut lower = Lower {
+            b: Builder::new(&name),
+            defaults: HashMap::new(),
+        };
+        lower.b.in_module(module.as_deref());
+
+        for (param, ty) in self.param_list()? {
+            lower.b.param(&param, ty);
+        }
+        self.expect_sym(Sym::To)?;
+        let ret = self.type_ref()?;
+        self.expect_sym(Sym::LBrace)?;
+
+        self.kind = Kind::Function;
+        self.returns = Some(ret.clone());
+        let body = self.statements(&mut lower, events)?;
+        self.returns = None;
+        self.kind = Kind::Command;
+        self.expect_sym(Sym::RBrace)?;
+
+        // Falls-through, the analysis rule 9 already uses. A `for` body does not count,
+        // because the container it walks can be empty.
+        if !always_returns(&body) {
+            return self.fail(format!(
+                "`{name}` can finish without returning a {ret}; every path out of a `fn` returns one"
+            ));
+        }
+        Ok(lower.b.finish_fn(ret, body))
+    }
+
+    fn fn_sig(&self, name: &str) -> Option<&Signature> {
+        self.functions.iter().find(|sig| sig.name == name)
+    }
+
+    /// A call, with each argument checked against its declared parameter so literal
+    /// inference and enum resolution work through it the way they work through `emit`.
+    fn call_fn(
+        &mut self,
+        lower: &mut Lower,
+        name: Ident,
+        span: Span,
+    ) -> Result<ExprId, SyntaxError> {
+        let params = self
+            .fn_sig(&name)
+            .expect("checked by caller")
+            .params
+            .clone();
+        self.expect_sym(Sym::LParen)?;
+        let outer = mem::replace(&mut self.no_record_literal, false);
+        let mut args = Vec::new();
+        while !self.at_sym(Sym::RParen) {
+            let expected = params.get(args.len()).map(|(_, ty)| ty.clone());
+            let (line, col) = self.here();
+            if expected.is_none() {
+                return Err(self.err(
+                    format!("`{name}` takes {} arguments", params.len()),
+                    line,
+                    col,
+                ));
+            }
+            args.push(self.expr(lower, expected)?);
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RParen)?;
+        self.no_record_literal = outer;
+        if args.len() != params.len() {
+            let (name_of, _) = &params[args.len()];
+            return Err(self.err(format!("`{name}` needs `{name_of}`"), span.line, span.col));
+        }
+        lower.b.at(span);
+        Ok(lower.b.expr(Expr::CallFn {
+            function: name,
+            args,
+        }))
     }
 
     fn expected_item(found: &Token) -> String {
         format!(
-            "expected `enum`, `record`, `const`, `event`, `command`, `projector` or `effect`, found {found}"
+            "expected `enum`, `record`, `const`, `fn`, `event`, `command`, `projector` or `effect`, found {found}"
         )
     }
 
@@ -1616,10 +1744,25 @@ impl Parser {
                         Kind::Effect => format!(
                             "`{outcome}` is a command's outcome; an effect's terminal outcome is `fail(...)`"
                         ),
+                        Kind::Function => format!(
+                            "`{outcome}` is a command's outcome; a `fn` returns a value, so a caller decides what a bad one means"
+                        ),
                         _ => format!(
                             "`{outcome}` is a command's outcome; a projector write cannot fail in a way the program observes"
                         ),
                     });
+                }
+                if let Some(want) = self.returns.clone() {
+                    let (line, col) = self.here();
+                    if self.at_sym(Sym::RBrace) || self.starts_statement() {
+                        return Err(self.err(
+                            format!("this `fn` returns {want}, so `return` needs a value"),
+                            line,
+                            col,
+                        ));
+                    }
+                    let value = self.expr(lower, Some(want))?;
+                    return Ok(Stmt::Return(Return::Value(value)));
                 }
                 let ret = if self.eat_word(Keyword::Invalid) {
                     self.expect_sym(Sym::LParen)?;
@@ -1649,6 +1792,9 @@ impl Parser {
                         return self.fail(
                             "an effect never appends events; call a command with `invoke`, which appends under its own guard",
                         );
+                    }
+                    Kind::Function => {
+                        return Err(self.purity_error("append events", self.span_here()));
                     }
                 }
                 let span = self.span_here();
@@ -1688,6 +1834,7 @@ impl Parser {
                 })
             }
             Token::Word(Keyword::Put) => {
+                self.not_in_fn("write a read model", self.span_here())?;
                 if self.kind != Kind::Projector {
                     return self
                         .fail("`put` writes an entity, so it can only appear in a projector");
@@ -1704,6 +1851,7 @@ impl Parser {
                 })
             }
             Token::Word(Keyword::Patch) => {
+                self.not_in_fn("write a read model", self.span_here())?;
                 if self.kind != Kind::Projector {
                     return self
                         .fail("`patch` writes an entity, so it can only appear in a projector");
@@ -1734,6 +1882,7 @@ impl Parser {
                 })
             }
             Token::Word(Keyword::Delete) => {
+                self.not_in_fn("write a read model", self.span_here())?;
                 if self.kind != Kind::Projector {
                     return self
                         .fail("`delete` writes an entity, so it can only appear in a projector");
@@ -1769,6 +1918,10 @@ impl Parser {
                 Ok(Stmt::For { iter, body })
             }
             Token::Word(Keyword::State) | Token::Word(Keyword::Guard) => {
+                if self.kind == Kind::Function {
+                    return self
+                        .fail("a `fn` has no `state`; it is a pure function of its arguments");
+                }
                 self.fail("`state` and `guard` must come before the first statement")
             }
             Token::Ident(name) if self.starts_effect_statement(name) => {
@@ -2036,6 +2189,9 @@ impl Parser {
                 if let Some(value) = self.builtin(lower, &name, expect.as_ref(), span)? {
                     return Ok(value);
                 }
+                if self.at_sym(Sym::LParen) && self.fn_sig(&name).is_some() {
+                    return self.call_fn(lower, name, span);
+                }
                 if !self.no_record_literal
                     && self.at_sym(Sym::LBrace)
                     && self.record_def(&name).is_some()
@@ -2250,6 +2406,7 @@ impl Parser {
             }),
             Expr::Invoke { .. } => Some(Type::Outcome),
             Expr::Record { ty, .. } => Some(Type::Record(ty.clone())),
+            Expr::CallFn { function, .. } => self.fn_sig(function)?.ret.clone(),
             Expr::Reveal { .. } => Some(Type::String),
         }
     }
@@ -2415,6 +2572,28 @@ impl Parser {
         Ok(arm)
     }
 
+    /// Whether the next token could begin a statement. Used by `return` to tell a bare
+    /// one from a `return <expr>`.
+    fn starts_statement(&self) -> bool {
+        match self.peek() {
+            Token::Word(
+                Keyword::If
+                | Keyword::Return
+                | Keyword::Emit
+                | Keyword::Put
+                | Keyword::Patch
+                | Keyword::Delete
+                | Keyword::Let
+                | Keyword::Invoke
+                | Keyword::For
+                | Keyword::State
+                | Keyword::Guard,
+            ) => true,
+            Token::Ident(name) => self.starts_effect_statement(name),
+            _ => false,
+        }
+    }
+
     /// Whether a statement begins with one of the soft-named effect builtins. They are
     /// not keywords (rule 10), so this is recognised by shape rather than by token.
     fn starts_effect_statement(&self, name: &str) -> bool {
@@ -2441,6 +2620,7 @@ impl Parser {
                 self.gate(
                     "`fail` is an effect's terminal outcome; a command returns `invalid(...)` or `reject(...)`",
                     "`fail` is an effect's terminal outcome; a projector write cannot fail in a way the program observes",
+                    "fail",
                     span,
                 )?;
                 self.bump();
@@ -2453,6 +2633,7 @@ impl Parser {
                 self.gate(
                     "`log` is an effect builtin; a command's decision is already visible in what it emits",
                     "`log` is an effect builtin; a projector runs once per rebuild, so its lines are not a trace",
+                    "log",
                     span,
                 )?;
                 self.bump();
@@ -2465,6 +2646,7 @@ impl Parser {
                 self.gate(
                     "only an effect crosses the decrypt boundary; a command decides from state without reaching personal data",
                     "only an effect crosses the decrypt boundary; a projector stores what the event carries",
+                    "erase a subject key",
                     span,
                 )?;
                 self.bump();
@@ -2517,11 +2699,38 @@ impl Parser {
         Ok(())
     }
 
-    fn gate(&self, command: &str, projector: &str, span: Span) -> Result<(), SyntaxError> {
+    /// A `fn` is pure, and the message says which rule that keeps rather than calling
+    /// it a style. Rule 9's erase-last check runs over one arm's statement tree; the
+    /// moment a helper can hold a `reveal` or an `erase` it has to follow calls.
+    fn purity_error(&self, what: &str, span: Span) -> SyntaxError {
+        self.err(
+            format!(
+                "a `fn` is pure, so it cannot {what}; that is what keeps the erase-last check inside one arm instead of following calls"
+            ),
+            span.line,
+            span.col,
+        )
+    }
+
+    fn not_in_fn(&self, what: &str, span: Span) -> Result<(), SyntaxError> {
+        if self.kind == Kind::Function {
+            return Err(self.purity_error(what, span));
+        }
+        Ok(())
+    }
+
+    fn gate(
+        &self,
+        command: &str,
+        projector: &str,
+        what: &str,
+        span: Span,
+    ) -> Result<(), SyntaxError> {
         match self.kind {
             Kind::Effect => Ok(()),
             Kind::Command => Err(self.err(command, span.line, span.col)),
             Kind::Projector => Err(self.err(projector, span.line, span.col)),
+            Kind::Function => Err(self.purity_error(what, span)),
         }
     }
 
@@ -2550,6 +2759,7 @@ impl Parser {
                         span.col,
                     ));
                 }
+                self.not_in_fn("read a clock", span)?;
                 self.not_in_fold("read a clock", span)?;
                 self.bump();
                 self.expect_sym(Sym::RParen)?;
@@ -2614,6 +2824,7 @@ impl Parser {
         self.gate(
             "a command decides from state and appends; only an effect can call out, because only an effect journals the call",
             "a projector is a pure fold over the log, so it cannot make an HTTP call",
+            "call out",
             span,
         )?;
         self.not_in_fold("call out", span)?;
@@ -2650,6 +2861,7 @@ impl Parser {
         self.gate(
             "only an effect crosses the decrypt boundary; a command decides from state without reaching personal data",
             "only an effect crosses the decrypt boundary; a projector stores what the event carries",
+            "decrypt",
             span,
         )?;
         self.not_in_fold("decrypt", span)?;
@@ -3055,6 +3267,7 @@ impl Parser {
         self.gate(
             "`invoke` calls a command, so it can only appear in an effect; a command that needs another command's work emits, and an effect reacts",
             "`invoke` calls a command, so it can only appear in an effect; a projector is a pure fold",
+            "call a command",
             span,
         )?;
         self.not_in_fold("call a command", span)?;
@@ -3130,6 +3343,20 @@ impl Parser {
     /// No effect may trigger itself, directly or through a chain of invokes. An edge
     /// `trigger -> emitted` for every (arm, command it invokes, event that command
     /// emits); a cycle in that graph is an unbounded event stream.
+    /// A `fn` may not call itself, directly or through another. Termination by
+    /// construction rather than by a cap, which is the argument the self-trigger check
+    /// already makes: a fold arm re-runs on every attempt and must not be able to hang.
+    fn check_recursion(&self, program: &Program) -> Result<(), SyntaxError> {
+        let Some(path) = fn_cycle(program) else {
+            return Ok(());
+        };
+        let names: Vec<String> = path.iter().map(|name| format!("`{name}`")).collect();
+        self.fail(format!(
+            "{}: a `fn` cannot call itself, directly or through another, so that every call ends",
+            names.join(" calls ")
+        ))
+    }
+
     fn check_cycles(&self, program: &Program) -> Result<(), SyntaxError> {
         let mut edges: Vec<Edge> = Vec::new();
         for effect in &program.effects {
@@ -3294,7 +3521,7 @@ fn roots(stmt: &Stmt) -> Vec<ExprId> {
         Stmt::Fail { message, .. } | Stmt::Log { message } => vec![*message],
         Stmt::Erase { value, .. } | Stmt::Discard(value) => vec![*value],
         Stmt::Return(Return::Ok) => Vec::new(),
-        Stmt::Return(Return::Invalid(message)) => vec![*message],
+        Stmt::Return(Return::Invalid(message) | Return::Value(message)) => vec![*message],
         Stmt::Return(Return::Reject { code, message }) => vec![*code, *message],
     }
 }
@@ -3319,6 +3546,7 @@ fn children(expr: &Expr) -> Vec<ExprId> {
         Expr::Interp(parts) => parts.clone(),
         Expr::List(items) => items.clone(),
         Expr::Record { fields, .. } => fields.iter().map(|(_, id)| *id).collect(),
+        Expr::CallFn { args, .. } => args.clone(),
         Expr::Comp {
             iter, cond, yields, ..
         } => {
@@ -3334,6 +3562,74 @@ fn children(expr: &Expr) -> Vec<ExprId> {
             ..
         } => vec![*value, *subject_value],
     }
+}
+
+/// Whether every path out of a body returns. An `if` counts only when it has an
+/// `else` and both branches return; a `for` body never counts, because the container
+/// it walks can be empty and the loop can run zero times.
+fn always_returns(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        Stmt::Return(_) | Stmt::Fail { .. } => true,
+        Stmt::If {
+            then, otherwise, ..
+        } => !otherwise.is_empty() && always_returns(then) && always_returns(otherwise),
+        _ => false,
+    })
+}
+
+/// Every `fn` a body calls, at any depth in its expressions.
+fn calls(exprs: &Exprs, body: &[Stmt]) -> Vec<Ident> {
+    let mut found = Vec::new();
+    walk_stmts(body, &mut |stmt| {
+        for root in roots(stmt) {
+            collect(exprs, root, &mut found, &|_, expr, out| {
+                if let Expr::CallFn { function, .. } = expr {
+                    out.push(function.clone());
+                }
+            });
+        }
+    });
+    found
+}
+
+/// A cycle in the call graph, as the path that closes it.
+fn fn_cycle(program: &Program) -> Option<Vec<Ident>> {
+    let mut done: BTreeSet<Ident> = BTreeSet::new();
+    for function in &program.functions {
+        let mut stack = Vec::new();
+        if reaches_itself(program, &function.name, &mut stack, &mut done) {
+            return Some(stack);
+        }
+    }
+    None
+}
+
+fn reaches_itself(
+    program: &Program,
+    name: &Ident,
+    stack: &mut Vec<Ident>,
+    done: &mut BTreeSet<Ident>,
+) -> bool {
+    if let Some(at) = stack.iter().position(|seen| seen == name) {
+        stack.drain(..at);
+        stack.push(name.clone());
+        return true;
+    }
+    if done.contains(name) {
+        return false;
+    }
+    let Some(def) = program.function(name) else {
+        return false;
+    };
+    stack.push(name.clone());
+    for callee in calls(&def.exprs, &def.body) {
+        if reaches_itself(program, &callee, stack, done) {
+            return true;
+        }
+    }
+    stack.pop();
+    done.insert(name.clone());
+    false
 }
 
 /// Rule 9. `Err((erase, reveal))` names the erase that may already have run and the

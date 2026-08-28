@@ -130,6 +130,7 @@ pub struct Program {
     pub enums: Vec<EnumDef>,
     pub records: Vec<RecordDef>,
     pub consts: Vec<ConstDef>,
+    pub functions: Vec<Function>,
 }
 
 impl Program {
@@ -158,6 +159,23 @@ impl Program {
     pub fn constant(&self, name: &str) -> Option<&ConstDef> {
         self.consts.iter().find(|def| def.name == name)
     }
+
+    pub fn function(&self, name: &str) -> Option<&Function> {
+        self.functions.iter().find(|def| def.name == name)
+    }
+}
+
+/// A pure helper. It has a command's frame and arena and none of its machinery: no
+/// prologue, no slices, no state, because none of those can be pure.
+#[derive(Debug, Clone)]
+pub struct Function {
+    pub name: Ident,
+    pub module: Option<Ident>,
+    pub params: Vec<Param>,
+    pub ret: Type,
+    pub frame: usize,
+    pub exprs: Exprs,
+    pub body: Vec<Stmt>,
 }
 
 /// A named product type at module scope. Unlike an entity it is an ordinary value:
@@ -545,6 +563,10 @@ pub enum Expr {
         ty: Ident,
         fields: Vec<(Ident, ExprId)>,
     },
+    CallFn {
+        function: Ident,
+        args: Vec<ExprId>,
+    },
     /// `[yields for bindings in over if cond]`. The bindings are ordinary frame slots,
     /// filled once per element, so nothing about a comprehension is a new scope kind.
     Comp {
@@ -791,7 +813,13 @@ pub enum Stmt {
 pub enum Return {
     Ok,
     Invalid(ExprId),
-    Reject { code: ExprId, message: ExprId },
+    Reject {
+        code: ExprId,
+        message: ExprId,
+    },
+    /// A `fn`'s result. Only a `fn` can produce one, and it always does: the parser
+    /// rejects a body that can finish without returning.
+    Value(ExprId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

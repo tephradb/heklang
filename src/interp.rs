@@ -6,7 +6,8 @@ use uuid::Uuid;
 
 use crate::ir::{
     Assign, BinOp, Builtin, Command, Effect, EntityDef, EnvField, EventPath, Expr, ExprId, Exprs,
-    Ident, Iter, Program, Projector, Return, Slice, SliceId, Slot, Span, Stmt, Type, UnOp,
+    Function, Ident, Iter, Program, Projector, Return, Slice, SliceId, Slot, Span, Stmt, Type,
+    UnOp,
 };
 use crate::scaled::{self, Rounding};
 use crate::value::{self, Event, Invoked, Json, Key, Record, Value};
@@ -120,6 +121,7 @@ pub enum ErrorKind {
     },
     BadKey(Type),
     NotIterable(Type),
+    UnknownFunction(Ident),
     DivisionByZero,
     Overflow,
     Inexact,
@@ -196,6 +198,7 @@ impl fmt::Display for ErrorKind {
             }
             ErrorKind::BadKey(ty) => write!(f, "{ty} cannot be an entity key"),
             ErrorKind::NotIterable(ty) => write!(f, "{ty} is not a list or a map"),
+            ErrorKind::UnknownFunction(name) => write!(f, "unknown fn `{name}`"),
             ErrorKind::DivisionByZero => f.write_str("division by zero"),
             ErrorKind::Overflow => f.write_str("arithmetic overflow"),
             ErrorKind::Inexact => f.write_str("result is not exact"),
@@ -304,6 +307,9 @@ enum Flow {
 
 enum Ret {
     Ok,
+    /// A `fn`'s result. It never escapes `call_function`, which is the only caller
+    /// that can produce one.
+    Value(Value),
     Invalid(String),
     Reject {
         code: String,
@@ -457,6 +463,7 @@ impl<'a> Interpreter<'a> {
             return Ok(Invocation::Ignored);
         };
 
+        let program = self.program;
         let mut frame = Frame::new(arm.frame);
         for bind in &arm.binds {
             let value = field(&record.event, &bind.field)?.clone();
@@ -466,16 +473,23 @@ impl<'a> Interpreter<'a> {
             frame.set(bind.slot, envelope_value(&record, bind.field))?;
         }
 
-        run_assigns(&arm.exprs, &arm.prologue, &mut frame)?;
-        let filters = resolve_filters(&arm.exprs, &arm.slices, &mut frame)?;
+        run_assigns(program, &arm.exprs, &arm.prologue, &mut frame)?;
+        let filters = resolve_filters(program, &arm.exprs, &arm.slices, &mut frame)?;
         for state in &arm.states {
-            let value = eval(&arm.exprs, &mut frame, state.init, None)?;
+            let value = eval(program, &arm.exprs, &mut frame, state.init, None)?;
             frame.set(state.slot, value)?;
         }
         // Rule 3: the fold stops at the trigger's own position, inclusive, so state is
         // a pure function of the log prefix and that position, and counts the trigger.
         let prefix = &self.log[..=position as usize];
-        fold(&arm.exprs, &arm.slices, &filters, prefix, &mut frame)?;
+        fold(
+            program,
+            &arm.exprs,
+            &arm.slices,
+            &filters,
+            prefix,
+            &mut frame,
+        )?;
 
         let mut ctx = Effects {
             program: self.program,
@@ -637,16 +651,23 @@ fn execute(
         .map(|(name, value)| (name.into(), value))
         .collect();
     bind_params(command, &mut args, &mut frame)?;
-    run_assigns(&command.exprs, &command.prologue, &mut frame)?;
+    run_assigns(program, &command.exprs, &command.prologue, &mut frame)?;
 
-    let filters = resolve_filters(&command.exprs, &command.slices, &mut frame)?;
+    let filters = resolve_filters(program, &command.exprs, &command.slices, &mut frame)?;
     for state in &command.states {
-        let value = eval(&command.exprs, &mut frame, state.init, None)?;
+        let value = eval(program, &command.exprs, &mut frame, state.init, None)?;
         frame.set(state.slot, value)?;
     }
 
     let after = log.len() as u64;
-    fold(&command.exprs, &command.slices, &filters, log, &mut frame)?;
+    fold(
+        program,
+        &command.exprs,
+        &command.slices,
+        &filters,
+        log,
+        &mut frame,
+    )?;
 
     let mut emitted = Vec::new();
     let ret = {
@@ -674,8 +695,9 @@ fn execute(
         Ret::Ok => Outcome::Ok(emitted),
         Ret::Invalid(message) => Outcome::Invalid(message),
         Ret::Reject { code, message } => Outcome::Reject { code, message },
-        // The parser gates `fail` to an effect, so a command can never carry one.
-        Ret::Fail(_) => return Err(ErrorKind::MalformedIr.into()),
+        // The parser gates `fail` to an effect and a value return to a `fn`, so a
+        // command can never carry either.
+        Ret::Fail(_) | Ret::Value(_) => return Err(ErrorKind::MalformedIr.into()),
     };
 
     // Emitted events are already validated at the emit site, where each field still
@@ -717,15 +739,21 @@ fn bind_params(
     }
 }
 
-fn run_assigns(exprs: &Exprs, assigns: &[Assign], frame: &mut Frame) -> Result<(), Error> {
+fn run_assigns(
+    program: &Program,
+    exprs: &Exprs,
+    assigns: &[Assign],
+    frame: &mut Frame,
+) -> Result<(), Error> {
     for assign in assigns {
-        let value = eval(exprs, frame, assign.value, None)?;
+        let value = eval(program, exprs, frame, assign.value, None)?;
         frame.set(assign.slot, value)?;
     }
     Ok(())
 }
 
 fn resolve_filters(
+    program: &Program,
     exprs: &Exprs,
     slices: &[Slice],
     frame: &mut Frame,
@@ -736,13 +764,14 @@ fn resolve_filters(
             slice
                 .filters
                 .iter()
-                .map(|filter| eval(exprs, frame, filter.value, None))
+                .map(|filter| eval(program, exprs, frame, filter.value, None))
                 .collect()
         })
         .collect()
 }
 
 fn fold(
+    program: &Program,
     exprs: &Exprs,
     slices: &[Slice],
     filters: &[Vec<Value>],
@@ -761,7 +790,7 @@ fn fold(
                 frame.set(bind.slot, value)?;
             }
             for update in &slice.updates {
-                let value = eval(exprs, frame, update.value, None)?;
+                let value = eval(program, exprs, frame, update.value, None)?;
                 frame.set(update.slot, value)?;
             }
         }
@@ -791,6 +820,9 @@ fn field<'a>(event: &'a Event, name: &str) -> Result<&'a Value, Error> {
 /// the parser is what guarantees a command never reaches `Write` and a handler
 /// never reaches `Emit`.
 enum Sink<'a> {
+    /// A `fn` body, which writes nowhere. Purity is a parse-time rule, so nothing here
+    /// has to enforce it; this is what there is nothing to write through.
+    Pure,
     Emit(&'a mut Vec<Event>),
     Write {
         projector: &'a Projector,
@@ -831,7 +863,7 @@ fn exec_stmt(
 ) -> Result<Flow, Error> {
     match stmt {
         Stmt::Assign { slot, value } => {
-            let value = eval(exprs, frame, *value, effects(sink))?;
+            let value = eval(program, exprs, frame, *value, effects(sink))?;
             frame.set(*slot, value)?;
             Ok(Flow::Next)
         }
@@ -840,7 +872,7 @@ fn exec_stmt(
             then,
             otherwise,
         } => {
-            let branch = if eval_bool(exprs, frame, *cond, effects(sink))? {
+            let branch = if eval_bool(program, exprs, frame, *cond, effects(sink))? {
                 then
             } else {
                 otherwise
@@ -848,7 +880,7 @@ fn exec_stmt(
             exec_block(exprs, branch, frame, program, sink)
         }
         Stmt::For { iter, body } => {
-            for (index, item) in elements(exprs, frame, iter, effects(sink))? {
+            for (index, item) in elements(program, exprs, frame, iter, effects(sink))? {
                 bind_iter(iter, index, item, frame)?;
                 let flow = exec_block(exprs, body, frame, program, sink)?;
                 // A `return` inside a `for` leaves the loop and the body both, which
@@ -883,7 +915,7 @@ fn exec_stmt(
                         at,
                     ));
                 };
-                let value = coerce(eval(exprs, frame, *value, None)?, &declared.ty);
+                let value = coerce(eval(program, exprs, frame, *value, None)?, &declared.ty);
                 // An over-length value is the runtime's validation channel, so it
                 // leaves as `Outcome::Invalid` rather than as an error.
                 if let Some(fault) = check_field(&declared.ty, declared.max_len, name, &value, at)?
@@ -921,7 +953,7 @@ fn exec_stmt(
 
             let mut row = Row::default();
             for (name, value) in fields {
-                let value = eval_field(exprs, frame, def, entity, name, *value)?;
+                let value = eval_field(program, exprs, frame, def, entity, name, *value)?;
                 row.0.insert(name.clone(), value);
             }
             for declared in &def.fields {
@@ -947,7 +979,7 @@ fn exec_stmt(
             fields,
             span,
         } => {
-            let key_value = eval(exprs, frame, *key, None)?;
+            let key_value = eval(program, exprs, frame, *key, None)?;
             let (projector, store) = write_sink(sink, *span)?;
             let def = entity_def(projector, entity, *span)?;
             let key = key_of(&key_value, exprs.span(*key))?;
@@ -972,7 +1004,7 @@ fn exec_stmt(
             }
 
             for (name, value) in fields {
-                let value = eval_field(exprs, frame, def, entity, name, *value)?;
+                let value = eval_field(program, exprs, frame, def, entity, name, *value)?;
                 row.0.insert(name.clone(), value);
             }
 
@@ -981,7 +1013,7 @@ fn exec_stmt(
         }
         Stmt::Delete { entity, key } => {
             let span = exprs.span(*key);
-            let key_value = eval(exprs, frame, *key, None)?;
+            let key_value = eval(program, exprs, frame, *key, None)?;
             let (projector, store) = write_sink(sink, span)?;
             entity_def(projector, entity, span)?;
             let key = key_of(&key_value, span)?;
@@ -993,12 +1025,12 @@ fn exec_stmt(
             if !matches!(sink, Sink::Effect(_)) {
                 return Err(Error::at(ErrorKind::MalformedIr, *span));
             }
-            let message = eval_string(exprs, frame, *message, effects(sink))?;
+            let message = eval_string(program, exprs, frame, *message, effects(sink))?;
             Ok(Flow::Return(Ret::Fail(message)))
         }
         // Rule 10: not journaled, so a replay adds this line again.
         Stmt::Log { message } => {
-            let message = eval_string(exprs, frame, *message, effects(sink))?;
+            let message = eval_string(program, exprs, frame, *message, effects(sink))?;
             match sink {
                 Sink::Effect(ctx) => ctx.lines.push(message),
                 _ => return Err(ErrorKind::MalformedIr.into()),
@@ -1010,7 +1042,7 @@ fn exec_stmt(
             value,
             span,
         } => {
-            let value = eval(exprs, frame, *value, effects(sink))?;
+            let value = eval(program, exprs, frame, *value, effects(sink))?;
             let id = subject_id(&value, *span)?;
             match sink {
                 Sink::Effect(ctx) => ctx.erase(subject, &id),
@@ -1019,19 +1051,22 @@ fn exec_stmt(
             Ok(Flow::Next)
         }
         Stmt::Discard(value) => {
-            eval(exprs, frame, *value, effects(sink))?;
+            eval(program, exprs, frame, *value, effects(sink))?;
             Ok(Flow::Next)
         }
         Stmt::Return(ret) => {
             let ret = match ret {
                 Return::Ok => Ret::Ok,
                 Return::Invalid(message) => {
-                    Ret::Invalid(eval_string(exprs, frame, *message, None)?)
+                    Ret::Invalid(eval_string(program, exprs, frame, *message, None)?)
                 }
                 Return::Reject { code, message } => Ret::Reject {
-                    code: eval_string(exprs, frame, *code, None)?,
-                    message: eval_string(exprs, frame, *message, None)?,
+                    code: eval_string(program, exprs, frame, *code, None)?,
+                    message: eval_string(program, exprs, frame, *message, None)?,
                 },
+                Return::Value(value) => {
+                    Ret::Value(eval(program, exprs, frame, *value, effects(sink))?)
+                }
             };
             Ok(Flow::Return(ret))
         }
@@ -1054,7 +1089,9 @@ fn write_sink<'s, 'a>(
 ) -> Result<(&'a Projector, &'s mut Store), Error> {
     match sink {
         Sink::Write { projector, store } => Ok((projector, store)),
-        Sink::Emit(_) | Sink::Effect(_) => Err(Error::at(ErrorKind::MalformedIr, span)),
+        Sink::Emit(_) | Sink::Effect(_) | Sink::Pure => {
+            Err(Error::at(ErrorKind::MalformedIr, span))
+        }
     }
 }
 
@@ -1072,6 +1109,7 @@ fn entity_def<'a>(
 /// field. An over-length value is a hard error here: rule 2 gives a projector no
 /// outcome an author could catch it with.
 fn eval_field(
+    program: &Program,
     exprs: &Exprs,
     frame: &mut Frame,
     def: &EntityDef,
@@ -1089,7 +1127,7 @@ fn eval_field(
             at,
         ));
     };
-    let value = coerce(eval(exprs, frame, value, None)?, &declared.ty);
+    let value = coerce(eval(program, exprs, frame, value, None)?, &declared.ty);
     if let Some(fault) = check_field(&declared.ty, declared.max_len, name, &value, at)? {
         return Err(Error::at(fault, at));
     }
@@ -1201,6 +1239,7 @@ fn key_value(key: &Key) -> Value {
 }
 
 fn eval(
+    program: &Program,
     exprs: &Exprs,
     frame: &mut Frame,
     id: ExprId,
@@ -1213,27 +1252,27 @@ fn eval(
         Expr::Lit(lit) => Ok(value::literal(lit)),
         Expr::Load(slot) => frame.get(*slot).cloned().map_err(at),
         Expr::Unary { op, operand } => {
-            let value = eval(exprs, frame, *operand, ctx)?;
+            let value = eval(program, exprs, frame, *operand, ctx)?;
             unary(*op, value).map_err(at)
         }
         Expr::Binary { op, lhs, rhs } => match op {
             BinOp::And => {
-                if eval_bool(exprs, frame, *lhs, ctx.as_deref_mut())? {
-                    Ok(Value::Bool(eval_bool(exprs, frame, *rhs, ctx)?))
+                if eval_bool(program, exprs, frame, *lhs, ctx.as_deref_mut())? {
+                    Ok(Value::Bool(eval_bool(program, exprs, frame, *rhs, ctx)?))
                 } else {
                     Ok(Value::Bool(false))
                 }
             }
             BinOp::Or => {
-                if eval_bool(exprs, frame, *lhs, ctx.as_deref_mut())? {
+                if eval_bool(program, exprs, frame, *lhs, ctx.as_deref_mut())? {
                     Ok(Value::Bool(true))
                 } else {
-                    Ok(Value::Bool(eval_bool(exprs, frame, *rhs, ctx)?))
+                    Ok(Value::Bool(eval_bool(program, exprs, frame, *rhs, ctx)?))
                 }
             }
             op => {
-                let lhs = eval(exprs, frame, *lhs, ctx.as_deref_mut())?;
-                let rhs = eval(exprs, frame, *rhs, ctx)?;
+                let lhs = eval(program, exprs, frame, *lhs, ctx.as_deref_mut())?;
+                let rhs = eval(program, exprs, frame, *rhs, ctx)?;
                 binary(*op, lhs, rhs).map_err(at)
             }
         },
@@ -1242,10 +1281,10 @@ fn eval(
             method,
             args,
         } => {
-            let receiver = eval(exprs, frame, *receiver, ctx.as_deref_mut())?;
+            let receiver = eval(program, exprs, frame, *receiver, ctx.as_deref_mut())?;
             let mut values = Vec::new();
             for arg in args {
-                values.push(eval(exprs, frame, *arg, ctx.as_deref_mut())?);
+                values.push(eval(program, exprs, frame, *arg, ctx.as_deref_mut())?);
             }
             call_method(receiver, method, values).map_err(at)
         }
@@ -1254,11 +1293,17 @@ fn eval(
             then,
             otherwise,
         } => {
-            let taken = eval_bool(exprs, frame, *cond, ctx.as_deref_mut())?;
-            eval(exprs, frame, if taken { *then } else { *otherwise }, ctx)
+            let taken = eval_bool(program, exprs, frame, *cond, ctx.as_deref_mut())?;
+            eval(
+                program,
+                exprs,
+                frame,
+                if taken { *then } else { *otherwise },
+                ctx,
+            )
         }
         Expr::Field { receiver, name } => {
-            let value = eval(exprs, frame, *receiver, ctx)?;
+            let value = eval(program, exprs, frame, *receiver, ctx)?;
             match (&value, name.as_str()) {
                 (Value::Response { status, .. }, "status") => Ok(Value::Int(*status)),
                 (Value::Response { body, .. }, "body") => Ok(Value::Json(body.clone())),
@@ -1279,7 +1324,7 @@ fn eval(
             }
             let mut object = BTreeMap::new();
             for (name, value) in fields {
-                let value = eval(exprs, frame, *value, ctx.as_deref_mut())?;
+                let value = eval(program, exprs, frame, *value, ctx.as_deref_mut())?;
                 object.insert(name.clone(), Json::from_value(&value));
             }
             Ok(Value::Json(Json::Obj(object)))
@@ -1287,7 +1332,7 @@ fn eval(
         Expr::List(items) => {
             let mut values = Vec::new();
             for item in items {
-                values.push(eval(exprs, frame, *item, ctx.as_deref_mut())?);
+                values.push(eval(program, exprs, frame, *item, ctx.as_deref_mut())?);
             }
             let inner = values.first().map_or(Type::Json, Value::ty);
             Ok(Value::List {
@@ -1303,14 +1348,14 @@ fn eval(
         } => {
             let mut items = Vec::new();
             let mut inner = declared.clone();
-            for (index, item) in elements(exprs, frame, iter, ctx.as_deref_mut())? {
+            for (index, item) in elements(program, exprs, frame, iter, ctx.as_deref_mut())? {
                 bind_iter(iter, index, item, frame)?;
                 if let Some(cond) = cond
-                    && !eval_bool(exprs, frame, *cond, ctx.as_deref_mut())?
+                    && !eval_bool(program, exprs, frame, *cond, ctx.as_deref_mut())?
                 {
                     continue;
                 }
-                let value = eval(exprs, frame, *yields, ctx.as_deref_mut())?;
+                let value = eval(program, exprs, frame, *yields, ctx.as_deref_mut())?;
                 inner.get_or_insert_with(|| value.ty());
                 items.push(value);
             }
@@ -1319,10 +1364,20 @@ fn eval(
                 items,
             })
         }
+        Expr::CallFn { function, args } => {
+            let mut values = Vec::new();
+            for arg in args {
+                values.push(eval(program, exprs, frame, *arg, ctx.as_deref_mut())?);
+            }
+            let def = program
+                .function(function)
+                .ok_or_else(|| at(ErrorKind::UnknownFunction(function.clone())))?;
+            call_function(program, def, values, span)
+        }
         Expr::Record { ty, fields } => {
             let mut values = BTreeMap::new();
             for (name, value) in fields {
-                let value = eval(exprs, frame, *value, ctx.as_deref_mut())?;
+                let value = eval(program, exprs, frame, *value, ctx.as_deref_mut())?;
                 values.insert(name.clone(), value);
             }
             Ok(Value::Record {
@@ -1333,7 +1388,7 @@ fn eval(
         Expr::Interp(parts) => {
             let mut text = String::new();
             for part in parts {
-                let value = eval(exprs, frame, *part, ctx.as_deref_mut())?;
+                let value = eval(program, exprs, frame, *part, ctx.as_deref_mut())?;
                 text.push_str(&value::text(&value));
             }
             Ok(Value::Str(text))
@@ -1341,7 +1396,7 @@ fn eval(
         Expr::Call { builtin, args } => {
             let mut values = Vec::new();
             for arg in args {
-                values.push(eval(exprs, frame, *arg, ctx.as_deref_mut())?);
+                values.push(eval(program, exprs, frame, *arg, ctx.as_deref_mut())?);
             }
             if *builtin == Builtin::UuidDerive {
                 return uuid_derive(&values).map_err(at);
@@ -1358,7 +1413,7 @@ fn eval(
         Expr::Invoke { command, args } => {
             let mut values: BTreeMap<Ident, Value> = BTreeMap::new();
             for (name, value) in args {
-                let value = eval(exprs, frame, *value, ctx.as_deref_mut())?;
+                let value = eval(program, exprs, frame, *value, ctx.as_deref_mut())?;
                 values.insert(name.clone(), value);
             }
             let Some(ctx) = ctx else {
@@ -1372,8 +1427,8 @@ fn eval(
             subject,
             subject_value,
         } => {
-            let plaintext = eval(exprs, frame, *value, ctx.as_deref_mut())?;
-            let id = eval(exprs, frame, *subject_value, ctx.as_deref_mut())?;
+            let plaintext = eval(program, exprs, frame, *value, ctx.as_deref_mut())?;
+            let id = eval(program, exprs, frame, *subject_value, ctx.as_deref_mut())?;
             let id = subject_id(&id, span)?;
             let Some(ctx) = ctx else {
                 return Err(at(ErrorKind::MalformedIr));
@@ -1383,17 +1438,44 @@ fn eval(
     }
 }
 
+/// A pure call: a fresh frame, the parameters filled, and no sink to write through.
+/// The parser proved every path returns, so falling out of the body is malformed IR
+/// rather than a case with a value.
+fn call_function(
+    program: &Program,
+    def: &Function,
+    args: Vec<Value>,
+    span: Span,
+) -> Result<Value, Error> {
+    let mut frame = Frame::new(def.frame);
+    if args.len() != def.params.len() {
+        return Err(Error::at(ErrorKind::MalformedIr, span));
+    }
+    for (param, value) in def.params.iter().zip(args) {
+        // The same coercion `bind_params` applies, so a bare `T` fills a `T?`.
+        frame
+            .set(param.slot, coerce(value, &param.ty))
+            .map_err(|kind| Error::at(kind, span))?;
+    }
+    let mut sink = Sink::Pure;
+    match exec_block(&def.exprs, &def.body, &mut frame, program, &mut sink)? {
+        Flow::Return(Ret::Value(value)) => Ok(coerce(value, &def.ret)),
+        _ => Err(Error::at(ErrorKind::MalformedIr, span)),
+    }
+}
+
 /// The (index, item) pairs a `for` or a comprehension walks. A map yields its key
 /// beside its value; a list yields its position. Collected up front, because the body
 /// may write frame slots the container was read from.
 fn elements(
+    program: &Program,
     exprs: &Exprs,
     frame: &mut Frame,
     iter: &Iter,
     ctx: Option<&mut Effects<'_>>,
 ) -> Result<Vec<(Value, Value)>, Error> {
     let span = exprs.span(iter.over);
-    match eval(exprs, frame, iter.over, ctx)? {
+    match eval(program, exprs, frame, iter.over, ctx)? {
         Value::List { items, .. } => Ok(items
             .into_iter()
             .enumerate()
@@ -1416,12 +1498,13 @@ fn bind_iter(iter: &Iter, index: Value, item: Value, frame: &mut Frame) -> Resul
 }
 
 fn eval_bool(
+    program: &Program,
     exprs: &Exprs,
     frame: &mut Frame,
     id: ExprId,
     ctx: Option<&mut Effects<'_>>,
 ) -> Result<bool, Error> {
-    match eval(exprs, frame, id, ctx)? {
+    match eval(program, exprs, frame, id, ctx)? {
         Value::Bool(value) => Ok(value),
         other => Err(Error::at(
             ErrorKind::TypeMismatch {
@@ -1434,12 +1517,13 @@ fn eval_bool(
 }
 
 fn eval_string(
+    program: &Program,
     exprs: &Exprs,
     frame: &mut Frame,
     id: ExprId,
     ctx: Option<&mut Effects<'_>>,
 ) -> Result<String, Error> {
-    match eval(exprs, frame, id, ctx)? {
+    match eval(program, exprs, frame, id, ctx)? {
         Value::Str(value) => Ok(value),
         other => Err(Error::at(
             ErrorKind::TypeMismatch {

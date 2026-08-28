@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use crate::ir::{
     Arm, Assign, BinOp, Bind, Command, EnvBind, EnvField, EventPath, Expr, ExprId, Exprs, Filter,
-    Handler, Ident, Literal, Number, Param, Slice, SliceId, Slot, Span, StateVar, Stmt, Type, UnOp,
-    Update,
+    Function, Handler, Ident, Literal, Number, Param, Slice, SliceId, Slot, Span, StateVar, Stmt,
+    Type, UnOp, Update,
 };
 use crate::scaled::Rounding;
 
@@ -223,6 +223,18 @@ impl Builder {
             then,
             otherwise,
         })
+    }
+
+    pub fn finish_fn(self, ret: Type, body: Vec<Stmt>) -> Function {
+        Function {
+            name: self.name,
+            module: self.module,
+            params: self.params,
+            ret,
+            frame: self.frame as usize,
+            exprs: self.exprs,
+            body,
+        }
     }
 
     pub fn finish(self, body: Vec<Stmt>) -> Command {
