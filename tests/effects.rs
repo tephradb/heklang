@@ -20,6 +20,17 @@ event @order.reviewed {
   comment: String? @subject(customer_id),
 }
 event @order.notified { order_id: Uuid, notification_id: Uuid }
+event @order.reconfirmed {
+  order_id: Uuid,
+  customer_id: Int,
+  email: String @subject(customer_id),
+}
+event @order.audited {
+  order_id: Uuid,
+  auditor_id: Int,
+  note: String @subject(auditor_id),
+  tool: String,
+}
 
 command RecordNotified(order_id: Uuid, notification_id: Uuid) {
   guard @order.notified(order_id)
@@ -95,6 +106,22 @@ fn reviewed(seq: u32, customer_id: i64, comment: Option<&str>) -> Event {
                     None => Value::none(Type::String),
                 },
             ),
+        ],
+    )
+}
+
+/// The same subject-bound field on a second event type, which is the shape a fold with
+/// two arms under one subject takes.
+fn reconfirmed(seq: u32, customer_id: i64, email: &str) -> Event {
+    Event::new(
+        EventPath::new(["order", "reconfirmed"]),
+        [
+            (
+                "order_id",
+                Value::uuid(format!("0190d1a1-0000-7000-8000-{seq:012}")),
+            ),
+            ("customer_id", Value::Int(customer_id)),
+            ("email", Value::str(email)),
         ],
     )
 }
@@ -897,6 +924,188 @@ fn the_skip_message_says_the_erase_may_be_non_local() {
         "{message}"
     );
     assert!(message.contains("concurrent invocation"), "{message}");
+}
+
+// Rule 12: what `reveal` takes. The credential is folded off an event that happened
+// long before the one being handled, which is the shape every real effect has.
+
+const FOLDING: &str = "effect E {
+  on @order.reviewed as e { customer_id } {
+    state contact: String? = fold none
+      on @order.placed(customer_id) { email } => email
+      on @order.reconfirmed(customer_id) { email } => email
+
+    if contact.is_none() {
+      log(\"no orders\")
+      return
+    }
+    http.post(\"https://mail.example/confirm\", { \"to\": reveal(contact) })
+    log(\"sent\")
+  }
+}";
+
+#[test]
+fn a_fold_from_two_events_with_the_same_subject_reveals() {
+    let program = program(FOLDING);
+    let log = vec![
+        placed(1, 7, 100),
+        reconfirmed(2, 7, "grace@example.com"),
+        reviewed(3, 7, None),
+    ];
+
+    let mut journal = Journal::default();
+    let mut interpreter = Interpreter::with_log(&program, log.clone());
+    interpreter.script(URL, [Reply::Status(200)]);
+    interpreter
+        .deliver("E", 2, &mut journal)
+        .expect("a folded credential is revealable");
+    // The later arm wrote last, so this is a fold rather than a first-match lookup.
+    assert!(
+        posted(&journal).contains("\"to\":\"grace@example.com\""),
+        "{}",
+        posted(&journal)
+    );
+    assert_eq!(interpreter.lines(), ["sent"]);
+
+    // The companion tracks the subject of the value it is holding, so erasing some
+    // other customer changes nothing.
+    let mut interpreter = Interpreter::with_log(&program, log.clone());
+    interpreter.script(URL, [Reply::Status(200)]);
+    interpreter.erase_subject("customer_id", "3");
+    assert!(matches!(
+        interpreter.deliver("E", 2, &mut Journal::default()),
+        Ok(Invocation::Done)
+    ));
+
+    // Erasing the right one is rule 12's terminal skip, named for the variable the
+    // source reveals rather than for the field it folded.
+    let mut interpreter = Interpreter::with_log(&program, log);
+    interpreter.script(URL, [Reply::Status(200)]);
+    interpreter.erase_subject("customer_id", "7");
+    let Ok(Invocation::Skipped(message)) = interpreter.deliver("E", 2, &mut Journal::default())
+    else {
+        panic!("expected a terminal skip");
+    };
+    assert!(
+        message.starts_with("reveal cannot decrypt `contact`"),
+        "{message}"
+    );
+}
+
+/// The seed is not subject-bound and cannot be: it is evaluated before the fold, with
+/// no event behind it. Revealing a variable that never matched hands back what the
+/// author wrote, without consulting a key store that has nothing to say about it.
+#[test]
+fn a_non_subject_seed_is_accepted() {
+    let program = program(
+        "effect E {
+  on @order.reviewed as e { customer_id } {
+    state contact: String = fold \"nobody\"
+      on @order.placed(customer_id) { email } => email
+
+    log(reveal(contact))
+  }
+}",
+    );
+
+    let mut interpreter = Interpreter::with_log(&program, vec![reviewed(1, 7, None)]);
+    interpreter.erase_subject("customer_id", "7");
+    interpreter
+        .deliver("E", 0, &mut Journal::default())
+        .expect("the seed was never sealed");
+    assert_eq!(interpreter.lines(), ["nobody"]);
+}
+
+/// One variable holds one subject, because `reveal` names the key by it.
+#[test]
+fn two_arms_with_different_subjects_are_a_conflict() {
+    let message = err("effect E {
+  on @order.reviewed as e { customer_id, order_id } {
+    state secret: String? = fold none
+      on @order.placed(customer_id) { email } => email
+      on @order.audited(order_id) { note } => note
+
+    log(reveal(secret))
+  }
+}");
+    assert!(
+        message.contains("folds under two subjects"),
+        "got: {message}"
+    );
+    assert!(message.contains("`customer_id`"), "got: {message}");
+    assert!(message.contains("`auditor_id`"), "got: {message}");
+}
+
+/// A seed may be plain, an arm may not, and the order the two are written in does not
+/// change the answer.
+#[test]
+fn a_non_subject_arm_into_a_subject_bound_variable_is_rejected() {
+    let subject_first = err("effect E {
+  on @order.reviewed as e { customer_id, order_id } {
+    state secret: String? = fold none
+      on @order.placed(customer_id) { email } => email
+      on @order.audited(order_id) { tool } => tool
+
+    log(reveal(secret))
+  }
+}");
+    let plain_first = err("effect E {
+  on @order.reviewed as e { customer_id, order_id } {
+    state secret: String? = fold none
+      on @order.audited(order_id) { tool } => tool
+      on @order.placed(customer_id) { email } => email
+
+    log(reveal(secret))
+  }
+}");
+    for message in [&subject_first, &plain_first] {
+        assert!(
+            message.contains("cannot fold a plain one into it"),
+            "got: {message}"
+        );
+        assert!(
+            message.contains("A seed may be plain, an arm may not."),
+            "got: {message}"
+        );
+        assert!(message.contains("@order.audited"), "got: {message}");
+    }
+}
+
+/// Subject-ness is a property of the field, so anything computed from it is a new value
+/// the schema says nothing about. That is the same line a trigger field is held to.
+#[test]
+fn a_transformed_arm_drops_the_binding() {
+    let message = err("effect E {
+  on @order.reviewed as e { customer_id } {
+    state contact: String? = fold none
+      on @order.placed(customer_id) { email } => email.trim()
+
+    log(reveal(contact))
+  }
+}");
+    assert!(
+        message.contains("`contact` folds no subject-bound value"),
+        "got: {message}"
+    );
+    assert!(message.contains("drops the binding"), "got: {message}");
+}
+
+/// `erase` names a subject id rather than a subject-bound value, so it stays on the
+/// trigger: an id folded off an earlier event is not one this arm can be sure of.
+#[test]
+fn erase_still_takes_a_field_of_the_trigger() {
+    let message = err("effect E {
+  on @order.reviewed as e { customer_id } {
+    state who: Int? = fold none
+      on @order.placed(customer_id) { customer_id } => customer_id
+
+    erase(who)
+  }
+}");
+    assert!(
+        message.contains("`erase` takes a field of the triggering event"),
+        "got: {message}"
+    );
 }
 
 // Rule 12: an optional in, an optional out. These two are the pair the rule exists for:

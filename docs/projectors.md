@@ -261,6 +261,11 @@ The two checks over it are not (see "Checker obligations"):
   error;
 - assigning a subject-bound value into a context that discards the binding is an error.
 
+The first of those **is** implemented for the other place subjects propagate, a `state` fold
+(`docs/effects.md` rule 12), where the same sentence appears about a fold arm rather than a handler.
+The projector side is still a no-op, so this is a gap in the checker rather than a disagreement about
+the rule.
+
 ## 10. Scoping
 
 The same prologue-free model as command bodies: destructured names, the `as` binding, and `let`

@@ -13,8 +13,8 @@ pub use interp::{
 };
 pub use ir::{
     Arm, Assign, BinOp, Bind, Builtin, Command, ConstDef, Effect, EntityDef, EntityField, EnumDef,
-    EnvBind, EnvField, EventDef, EventPath, Expr, ExprId, Exprs, FieldDef, Filter, Function,
-    Handler, Ident, Index, Iter, Literal, Number, NumberError, Param, Program, Projector,
+    EnvBind, EnvField, EventDef, EventPath, Expr, ExprId, Exprs, FieldDef, Filter, FoldSubject,
+    Function, Handler, Ident, Index, Iter, Literal, Number, NumberError, Param, Program, Projector,
     RecordDef, RecordField, Return, Slice, SliceId, Slot, Span, StateVar, Stmt, Type, UnOp, Update,
 };
 pub use lex::SyntaxError;

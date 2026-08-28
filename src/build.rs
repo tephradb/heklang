@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use crate::ir::{
     Arm, Assign, BinOp, Bind, Command, EnvBind, EnvField, EventPath, Expr, ExprId, Exprs, Filter,
-    Function, Handler, Ident, Literal, Number, Param, Slice, SliceId, Slot, Span, StateVar, Stmt,
-    Type, UnOp, Update,
+    FoldSubject, Function, Handler, Ident, Literal, Number, Param, Slice, SliceId, Slot, Span,
+    StateVar, Stmt, Type, UnOp, Update,
 };
 use crate::scaled::Rounding;
 
@@ -108,12 +108,36 @@ impl Builder {
             ty,
             slot,
             init,
+            subject: None,
         });
         slot
     }
 
+    pub fn state_of(&self, slot: Slot) -> Option<&StateVar> {
+        self.states.iter().find(|state| state.slot == slot)
+    }
+
+    /// Rule 12: recorded once the whole fold is parsed, because it is a property of
+    /// every arm agreeing rather than of any one of them.
+    pub fn set_state_subject(&mut self, slot: Slot, subject: FoldSubject) {
+        if let Some(state) = self.states.iter_mut().find(|state| state.slot == slot) {
+            state.subject = Some(subject);
+        }
+    }
+
     pub fn bind(&mut self, field: &str, ty: Option<Type>) -> Bind {
         let slot = self.alloc(field, ty);
+        Bind {
+            field: field.to_string(),
+            slot,
+        }
+    }
+
+    /// A slice binding the author did not write. Bound from `field` like any other, but
+    /// allocated under a name no source token can spell, so folding a subject id the
+    /// author did not destructure cannot shadow a trigger binding of the same name.
+    pub fn hidden_bind(&mut self, field: &str, ty: Option<Type>) -> Bind {
+        let slot = self.alloc(format!("@fold:{field}"), ty);
         Bind {
             field: field.to_string(),
             slot,

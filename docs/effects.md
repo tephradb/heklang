@@ -436,6 +436,74 @@ there is no bare `Uuid` expression, only the qualified call.
 `reveal` takes a subject-bound value and hands back the plaintext. It decides nothing about it;
 everything below is about the two ways it can hand back something else.
 
+### What it takes: a field of the trigger, or a fold of one
+
+```
+on @shop.sync.requested as e { shop_id } {
+  state token: String? = fold none
+    on @shop.connected(shop_id) { access_token } => access_token
+    on @shop.reconnected(shop_id) { access_token } => access_token
+
+  let secret = reveal(token)
+```
+
+A credential is almost never on the event being handled. It was appended when the shop connected,
+long before, so **subject binding propagates through a `state` fold**: a variable folded from a
+`@subject(...)` field is still subject-bound and can be revealed. That is the same propagation
+`docs/projectors.md` rule 9 already performs through a projector write, and it works the same way,
+by recovering a schema fact in the parser rather than by carrying anything on the value.
+
+An arm makes the variable subject-bound when its result **is** the field, a bare load of a
+destructured `@subject(...)` name. A transformed one (`=> access_token.trim()`) is not: the result is
+a new value, and the schema says nothing about it. This is the same line `reveal` already draws for a
+trigger field, and it is why the fold above holds `String?` rather than folding an
+`unwrap_or("")` into a `String`.
+
+**The subject id is folded too.** It cannot come from the slice's filter, because a fold is not
+always filtered on its subject: a fold of `customer_name @subject(customer_id)` filtered on
+`warranty_id` is an ordinary shape. So each subject-bound variable gets a companion the author never
+writes, folded by the same arms, holding the subject of the value currently held. It is absent
+exactly when the fold never matched, which is what makes the seed distinguishable from a real value
+below.
+
+**Rejected: an opaque handle carried on the value.** A subject-bound field would be a distinct type
+all the way through, and the decrypt boundary would be enforced instead of documented. That is the
+right end state and it is recorded under "What `reveal` models" as a known gap; it touches every
+value path, including JSON, projector writes, `@max` and interpolation, and it is a larger pass than
+this one.
+
+#### One variable, one subject
+
+Two arms folding subject-bound values under **different** subject fields into one variable is an
+error naming both. Two arms under the same subject is the common case (`@shop.connected` and
+`@shop.reconnected` are both keyed by `shop_id`) and is exactly what this is for.
+
+> `token` folds under two subjects, `shop_id` from @shop.connected and `customer_id` from
+> @warranty.sold; one variable holds one subject, because `reveal` names the key by it
+
+**Rejected: allow several and take the last writer's at reveal time.** It makes the key's name a
+runtime property, so the terminal message would name a subject a reader cannot predict from the
+source, which is the one thing that message exists to make predictable.
+
+#### A plain seed is fine, a plain arm is not
+
+The asymmetry is not obvious, so both halves are stated:
+
+- **The seed is never subject-bound, and that is fine.** It is evaluated before the fold, with no
+  event behind it, so it is a value the author wrote rather than one that came out of the log.
+  `state token: String? = fold none` seeds with nothing and folds credentials into it.
+- **An arm folding a non-subject-bound value into a variable another arm makes subject-bound is an
+  error**, in either declaration order, naming the arm to change. Otherwise plaintext and a value
+  that needs a key share one slot, with nothing static to say which one is in it.
+
+**Rejected: allow the mix and treat the variable as plain when a plain arm wrote last.** The same
+defect as above, one level worse: whether `reveal` is required at all would become a runtime
+property.
+
+The rules are about the variable, so they hold in a command as well as an effect. Only an effect can
+`reveal`, so a command's recorded subject is inert; one rule is worth an unread field.
+
+
 ### `@subject(...)` names a field that always has a value
 
 `@subject(x)` must name a field of the same event, `x` may not itself be subject-bound, and **`x` may
@@ -606,45 +674,31 @@ a bug.
 | self-triggering | rejected statically | unguarded |
 | `erase` | a statement, no result (rule 9) | an expression returning a bool |
 
-## Open problem: `reveal` beyond the trigger, and the sentinel it forces
+## What the port wrote before rule 12 grew
 
-This is not a missing feature with a known shape. It needs its own design pass, and it is recorded
-here with what a real port had to do instead, because the workaround is the evidence.
+Recorded because the workaround is the evidence, and because it is what the port's files still say
+until they are changed. `reveal` used to require a field of the triggering event, which blocked eight
+of that port's eleven effects outright: every credential there is folded off a `@shop.connected` that
+happened long before the event being handled. With nowhere for a `String?` to go, the port wrote `""`
+and `0` as absent-credential sentinels, in a language whose zero-value table in
+`docs/projectors.md` exists to argue against exactly that:
 
-**`reveal` requires its argument to be a field of the triggering event.** `subject_source` in the
-parser insists on a load of a bound trigger field, so a value that reached the arm any other way
-cannot be revealed. Real credentials do not arrive that way: an access token is folded off the
-`@shop.connected` that happened long before the event now being handled. **Eight of eleven effects in
-that port are blocked on this outright.**
+```
+state token: String = fold ""          becomes    state token: String? = fold none
+if token.is_empty() { ... }            becomes    if token.is_none() { ... }
+=> customer_name.unwrap_or("")         becomes    => customer_name
+```
 
-The mechanism is not the hard part. Subject binding would propagate through a `state` fold, so a value
-folded from a `@subject(...)` field stays subject-bound, which is the same propagation rule 9 of
-`docs/projectors.md` already performs through a projector write. Two things make it a design question
-rather than an implementation:
+The last line is the one worth noticing: the `unwrap_or` was there to reach a `String`, and it was
+also what dropped the subject binding, so removing the sentinel and gaining the propagation are the
+same edit.
 
-**The seed is not subject-bound.** `state token: String = fold ""` seeds with a plain `""` and folds a
-subject-bound value into it. Something has to say that a non-subject *seed* is allowed while a
-non-subject *arm* is not, and that rule does not exist yet.
+## Open problem: consuming an optional the code has proved present
 
-**`reveal` on an optional has no defined meaning, so the port used sentinels.** It wrote `""` and `0`
-for "no credential", in a language whose zero-value table in `docs/projectors.md` exists to argue
-against exactly that. It reads well (`if token.is_empty() { ... }`) and it is still a sentinel, and
-the reason it was reached for is that `String?` had nowhere to go: `reveal` takes a `String`.
-
-The design question is therefore sharper than "let `reveal` see more values". **`reveal` has to
-distinguish two absences that must not collapse:**
-
-- the field was **absent** (no token was ever folded, so nothing was ever encrypted), and
-- the key was **shredded** (a token existed and its subject has since been erased).
-
-The first is an ordinary optional. The second is rule 12's terminal skip, which is loud on purpose.
-Returning an optional for both would turn a shredded key into a quiet `none` and lose the whole point
-of rule 12; failing terminally for both would wedge on shops that simply have no token yet.
-
-**A related gap, which the same pass should settle:** there is no way to consume an optional the code
-has already proved present. The port carries `NO_..._FACTS` constants that exist only to satisfy
-`unwrap_or` on a branch that cannot be taken, three lines below the `is_some()` that proved it. Those
-constants are a bug waiting to be read as data, and they exist because narrowing does not.
+There is no way to consume an optional a branch has already shown is there. The port carries
+`NO_..._FACTS` constants that exist only to satisfy `unwrap_or` on a branch that cannot be taken,
+three lines below the `is_some()` that proved it. Those constants are a bug waiting to be read as
+data, and they exist because narrowing does not.
 
 ## Checker obligations
 

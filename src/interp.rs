@@ -1048,7 +1048,9 @@ fn exec_stmt(
             span,
         } => {
             let value = eval(program, exprs, frame, *value, effects(sink))?;
-            let id = subject_id(&value, *span)?;
+            let Some(id) = subject_id(&value, *span)? else {
+                return Err(Error::at(ErrorKind::BadSubject(value.ty()), *span));
+            };
             match sink {
                 Sink::Effect(ctx) => ctx.erase(subject, &id),
                 _ => return Err(Error::at(ErrorKind::MalformedIr, *span)),
@@ -1079,11 +1081,16 @@ fn exec_stmt(
 }
 
 /// A subject is identified by a plaintext scalar, which is what `erase` and `reveal`
-/// look the key up by.
-fn subject_id(value: &Value, span: Span) -> Result<String, Error> {
+/// look the key up by. Absent only for a fold's companion, which holds nothing until
+/// the fold matches something; rule 12 turns on telling that apart from a real id.
+fn subject_id(value: &Value, span: Span) -> Result<Option<String>, Error> {
     match value {
-        Value::Int(id) => Ok(id.to_string()),
-        Value::Str(id) | Value::Uuid(id) => Ok(id.clone()),
+        Value::Int(id) => Ok(Some(id.to_string())),
+        Value::Str(id) | Value::Uuid(id) => Ok(Some(id.clone())),
+        Value::Opt {
+            value: Some(id), ..
+        } => subject_id(id, span),
+        Value::Opt { value: None, .. } => Ok(None),
         other => Err(Error::at(ErrorKind::BadSubject(other.ty()), span)),
     }
 }
@@ -1469,7 +1476,12 @@ fn eval(
                 return Ok(plaintext);
             }
             let id = eval(program, exprs, frame, *subject_value, ctx.as_deref_mut())?;
-            let id = subject_id(&id, span)?;
+            // A fold tracks the subject of the value it is holding, and holds none
+            // until it matches something. The value is then the author's own seed,
+            // which nothing sealed, so there is no key to ask about.
+            let Some(id) = subject_id(&id, span)? else {
+                return Ok(plaintext);
+            };
             let Some(ctx) = ctx else {
                 return Err(at(ErrorKind::MalformedIr));
             };

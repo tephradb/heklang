@@ -457,6 +457,18 @@ pub struct StateVar {
     pub ty: Type,
     pub slot: Slot,
     pub init: ExprId,
+    /// Rule 12: set when every arm folds a `@subject(...)` field, which is what makes
+    /// the variable revealable. The seed never carries one, and that is allowed.
+    pub subject: Option<FoldSubject>,
+}
+
+/// What makes a folded value revealable. `field` is the `@subject(...)` field naming
+/// the key; `value` reads a companion fold that tracks that field's id alongside the
+/// value, and is absent exactly when the variable still holds its seed.
+#[derive(Debug, Clone)]
+pub struct FoldSubject {
+    pub field: Ident,
+    pub value: ExprId,
 }
 
 #[derive(Debug, Clone)]

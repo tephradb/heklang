@@ -4,9 +4,9 @@ use std::mem;
 use crate::build::Builder;
 use crate::ir::{
     Arm, BinOp, Bind, Builtin, Command, ConstDef, Effect, EntityDef, EntityField, EnumDef,
-    EnvField, EventDef, EventPath, Expr, ExprId, Exprs, FieldDef, Filter, Function, Handler, Ident,
-    Index, Iter, Literal, Number, Program, Projector, RecordDef, RecordField, Return, Slot, Span,
-    Stmt, Type, UnOp, Update,
+    EnvField, EventDef, EventPath, Expr, ExprId, Exprs, FieldDef, Filter, FoldSubject, Function,
+    Handler, Ident, Index, Iter, Literal, Number, Program, Projector, RecordDef, RecordField,
+    Return, Slot, Span, Stmt, Type, UnOp, Update,
 };
 use crate::lex::{Keyword, Spanned, Sym, SyntaxError, Token, lex};
 use crate::scaled::Rounding;
@@ -96,6 +96,15 @@ enum Kind {
     Projector,
     Effect,
     Function,
+}
+
+/// See `Parser::subject_source`.
+enum Source {
+    Trigger(Ident),
+    State {
+        name: Ident,
+        subject: Option<FoldSubject>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1573,6 +1582,7 @@ impl Parser {
     }
 
     fn state_decl(&mut self, lower: &mut Lower, events: &[EventDef]) -> Result<(), SyntaxError> {
+        let decl = self.span_here();
         self.expect_word(Keyword::State)?;
         let name = self.expect_ident()?;
         self.expect_sym(Sym::Colon)?;
@@ -1588,7 +1598,17 @@ impl Parser {
         self.folding = false;
         let slot = lower.b.state(&name, ty.clone(), init);
 
-        while self.eat_word(Keyword::On) {
+        // Rule 12: whether the variable is subject-bound is a property of every arm
+        // agreeing, so it is settled across the declaration rather than at any one arm.
+        // The seed is never subject-bound, which is allowed and is why `plain` records
+        // only arms.
+        let mut bound: Option<(Ident, EventPath)> = None;
+        let mut plain: Option<(EventPath, Span)> = None;
+        let mut companion: Option<Slot> = None;
+
+        while self.at_word(Keyword::On) {
+            let arm = self.span_here();
+            self.bump();
             let (path, filters) = self.slice_ref(lower, events)?;
             let def = self.event_def(events, &path)?;
 
@@ -1612,20 +1632,111 @@ impl Parser {
             self.folding = true;
             let value = self.expr(lower, Some(ty.clone()))?;
             self.folding = false;
+
+            // The subject id has to be folded alongside the value, because a fold is
+            // not always filtered on its subject: folding `customer_name` off a slice
+            // filtered by `warranty_id` is an ordinary shape. Bound here, while the
+            // slice's scope is still open, under a name no source token can spell.
+            let carried = fold_subject(lower, &binds, def, value);
+            let id = match &carried {
+                Some(field) => {
+                    let Some(declared) = def.field(field) else {
+                        return self.fail(format!("`@subject({field})` names no field of {path}"));
+                    };
+                    let id_ty = declared.ty.clone();
+                    let slot = match binds.iter().find(|bind| &bind.field == field) {
+                        Some(bind) => bind.slot,
+                        None => {
+                            let bind = lower.b.hidden_bind(field, Some(id_ty.clone()));
+                            let slot = bind.slot;
+                            binds.push(bind);
+                            slot
+                        }
+                    };
+                    Some((slot, id_ty))
+                }
+                None => None,
+            };
             lower.b.pop_scope();
-            lower.b.slice(
-                path,
-                filters,
-                binds,
-                vec![Update {
-                    slot,
-                    value,
-                    ty: ty.clone(),
-                }],
-            );
+
+            let mut updates = vec![Update {
+                slot,
+                value,
+                ty: ty.clone(),
+            }];
+
+            match (carried, id) {
+                (Some(field), Some((id_slot, id_ty))) => {
+                    if let Some((have, first)) = &bound
+                        && have != &field
+                    {
+                        return Err(self.err(
+                            format!(
+                                "`{name}` folds under two subjects, `{have}` from {first} and `{field}` from {path}; one variable holds one subject, because `reveal` names the key by it"
+                            ),
+                            arm.line,
+                            arm.col,
+                        ));
+                    }
+                    if let Some((first, at)) = &plain {
+                        return Err(self.err(
+                            self.mixed_fold(&name, &field, first),
+                            at.line,
+                            at.col,
+                        ));
+                    }
+                    let held = Type::opt(id_ty.clone());
+                    let carrier = match companion {
+                        Some(carrier) => carrier,
+                        None => {
+                            lower.b.at(arm);
+                            let seed = lower.b.none(id_ty);
+                            let carrier =
+                                lower
+                                    .b
+                                    .state(&format!("@subject:{name}"), held.clone(), seed);
+                            companion = Some(carrier);
+                            carrier
+                        }
+                    };
+                    lower.b.at(arm);
+                    let value = lower.b.read(id_slot);
+                    updates.push(Update {
+                        slot: carrier,
+                        value,
+                        ty: held,
+                    });
+                    bound.get_or_insert((field, path.clone()));
+                }
+                _ => {
+                    if let Some((have, _)) = &bound {
+                        let message = self.mixed_fold(&name, have, &path);
+                        return Err(self.err(message, arm.line, arm.col));
+                    }
+                    plain.get_or_insert((path.clone(), arm));
+                }
+            }
+
+            lower.b.slice(path, filters, binds, updates);
+        }
+
+        if let (Some((field, _)), Some(carrier)) = (bound, companion) {
+            lower.b.at(decl);
+            let value = lower.b.read(carrier);
+            lower
+                .b
+                .set_state_subject(slot, FoldSubject { field, value });
         }
 
         Ok(())
+    }
+
+    /// Rule 12: a seed may be plain, an arm may not. Said the same way whichever order
+    /// the two arms are written in, because the defect is the pair rather than either.
+    fn mixed_fold(&self, name: &str, subject: &str, offender: &EventPath) -> String {
+        format!(
+            "`{name}` folds a subject-bound value under `{subject}`, so the arm on {offender} cannot fold a plain one into it; plaintext and a value that needs a key would share one slot, with nothing static to say which is in it. A seed may be plain, an arm may not."
+        )
     }
 
     fn hoisted_let(&mut self, lower: &mut Lower) -> Result<(), SyntaxError> {
@@ -2566,6 +2677,17 @@ fn response_field(name: &str) -> Option<Type> {
 /// checker can recover both spans; only the checking is deferred.
 fn check_subject(_target: &EntityField, _incoming: &Ident) {}
 
+/// Rule 12: the `@subject(...)` a fold arm's result carries. It carries one only when
+/// the result **is** a destructured field, because anything computed from it is a new
+/// value the schema says nothing about. Same line `reveal` draws for a trigger field.
+fn fold_subject(lower: &Lower, binds: &[Bind], def: &EventDef, value: ExprId) -> Option<Ident> {
+    let Some(Expr::Load(slot)) = lower.b.exprs().get(value) else {
+        return None;
+    };
+    let bind = binds.iter().find(|bind| bind.slot == *slot)?;
+    def.field(&bind.field)?.subject.clone()
+}
+
 impl Parser {
     fn effect_decl(&mut self, events: &[EventDef]) -> Result<Effect, SyntaxError> {
         let module = self.module_at(self.pos).map(str::to_string);
@@ -2817,7 +2939,17 @@ impl Parser {
                 let value = self.expr(lower, None)?;
                 self.expect_sym(Sym::RParen)?;
 
-                let subject = self.subject_source(lower, value, line, col, "erase")?;
+                // `erase` names a subject id rather than a subject-bound value, so
+                // rule 12's fold path does not apply to it: an id is on the trigger or
+                // it is not an id this arm can be sure of.
+                let Some(Source::Trigger(subject)) = self.subject_source(lower, value) else {
+                    return Err(self.err(
+                        "`erase` takes a field of the triggering event, like `e.customer_id`"
+                            .to_string(),
+                        line,
+                        col,
+                    ));
+                };
                 let scoped = events.iter().any(|def| {
                     def.fields
                         .iter()
@@ -3059,7 +3191,50 @@ impl Parser {
         let value = self.expr(lower, None)?;
         self.expect_sym(Sym::RParen)?;
 
-        let field = self.subject_source(lower, value, line, col, "reveal")?;
+        let (field, subject, subject_value) = match self.subject_source(lower, value) {
+            Some(Source::Trigger(field)) => self.trigger_subject(lower, field, line, col)?,
+            // Rule 12: a fold recovered the pair once, at the declaration, so there is
+            // nothing left to look up here.
+            Some(Source::State {
+                name,
+                subject: Some(fold),
+            }) => (name, fold.field, fold.value),
+            Some(Source::State { name, .. }) => {
+                return Err(self.err(
+                    format!(
+                        "`{name}` folds no subject-bound value, so there is nothing to reveal; an arm that transforms the field it folds drops the binding, because `@subject` is a property of the field rather than of the value"
+                    ),
+                    line,
+                    col,
+                ));
+            }
+            None => {
+                return Err(self.err(
+                    "`reveal` takes a subject-bound value: a field of the triggering event like `e.email`, or a `state` folded from one".to_string(),
+                    line,
+                    col,
+                ));
+            }
+        };
+
+        lower.b.at(span);
+        Ok(lower.b.expr(Expr::Reveal {
+            value,
+            field,
+            subject,
+            subject_value,
+        }))
+    }
+
+    /// The pair `reveal` needs for a field of the triggering event: the `@subject(...)`
+    /// naming its key, and the trigger's own value for that field.
+    fn trigger_subject(
+        &mut self,
+        lower: &mut Lower,
+        field: Ident,
+        line: u32,
+        col: u32,
+    ) -> Result<(Ident, Ident, ExprId), SyntaxError> {
         let def = self.event.clone().expect("only inside an arm");
         let Some(declared) = def.field(&field) else {
             return Err(self.err(format!("{} has no field `{field}`", def.path), line, col));
@@ -3086,38 +3261,24 @@ impl Parser {
 
         let slot = lower.b.payload(&subject, Some(id.ty.clone()));
         let subject_value = lower.b.read(slot);
-        lower.b.at(span);
-        Ok(lower.b.expr(Expr::Reveal {
-            value,
-            field,
-            subject,
-            subject_value,
-        }))
+        Ok((field, subject, subject_value))
     }
 
-    /// The event field an expression loads. `reveal` and `erase` both name a value and
-    /// recover the schema fact from it, because subject-ness is a property of the path
-    /// rather than of the value.
-    fn subject_source(
-        &self,
-        lower: &Lower,
-        value: ExprId,
-        line: u32,
-        col: u32,
-        what: &str,
-    ) -> Result<Ident, SyntaxError> {
-        let bound = match lower.b.exprs().get(value) {
-            Some(Expr::Load(slot)) => lower.b.bound_field(*slot),
-            _ => None,
+    /// Where a value `reveal` or `erase` names came from. Both recover a schema fact
+    /// from a value, because subject-ness is a property of the path rather than of the
+    /// value, and after rule 12 there are two paths it can travel: the trigger's
+    /// binding, or a `state` fold.
+    fn subject_source(&self, lower: &Lower, value: ExprId) -> Option<Source> {
+        let Some(Expr::Load(slot)) = lower.b.exprs().get(value) else {
+            return None;
         };
-        match bound {
-            Some(field) => Ok(field.to_string()),
-            None => Err(self.err(
-                format!("`{what}` takes a field of the triggering event, like `e.email`"),
-                line,
-                col,
-            )),
+        if let Some(field) = lower.b.bound_field(*slot) {
+            return Some(Source::Trigger(field.to_string()));
         }
+        lower.b.state_of(*slot).map(|state| Source::State {
+            name: state.name.clone(),
+            subject: state.subject.clone(),
+        })
     }
 
     /// `TextOpen`, then a hole, then a `TextPart` before each further hole, then
