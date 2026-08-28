@@ -1940,11 +1940,22 @@ fn type_of(lower: &Lower, id: ExprId) -> Option<Type> {
         Expr::Field { name, .. } => response_field(name),
         Expr::Object(_) => Some(Type::Json),
         Expr::Call { builtin, .. } => Some(match builtin {
-            Builtin::Uuid5 => Type::Uuid,
+            Builtin::UuidDerive => Type::Uuid,
             _ => Type::Response,
         }),
         Expr::Invoke { .. } => Some(Type::Outcome),
         Expr::Reveal { .. } => Some(Type::String),
+    }
+}
+
+/// Rule 11 stated where an author looks for it. `Uuid.new` sits next to `derive` in
+/// the same namespace, so its absence is visible rather than something to notice.
+fn uuid_member(member: &str) -> String {
+    match member {
+        "new" | "random" | "generate" | "v4" => format!(
+            "`Uuid` has no `{member}`: an id has to be derived from its inputs, so that a command retry and an effect replay produce the id they produced the first time; write `Uuid.derive(seed, name)`"
+        ),
+        _ => format!("`Uuid` has no `{member}`; it has `derive(seed, name)`"),
     }
 }
 
@@ -2189,6 +2200,7 @@ impl Parser {
         let called = self.at_sym(Sym::LParen);
         match name {
             "http" if self.at_sym(Sym::Dot) => self.http_call(lower, span).map(Some),
+            "Uuid" if self.at_sym(Sym::Dot) => self.uuid_call(lower, span).map(Some),
             "reveal" if called => self.reveal_call(lower, span).map(Some),
             "now" if called => {
                 // Rule 11's clock rule: a clock exists where its result is pinned or
@@ -2207,18 +2219,6 @@ impl Parser {
                 lower.b.at(span);
                 Ok(Some(lower.b.read(slot)))
             }
-            "uuid5" if called => {
-                self.bump();
-                let namespace = self.expr(lower, Some(Type::Uuid))?;
-                self.expect_sym(Sym::Comma)?;
-                let name = self.expr(lower, Some(Type::String))?;
-                self.expect_sym(Sym::RParen)?;
-                lower.b.at(span);
-                Ok(Some(lower.b.expr(Expr::Call {
-                    builtin: Builtin::Uuid5,
-                    args: vec![namespace, name],
-                })))
-            }
             "erase" if called => Err(self.err(
                 "`erase` is a statement rather than a value; it returns nothing, because there is nothing an author could do differently on either answer",
                 span.line,
@@ -2229,15 +2229,37 @@ impl Parser {
                 span.line,
                 span.col,
             )),
-            "uuid4" | "random" if called => Err(self.err(
+            "uuid4" | "random" | "uuid5" if called => Err(self.err(
                 format!(
-                    "there is no `{name}` in heklang: a command retry and an effect replay have to derive the same id they derived the first time, so use `uuid5(namespace, name)`"
+                    "there is no `{name}` in heklang: an id has to be derived from its inputs, so that a command retry and an effect replay produce the id they produced the first time; write `Uuid.derive(seed, name)`"
                 ),
                 span.line,
                 span.col,
             )),
             _ => Ok(None),
         }
+    }
+
+    /// The language's first type-qualified call. The global namespace holds actions
+    /// with no natural receiver, so a value constructed from nothing is named by its
+    /// type instead; `Json.parse` and `Timestamp.from_micros` will take this shape too.
+    fn uuid_call(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, SyntaxError> {
+        self.expect_sym(Sym::Dot)?;
+        let (line, col) = self.here();
+        let member = self.expect_ident()?;
+        if member != "derive" {
+            return Err(self.err(uuid_member(&member), line, col));
+        }
+        self.expect_sym(Sym::LParen)?;
+        let seed = self.expr(lower, Some(Type::Uuid))?;
+        self.expect_sym(Sym::Comma)?;
+        let name = self.expr(lower, Some(Type::String))?;
+        self.expect_sym(Sym::RParen)?;
+        lower.b.at(span);
+        Ok(lower.b.expr(Expr::Call {
+            builtin: Builtin::UuidDerive,
+            args: vec![seed, name],
+        }))
     }
 
     fn http_call(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, SyntaxError> {

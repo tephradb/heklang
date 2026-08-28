@@ -29,7 +29,7 @@ effect NotifyCustomer {
 
     invoke RecordNotified {
       order_id: e.order_id,
-      notification_id: uuid5(e.id, "confirmation"),
+      notification_id: Uuid.derive(e.id, "confirmation"),
     }
   }
 }
@@ -319,17 +319,31 @@ is about a small set of well-named things, and it stops holding when either half
 | `http.put` / `http.patch` / `http.delete` | `Response` | yes |
 | `invoke Name { ... }` | `Outcome` | yes |
 | `now()` | `Timestamp` | yes |
-| `uuid5(namespace, name)` | `Uuid` | pure |
+| `Uuid.derive(seed, name)` | `Uuid` | pure |
 | `log(message)` | nothing | **no** |
 | `reveal(field)` | `String` | **no**, re-decrypts every attempt |
 | `erase(subject_value)` | nothing | yes |
 
-**There is no `uuid4` and no `random`, anywhere in the language.** Not in effects, not in commands,
-not in projectors. "Never mint a random id" is therefore unrepresentable rather than documented: a
-command retry and an effect replay both have to derive the same id they derived the first time, and
-the only way to guarantee that is to have no other option. `uuid5(namespace, name)` derives one from
-an identity that already exists, and `e.id` is the namespace most handlers want. This holds below the
-grammar too: the `uuid` dependency is built without its `v4` feature.
+**There is no `Uuid.new`, no `Uuid.random` and no `random`, anywhere in the language.** Not in
+effects, not in commands, not in projectors. "Never mint a random id" is therefore unrepresentable
+rather than documented: a command retry and an effect replay both have to derive the same id they
+derived the first time, and the only way to guarantee that is to have no other option.
+`Uuid.derive(seed, name)` derives one from an identity that already exists, and `e.id` is the seed
+most handlers want. This holds below the grammar too: the `uuid` dependency is built without its `v4`
+feature.
+
+Putting `derive` on the type is what makes that absence **visible**. An author who wants a fresh id
+types `Uuid.` and sees one member; the thing they were reaching for is missing from the place they
+looked, and asking for it by name gets the reason rather than "not in scope". A missing global could
+not manage that: nobody scans a namespace they have no reason to think contains what they want, so
+`uuid4` being absent taught nothing to the author who never typed it. The rejected spellings are
+still recognised (`Uuid.new`, `Uuid.random`, `Uuid.generate`, `Uuid.v4`, and the globals `uuid4`,
+`random` and `uuid5`), each pointing at `derive`.
+
+`derive` also refuses to spell RFC 4122's version number. `uuid5` names the algorithm; `derive` names
+the purpose, in a language that already hides `i64` behind `Int` and `Money` and does not otherwise
+ask an author to know a wire format. The seed argument is a `seed`, not a `namespace`, for the same
+reason.
 
 **The clock rule**, ported from hekla and better than "effects only": a clock exists where its result
 is pinned or journaled, and is absent where replay demands determinism.
@@ -346,6 +360,25 @@ two calls in one body are two reads of the same value. In a command that value i
 request would append at, computed on entry, so it is well defined even for a command that appends
 nothing: one returning `invalid` or `reject` still read a real instant, it was simply never stamped
 on anything. A command emitting two events reads the first one's append time.
+
+## The global namespace is closed to constructors
+
+`Uuid.derive` is the language's first type-qualified call, and the rule it establishes is the reason
+it was worth introducing a syntactic form for one member:
+
+> The global namespace holds **actions with no natural receiver**. Anything constructed from nothing
+> is named by its type.
+
+`log`, `fail`, `now`, `reveal`, `erase`, `invoke` and `http.*` are all things a handler *does*, and
+none of them has a receiver to hang from. A constructor is not one of those: it has an obvious owner,
+and `Json.parse` and `Timestamp.from_micros` will want the same shape as soon as they exist.
+Establishing the form now with a single member is cheaper than adding a second global and retrofitting
+later, when the retrofit would be a breaking change to two call sites instead of one.
+
+The receiver behaves like the soft builtin names (rule 10): `Uuid` is claimed only in the position
+where it is unambiguous, which is immediately before a `.`, so a local binding named `Uuid` still
+shadows it and an enum variant called `Uuid` still resolves. Nothing about this makes `Uuid` a value:
+there is no bare `Uuid` expression, only the qualified call.
 
 ## 12. `reveal` fails terminally
 

@@ -499,6 +499,8 @@ pub enum Expr {
 
 /// The builtins that are ordinary calls. `now()` is not among them: it lowers to a
 /// pre-filled slot, so it is pinned once per invocation rather than once per call.
+/// `UuidDerive` is spelled `Uuid.derive`: the global namespace is closed to
+/// constructors, so anything built from nothing is named by its type instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Builtin {
     HttpGet,
@@ -506,7 +508,7 @@ pub enum Builtin {
     HttpPut,
     HttpPatch,
     HttpDelete,
-    Uuid5,
+    UuidDerive,
 }
 
 impl Builtin {
@@ -536,7 +538,7 @@ impl Builtin {
             Builtin::HttpPut => "http.put",
             Builtin::HttpPatch => "http.patch",
             Builtin::HttpDelete => "http.delete",
-            Builtin::Uuid5 => "uuid5",
+            Builtin::UuidDerive => "Uuid.derive",
         }
     }
 }

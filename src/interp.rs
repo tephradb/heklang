@@ -1266,8 +1266,8 @@ fn eval(
             for arg in args {
                 values.push(eval(exprs, frame, *arg, ctx.as_deref_mut())?);
             }
-            if *builtin == Builtin::Uuid5 {
-                return uuid5(&values).map_err(at);
+            if *builtin == Builtin::UuidDerive {
+                return uuid_derive(&values).map_err(at);
             }
             let Some(ctx) = ctx else {
                 return Err(at(ErrorKind::MalformedIr));
@@ -1700,17 +1700,17 @@ fn optional_str(value: Option<&str>) -> Value {
     }
 }
 
-/// Rule 11. There is no `uuid4`, so an id is always derived from one that already
+/// Rule 11. There is no `Uuid.new`, so an id is always derived from one that already
 /// exists, and a retry or a replay derives the same one.
-fn uuid5(args: &[Value]) -> Result<Value, ErrorKind> {
-    let (Some(Value::Uuid(namespace)), Some(Value::Str(name))) = (args.first(), args.get(1)) else {
+fn uuid_derive(args: &[Value]) -> Result<Value, ErrorKind> {
+    let (Some(Value::Uuid(seed)), Some(Value::Str(name))) = (args.first(), args.get(1)) else {
         return Err(ErrorKind::BadArgument {
-            method: "uuid5".to_string(),
-            expected: "a Uuid namespace and a String name",
+            method: "Uuid.derive".to_string(),
+            expected: "a Uuid seed and a String name",
             found: args.first().map_or(Type::Uuid, Value::ty),
         });
     };
-    let parsed = Uuid::parse_str(namespace).map_err(|_| ErrorKind::BadUuid(namespace.clone()))?;
+    let parsed = Uuid::parse_str(seed).map_err(|_| ErrorKind::BadUuid(seed.clone()))?;
     Ok(Value::uuid(
         Uuid::new_v5(&parsed, name.as_bytes()).to_string(),
     ))

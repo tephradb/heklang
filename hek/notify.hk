@@ -23,7 +23,7 @@ effect NotifyCustomer {
 
     invoke RecordNotified {
       order_id: e.order_id,
-      notification_id: uuid5(e.id, "confirmation"),
+      notification_id: Uuid.derive(e.id, "confirmation"),
     }
   }
 }

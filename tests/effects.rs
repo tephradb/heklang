@@ -311,7 +311,7 @@ const INVOKING: &str = "effect E {
   on @order.placed as e {
     let result = invoke RecordNotified {
       order_id: e.order_id,
-      notification_id: uuid5(e.id, \"confirmation\"),
+      notification_id: Uuid.derive(e.id, \"confirmation\"),
     }
     log(result.code().unwrap_or(\"ok\"))
   }
@@ -619,7 +619,7 @@ fn journaled_calls_do_not_re_fire_but_reveal_and_log_do() {
 
 #[test]
 fn there_is_no_uuid4_or_random() {
-    for name in ["uuid4", "random"] {
+    for name in ["uuid4", "random", "uuid5"] {
         let message = err(&format!(
             "effect E {{
   on @order.placed as e {{
@@ -631,8 +631,86 @@ fn there_is_no_uuid4_or_random() {
             message.contains(&format!("there is no `{name}` in heklang")),
             "got: {message}"
         );
-        assert!(message.contains("uuid5(namespace, name)"), "got: {message}");
+        assert!(
+            message.contains("Uuid.derive(seed, name)"),
+            "got: {message}"
+        );
     }
+
+    // The absence that matters is the one beside `derive`, not the missing global: an
+    // author reaching for a fresh id reaches for `Uuid.new`, so that is where the
+    // reason has to be.
+    for member in ["new", "random", "generate", "v4"] {
+        let message = err(&format!(
+            "effect E {{
+  on @order.placed as e {{
+    log(\"x\" + Uuid.{member}())
+  }}
+}}"
+        ));
+        assert!(
+            message.starts_with(&format!("`Uuid` has no `{member}`:")),
+            "got: {message}"
+        );
+        assert!(
+            message.contains(
+                "a command retry and an effect replay produce the id they produced the first time"
+            ),
+            "got: {message}"
+        );
+    }
+
+    let message = err("effect E {
+  on @order.placed as e {
+    log(\"x\" + Uuid.parse(\"7\"))
+  }
+}");
+    assert_eq!(
+        message,
+        "`Uuid` has no `parse`; it has `derive(seed, name)`"
+    );
+}
+
+/// `Uuid.derive` is the first type-qualified call, so the receiver has to behave like
+/// the soft builtin names: claimed only where it is unambiguous, shadowed by a local.
+#[test]
+fn a_local_named_uuid_shadows_the_type() {
+    let program = program(
+        "effect E {
+  on @order.placed as e {
+    let Uuid = \"shadowed\"
+    log(Uuid)
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let (interpreter, outcome) = deliver(&program, vec![placed(1, 7, 100)], vec![], &mut journal);
+    outcome.expect("delivered");
+    assert_eq!(interpreter.lines(), ["shadowed"]);
+}
+
+/// Matching hekla's derived ids is the whole reason the `uuid` crate is a dependency,
+/// so the bytes are pinned rather than left as merely deterministic. The expected value
+/// is RFC 4122 v5 of that seed and name, computed outside this crate.
+#[test]
+fn derive_produces_the_same_bytes_as_uuid_v5() {
+    let program = program(
+        "effect E {
+  on @order.placed as e {
+    invoke RecordNotified {
+      order_id: e.order_id,
+      notification_id: Uuid.derive(e.order_id, \"confirmation\"),
+    }
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let (interpreter, outcome) = deliver(&program, vec![placed(1, 7, 100)], vec![], &mut journal);
+    outcome.expect("delivered");
+    assert_eq!(
+        interpreter.log()[1].event.field("notification_id"),
+        Some(&Value::uuid("80d7a177-654b-5d44-aaaf-f40ba9b777ac")),
+    );
 }
 
 #[test]
