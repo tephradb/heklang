@@ -213,3 +213,82 @@ fn the_demo_modules_load_as_separate_files() {
         Some("commands/place_order.hk")
     );
 }
+
+/// There is no import syntax, so a `fn` is reachable from every module. Signatures are
+/// collected across every file before any body is parsed, which is what makes the file
+/// order irrelevant here too.
+#[test]
+fn a_fn_is_callable_from_another_module() {
+    const LIB: &str = "fn effective_sku(sku: String?, order_id: Uuid) -> String {
+  let given = sku.unwrap_or(\"\").trim()
+  if given.is_empty() {
+    return \"SKU:{order_id}\"
+  }
+  return given
+}
+";
+    const SKUS: &str = "event @order.skued { order_id: Uuid, sku: String }
+";
+    const CALLER: &str = "command Sku(order_id: Uuid, sku: String?) {
+  emit @order.skued { order_id, sku: effective_sku(sku, order_id) }
+}
+";
+
+    // The caller's file first, so the definition is only found because collection runs
+    // over every module before any body does.
+    let orders = [
+        [
+            ("commands/sku.hk", CALLER),
+            ("events/sku.hk", SKUS),
+            ("lib/sku.hk", LIB),
+        ],
+        [
+            ("lib/sku.hk", LIB),
+            ("commands/sku.hk", CALLER),
+            ("events/sku.hk", SKUS),
+        ],
+    ];
+
+    for files in orders {
+        let names: Vec<&str> = files.iter().map(|(name, _)| *name).collect();
+        let program = parse_files(files).unwrap_or_else(|err| panic!("for {names:?}: {err}"));
+        assert_eq!(program.functions.len(), 1, "for {names:?}");
+
+        let mut interpreter = Interpreter::new(&program);
+        let execution = interpreter
+            .run(
+                "Sku",
+                vec![
+                    (
+                        "order_id",
+                        Value::uuid("0190d1a1-0000-7000-8000-000000000001"),
+                    ),
+                    ("sku", Value::none(heklang::Type::String)),
+                ],
+            )
+            .unwrap_or_else(|err| panic!("for {names:?}: {err}"));
+        let heklang::Outcome::Ok(events) = execution.outcome else {
+            panic!("for {names:?}: expected an append");
+        };
+        assert_eq!(
+            events[0].field("sku"),
+            Some(&Value::str("SKU:0190d1a1-0000-7000-8000-000000000001")),
+            "for {names:?}: the helper ran, from another module"
+        );
+    }
+}
+
+/// One flat space, so the same helper in two files is a collision rather than two
+/// module-local helpers. The error names the second file, which is the one to change.
+#[test]
+fn a_fn_declared_in_two_modules_collides() {
+    const LIB: &str = "fn parse_gid(gid: String) -> Int {\n  return gid.after_last(\"/\").to_int().unwrap_or(0)\n}\n";
+    let err = parse_files([
+        ("events/order.hk", EVENTS),
+        ("lib/shopify.hk", LIB),
+        ("lib/stripe.hk", LIB),
+    ])
+    .expect_err("one name, one function");
+    assert_eq!(err.message, "fn `parse_gid` is declared twice");
+    assert_eq!(err.file.as_deref(), Some("lib/stripe.hk"));
+}
