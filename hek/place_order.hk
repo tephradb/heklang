@@ -1,0 +1,89 @@
+currency USD
+
+// events/order.hk
+
+event @order.placed {
+  order_id: Uuid,
+  customer_id: Int,
+  email: String @subject(customer_id) @max(200),
+  address: String @subject(customer_id) @max(200),
+  total: Money,
+  tax_rate: Decimal(4),
+  notes: String @no_index,
+}
+
+event @order.cancelled {
+  order_id: Uuid,
+  customer_id: Int,
+  refund: Money,
+}
+
+event @customer.blocked {
+  customer_id: Int,
+  reason: String,
+}
+
+// commands/place_order.hk
+
+command PlaceOrder(
+  order_id: Uuid,
+  customer_id: Int,
+  email: String,
+  address: String,
+  total: Money,
+  tax_rate: Decimal(4),
+  notes: String?,
+) {
+  guard @order.placed(order_id), @order.cancelled(order_id)
+
+  state email_taken: Bool = false
+    on @order.placed(email) => true
+
+  state open_orders: Int = 0
+    on @order.placed(customer_id) => open_orders + 1
+    on @order.cancelled(customer_id) => open_orders - 1
+
+  state lifetime_spend: Money = 0
+    on @order.placed(customer_id) { total } => lifetime_spend + total
+
+  let customer = customer_id
+  state blocked: Bool = false
+    on @customer.blocked(customer_id: customer) => true
+
+  if address.trim() == "" {
+    return invalid("address must not be blank")
+  }
+
+  if blocked {
+    return reject("customer_blocked", "this customer cannot place orders")
+  }
+
+  if email_taken {
+    return reject("email_taken", "that email has already placed an order")
+  }
+
+  if open_orders >= 10 {
+    return reject("too_many_open", "too many open orders")
+  }
+
+  let discounted = if lifetime_spend > 1000.00 {
+    total.mul(0.9, HalfUp)
+  } else {
+    total
+  }
+
+  emit @order.placed {
+    order_id,
+    customer_id,
+    email,
+    address,
+    total: discounted,
+    tax_rate,
+    notes: notes.unwrap_or(""),
+  }
+}
+
+command BareDiscount(total: Money) {
+  let cut = total * 0.9
+  return
+}
