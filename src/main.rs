@@ -14,7 +14,9 @@ const COMMANDS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/place_order.hk"
 const PROJECTORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/orders.hk");
 const EFFECTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/notify.hk");
 const CATALOG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/catalog.hk");
+const SHOP: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/shop.hk");
 const AUDIT: &str = "https://audit.example/catalog";
+const SYNC: &str = "https://one.example/admin/api/sync";
 const CONFIRM: &str = "https://mail.example/confirm";
 
 fn order_placed() -> EventPath {
@@ -154,6 +156,13 @@ fn load() -> Result<Program, String> {
 fn load_catalog() -> Result<Program, String> {
     let catalog = read(CATALOG)?;
     parse_files([("catalog/catalog.hk", catalog.as_str())]).map_err(|err| err.to_string())
+}
+
+/// The shop module, likewise its own program. Rule 12's fold path needs a credential
+/// appended long before the event being handled, which is a log of its own.
+fn load_shop() -> Result<Program, String> {
+    let shop = read(SHOP)?;
+    parse_files([("shop/shop.hk", shop.as_str())]).map_err(|err| err.to_string())
 }
 
 fn main() -> ExitCode {
@@ -334,7 +343,78 @@ fn main() -> ExitCode {
         }
     }
 
+    match load_shop() {
+        Ok(shop) => shop_demo(&shop),
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::FAILURE;
+        }
+    }
+
     ExitCode::SUCCESS
+}
+
+fn connected(shop_id: i64, domain: &str, token: &str) -> Event {
+    Event::new(
+        EventPath::new(["shop", "connected"]),
+        [
+            ("shop_id", Value::Int(shop_id)),
+            ("shop_domain", Value::str(domain)),
+            ("access_token", Value::str(token)),
+        ],
+    )
+}
+
+fn sync_requested(shop_id: i64) -> Event {
+    Event::new(
+        EventPath::new(["shop", "sync", "requested"]),
+        [("shop_id", Value::Int(shop_id))],
+    )
+}
+
+/// The two absences that must not collapse, side by side: a shop that never connected
+/// and a shop whose key is gone. One is an ordinary branch, the other is terminal.
+fn shop_demo(program: &Program) {
+    println!("\nmodule shop.hk");
+
+    let log = vec![
+        connected(1, "one.example", "shpat-one"),
+        connected(3, "three.example", "shpat-three"),
+        sync_requested(1),
+        sync_requested(2),
+        sync_requested(3),
+    ];
+
+    let mut interpreter = Interpreter::with_log(program, log);
+    interpreter.script(SYNC, [Reply::Status(200)]);
+    // Shop 3 connected and was then redacted. Nothing static catches that, which is
+    // exactly what rule 12's message says.
+    interpreter.erase_subject("shop_id", "3");
+
+    let labels = ["connected", "never connected", "erased subject"];
+    let mut seen = 0usize;
+    for (label, position) in labels.iter().zip([2u64, 3, 4]) {
+        let mut journal = Journal::default();
+        match interpreter.deliver("SyncShop", position, &mut journal) {
+            Ok(Invocation::Done) => println!("{label:16} done"),
+            Ok(Invocation::Skipped(message)) => println!("{label:16} skipped  {message}"),
+            Ok(Invocation::Failed(message)) => println!("{label:16} failed   {message}"),
+            Ok(Invocation::Ignored) => println!("{label:16} ignored"),
+            Err(err) => println!("{label:16} error    {err}"),
+        }
+        for line in &interpreter.lines()[seen..] {
+            println!("{:16} {line}", "");
+        }
+        seen = interpreter.lines().len();
+        for (call, _) in journal.calls() {
+            println!("{:16} journaled {call}", "");
+        }
+    }
+    // The one request that went out, carrying a credential nothing else in the log
+    // could have produced.
+    if let Some(sent) = interpreter.requests().first() {
+        println!("\n  {} sent {}", sent.url, sent.headers);
+    }
 }
 
 fn tier(name: &str) -> Value {

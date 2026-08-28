@@ -1,0 +1,60 @@
+// shop/shop.hk
+//
+// A fifth module, and the shape every real effect has: the credential is not on the
+// event being handled. It was appended when the shop connected, long before, so the
+// arm folds it back out of the log and reveals it there.
+
+// events/shop.hk
+
+event @shop.connected {
+  shop_id: Int,
+  shop_domain: String @max(255),
+  access_token: String @subject(shop_id) @no_index @max(4096),
+}
+
+event @shop.reconnected {
+  shop_id: Int,
+  shop_domain: String @max(255),
+  access_token: String @subject(shop_id) @no_index @max(4096),
+}
+
+event @shop.sync.requested {
+  shop_id: Int,
+}
+
+// effects/sync_shop.hk
+
+effect SyncShop {
+  on @shop.sync.requested as e { shop_id } {
+    state domain: String = fold ""
+      on @shop.connected(shop_id) { shop_domain } => shop_domain
+      on @shop.reconnected(shop_id) { shop_domain } => shop_domain
+
+    // Two arms, one subject. The seed is plain and that is allowed; an arm folding a
+    // plain value in beside these would not be.
+    state token: String? = fold none
+      on @shop.connected(shop_id) { access_token } => access_token
+      on @shop.reconnected(shop_id) { access_token } => access_token
+
+    // Absent means this shop has never connected, which is an ordinary condition. A
+    // shredded key is not: that skips the position terminally, and the difference is
+    // the reason this is an optional rather than an empty string.
+    let secret = reveal(token)
+    if secret.is_none() {
+      log("shop {shop_id} has never connected, nothing to sync")
+      return
+    }
+
+    // `secret` is a String from here, proved by the branch above, so nothing has to
+    // invent a fallback it can never reach.
+    let response = http.post(
+      "https://{domain}/admin/api/sync",
+      { "shop": shop_id },
+      headers = { "X-Access-Token": secret },
+    )
+    if response.status >= 400 {
+      fail("sync rejected with status {response.status}")
+    }
+    log("synced shop {shop_id} at {domain}")
+  }
+}
