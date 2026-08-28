@@ -1,88 +1,77 @@
-; Helix reads these from runtime/queries/hek/. Order matters: the first pattern that
-; matches a node wins, so the specific rules come first and the catch-alls last.
+; Helix reads these from runtime/queries/hek/.
+;
+; ORDER: the LAST matching pattern wins, and the innermost node wins
+; (helix book, guides/adding_languages.md). So this file runs general to specific: the
+; catch-alls are at the top and the most specific rules at the bottom, which is the same
+; shape helix's own runtime/queries/rust/highlights.scm has.
 
-; ------------------------------------------------------------------- declarations
+; ---------------------------------------------------------------------- catch-alls
 
-(enum_declaration name: (type_identifier) @type)
-(record_declaration name: (type_identifier) @type)
-(entity_declaration name: (type_identifier) @type)
-(projector_declaration name: (type_identifier) @type)
-(effect_declaration name: (type_identifier) @type)
-(command_declaration name: (type_identifier) @function)
-(function_declaration name: (identifier) @function)
-(const_declaration name: (identifier) @constant)
+(identifier) @variable
+(type_identifier) @type
 
-(enum_variant name: (identifier) @type.enum.variant)
-(parameter name: (identifier) @variable.parameter)
-(event_handler binding: (identifier) @variable.parameter)
+; Two conventions a grammar cannot know. Anything spelled either way that is *not* one of
+; these is captured more specifically below, so it wins over both.
+((identifier) @type.enum.variant
+ (#match? @type.enum.variant "^[A-Z][a-zA-Z0-9_]*$"))
 
-; ------------------------------------------------------------- paths, annotations
+; Second, because SCREAMING_SNAKE matches the PascalCase pattern too and has to win.
+((identifier) @constant
+ (#match? @constant "^[A-Z][A-Z0-9_]*$"))
 
-; `@max`, `@key`, `@subject(...)`, `@no_index`, `@index`, `@default`.
-(annotation_name) @attribute
+; ------------------------------------------------------------------------ literals
 
-; `@order.placed`. The same lexer token as an annotation, kept a separate colour
-; because one names a declaration and the other modifies a field.
-(event_path) @label
+(comment) @comment.line
 
-; ------------------------------------------------------------------------- types
+[
+  (string)
+  (raw_string)
+] @string
 
-(primitive_type) @type.builtin
-(scaled_type ["Decimal" "Money"] @type.builtin)
-(list_type "List" @type.builtin)
-(map_type "Map" @type.builtin)
+(escape_sequence) @constant.character.escape
 
-; ---------------------------------------------------------- builtins and calls
+(decimal_literal) @constant.numeric.float
+(integer_literal) @constant.numeric.integer
 
-; The closed global namespace: actions with no natural receiver.
-((call_expression function: (identifier) @function.builtin)
- (#any-of? @function.builtin "now" "reveal" "log" "fail" "erase"))
+(boolean_literal) @constant.builtin.boolean
+(none_literal) @constant.builtin
 
-; `Uuid.derive(..)`, `Json.encode(..)`, `Money.parse(..)`, `http.post(..)`.
-((method_call
-   receiver: (identifier) @type.builtin
-   method: (identifier) @function.builtin)
- (#any-of? @type.builtin "Uuid" "Map" "Json" "Timestamp" "Money" "http"))
+; After the PascalCase rule above, which would otherwise read these as enum variants.
+((identifier) @constant.builtin
+ (#any-of? @constant.builtin "HalfUp" "HalfEven" "Down"))
 
-; `Map.empty` and `Json.empty` take no arguments.
-((field_expression
-   receiver: (identifier) @type.builtin
-   field: (identifier) @function.builtin)
- (#any-of? @type.builtin "Uuid" "Map" "Json" "Timestamp" "Money" "http"))
+; ----------------------------------------------------------- punctuation, operators
 
-(outcome_expression ["invalid" "reject"] @function.builtin)
+["(" ")" "[" "]" "{" "}"] @punctuation.bracket
+["," ":" "."] @punctuation.delimiter
 
-(method_call method: (identifier) @function.method)
-(call_expression function: (identifier) @function)
+[
+  "!"
+  "!="
+  "%"
+  "&&"
+  "*"
+  "+"
+  "-"
+  "->"
+  "/"
+  "<"
+  "<="
+  "="
+  "=="
+  "=>"
+  ">"
+  ">="
+  "?"
+  "||"
+] @operator
 
-(record_literal name: (type_identifier) @constructor)
-(invoke_expression command: (identifier) @function)
-(run_clause command: (identifier) @function)
-(project_clause projector: (identifier) @type)
-(deliver_clause effect: (identifier) @type)
+; The same `{` and `}` tokens the bracket rule above matched, so this has to follow it.
+(interpolation
+  "{" @punctuation.special
+  "}" @punctuation.special)
 
-; The entity a write or a row expectation names.
-(put_statement entity: (identifier) @type)
-(patch_statement entity: (identifier) @type)
-(delete_statement entity: (identifier) @type)
-(row_expectation entity: (identifier) @type)
-
-; ------------------------------------------------------------------- field names
-
-(record_field name: (identifier) @variable.other.member)
-(event_field name: (identifier) @variable.other.member)
-(entity_field name: (identifier) @variable.other.member)
-(field_initializer name: (identifier) @variable.other.member)
-(field_expression field: (identifier) @variable.other.member)
-(stored_field field: (identifier) @variable.other.member)
-(destructure (identifier) @variable.other.member)
-(filter field: (identifier) @variable.other.member)
-(named_argument name: (identifier) @variable.other.member)
-(erased_clause subject: (identifier) @variable.other.member)
-(annotation_arguments (identifier) @variable.other.member)
-(index_clause (identifier) @variable.other.member)
-
-; ---------------------------------------------------------------------- keywords
+; ------------------------------------------------------------------------ keywords
 
 [
   "enum"
@@ -145,66 +134,89 @@
   "skipped"
 ] @keyword
 
-; ---------------------------------------------------------------------- literals
+; ------------------------------------------------------------- paths, annotations
 
-(boolean_literal) @constant.builtin.boolean
-(none_literal) @constant.builtin
+; `@max`, `@key`, `@subject(...)`, `@no_index`, `@index`, `@default`.
+(annotation_name) @attribute
 
-; The rounding modes, the only bare builtin values.
-((identifier) @constant.builtin
- (#any-of? @constant.builtin "HalfUp" "HalfEven" "Down"))
+; `@order.placed`. The same lexer token as an annotation, kept a separate colour because
+; one names a declaration and the other modifies a field.
+(event_path) @label
 
-(decimal_literal) @constant.numeric.float
-(integer_literal) @constant.numeric.integer
+; --------------------------------------------------------------------------- types
 
-[
-  (string)
-  (raw_string)
-] @string
+(primitive_type) @type.builtin
+(scaled_type ["Decimal" "Money"] @type.builtin)
+(list_type "List" @type.builtin)
+(map_type "Map" @type.builtin)
 
-(escape_sequence) @constant.character.escape
+; --------------------------------------------------------------------- field names
 
-(interpolation
-  "{" @punctuation.special
-  "}" @punctuation.special)
+(record_field name: (identifier) @variable.other.member)
+(event_field name: (identifier) @variable.other.member)
+(entity_field name: (identifier) @variable.other.member)
+(field_initializer name: (identifier) @variable.other.member)
+(field_expression field: (identifier) @variable.other.member)
+(stored_field field: (identifier) @variable.other.member)
+(filter field: (identifier) @variable.other.member)
+(named_argument name: (identifier) @variable.other.member)
+(erased_clause subject: (identifier) @variable.other.member)
+(annotation_arguments (identifier) @variable.other.member)
+(index_clause (identifier) @variable.other.member)
 
-(comment) @comment.line
+; ------------------------------------------------------------------------ bindings
 
-; --------------------------------------------------------------------- operators
+(parameter name: (identifier) @variable.parameter)
 
-[
-  "!"
-  "!="
-  "%"
-  "&&"
-  "*"
-  "+"
-  "-"
-  "->"
-  "/"
-  "<"
-  "<="
-  "="
-  "=="
-  "=>"
-  ">"
-  ">="
-  "?"
-  "||"
-] @operator
+; A destructure and an `as` binding are how a handler names its inputs, which is what a
+; parameter list is; locals.scm carries the same class so their uses match.
+(event_handler binding: (identifier) @variable.parameter)
+(destructure (identifier) @variable.parameter)
 
-["(" ")" "[" "]" "{" "}"] @punctuation.bracket
-["," ":" "."] @punctuation.delimiter
+(enum_variant name: (identifier) @type.enum.variant)
 
-; ------------------------------------------------------------------- catch-alls
+; -------------------------------------------------------------------- declarations
 
-; SCREAMING_SNAKE is a `const` by convention, and PascalCase in a value position is an
-; enum variant: everything else spelled either way is captured above.
-((identifier) @constant
- (#match? @constant "^[A-Z][A-Z0-9_]*$"))
+(enum_declaration name: (type_identifier) @type)
+(record_declaration name: (type_identifier) @type)
+(entity_declaration name: (type_identifier) @type)
+(projector_declaration name: (type_identifier) @type)
+(effect_declaration name: (type_identifier) @type)
+(command_declaration name: (type_identifier) @function)
+(function_declaration name: (identifier) @function)
+(const_declaration name: (identifier) @constant)
 
-((identifier) @type.enum.variant
- (#match? @type.enum.variant "^[A-Z][a-zA-Z0-9_]*$"))
+; The entity, command, projector or effect a statement or a test clause names.
+(put_statement entity: (identifier) @type)
+(patch_statement entity: (identifier) @type)
+(delete_statement entity: (identifier) @type)
+(row_expectation entity: (identifier) @type)
+(project_clause projector: (identifier) @type)
+(deliver_clause effect: (identifier) @type)
 
-(type_identifier) @type
-(identifier) @variable
+; ----------------------------------------------------------------- calls, builtins
+
+(call_expression function: (identifier) @function)
+(method_call method: (identifier) @function.method)
+(record_literal name: (type_identifier) @constructor)
+(invoke_expression command: (identifier) @function)
+(run_clause command: (identifier) @function)
+
+(outcome_expression ["invalid" "reject"] @function.builtin)
+
+; The closed global namespace: actions with no natural receiver. After the generic call
+; rules above, so these override them.
+((call_expression function: (identifier) @function.builtin)
+ (#any-of? @function.builtin "now" "reveal" "log" "fail" "erase"))
+
+; `Uuid.derive(..)`, `Json.encode(..)`, `Money.parse(..)`, `http.post(..)`.
+((method_call
+   receiver: (identifier) @type.builtin
+   method: (identifier) @function.builtin)
+ (#any-of? @type.builtin "Uuid" "Map" "Json" "Timestamp" "Money" "http"))
+
+; `Map.empty` and `Json.empty` take no arguments, so they are a field access.
+((field_expression
+   receiver: (identifier) @type.builtin
+   field: (identifier) @function.builtin)
+ (#any-of? @type.builtin "Uuid" "Map" "Json" "Timestamp" "Money" "http"))

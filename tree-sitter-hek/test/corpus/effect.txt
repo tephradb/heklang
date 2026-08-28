@@ -199,3 +199,84 @@ effect SyncShop {
                     (identifier)
                     (identifier)))))
             (return_statement)))))))
+
+================================================================================
+a fn scoped to the effect that uses it
+================================================================================
+
+effect RecordWarrantySales {
+  fn lookup_plan(plans: Map(Uuid, SalePlan), sku: String) -> SalePlan? {
+    for plan_id, plan in plans {
+      if plan.sku == sku {
+        return plan
+      }
+    }
+    return none
+  }
+
+  on @shopify.orders_paid.received as e {
+    shop_id, order_id, order_name
+  } {
+    log("order {order_name} for shop {shop_id}")
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (effect_declaration
+    (type_identifier)
+    (function_declaration
+      (identifier)
+      (parameters
+        (parameter
+          (identifier)
+          (type
+            (map_type
+              (type
+                (primitive_type))
+              (type
+                (type_identifier)))))
+        (parameter
+          (identifier)
+          (type
+            (primitive_type))))
+      (type
+        (type_identifier))
+      (block
+        (for_statement
+          (iter_bindings
+            (identifier)
+            (identifier)
+            (identifier))
+          (block
+            (if_statement
+              (binary_expression
+                (field_expression
+                  (identifier)
+                  (identifier))
+                (identifier))
+              (block
+                (return_statement
+                  (identifier))))))
+        (return_statement
+          (none_literal))))
+    (event_handler
+      (event_path)
+      (identifier)
+      (destructure
+        (identifier)
+        (identifier)
+        (identifier))
+      (block
+        (expression_statement
+          (call_expression
+            (identifier)
+            (arguments
+              (string
+                (string_content)
+                (interpolation
+                  (identifier))
+                (string_content)
+                (interpolation
+                  (identifier))))))))))

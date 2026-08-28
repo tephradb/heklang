@@ -186,12 +186,14 @@ module.exports = grammar({
         optional(seq('=', field('default', $._expression))),
       ),
 
+    // An effect body takes helpers beside its arms; a projector body does not
+    // (parse.rs `effect_decl` against `projector_shell`).
     effect_declaration: ($) =>
       seq(
         'effect',
         field('name', $._type_name),
         '{',
-        repeat($.event_handler),
+        repeat(choice($.event_handler, $.function_declaration)),
         '}',
       ),
 

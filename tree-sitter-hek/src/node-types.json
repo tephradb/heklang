@@ -949,6 +949,10 @@
         {
           "type": "event_handler",
           "named": true
+        },
+        {
+          "type": "function_declaration",
+          "named": true
         }
       ]
     }

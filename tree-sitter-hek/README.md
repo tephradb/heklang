@@ -11,11 +11,18 @@ real acceptance sources in `../hek` instead of a copy that drifts.
 
 ## What it does and does not do
 
-The grammar mirrors the parser's shapes, with one deliberate widening: heklang's parser
-knows whether it is inside a command, a projector, an effect, a `fn` or a test, and
-refuses statements that do not belong there (`put` outside a projector, `invoke` outside
-an effect, `emit` in a `fn`). A tree-sitter grammar has no such context, so every body
-here accepts every statement. Nothing valid fails to parse; some invalid programs do.
+The grammar mirrors the parser's shapes, with one deliberate widening.
+
+heklang's parser knows whether it is inside a command, a projector, an effect, a `fn` or
+a test, and refuses statements that do not belong there (`put` outside a projector,
+`invoke` outside an effect, `emit` in a `fn`). A tree-sitter grammar has no such context,
+so every body here accepts every statement. Nothing valid fails to parse; some invalid
+programs do.
+
+An `effect` body takes `fn` helpers beside its `on` arms; a `projector` body does not,
+and a `fn` is not a statement. That asymmetry is real rather than an oversight, so the
+grammar keeps it: `effect_decl` sweeps for `fn` and `on`, `projector_shell` for `enum`,
+`entity` and `on`.
 
 Two things are decided by lookahead the way the parser decides them with a flag:
 
@@ -130,11 +137,24 @@ change. `hx --health hek` should show six ticks. A local `hek.so` built here is 
 
 ## Queries
 
-- `highlights.scm` — the first pattern that matches a node wins, so specific rules come
-  first and the catch-alls last. Two conventions are read as rules at the bottom:
-  `SCREAMING_SNAKE` is a `const` and a bare PascalCase name in a value position is an
-  enum variant, neither of which a grammar can know.
-- `indents.scm`, `textobjects.scm`, `locals.scm`.
+- `highlights.scm` — **the LAST matching pattern wins** (helix book,
+  `guides/adding_languages.md`), so the file runs general to specific: catch-alls at the
+  top, the most specific rules at the bottom. That is the shape helix's own
+  `runtime/queries/rust/highlights.scm` has, with `(identifier) @variable` on line 9.
+  Getting this backwards is silent: every rule still matches, the catch-all just wins
+  them all, and every identifier reads `variable`.
+  Two conventions are encoded as `#match?` rules near the top, since a grammar cannot
+  know them: a bare PascalCase name in a value position is an enum variant, and
+  `SCREAMING_SNAKE` is a `const`. The const rule comes second because a
+  `SCREAMING_SNAKE` name matches the PascalCase pattern too and has to win.
+- `indents.scm`, `textobjects.scm`.
+- `locals.scm` — the capture must be `@local.definition.<scope>`, not a bare
+  `@local.definition`: the class after the prefix **is** the highlight a resolved
+  reference gets. With a bare one a parameter renders `variable.parameter` at its
+  declaration and plain `variable` at every use, because the use falls through to the
+  `(identifier) @variable` catch-all. `:tree-sitter-highlight-name` in Helix is how to
+  check. The `@_` captures at the bottom keep a field or method that shares a name with
+  an in-scope local from taking that local's colour.
 - `tags.scm` — hek has no language server, so this is all the syntax symbol picker has
   to work with: every top-level declaration, plus a projector's `enum` and `entity`.
 - `rainbows.scm`.
