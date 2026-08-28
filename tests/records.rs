@@ -572,6 +572,29 @@ fn the_optional_wrap_does_not_recurse() {
     assert_eq!(bad, "a Int? const cannot be a String");
 }
 
+/// `Literal::EmptyJson` says in its own doc comment that it is a literal so it can be
+/// a seed, a default and a const, and it could not be a const: nothing in
+/// `default_literal` read `Json.empty`. Its neighbour `Map.empty` always could.
+#[test]
+fn an_empty_json_is_a_const() {
+    let source = "const BLANK: Json = Json.empty\nevent @a.b { x: Int }\n";
+    let program = parse(source).expect("Json.empty is a literal, not a call");
+    assert_eq!(
+        program.constant("BLANK").expect("declared").value,
+        heklang::Literal::EmptyJson
+    );
+
+    let wrong = parse("const BLANK: Int = Json.empty\nevent @a.b { x: Int }\n")
+        .expect_err("expected a rejection")
+        .message;
+    assert_eq!(wrong, "a Int const cannot be a Json value");
+
+    let member = parse("const BLANK: Json = Json.encode\nevent @a.b { x: Int }\n")
+        .expect_err("expected a rejection")
+        .message;
+    assert_eq!(member, "a Json const cannot be `Json.encode`");
+}
+
 /// `none` needs an optional to be absent from, so it is the one shape checked against
 /// the declared type rather than through it.
 #[test]

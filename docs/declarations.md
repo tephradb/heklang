@@ -163,13 +163,18 @@ const NAMESPACE: Uuid = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
 ```
 
 `const NAME: Type = <literal>`, restricted to literals and literal aggregates: a scalar, a list of
-them, an empty map, or a record whose fields are literals. Not an expression.
+them, an empty map, an empty `Json` object, or a record whose fields are literals. Not an
+expression.
 
 The reason is the one an entity default already gives: **no expression arena hangs off a
 declaration.** A declaration is read in an early pass, before any body exists, and a const holding an
 expression would need a frame and an evaluation order that nothing else at that level has. The
 restriction has a second benefit, which is that a const is inlined at every use rather than being a
 runtime lookup.
+
+`Map.empty` and `Json.empty` are spellable here for that same reason: both are literals in the IR
+rather than calls, so they construct nothing and read nothing. It is also why both may be a `state`
+seed and an entity default.
 
 ### A string literal resolves against a `Uuid` target
 

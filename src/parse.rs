@@ -1339,6 +1339,17 @@ impl Parser {
                     items,
                 }
             }
+            Token::Ident(name) if name == "Json" && self.at_sym(Sym::Dot) => {
+                if !matches!(target, Type::Json) {
+                    return Err(self.err(bad("a Json value"), line, col));
+                }
+                self.expect_sym(Sym::Dot)?;
+                let member = self.expect_ident()?;
+                if member != "empty" {
+                    return Err(self.err(bad(&format!("`Json.{member}`")), line, col));
+                }
+                Literal::EmptyJson
+            }
             Token::Ident(name) if name == "Map" && self.at_sym(Sym::Dot) => {
                 let Type::Map(key, value) = target else {
                     return Err(self.err(bad("a map"), line, col));
