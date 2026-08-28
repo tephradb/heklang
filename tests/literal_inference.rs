@@ -29,7 +29,10 @@ fn describe(lit: &Literal) -> String {
         Literal::Decimal { units, scale } => format!("Decimal({units}, scale {scale})"),
         Literal::Str(value) => format!("Str({value:?})"),
         Literal::Uuid(value) => format!("Uuid({value})"),
+        Literal::Timestamp(micros) => format!("Timestamp({micros})"),
+        Literal::None(inner) => format!("None({inner})"),
         Literal::Money(value) => format!("Money({value})"),
+        Literal::Enum { ty, variant } => format!("{ty}.{variant}"),
         Literal::Rounding(mode) => format!("Rounding({mode})"),
     }
 }

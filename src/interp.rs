@@ -4,11 +4,16 @@ use std::fmt;
 
 use crate::currency::Currency;
 use crate::ir::{
-    Assign, BinOp, Command, EventPath, Expr, ExprId, Exprs, Ident, Literal, Program, Return, Slice,
-    SliceId, Slot, Span, Stmt, Type, UnOp,
+    Assign, BinOp, Command, EntityDef, EnvField, EventPath, Expr, ExprId, Exprs, Ident, Program,
+    Projector, Return, Slice, SliceId, Slot, Span, Stmt, Type, UnOp,
 };
 use crate::scaled::{self, Rounding};
-use crate::value::{Event, Value};
+use crate::value::{self, Event, Key, Record, Value};
+
+/// 2020-01-01T00:00:00Z, so a synthesised envelope timestamp reads as a plausible
+/// instant rather than the epoch.
+const EPOCH_MICROS: i64 = 1_577_836_800_000_000;
+const MINUTE_MICROS: i64 = 60_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendCondition {
@@ -32,6 +37,7 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorKind {
     UnknownCommand(String),
+    UnknownProjector(String),
     UnknownEvent(EventPath),
     UnknownField {
         event: EventPath,
@@ -76,6 +82,21 @@ pub enum ErrorKind {
         op: BinOp,
         hint: &'static str,
     },
+    TooLong {
+        field: Ident,
+        len: usize,
+        max: usize,
+    },
+    UnknownEntity(Ident),
+    UnknownEntityField {
+        entity: Ident,
+        field: Ident,
+    },
+    MissingEntityField {
+        entity: Ident,
+        field: Ident,
+    },
+    BadKey(Type),
     DivisionByZero,
     Overflow,
     Inexact,
@@ -85,6 +106,7 @@ impl fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ErrorKind::UnknownCommand(name) => write!(f, "unknown command `{name}`"),
+            ErrorKind::UnknownProjector(name) => write!(f, "unknown projector `{name}`"),
             ErrorKind::UnknownEvent(path) => write!(f, "undeclared event {path}"),
             ErrorKind::UnknownField { event, field } => {
                 write!(f, "event {event} has no field `{field}`")
@@ -118,6 +140,17 @@ impl fmt::Display for ErrorKind {
                 f,
                 "`{op}` on Money is not exact here, use `{hint}` with an explicit rounding mode"
             ),
+            ErrorKind::TooLong { field, len, max } => {
+                write!(f, "{field} is {len} characters, the most allowed is {max}")
+            }
+            ErrorKind::UnknownEntity(name) => write!(f, "undeclared entity `{name}`"),
+            ErrorKind::UnknownEntityField { entity, field } => {
+                write!(f, "entity `{entity}` has no field `{field}`")
+            }
+            ErrorKind::MissingEntityField { entity, field } => {
+                write!(f, "entity `{entity}` is missing field `{field}`")
+            }
+            ErrorKind::BadKey(ty) => write!(f, "{ty} cannot be an entity key"),
             ErrorKind::DivisionByZero => f.write_str("division by zero"),
             ErrorKind::Overflow => f.write_str("arithmetic overflow"),
             ErrorKind::Inexact => f.write_str("result is not exact"),
@@ -214,9 +247,56 @@ enum Ret {
     Reject { code: String, message: String },
 }
 
+/// In-memory read models, one map per entity. A test harness: declared indexes are
+/// recorded in the IR and ignored here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Store {
+    entities: BTreeMap<Ident, BTreeMap<Key, Row>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Row(pub BTreeMap<Ident, Value>);
+
+impl Row {
+    pub fn field(&self, name: &str) -> Option<&Value> {
+        self.0.get(name)
+    }
+}
+
+impl Store {
+    pub fn get(&self, entity: &str, key: &Key) -> Option<&Row> {
+        self.entities.get(entity)?.get(key)
+    }
+
+    pub fn rows(&self, entity: &str) -> impl Iterator<Item = (&Key, &Row)> {
+        self.entities.get(entity).into_iter().flatten()
+    }
+
+    pub fn len(&self, entity: &str) -> usize {
+        self.entities.get(entity).map_or(0, BTreeMap::len)
+    }
+
+    pub fn is_empty(&self, entity: &str) -> bool {
+        self.len(entity) == 0
+    }
+
+    fn put(&mut self, entity: &Ident, key: Key, row: Row) {
+        self.entities
+            .entry(entity.clone())
+            .or_default()
+            .insert(key, row);
+    }
+
+    fn remove(&mut self, entity: &str, key: &Key) {
+        if let Some(rows) = self.entities.get_mut(entity) {
+            rows.remove(key);
+        }
+    }
+}
+
 pub struct Interpreter<'a> {
     program: &'a Program,
-    log: Vec<Event>,
+    log: Vec<Record>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -228,22 +308,71 @@ impl<'a> Interpreter<'a> {
     }
 
     pub fn with_log(program: &'a Program, log: impl IntoIterator<Item = Event>) -> Self {
-        Self {
-            program,
-            log: log.into_iter().collect(),
+        let mut interpreter = Self::new(program);
+        for event in log {
+            interpreter.append(event);
         }
+        interpreter
     }
 
     pub fn currency(&self) -> &Currency {
         &self.program.currency
     }
 
-    pub fn log(&self) -> &[Event] {
+    pub fn log(&self) -> &[Record] {
         &self.log
     }
 
+    /// Appends with a synthesised envelope. The id and timestamp are derived from the
+    /// position so a run is reproducible; a real host stamps its own.
     pub fn append(&mut self, event: Event) {
-        self.log.push(event);
+        let position = self.log.len() as u64;
+        self.log.push(Record::new(
+            format!("0190d1a1-0000-7000-9000-{position:012}"),
+            position,
+            EPOCH_MICROS + position as i64 * MINUTE_MICROS,
+            event,
+        ));
+    }
+
+    /// Folds the whole log into this projector's read models. Each handler gets a
+    /// fresh frame, which is what makes "handlers do not share state" structural.
+    pub fn project(&self, name: &str) -> Result<Store, Error> {
+        let projector = self
+            .program
+            .projector(name)
+            .ok_or_else(|| ErrorKind::UnknownProjector(name.to_string()))?;
+
+        let mut store = Store::default();
+        for record in &self.log {
+            for handler in &projector.handlers {
+                if handler.event != record.event.path {
+                    continue;
+                }
+
+                let mut frame = Frame::new(handler.frame);
+                for bind in &handler.binds {
+                    let value = field(&record.event, &bind.field)?.clone();
+                    frame.set(bind.slot, value)?;
+                }
+                for bind in &handler.envelope {
+                    frame.set(bind.slot, envelope_value(record, bind.field))?;
+                }
+
+                let mut sink = Sink::Write {
+                    projector,
+                    store: &mut store,
+                };
+                exec_block(
+                    &handler.exprs,
+                    &handler.body,
+                    &mut frame,
+                    self.program,
+                    &mut sink,
+                )?;
+            }
+        }
+        Ok(store)
     }
 
     pub fn run(
@@ -274,9 +403,18 @@ impl<'a> Interpreter<'a> {
         fold(command, &filters, &self.log, &mut frame)?;
 
         let mut emitted = Vec::new();
-        let ret = match exec_block(&command.exprs, &command.body, &mut frame, &mut emitted)? {
-            Flow::Return(ret) => ret,
-            Flow::Next => Ret::Ok,
+        let ret = {
+            let mut sink = Sink::Emit(&mut emitted);
+            match exec_block(
+                &command.exprs,
+                &command.body,
+                &mut frame,
+                program,
+                &mut sink,
+            )? {
+                Flow::Return(ret) => ret,
+                Flow::Next => Ret::Ok,
+            }
         };
 
         let condition = AppendCondition {
@@ -286,23 +424,17 @@ impl<'a> Interpreter<'a> {
                 .collect(),
         };
 
-        let mut outcome = match ret {
+        let outcome = match ret {
             Ret::Ok => Outcome::Ok(emitted),
             Ret::Invalid(message) => Outcome::Invalid(message),
             Ret::Reject { code, message } => Outcome::Reject { code, message },
         };
 
+        // Emitted events are already validated at the emit site, where each field
+        // still has an expression to point a span at.
         if let Outcome::Ok(events) = &outcome {
-            let mut rejected = None;
             for event in events {
-                if let Some(message) = validate(program, event)? {
-                    rejected = Some(message);
-                    break;
-                }
-            }
-            match rejected {
-                Some(message) => outcome = Outcome::Invalid(message),
-                None => self.log.extend(events.iter().cloned()),
+                self.append(event.clone());
             }
         }
 
@@ -366,10 +498,11 @@ fn resolve_filters(
 fn fold(
     command: &Command,
     filters: &[Vec<Value>],
-    log: &[Event],
+    log: &[Record],
     frame: &mut Frame,
 ) -> Result<(), Error> {
-    for event in log {
+    for record in log {
+        let event = &record.event;
         for (index, slice) in command.slices.iter().enumerate() {
             if slice.event != event.path || !matches(slice, &filters[index], event)? {
                 continue;
@@ -406,52 +539,26 @@ fn field<'a>(event: &'a Event, name: &str) -> Result<&'a Value, Error> {
     })
 }
 
-fn validate(program: &Program, event: &Event) -> Result<Option<String>, Error> {
-    let def = program
-        .event(&event.path)
-        .ok_or_else(|| Error::new(ErrorKind::UnknownEvent(event.path.clone())))?;
-
-    for name in event.fields.keys() {
-        if def.field(name).is_none() {
-            return Err(ErrorKind::UnknownField {
-                event: event.path.clone(),
-                field: name.clone(),
-            }
-            .into());
-        }
-    }
-
-    for declared in &def.fields {
-        let value = field(event, &declared.name)?;
-        if !value.has_type(&declared.ty) {
-            return Err(ErrorKind::TypeMismatch {
-                expected: declared.ty.clone(),
-                found: value.ty(),
-            }
-            .into());
-        }
-        if let (Some(max), Value::Str(text)) = (declared.max_len, value) {
-            let len = text.chars().count();
-            if len > max {
-                let field = &declared.name;
-                return Ok(Some(format!(
-                    "{field} is {len} characters, the most allowed is {max}"
-                )));
-            }
-        }
-    }
-
-    Ok(None)
+/// Where a statement's writes go. One `exec_block` serves both declaration kinds;
+/// the parser is what guarantees a command never reaches `Write` and a handler
+/// never reaches `Emit`.
+enum Sink<'a> {
+    Emit(&'a mut Vec<Event>),
+    Write {
+        projector: &'a Projector,
+        store: &'a mut Store,
+    },
 }
 
 fn exec_block(
     exprs: &Exprs,
     stmts: &[Stmt],
     frame: &mut Frame,
-    emitted: &mut Vec<Event>,
+    program: &Program,
+    sink: &mut Sink<'_>,
 ) -> Result<Flow, Error> {
     for stmt in stmts {
-        let flow = exec_stmt(exprs, stmt, frame, emitted)?;
+        let flow = exec_stmt(exprs, stmt, frame, program, sink)?;
         if matches!(flow, Flow::Return(_)) {
             return Ok(flow);
         }
@@ -463,7 +570,8 @@ fn exec_stmt(
     exprs: &Exprs,
     stmt: &Stmt,
     frame: &mut Frame,
-    emitted: &mut Vec<Event>,
+    program: &Program,
+    sink: &mut Sink<'_>,
 ) -> Result<Flow, Error> {
     match stmt {
         Stmt::Assign { slot, value } => {
@@ -481,17 +589,135 @@ fn exec_stmt(
             } else {
                 otherwise
             };
-            exec_block(exprs, branch, frame, emitted)
+            exec_block(exprs, branch, frame, program, sink)
         }
-        Stmt::Emit { event, fields } => {
+        Stmt::Emit {
+            event,
+            fields,
+            span,
+        } => {
+            let Sink::Emit(emitted) = sink else {
+                return Err(Error::at(ErrorKind::MalformedIr, *span));
+            };
+            let def = program
+                .event(event)
+                .ok_or_else(|| Error::at(ErrorKind::UnknownEvent(event.clone()), *span))?;
+
             let mut values = BTreeMap::new();
             for (name, value) in fields {
-                values.insert(name.clone(), eval(exprs, frame, *value)?);
+                let at = exprs.span(*value);
+                let Some(declared) = def.field(name) else {
+                    return Err(Error::at(
+                        ErrorKind::UnknownField {
+                            event: event.clone(),
+                            field: name.clone(),
+                        },
+                        at,
+                    ));
+                };
+                let value = coerce(eval(exprs, frame, *value)?, &declared.ty);
+                // An over-length value is the runtime's validation channel, so it
+                // leaves as `Outcome::Invalid` rather than as an error.
+                if let Some(fault) = check_field(&declared.ty, declared.max_len, name, &value, at)?
+                {
+                    return Ok(Flow::Return(Ret::Invalid(fault.to_string())));
+                }
+                values.insert(name.clone(), value);
             }
+
+            for declared in &def.fields {
+                if !values.contains_key(&declared.name) {
+                    return Err(Error::at(
+                        ErrorKind::MissingField {
+                            event: event.clone(),
+                            field: declared.name.clone(),
+                        },
+                        *span,
+                    ));
+                }
+            }
+
             emitted.push(Event {
                 path: event.clone(),
                 fields: values,
             });
+            Ok(Flow::Next)
+        }
+        Stmt::Put {
+            entity,
+            fields,
+            span,
+        } => {
+            let (projector, store) = write_sink(sink, *span)?;
+            let def = entity_def(projector, entity, *span)?;
+
+            let mut row = Row::default();
+            for (name, value) in fields {
+                let value = eval_field(exprs, frame, def, entity, name, *value)?;
+                row.0.insert(name.clone(), value);
+            }
+            for declared in &def.fields {
+                if !row.0.contains_key(&declared.name) {
+                    return Err(Error::at(
+                        ErrorKind::MissingEntityField {
+                            entity: entity.clone(),
+                            field: declared.name.clone(),
+                        },
+                        *span,
+                    ));
+                }
+            }
+
+            let key = row_key(def, &row, *span)?;
+            store.put(entity, key, row);
+            Ok(Flow::Next)
+        }
+        Stmt::Patch {
+            entity,
+            key,
+            loads,
+            fields,
+            span,
+        } => {
+            let key_value = eval(exprs, frame, *key)?;
+            let (projector, store) = write_sink(sink, *span)?;
+            let def = entity_def(projector, entity, *span)?;
+            let key = key_of(&key_value, exprs.span(*key))?;
+
+            // Rule 5: a missing row materializes from zeros, so a patch always has
+            // a prior value for `.field` to read.
+            let mut row = match store.get(entity, &key) {
+                Some(row) => row.clone(),
+                None => materialize(def, projector, &key, *span)?,
+            };
+            for load in loads {
+                let value = row.0.get(&load.field).cloned().ok_or_else(|| {
+                    Error::at(
+                        ErrorKind::UnknownEntityField {
+                            entity: entity.clone(),
+                            field: load.field.clone(),
+                        },
+                        *span,
+                    )
+                })?;
+                frame.set(load.slot, value)?;
+            }
+
+            for (name, value) in fields {
+                let value = eval_field(exprs, frame, def, entity, name, *value)?;
+                row.0.insert(name.clone(), value);
+            }
+
+            store.put(entity, key, row);
+            Ok(Flow::Next)
+        }
+        Stmt::Delete { entity, key } => {
+            let span = exprs.span(*key);
+            let key_value = eval(exprs, frame, *key)?;
+            let (projector, store) = write_sink(sink, span)?;
+            entity_def(projector, entity, span)?;
+            let key = key_of(&key_value, span)?;
+            store.remove(entity, &key);
             Ok(Flow::Next)
         }
         Stmt::Return(ret) => {
@@ -508,12 +734,158 @@ fn exec_stmt(
     }
 }
 
+fn write_sink<'s, 'a>(
+    sink: &'s mut Sink<'a>,
+    span: Span,
+) -> Result<(&'a Projector, &'s mut Store), Error> {
+    match sink {
+        Sink::Write { projector, store } => Ok((projector, store)),
+        Sink::Emit(_) => Err(Error::at(ErrorKind::MalformedIr, span)),
+    }
+}
+
+fn entity_def<'a>(
+    projector: &'a Projector,
+    name: &Ident,
+    span: Span,
+) -> Result<&'a EntityDef, Error> {
+    projector
+        .entity(name)
+        .ok_or_else(|| Error::at(ErrorKind::UnknownEntity(name.clone()), span))
+}
+
+/// Evaluates one `put` or `patch` field value and checks it against the declared
+/// field. An over-length value is a hard error here: rule 2 gives a projector no
+/// outcome an author could catch it with.
+fn eval_field(
+    exprs: &Exprs,
+    frame: &Frame,
+    def: &EntityDef,
+    entity: &Ident,
+    name: &Ident,
+    value: ExprId,
+) -> Result<Value, Error> {
+    let at = exprs.span(value);
+    let Some(declared) = def.field(name) else {
+        return Err(Error::at(
+            ErrorKind::UnknownEntityField {
+                entity: entity.clone(),
+                field: name.clone(),
+            },
+            at,
+        ));
+    };
+    let value = coerce(eval(exprs, frame, value)?, &declared.ty);
+    if let Some(fault) = check_field(&declared.ty, declared.max_len, name, &value, at)? {
+        return Err(Error::at(fault, at));
+    }
+    Ok(value)
+}
+
+/// Type check, then length check. A type mismatch is always an error; the caller
+/// decides what an over-length value means, which is the one place commands and
+/// projectors differ.
+/// A bare `T` written into a `T?` field wraps, the same coercion `bind_params`
+/// already applies to command arguments.
+fn coerce(value: Value, ty: &Type) -> Value {
+    match ty {
+        Type::Opt(inner) if value.has_type(inner) => Value::some(value),
+        _ => value,
+    }
+}
+
+fn check_field(
+    ty: &Type,
+    max_len: Option<usize>,
+    name: &Ident,
+    value: &Value,
+    span: Span,
+) -> Result<Option<ErrorKind>, Error> {
+    if !value.has_type(ty) {
+        return Err(Error::at(
+            ErrorKind::TypeMismatch {
+                expected: ty.clone(),
+                found: value.ty(),
+            },
+            span,
+        ));
+    }
+    if let (Some(max), Value::Str(text)) = (max_len, value) {
+        let len = text.chars().count();
+        if len > max {
+            return Ok(Some(ErrorKind::TooLong {
+                field: name.clone(),
+                len,
+                max,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+fn key_of(value: &Value, span: Span) -> Result<Key, Error> {
+    Key::from_value(value).ok_or_else(|| Error::at(ErrorKind::BadKey(value.ty()), span))
+}
+
+fn row_key(def: &EntityDef, row: &Row, span: Span) -> Result<Key, Error> {
+    let name = &def.key_field().name;
+    let value = row.0.get(name).ok_or_else(|| {
+        Error::at(
+            ErrorKind::MissingEntityField {
+                entity: def.name.clone(),
+                field: name.clone(),
+            },
+            span,
+        )
+    })?;
+    key_of(value, span)
+}
+
+fn materialize(
+    def: &EntityDef,
+    projector: &Projector,
+    key: &Key,
+    span: Span,
+) -> Result<Row, Error> {
+    let mut row = Row::default();
+    for field in &def.fields {
+        let value = if field.name == def.key_field().name {
+            key_value(key)
+        } else {
+            value::initial(field, &projector.enums).ok_or_else(|| {
+                Error::at(
+                    ErrorKind::MissingEntityField {
+                        entity: def.name.clone(),
+                        field: field.name.clone(),
+                    },
+                    span,
+                )
+            })?
+        };
+        row.0.insert(field.name.clone(), value);
+    }
+    Ok(row)
+}
+
+fn key_value(key: &Key) -> Value {
+    match key {
+        Key::Int(value) => Value::Int(*value),
+        Key::Str(value) => Value::Str(value.clone()),
+        Key::Uuid(value) => Value::Uuid(value.clone()),
+        Key::Timestamp(micros) => Value::Timestamp(*micros),
+        Key::Enum { ty, variant } => Value::Enum {
+            ty: ty.clone(),
+            variant: variant.clone(),
+        },
+    }
+}
+
 fn eval(exprs: &Exprs, frame: &Frame, id: ExprId) -> Result<Value, Error> {
     let span = exprs.span(id);
     let at = |kind: ErrorKind| Error::at(kind, span);
 
     match exprs.get(id).ok_or_else(|| at(ErrorKind::MalformedIr))? {
-        Expr::Lit(lit) => Ok(literal(lit)),
+        Expr::Lit(lit) => Ok(value::literal(lit)),
         Expr::Load(slot) => frame.get(*slot).cloned().map_err(at),
         Expr::Unary { op, operand } => {
             let value = eval(exprs, frame, *operand)?;
@@ -586,21 +958,6 @@ fn eval_string(exprs: &Exprs, frame: &Frame, id: ExprId) -> Result<String, Error
             },
             exprs.span(id),
         )),
-    }
-}
-
-fn literal(lit: &Literal) -> Value {
-    match lit {
-        Literal::Bool(value) => Value::Bool(*value),
-        Literal::Int(value) => Value::Int(*value),
-        Literal::Decimal { units, scale } => Value::Decimal {
-            units: *units,
-            scale: *scale,
-        },
-        Literal::Str(value) => Value::Str(value.clone()),
-        Literal::Uuid(value) => Value::Uuid(value.clone()),
-        Literal::Money(value) => Value::Money(*value),
-        Literal::Rounding(mode) => Value::Rounding(*mode),
     }
 }
 
@@ -858,5 +1215,13 @@ fn expect_arity(method: &str, expected: usize, args: &[Value]) -> Result<(), Err
             expected,
             found: args.len(),
         })
+    }
+}
+
+fn envelope_value(record: &Record, field: EnvField) -> Value {
+    match field {
+        EnvField::At => Value::Timestamp(record.at),
+        EnvField::Id => Value::Uuid(record.id.clone()),
+        EnvField::Position => Value::Int(record.position as i64),
     }
 }

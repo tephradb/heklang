@@ -2,8 +2,9 @@ use std::collections::HashMap;
 
 use crate::currency::Currency;
 use crate::ir::{
-    Assign, BinOp, Bind, Command, EventPath, Expr, ExprId, Exprs, Filter, Ident, Literal, Number,
-    Param, Slice, SliceId, Slot, Span, StateVar, Stmt, Type, UnOp, Update,
+    Assign, BinOp, Bind, Command, EnvBind, EnvField, EventPath, Expr, ExprId, Exprs, Filter,
+    Handler, Ident, Literal, Number, Param, Slice, SliceId, Slot, Span, StateVar, Stmt, Type, UnOp,
+    Update,
 };
 use crate::scaled::Rounding;
 
@@ -18,6 +19,8 @@ pub struct Builder {
     span: Span,
     slot_types: Vec<Option<Type>>,
     scopes: Vec<HashMap<Ident, Slot>>,
+    binds: Vec<Bind>,
+    envelope: Vec<EnvBind>,
 }
 
 impl Builder {
@@ -33,6 +36,8 @@ impl Builder {
             span: Span::default(),
             slot_types: Vec::new(),
             scopes: vec![HashMap::new()],
+            binds: Vec::new(),
+            envelope: Vec::new(),
         }
     }
 
@@ -224,5 +229,66 @@ impl Builder {
             states: self.states,
             body,
         }
+    }
+}
+
+impl Builder {
+    /// A destructured payload field: allocated under its own name, so the body
+    /// reaches it bare.
+    pub fn destructure(&mut self, field: &str, ty: Option<Type>) -> Slot {
+        let bind = self.bind(field, ty);
+        let slot = bind.slot;
+        self.binds.push(bind);
+        slot
+    }
+
+    /// A payload field reached through the `as` binding without being destructured.
+    /// Allocated under a name no source token can spell, so `e.total` never puts a
+    /// bare `total` in scope.
+    pub fn payload(&mut self, field: &str, ty: Option<Type>) -> Slot {
+        if let Some(bind) = self.binds.iter().find(|bind| bind.field == field) {
+            return bind.slot;
+        }
+        let slot = self.alloc(format!("@{field}"), ty);
+        self.binds.push(Bind {
+            field: field.to_string(),
+            slot,
+        });
+        slot
+    }
+
+    pub fn envelope(&mut self, field: EnvField) -> Slot {
+        if let Some(bind) = self.envelope.iter().find(|bind| bind.field == field) {
+            return bind.slot;
+        }
+        let slot = self.alloc(format!("@@{field:?}"), Some(field.ty()));
+        self.envelope.push(EnvBind { field, slot });
+        slot
+    }
+
+    pub fn none(&mut self, inner: Type) -> ExprId {
+        self.lit(Literal::None(inner))
+    }
+
+    pub fn finish_handler(self, event: EventPath, body: Vec<Stmt>) -> Handler {
+        Handler {
+            event,
+            binds: self.binds,
+            envelope: self.envelope,
+            frame: self.frame as usize,
+            exprs: self.exprs,
+            body,
+        }
+    }
+}
+
+impl Builder {
+    /// The payload field a slot was bound from, if any. Used to propagate `@subject`
+    /// from an event field into the entity field a handler writes it to.
+    pub fn bound_field(&self, slot: Slot) -> Option<&str> {
+        self.binds
+            .iter()
+            .find(|bind| bind.slot == slot)
+            .map(|bind| bind.field.as_str())
     }
 }

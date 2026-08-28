@@ -40,7 +40,9 @@ pub enum Type {
     Decimal(u8),
     String,
     Uuid,
+    Timestamp,
     Money,
+    Enum(Ident),
     Rounding,
     Opt(Box<Type>),
 }
@@ -59,7 +61,9 @@ impl fmt::Display for Type {
             Type::Decimal(scale) => write!(f, "Decimal({scale})"),
             Type::String => f.write_str("String"),
             Type::Uuid => f.write_str("Uuid"),
+            Type::Timestamp => f.write_str("Timestamp"),
             Type::Money => f.write_str("Money"),
+            Type::Enum(name) => f.write_str(name),
             Type::Rounding => f.write_str("Rounding"),
             Type::Opt(inner) => write!(f, "{inner}?"),
         }
@@ -97,6 +101,7 @@ pub struct Program {
     pub currency: Currency,
     pub events: Vec<EventDef>,
     pub commands: Vec<Command>,
+    pub projectors: Vec<Projector>,
 }
 
 impl Program {
@@ -106,6 +111,12 @@ impl Program {
 
     pub fn command(&self, name: &str) -> Option<&Command> {
         self.commands.iter().find(|command| command.name == name)
+    }
+
+    pub fn projector(&self, name: &str) -> Option<&Projector> {
+        self.projectors
+            .iter()
+            .find(|projector| projector.name == name)
     }
 }
 
@@ -162,6 +173,129 @@ impl FieldDef {
         self.max_len = Some(len);
         self
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct Projector {
+    pub name: Ident,
+    pub enums: Vec<EnumDef>,
+    pub entities: Vec<EntityDef>,
+    pub handlers: Vec<Handler>,
+}
+
+impl Projector {
+    pub fn entity(&self, name: &str) -> Option<&EntityDef> {
+        self.entities.iter().find(|entity| entity.name == name)
+    }
+
+    pub fn enum_def(&self, name: &str) -> Option<&EnumDef> {
+        self.enums.iter().find(|def| def.name == name)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumDef {
+    pub name: Ident,
+    pub variants: Vec<Ident>,
+    pub default: Option<usize>,
+}
+
+impl EnumDef {
+    pub fn has(&self, variant: &str) -> bool {
+        self.variants.iter().any(|found| found == variant)
+    }
+
+    pub fn default_variant(&self) -> Option<&Ident> {
+        self.default.and_then(|index| self.variants.get(index))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EntityDef {
+    pub name: Ident,
+    pub fields: Vec<EntityField>,
+    pub key: usize,
+    pub indexes: Vec<Index>,
+}
+
+impl EntityDef {
+    pub fn field(&self, name: &str) -> Option<&EntityField> {
+        self.fields.iter().find(|field| field.name == name)
+    }
+
+    pub fn key_field(&self) -> &EntityField {
+        &self.fields[self.key]
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EntityField {
+    pub name: Ident,
+    pub ty: Type,
+    pub max_len: Option<usize>,
+    pub default: Option<Literal>,
+    pub subject: Option<Ident>,
+}
+
+impl EntityField {
+    pub fn new(name: impl Into<Ident>, ty: Type) -> Self {
+        Self {
+            name: name.into(),
+            ty,
+            max_len: None,
+            default: None,
+            subject: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Index {
+    pub fields: Vec<Ident>,
+}
+
+/// One `on @path { .. } { .. }` arm. Each handler owns its frame and arena, which
+/// is what makes "handlers do not share state" structural rather than a rule.
+#[derive(Debug, Clone)]
+pub struct Handler {
+    pub event: EventPath,
+    pub binds: Vec<Bind>,
+    pub envelope: Vec<EnvBind>,
+    pub frame: usize,
+    pub exprs: Exprs,
+    pub body: Vec<Stmt>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvField {
+    At,
+    Id,
+    Position,
+}
+
+impl EnvField {
+    pub fn lookup(name: &str) -> Option<Self> {
+        Some(match name {
+            "at" => EnvField::At,
+            "id" => EnvField::Id,
+            "position" => EnvField::Position,
+            _ => return None,
+        })
+    }
+
+    pub fn ty(self) -> Type {
+        match self {
+            EnvField::At => Type::Timestamp,
+            EnvField::Id => Type::Uuid,
+            EnvField::Position => Type::Int,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EnvBind {
+    pub field: EnvField,
+    pub slot: Slot,
 }
 
 #[derive(Debug, Clone)]
@@ -293,7 +427,10 @@ pub enum Literal {
     Decimal { units: i64, scale: u8 },
     Str(String),
     Uuid(String),
+    Timestamp(i64),
+    None(Type),
     Money(i64),
+    Enum { ty: Ident, variant: Ident },
     Rounding(Rounding),
 }
 
@@ -374,6 +511,23 @@ pub enum Stmt {
     Emit {
         event: EventPath,
         fields: Vec<(Ident, ExprId)>,
+        span: Span,
+    },
+    Put {
+        entity: Ident,
+        fields: Vec<(Ident, ExprId)>,
+        span: Span,
+    },
+    Patch {
+        entity: Ident,
+        key: ExprId,
+        loads: Vec<Bind>,
+        fields: Vec<(Ident, ExprId)>,
+        span: Span,
+    },
+    Delete {
+        entity: Ident,
+        key: ExprId,
     },
     Return(Return),
 }

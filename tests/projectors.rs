@@ -1,0 +1,969 @@
+//! `docs/projectors.md` as executable tests, one test per numbered rule.
+
+use heklang::ir::Stmt;
+use heklang::{Event, EventPath, Interpreter, Key, Store, Value, parse};
+
+const EVENTS: &str = "currency USD
+event @order.placed {
+  order_id: Uuid,
+  customer_id: Int,
+  email: String @subject(customer_id) @max(200),
+  total: Money,
+}
+event @order.shipped { order_id: Uuid, tracking: String }
+event @order.purged { order_id: Uuid }
+";
+
+/// A projector with the two entities most of these tests write to.
+fn source(body: &str) -> String {
+    format!(
+        "{EVENTS}projector P {{
+  enum Status {{ @default Placed, Shipped }}
+
+  entity Order {{
+    order_id: Uuid @key,
+    customer_id: Int @index,
+    total: Money,
+    status: Status,
+    tracking: String?,
+  }}
+
+  entity Customer {{
+    customer_id: Int @key,
+    order_count: Int,
+    lifetime_spend: Money,
+  }}
+
+{body}
+}}
+"
+    )
+}
+
+fn placed(seq: u32, customer_id: i64, total: i64) -> Event {
+    Event::new(
+        EventPath::new(["order", "placed"]),
+        [
+            ("order_id", Value::uuid(format!("order-{seq}"))),
+            ("customer_id", Value::Int(customer_id)),
+            ("email", Value::str("ada@example.com")),
+            ("total", Value::Money(total)),
+        ],
+    )
+}
+
+fn shipped(seq: u32, tracking: &str) -> Event {
+    Event::new(
+        EventPath::new(["order", "shipped"]),
+        [
+            ("order_id", Value::uuid(format!("order-{seq}"))),
+            ("tracking", Value::str(tracking)),
+        ],
+    )
+}
+
+fn purged(seq: u32) -> Event {
+    Event::new(
+        EventPath::new(["order", "purged"]),
+        [("order_id", Value::uuid(format!("order-{seq}")))],
+    )
+}
+
+fn err(body: &str) -> String {
+    parse(&source(body))
+        .expect_err("expected this projector to be rejected")
+        .message
+}
+
+/// Runs a projector over `log` and returns its read models.
+fn project(body: &str, log: Vec<Event>) -> Store {
+    let source = source(body);
+    let program = parse(&source).unwrap_or_else(|err| panic!("{err}"));
+    let interpreter = Interpreter::with_log(&program, log);
+    interpreter
+        .project("P")
+        .unwrap_or_else(|err| panic!("{err}"))
+}
+
+const PLACE: &str = "  on @order.placed { order_id, customer_id, total } {
+    put Order {
+      order_id, customer_id, total,
+      status: Placed,
+      tracking: none,
+    }
+    patch Customer[customer_id] {
+      order_count: .order_count + 1,
+      lifetime_spend: .lifetime_spend + total,
+    }
+  }";
+
+// Rule 1: handler form.
+
+#[test]
+fn a_handler_without_as_cannot_reach_the_envelope() {
+    let message = err("  on @order.placed { order_id } {\n    delete Order[e.id]\n  }");
+    assert_eq!(message, "`e` is not in scope");
+}
+
+#[test]
+fn as_binds_at_id_and_position() {
+    let store = project(
+        "  on @order.placed as e { order_id } {
+    put Order {
+      order_id: e.id,
+      customer_id: e.position,
+      total: e.total,
+      status: Placed,
+      tracking: none,
+    }
+  }",
+        vec![placed(9, 7, 2_599), placed(1, 7, 500)],
+    );
+
+    // The second event, so position 1 and the id the interpreter stamped for it.
+    let row = store
+        .get(
+            "Order",
+            &Key::Uuid("0190d1a1-0000-7000-9000-000000000001".into()),
+        )
+        .expect("`e.id` became the key");
+    assert_eq!(row.field("customer_id"), Some(&Value::Int(1)));
+    assert_eq!(
+        row.field("total"),
+        Some(&Value::Money(500)),
+        "`e.total` reads a payload field that was never destructured"
+    );
+}
+
+#[test]
+fn the_envelope_reaches_at_as_a_timestamp() {
+    let source = format!(
+        "{EVENTS}projector P {{
+  entity Stamp {{ order_id: Uuid @key, at: Timestamp? }}
+  on @order.placed as e {{ order_id }} {{
+    put Stamp {{ order_id, at: e.at }}
+  }}
+}}
+"
+    );
+    let program = parse(&source).unwrap_or_else(|err| panic!("{err}"));
+    let interpreter = Interpreter::with_log(&program, vec![placed(1, 7, 2_599)]);
+    let store = interpreter
+        .project("P")
+        .unwrap_or_else(|err| panic!("{err}"));
+    let row = store
+        .get("Stamp", &Key::Uuid("order-1".into()))
+        .expect("the put ran");
+    assert_eq!(
+        row.field("at"),
+        Some(&Value::some(Value::Timestamp(1_577_836_800_000_000))),
+        "`e.at` is epoch microseconds, and a Timestamp? field wraps it"
+    );
+}
+
+#[test]
+fn a_payload_field_reached_through_as_stays_out_of_scope() {
+    let message = err("  on @order.placed as e { order_id } {
+    patch Order[order_id] { total: e.total }
+    patch Order[order_id] { total: total }
+  }");
+    assert_eq!(
+        message, "`total` is not in scope",
+        "`e.total` binds a slot but does not put `total` in scope"
+    );
+}
+#[test]
+fn the_envelope_name_alone_is_not_a_value() {
+    let message = err(
+        "  on @order.placed as e { order_id } {\n    let x = e\n    delete Order[order_id]\n  }",
+    );
+    assert!(message.contains("is the event envelope"), "got: {message}");
+}
+
+// Rule 2: statements.
+
+#[test]
+fn put_writes_every_field_patch_only_the_listed_ones() {
+    let store = project(
+        &format!(
+            "{PLACE}\n\n  on @order.shipped {{ order_id, tracking }} {{\n    patch Order[order_id] {{ status: Shipped, tracking }}\n  }}"
+        ),
+        vec![placed(1, 7, 2_599), shipped(1, "TRK-1")],
+    );
+
+    let row = store
+        .get("Order", &Key::Uuid("order-1".into()))
+        .expect("the row exists");
+    assert_eq!(
+        row.field("total"),
+        Some(&Value::Money(2_599)),
+        "a field the patch did not list is left alone"
+    );
+    assert_eq!(
+        row.field("status"),
+        Some(&Value::Enum {
+            ty: "Status".into(),
+            variant: "Shipped".into()
+        })
+    );
+}
+
+#[test]
+fn put_must_write_every_field() {
+    let source = source("  on @order.placed { order_id } {\n    put Order { order_id }\n  }");
+    let program = parse(&source).expect("a partial `put` parses");
+    let interpreter = Interpreter::with_log(&program, vec![placed(1, 7, 2_599)]);
+    let message = interpreter
+        .project("P")
+        .expect_err("`put` writes all fields")
+        .to_string();
+    assert!(message.contains("is missing field"), "got: {message}");
+}
+
+#[test]
+fn delete_removes_the_row() {
+    let store = project(
+        &format!(
+            "{PLACE}\n\n  on @order.purged {{ order_id }} {{\n    delete Order[order_id]\n  }}"
+        ),
+        vec![placed(1, 7, 2_599), placed(2, 7, 1_000), purged(1)],
+    );
+
+    assert!(store.get("Order", &Key::Uuid("order-1".into())).is_none());
+    assert!(store.get("Order", &Key::Uuid("order-2".into())).is_some());
+}
+
+// Rule 3: stored-value reference.
+
+#[test]
+fn a_leading_dot_reads_the_stored_value_a_bare_name_does_not() {
+    // `total` is the event's field; `.total` is the one already in the row.
+    let store = project(
+        &format!(
+            "{PLACE}\n\n  on @order.placed {{ order_id, total }} {{\n    patch Order[order_id] {{ total: .total + total }}\n  }}"
+        ),
+        vec![placed(1, 7, 2_599)],
+    );
+
+    let row = store
+        .get("Order", &Key::Uuid("order-1".into()))
+        .expect("the row exists");
+    assert_eq!(
+        row.field("total"),
+        Some(&Value::Money(5_198)),
+        "the put stored 2599, then the patch added the event's 2599 to it"
+    );
+}
+
+#[test]
+fn a_dot_field_outside_a_patch_is_an_error() {
+    let message = err("  on @order.placed { order_id, customer_id, total } {
+    put Order {
+      order_id, customer_id,
+      total: .total,
+      status: Placed,
+      tracking: none,
+    }
+  }");
+    assert!(
+        message.contains("only a `patch` value can do"),
+        "got: {message}"
+    );
+
+    let message = err(
+        "  on @order.placed { order_id } {\n    let x = .total\n    delete Order[order_id]\n  }",
+    );
+    assert!(
+        message.contains("only a `patch` value can do"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn a_dot_field_must_name_a_field_of_the_patched_entity() {
+    let message =
+        err("  on @order.placed { order_id } {\n    patch Order[order_id] { total: .nope }\n  }");
+    assert_eq!(message, "entity `Order` has no field `nope`");
+}
+
+#[test]
+fn each_stored_field_is_loaded_once_per_patch() {
+    let source = source(
+        "  on @order.placed { order_id } {\n    patch Order[order_id] { total: .total + .total }\n  }",
+    );
+    let program = parse(&source).unwrap_or_else(|err| panic!("{err}"));
+    let handler = &program.projector("P").expect("declared").handlers[0];
+    let Stmt::Patch { loads, .. } = &handler.body[0] else {
+        panic!("expected a patch");
+    };
+    assert_eq!(loads.len(), 1, "`.total` twice is one stored load");
+    assert_eq!(loads[0].field, "total");
+}
+
+// Rule 4: no general reads.
+
+#[test]
+fn a_handler_cannot_read_another_entity() {
+    // There is no syntax for it: an entity name is not a value.
+    let message = err(
+        "  on @order.placed { order_id } {\n    let x = Customer\n    delete Order[order_id]\n  }",
+    );
+    assert_eq!(message, "`Customer` is not in scope");
+}
+
+#[test]
+fn a_patch_cannot_read_a_different_row() {
+    // `.field` always means the row being patched; there is no way to name another.
+    let message = err(
+        "  on @order.placed { order_id } {\n    patch Order[order_id] { total: Customer.lifetime_spend }\n  }",
+    );
+    assert_eq!(message, "`Customer` is not in scope");
+}
+
+// Rule 5: zero values.
+
+#[test]
+fn a_patch_materializes_a_missing_row_from_zeros() {
+    let store = project(
+        "  on @order.placed { order_id, total } {
+    patch Order[order_id] { total }
+  }",
+        vec![placed(1, 7, 2_599)],
+    );
+
+    let row = store
+        .get("Order", &Key::Uuid("order-1".into()))
+        .expect("the patch materialized the row");
+    assert_eq!(row.field("customer_id"), Some(&Value::Int(0)));
+    assert_eq!(
+        row.field("status"),
+        Some(&Value::Enum {
+            ty: "Status".into(),
+            variant: "Placed".into()
+        }),
+        "an enum starts at its @default variant"
+    );
+    assert_eq!(
+        row.field("tracking"),
+        Some(&Value::none(heklang::Type::String))
+    );
+    assert_eq!(
+        row.field("order_id"),
+        Some(&Value::Uuid("order-1".into())),
+        "the key comes from the subscript, not from a zero"
+    );
+}
+
+#[test]
+fn a_deleted_row_re_materializes_on_the_next_patch() {
+    let store = project(
+        &format!(
+            "{PLACE}\n\n  on @order.purged {{ order_id }} {{\n    delete Order[order_id]\n  }}\n\n  on @order.shipped {{ order_id, tracking }} {{\n    patch Order[order_id] {{ status: Shipped, tracking }}\n  }}"
+        ),
+        vec![placed(1, 7, 2_599), purged(1), shipped(1, "TRK-1")],
+    );
+
+    let row = store
+        .get("Order", &Key::Uuid("order-1".into()))
+        .expect("the patch brought the row back");
+    assert_eq!(
+        row.field("total"),
+        Some(&Value::Money(0)),
+        "the re-materialized row starts from zeros, not from what was deleted"
+    );
+}
+
+#[test]
+fn uuid_and_timestamp_have_no_zero() {
+    for ty in ["Uuid", "Timestamp"] {
+        let source = format!(
+            "{EVENTS}projector P {{
+  entity Thing {{
+    id: Int @key,
+    stamp: {ty},
+  }}
+  on @order.placed {{ order_id }} {{
+    delete Thing[1]
+  }}
+}}
+"
+        );
+        let message = parse(&source)
+            .expect_err("a non-optional {ty} field needs a default")
+            .message;
+        assert_eq!(
+            message,
+            format!("`stamp` is a {ty} with no zero value; give it a default or make it `{ty}?`")
+        );
+    }
+}
+
+#[test]
+fn a_default_or_a_zero_always_has_the_declared_type() {
+    let source =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/hek/place_order.hk"))
+            .expect("the demo command source")
+            + "\n"
+            + &std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/hek/orders.hk"))
+                .expect("the demo projector source");
+    let program = parse(&source).unwrap_or_else(|err| panic!("{err}"));
+
+    for projector in &program.projectors {
+        for entity in &projector.entities {
+            for (index, field) in entity.fields.iter().enumerate() {
+                if index == entity.key {
+                    continue;
+                }
+                let value = heklang::value::initial(field, &projector.enums).unwrap_or_else(|| {
+                    panic!(
+                        "{}.{} has neither default nor zero",
+                        entity.name, field.name
+                    )
+                });
+                assert_eq!(
+                    value.ty(),
+                    field.ty,
+                    "{}.{} starts at the wrong type",
+                    entity.name,
+                    field.name
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_money_default_resolves_at_the_currency_scale() {
+    for (code, units) in [("USD", 0), ("BHD", 0), ("JPY", 0)] {
+        let source = format!(
+            "currency {code}
+event @a.b {{ x: Int }}
+projector P {{
+  entity Thing {{ id: Int @key, spend: Money = 0 }}
+  on @a.b {{ x }} {{ delete Thing[x] }}
+}}
+"
+        );
+        let program = parse(&source).unwrap_or_else(|err| panic!("{code}: {err}"));
+        let entity = &program.projectors[0].entities[0];
+        assert_eq!(
+            entity.fields[1].default,
+            Some(heklang::Literal::Money(units)),
+            "for {code}"
+        );
+    }
+
+    let source = "currency JPY
+event @a.b { x: Int }
+projector P {
+  entity Thing { id: Int @key, spend: Money = 0.50 }
+  on @a.b { x } { delete Thing[x] }
+}
+";
+    assert_eq!(
+        parse(source).expect_err("JPY has no minor units").message,
+        "2 decimal places is too precise for Money"
+    );
+}
+
+#[test]
+fn an_optional_field_takes_no_default() {
+    let message = err_entity("tracking2: String? = \"x\"");
+    assert!(
+        message.contains("is optional, so it is already `none` by default"),
+        "got: {message}"
+    );
+}
+
+// Rule 6: enum defaults.
+
+#[test]
+fn an_enum_field_needs_a_default_variant() {
+    let source = format!(
+        "{EVENTS}projector P {{
+  enum Status {{ Placed, Shipped }}
+  entity Order {{ order_id: Uuid @key, status: Status }}
+  on @order.placed {{ order_id }} {{ delete Order[order_id] }}
+}}
+"
+    );
+    let message = parse(&source).expect_err("no @default variant").message;
+    assert!(
+        message.contains("needs a `@default` variant"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn an_enum_field_may_skip_the_default_when_optional() {
+    let source = format!(
+        "{EVENTS}projector P {{
+  enum Status {{ Placed, Shipped }}
+  entity Order {{ order_id: Uuid @key, status: Status? }}
+  on @order.placed {{ order_id }} {{ delete Order[order_id] }}
+}}
+"
+    );
+    parse(&source).expect("an optional enum field starts at none");
+}
+
+#[test]
+fn an_enum_declares_at_most_one_default() {
+    let source = format!(
+        "{EVENTS}projector P {{
+  enum Status {{ @default Placed, @default Shipped }}
+  entity Order {{ order_id: Uuid @key, status: Status }}
+  on @order.placed {{ order_id }} {{ delete Order[order_id] }}
+}}
+"
+    );
+    assert_eq!(
+        parse(&source).expect_err("two defaults").message,
+        "`Status` has more than one `@default` variant"
+    );
+}
+
+// Rule 7: enum literals.
+
+#[test]
+fn enum_variants_resolve_from_the_target_type() {
+    let source = source(
+        "  on @order.placed { order_id } {\n    patch Order[order_id] { status: Shipped }\n  }",
+    );
+    let program = parse(&source).unwrap_or_else(|err| panic!("{err}"));
+    let handler = &program.projector("P").expect("declared").handlers[0];
+    let Stmt::Patch { fields, .. } = &handler.body[0] else {
+        panic!("expected a patch");
+    };
+    let node = handler.exprs.get(fields[0].1).expect("the value");
+    assert!(
+        matches!(
+            node,
+            heklang::Expr::Lit(heklang::Literal::Enum { ty, variant })
+                if ty == "Status" && variant == "Shipped"
+        ),
+        "got: {node:?}"
+    );
+}
+
+#[test]
+fn a_variant_the_target_enum_lacks_is_an_error() {
+    let message = err(
+        "  on @order.placed { order_id } {\n    patch Order[order_id] { status: Cancelled }\n  }",
+    );
+    assert_eq!(message, "`Status` has no variant `Cancelled`");
+}
+
+#[test]
+fn an_ambiguous_variant_names_the_candidates() {
+    let source = format!(
+        "{EVENTS}projector P {{
+  enum Status {{ @default Placed, Shipped }}
+  enum Leg {{ @default Placed, Flown }}
+  entity Order {{ order_id: Uuid @key, status: Status }}
+  on @order.placed {{ order_id }} {{
+    let x = Placed
+    patch Order[order_id] {{ status: x }}
+  }}
+}}
+"
+    );
+    let message = parse(&source)
+        .expect_err("two enums declare `Placed`")
+        .message;
+    assert!(
+        message.contains("`Placed` is a variant of Status and Leg"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn an_unambiguous_variant_needs_no_target() {
+    let source = source(
+        "  on @order.placed { order_id } {
+    let s = Shipped
+    patch Order[order_id] { status: s }
+  }",
+    );
+    parse(&source).expect("`Shipped` is a variant of exactly one enum");
+}
+
+// Rule 8: indexes.
+
+#[test]
+fn indexes_are_recorded_in_the_ir() {
+    let source = format!(
+        "{EVENTS}projector P {{
+  enum Status {{ @default Placed, Shipped }}
+  entity Order {{
+    order_id: Uuid @key,
+    customer_id: Int @index,
+    status: Status,
+
+    index (customer_id, status)
+  }}
+  on @order.placed {{ order_id }} {{ delete Order[order_id] }}
+}}
+"
+    );
+    let program = parse(&source).unwrap_or_else(|err| panic!("{err}"));
+    let entity = &program.projectors[0].entities[0];
+    assert_eq!(entity.indexes.len(), 2);
+    assert_eq!(entity.indexes[0].fields, ["customer_id"]);
+    assert_eq!(
+        entity.indexes[1].fields,
+        ["customer_id", "status"],
+        "a compound index keeps its order"
+    );
+}
+
+#[test]
+fn an_index_must_name_declared_fields() {
+    let message = err_entity_body("order_id: Uuid @key,\n    total: Money,\n\n    index (nope)");
+    assert_eq!(message, "entity `Order` has no field `nope` to index");
+}
+
+#[test]
+fn index_is_still_usable_as_a_field_name() {
+    let source = format!(
+        "{EVENTS}projector P {{
+  entity Order {{ order_id: Uuid @key, index: Int }}
+  on @order.placed {{ order_id }} {{ delete Order[order_id] }}
+}}
+"
+    );
+    parse(&source).expect("`index` is a soft keyword");
+}
+
+// Rule 10: scoping.
+
+#[test]
+fn handlers_do_not_share_slots() {
+    let source = source(
+        "  on @order.placed { order_id, total } {
+    let mine = total
+    patch Order[order_id] { total: mine }
+  }
+
+  on @order.shipped { order_id, tracking } {
+    patch Order[order_id] { tracking }
+  }",
+    );
+    let program = parse(&source).unwrap_or_else(|err| panic!("{err}"));
+    let handlers = &program.projector("P").expect("declared").handlers;
+    assert_eq!(handlers.len(), 2);
+    assert!(
+        handlers[1].frame < handlers[0].frame,
+        "the second handler starts its own frame rather than continuing the first"
+    );
+}
+
+#[test]
+fn a_name_from_one_handler_is_not_in_scope_in_another() {
+    let message = err("  on @order.placed { order_id, total } {
+    let mine = total
+    patch Order[order_id] { total: mine }
+  }
+
+  on @order.shipped { order_id } {
+    patch Order[order_id] { total: mine }
+  }");
+    assert_eq!(message, "`mine` is not in scope");
+}
+
+// Rule 9: subject propagation. The propagation is live; the checks are not, so
+// these are the tests that turn on when `check_subjects` grows a body.
+
+#[test]
+#[ignore = "rule 9: the subject conflict check is not implemented yet"]
+fn two_handlers_with_different_subjects_conflict() {
+    unimplemented!("assert that writing `email` under two subjects is rejected")
+}
+
+#[test]
+#[ignore = "rule 9: the subject discard check is not implemented yet"]
+fn discarding_a_subject_binding_is_an_error() {
+    unimplemented!("assert that a subject-bound value cannot land in an unbound field")
+}
+
+// Declaration collection: a projector may precede the events it uses.
+
+#[test]
+fn a_projector_may_precede_the_events_it_uses() {
+    let source = "currency USD
+projector P {
+  entity Order { order_id: Uuid @key, total: Money }
+  on @order.placed { order_id, total } {
+    put Order { order_id, total }
+  }
+}
+
+event @order.placed { order_id: Uuid, total: Money }
+";
+    let program = parse(source).expect("events are collected before handler bodies are parsed");
+    assert_eq!(program.projectors[0].handlers.len(), 1);
+}
+
+#[test]
+fn an_entity_may_precede_the_enum_it_names() {
+    let source = "currency USD
+event @a.b { x: Int }
+projector P {
+  entity Thing { id: Int @key, status: Status }
+  enum Status { @default On, Off }
+  on @a.b { x } { delete Thing[x] }
+}
+";
+    let program = parse(source).expect("enums are collected before entities are parsed");
+    assert_eq!(
+        program.projectors[0].entities[0].fields[1].ty,
+        heklang::Type::Enum("Status".into())
+    );
+}
+
+#[test]
+fn duplicate_projector_declarations_are_rejected() {
+    let source = "currency USD
+event @a.b { x: Int }
+projector P {
+  entity Thing { id: Int @key }
+  on @a.b { x } { delete Thing[x] }
+}
+projector P {
+  entity Other { id: Int @key }
+  on @a.b { x } { delete Other[x] }
+}
+";
+    assert_eq!(
+        parse(source).expect_err("duplicate projector").message,
+        "projector `P` is declared twice"
+    );
+}
+
+#[test]
+fn entities_are_scoped_to_their_projector() {
+    let source = "currency USD
+event @a.b { x: Int }
+projector P {
+  entity Thing { id: Int @key }
+  on @a.b { x } { delete Thing[x] }
+}
+projector Q {
+  entity Other { id: Int @key }
+  on @a.b { x } { delete Thing[x] }
+}
+";
+    assert_eq!(
+        parse(source).expect_err("`Thing` belongs to P").message,
+        "entity `Thing` is not declared"
+    );
+}
+
+// Keys.
+
+#[test]
+fn a_uuid_key_and_a_string_key_are_distinct() {
+    let same = "same-text";
+    assert_ne!(
+        Key::from_value(&Value::uuid(same)),
+        Key::from_value(&Value::str(same)),
+        "the key discriminant survives, so a Uuid never collides with a String"
+    );
+    assert_eq!(Key::from_value(&Value::Money(1)), None);
+    assert_eq!(Key::from_value(&Value::Bool(true)), None);
+}
+
+#[test]
+fn a_key_must_be_an_orderable_scalar() {
+    for (ty, literal) in [("Money", "Money"), ("Bool", "Bool")] {
+        let source = format!(
+            "currency USD
+event @a.b {{ x: Int }}
+projector P {{
+  entity Thing {{ id: {ty} @key }}
+  on @a.b {{ x }} {{ delete Thing[x] }}
+}}
+"
+        );
+        assert_eq!(
+            parse(&source).expect_err("{ty} cannot be a key").message,
+            format!("`id` is a {literal}, which cannot be an entity key")
+        );
+    }
+}
+
+#[test]
+fn an_entity_needs_exactly_one_key() {
+    let message = err_entity_body("order_id: Uuid, total: Money");
+    assert_eq!(message, "entity `Order` has no `@key` field");
+
+    let message = err_entity_body("order_id: Uuid @key, total: Money @key");
+    assert_eq!(message, "entity `Order` has more than one `@key`");
+}
+
+// Statement gating.
+
+#[test]
+fn emit_is_a_command_statement_and_the_writes_are_not() {
+    let message =
+        err("  on @order.placed { order_id } {\n    emit @order.purged { order_id }\n  }");
+    assert!(
+        message.contains("only appear in a command"),
+        "got: {message}"
+    );
+
+    for keyword in ["put", "patch", "delete"] {
+        let source = format!(
+            "currency USD
+event @a.b {{ x: Int }}
+command C(x: Int) {{
+  {keyword} Thing
+  return
+}}
+"
+        );
+        let message = parse(&source).expect_err("a write in a command").message;
+        assert!(
+            message.contains("only appear in a projector"),
+            "for `{keyword}`, got: {message}"
+        );
+    }
+}
+
+// Helpers that build a one-entity projector to exercise entity-level errors.
+
+fn err_entity(field: &str) -> String {
+    err_entity_body(&format!("order_id: Uuid @key,\n    {field}"))
+}
+
+fn err_entity_body(body: &str) -> String {
+    let source = format!(
+        "{EVENTS}projector P {{
+  entity Order {{
+    {body}
+  }}
+  on @order.placed {{ order_id }} {{ delete Order[order_id] }}
+}}
+"
+    );
+    parse(&source)
+        .expect_err("expected this entity to be rejected")
+        .message
+}
+
+// Spans: a write-time failure points at the expression that produced the value.
+
+#[test]
+fn a_max_violation_reports_a_line_and_column() {
+    // `notes` carries no `@max`, so writing it into a field that has one is the
+    // schema bug the `@max` invariant forbids. Until the checker exists, this is
+    // where it surfaces.
+    let source = "currency USD
+event @order.placed { order_id: Uuid, notes: String }
+projector P {
+  entity Note {
+    order_id: Uuid @key,
+    note: String @max(8),
+  }
+  on @order.placed { order_id, notes } {
+    put Note { order_id, note: notes }
+  }
+}
+";
+    let program = parse(source).unwrap_or_else(|err| panic!("{err}"));
+    let log = vec![Event::new(
+        EventPath::new(["order", "placed"]),
+        [
+            ("order_id", Value::uuid("order-1")),
+            ("notes", Value::str("leave at the door")),
+        ],
+    )];
+    let interpreter = Interpreter::with_log(&program, log);
+    let err = interpreter
+        .project("P")
+        .expect_err("17 characters into @max(8)");
+
+    assert_eq!(
+        err.to_string(),
+        "9:32: note is 17 characters, the most allowed is 8"
+    );
+    let line = source.lines().nth(8).expect("line 9");
+    assert_eq!(
+        &line[31..36],
+        "notes",
+        "column 32 is the expression that produced the value"
+    );
+}
+
+#[test]
+fn a_command_reports_the_same_violation_as_an_outcome() {
+    // The same annotation, the other failure mode: a command has a validation
+    // channel to route it through, so it is `Invalid` rather than an error.
+    let source = "currency USD
+event @order.placed { order_id: Uuid, notes: String @max(8) }
+command C(order_id: Uuid, notes: String) {
+  emit @order.placed { order_id, notes }
+}
+";
+    let program = parse(source).unwrap_or_else(|err| panic!("{err}"));
+    let mut interpreter = Interpreter::new(&program);
+    let execution = interpreter
+        .run(
+            "C",
+            [
+                ("order_id", Value::uuid("order-1")),
+                ("notes", Value::str("leave at the door")),
+            ],
+        )
+        .expect("an over-length field is not an error in a command");
+
+    assert_eq!(
+        execution.outcome,
+        heklang::Outcome::Invalid("notes is 17 characters, the most allowed is 8".into())
+    );
+    assert!(
+        interpreter.log().is_empty(),
+        "a rejected command appends nothing"
+    );
+}
+
+#[test]
+fn a_subject_propagates_from_the_event_into_the_entity_field() {
+    // `email` is `@subject(customer_id)` on the event. The entity does not restate
+    // it; the binding arrives with the value.
+    let source = source(
+        "  on @order.placed { order_id, customer_id, email, total } {
+    put Order {
+      order_id, customer_id, total,
+      status: Placed,
+      tracking: none,
+    }
+    patch Customer[customer_id] { note: email }
+  }",
+    )
+    .replace(
+        "    order_count: Int,",
+        "    order_count: Int,\n    note: String,",
+    );
+    let program = parse(&source).unwrap_or_else(|err| panic!("{err}"));
+    let customer = program
+        .projector("P")
+        .expect("declared")
+        .entity("Customer")
+        .expect("declared");
+
+    assert_eq!(
+        customer.field("note").expect("declared").subject.as_deref(),
+        Some("customer_id"),
+        "the subject propagated from @order.placed.email"
+    );
+    assert_eq!(
+        customer
+            .field("order_count")
+            .expect("declared")
+            .subject
+            .as_deref(),
+        None,
+        "a field written from an unbound value carries no subject"
+    );
+}

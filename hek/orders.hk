@@ -1,0 +1,90 @@
+// projectors/orders.hk
+
+projector Orders {
+  enum Status { @default Placed, Shipped, Cancelled }
+
+  entity Order {
+    order_id: Uuid @key,
+    customer_id: Int @index,
+    email: String @max(200),
+    total: Money,
+    previous_total: Money,
+    status: Status,
+    tracking: String?,
+    placed_at: Timestamp?,
+
+    index (customer_id, status)
+  }
+
+  entity Customer {
+    customer_id: Int @key,
+    order_count: Int,
+    lifetime_spend: Money,
+    name: String = "unknown",
+  }
+
+  on @order.placed as e { order_id, customer_id, email, total } {
+    put Order {
+      order_id, customer_id, email, total,
+      previous_total: total,
+      status: Placed,
+      tracking: none,
+      placed_at: e.at,
+    }
+    patch Customer[customer_id] {
+      order_count: .order_count + 1,
+      lifetime_spend: .lifetime_spend + total,
+    }
+  }
+
+  // `total` is the event's new price; `.total` is the one already stored.
+  on @order.repriced { order_id, total } {
+    patch Order[order_id] {
+      total,
+      previous_total: .total,
+    }
+  }
+
+  on @order.shipped { order_id, tracking } {
+    patch Order[order_id] { status: Shipped, tracking }
+  }
+
+  on @order.cancelled { order_id } {
+    patch Order[order_id] { status: Cancelled }
+  }
+
+  on @order.purged { order_id } {
+    delete Order[order_id]
+  }
+}
+
+// A schema bug on purpose: `notes` carries no `@max`, so writing it into a field
+// that has one is exactly what the `@max` invariant forbids. The checker will
+// reject this statically; until then it is a runtime error with a location.
+projector Notes {
+  entity OrderNote {
+    order_id: Uuid @key,
+    note: String @max(8),
+  }
+
+  on @order.placed { order_id, notes } {
+    put OrderNote { order_id, note: notes }
+  }
+}
+
+// Declared below the projectors that use them, which is the point of two-pass
+// collection.
+
+event @order.repriced {
+  order_id: Uuid,
+  total: Money,
+}
+
+event @order.shipped {
+  order_id: Uuid,
+  tracking: String,
+}
+
+event @order.purged {
+  order_id: Uuid,
+}

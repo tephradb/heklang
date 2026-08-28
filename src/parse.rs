@@ -3,11 +3,13 @@ use std::collections::HashMap;
 use crate::build::Builder;
 use crate::currency::Currency;
 use crate::ir::{
-    BinOp, Command, EventDef, EventPath, Expr, ExprId, FieldDef, Filter, Literal, Number, Program,
-    Return, Span, Stmt, Type, UnOp, Update,
+    BinOp, Bind, Command, EntityDef, EntityField, EnumDef, EnvField, EventDef, EventPath, Expr,
+    ExprId, FieldDef, Filter, Handler, Ident, Index, Literal, Number, Program, Projector, Return,
+    Slot, Span, Stmt, Type, UnOp, Update,
 };
 use crate::lex::{Keyword, Spanned, Sym, SyntaxError, Token, lex};
 use crate::scaled::Rounding;
+use crate::value;
 
 pub fn parse(source: &str) -> Result<Program, SyntaxError> {
     Parser {
@@ -15,6 +17,11 @@ pub fn parse(source: &str) -> Result<Program, SyntaxError> {
         pos: 0,
         prologue: false,
         command_end: 0,
+        enums: Vec::new(),
+        entities: Vec::new(),
+        event: None,
+        envelope: None,
+        stored: None,
     }
     .program()
 }
@@ -27,11 +34,28 @@ struct Lower {
     currency: Currency,
 }
 
+/// Parsing state that the expression ladder needs but cannot be threaded through it,
+/// since those functions take only the unit being lowered and a type hint.
 struct Parser {
     tokens: Vec<Spanned>,
     pos: usize,
     prologue: bool,
     command_end: usize,
+    /// The enclosing projector's declarations; empty outside one.
+    enums: Vec<EnumDef>,
+    entities: Vec<EntityDef>,
+    /// The handler being parsed: its event, and the name its `as` clause bound.
+    event: Option<EventDef>,
+    envelope: Option<Ident>,
+    /// Set only while parsing a `patch` value, which is what makes `.field`
+    /// structurally illegal anywhere else.
+    stored: Option<Stored>,
+}
+
+struct Stored {
+    entity: EntityDef,
+    loads: Vec<Bind>,
+    slots: HashMap<Ident, Slot>,
 }
 
 impl Parser {
@@ -99,7 +123,7 @@ impl Parser {
             (Some(span), true) => format!(
                 "`{name}` is defined at {span}, below the declarations; \
                  `guard` and `state` run before the body, so they can only use names \
-                 bound above them — move that `let` up"
+                 bound above them; move that `let` up"
             ),
             (Some(span), false) => {
                 format!("`{name}` is not in scope yet; it is defined below at {span}")
@@ -205,6 +229,7 @@ impl Parser {
 
         let items = self.pos;
         let mut events: Vec<EventDef> = Vec::new();
+        let mut projectors: Vec<Projector> = Vec::new();
         loop {
             match self.peek() {
                 Token::End => break,
@@ -215,13 +240,22 @@ impl Parser {
                     }
                     events.push(event);
                 }
+                Token::Word(Keyword::Projector) => {
+                    let projector = self.projector_shell(&currency)?;
+                    if projectors.iter().any(|other| other.name == projector.name) {
+                        return self
+                            .fail(format!("projector `{}` is declared twice", projector.name));
+                    }
+                    projectors.push(projector);
+                }
                 Token::Word(Keyword::Command) => self.skip_item()?,
-                other => return self.fail(format!("expected `event` or `command`, found {other}")),
+                other => return self.fail(Self::expected_item(other)),
             }
         }
 
         self.pos = items;
         let mut commands = Vec::new();
+        let mut seen = 0usize;
         loop {
             match self.peek() {
                 Token::End => break,
@@ -236,7 +270,14 @@ impl Parser {
                     }
                     commands.push(command);
                 }
-                other => return self.fail(format!("expected `event` or `command`, found {other}")),
+                Token::Word(Keyword::Projector) => {
+                    let (handlers, entities) =
+                        self.projector_handlers(&projectors[seen], &events, &currency)?;
+                    projectors[seen].handlers = handlers;
+                    projectors[seen].entities = entities;
+                    seen += 1;
+                }
+                other => return self.fail(Self::expected_item(other)),
             }
         }
 
@@ -244,11 +285,109 @@ impl Parser {
             currency,
             events,
             commands,
+            projectors,
         })
     }
 
-    fn skip_item(&mut self) -> Result<(), SyntaxError> {
-        self.bump();
+    fn expected_item(found: &Token) -> String {
+        format!("expected `event`, `command` or `projector`, found {found}")
+    }
+
+    /// Collects a projector's `enum` and `entity` declarations, leaving its handlers
+    /// for the second pass, so a handler may reference an event declared later or in
+    /// another file. Two sub-passes, because an entity field may name an enum
+    /// declared below it.
+    fn projector_shell(&mut self, currency: &Currency) -> Result<Projector, SyntaxError> {
+        self.expect_word(Keyword::Projector)?;
+        let name = self.expect_ident()?;
+        self.expect_sym(Sym::LBrace)?;
+        let body = self.pos;
+
+        let mut enums: Vec<EnumDef> = Vec::new();
+        while !self.at_sym(Sym::RBrace) && !matches!(self.peek(), Token::End) {
+            match self.peek() {
+                Token::Word(Keyword::Enum) => {
+                    let def = self.enum_decl()?;
+                    if enums.iter().any(|other| other.name == def.name) {
+                        return self.fail(format!("enum `{}` is declared twice", def.name));
+                    }
+                    enums.push(def);
+                }
+                Token::Word(Keyword::Entity) => self.skip_braced()?,
+                Token::Word(Keyword::On) => self.skip_handler()?,
+                other => return self.fail(Self::expected_member(other)),
+            }
+        }
+
+        self.pos = body;
+        self.enums = enums;
+        let mut entities: Vec<EntityDef> = Vec::new();
+        while !self.at_sym(Sym::RBrace) && !matches!(self.peek(), Token::End) {
+            match self.peek() {
+                Token::Word(Keyword::Enum) => self.skip_braced()?,
+                Token::Word(Keyword::Entity) => {
+                    let def = self.entity_decl(currency)?;
+                    if entities.iter().any(|other| other.name == def.name) {
+                        return self.fail(format!("entity `{}` is declared twice", def.name));
+                    }
+                    entities.push(def);
+                }
+                Token::Word(Keyword::On) => self.skip_handler()?,
+                other => return self.fail(Self::expected_member(other)),
+            }
+        }
+        self.expect_sym(Sym::RBrace)?;
+
+        let enums = std::mem::take(&mut self.enums);
+        if entities.is_empty() {
+            return self.fail(format!("projector `{name}` declares no entities"));
+        }
+
+        Ok(Projector {
+            name,
+            enums,
+            entities,
+            handlers: Vec::new(),
+        })
+    }
+
+    fn expected_member(found: &Token) -> String {
+        format!("expected `enum`, `entity` or `on`, found {found}")
+    }
+
+    /// Returns the handlers and the entities, which the pass may have annotated with
+    /// propagated subjects (rule 9).
+    fn projector_handlers(
+        &mut self,
+        projector: &Projector,
+        events: &[EventDef],
+        currency: &Currency,
+    ) -> Result<(Vec<Handler>, Vec<EntityDef>), SyntaxError> {
+        self.expect_word(Keyword::Projector)?;
+        self.expect_ident()?;
+        self.expect_sym(Sym::LBrace)?;
+
+        self.enums = projector.enums.clone();
+        self.entities = projector.entities.clone();
+
+        let mut handlers = Vec::new();
+        while !self.at_sym(Sym::RBrace) && !matches!(self.peek(), Token::End) {
+            match self.peek() {
+                Token::Word(Keyword::Enum) | Token::Word(Keyword::Entity) => self.skip_braced()?,
+                Token::Word(Keyword::On) => {
+                    handlers.push(self.handler(&projector.name, events, currency)?)
+                }
+                other => return self.fail(Self::expected_member(other)),
+            }
+        }
+        self.expect_sym(Sym::RBrace)?;
+
+        self.enums.clear();
+        Ok((handlers, std::mem::take(&mut self.entities)))
+    }
+
+    /// Scans to the next `{` and skips the balanced block.
+    fn skip_braced(&mut self) -> Result<(), SyntaxError> {
         while !self.at_sym(Sym::LBrace) {
             if matches!(self.peek(), Token::End) {
                 return self.fail("expected `{`, found end of file");
@@ -271,6 +410,402 @@ impl Parser {
         }
     }
 
+    /// A handler is two adjacent blocks: the destructure and the body.
+    fn skip_handler(&mut self) -> Result<(), SyntaxError> {
+        self.skip_braced()?;
+        self.skip_braced()
+    }
+
+    fn skip_item(&mut self) -> Result<(), SyntaxError> {
+        self.bump();
+        self.skip_braced()
+    }
+
+    fn enum_decl(&mut self) -> Result<EnumDef, SyntaxError> {
+        self.expect_word(Keyword::Enum)?;
+        let name = self.expect_ident()?;
+        self.expect_sym(Sym::LBrace)?;
+
+        let mut variants: Vec<Ident> = Vec::new();
+        let mut default = None;
+        while !self.at_sym(Sym::RBrace) {
+            let mut marked = false;
+            if let Token::Path(segments) = self.peek().clone() {
+                let [annotation] = segments.as_slice() else {
+                    return self.fail("an annotation name cannot contain `.`");
+                };
+                if annotation != "default" {
+                    return self.fail(format!("unknown annotation `@{annotation}`"));
+                }
+                self.bump();
+                marked = true;
+            }
+
+            let (line, col) = self.here();
+            let variant = self.expect_ident()?;
+            if variants.contains(&variant) {
+                return Err(SyntaxError::new(
+                    format!("`{name}` declares `{variant}` twice"),
+                    line,
+                    col,
+                ));
+            }
+            if marked {
+                if default.is_some() {
+                    return Err(SyntaxError::new(
+                        format!("`{name}` has more than one `@default` variant"),
+                        line,
+                        col,
+                    ));
+                }
+                default = Some(variants.len());
+            }
+            variants.push(variant);
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RBrace)?;
+
+        if variants.is_empty() {
+            return self.fail(format!("enum `{name}` declares no variants"));
+        }
+        Ok(EnumDef {
+            name,
+            variants,
+            default,
+        })
+    }
+
+    fn entity_decl(&mut self, currency: &Currency) -> Result<EntityDef, SyntaxError> {
+        self.expect_word(Keyword::Entity)?;
+        let name = self.expect_ident()?;
+        self.expect_sym(Sym::LBrace)?;
+
+        let mut fields: Vec<EntityField> = Vec::new();
+        let mut at: Vec<(u32, u32)> = Vec::new();
+        let mut indexes: Vec<Index> = Vec::new();
+        let mut key: Option<usize> = None;
+
+        while !self.at_sym(Sym::RBrace) {
+            if self.at_index_clause() {
+                indexes.push(self.index_clause()?);
+                if !self.eat_sym(Sym::Comma) {
+                    break;
+                }
+                continue;
+            }
+
+            let (line, col) = self.here();
+            let field_name = self.expect_ident()?;
+            if fields.iter().any(|field| field.name == field_name) {
+                return Err(SyntaxError::new(
+                    format!("entity `{name}` declares `{field_name}` twice"),
+                    line,
+                    col,
+                ));
+            }
+            self.expect_sym(Sym::Colon)?;
+            let ty = self.type_ref()?;
+            let mut field = EntityField::new(&field_name, ty.clone());
+            let mut is_key = false;
+
+            while let Token::Path(segments) = self.peek().clone() {
+                self.bump();
+                let [annotation] = segments.as_slice() else {
+                    return self.fail("an annotation name cannot contain `.`");
+                };
+                match annotation.as_str() {
+                    "key" => is_key = true,
+                    "index" => indexes.push(Index {
+                        fields: vec![field_name.clone()],
+                    }),
+                    "max" => {
+                        self.expect_sym(Sym::LParen)?;
+                        let number = self.expect_number()?;
+                        if number.scale != 0 {
+                            return self.fail("`@max` takes a whole number");
+                        }
+                        let Ok(max) = usize::try_from(number.digits) else {
+                            return self.fail("`@max` is too large");
+                        };
+                        field.max_len = Some(max);
+                        self.expect_sym(Sym::RParen)?;
+                    }
+                    other => return self.fail(format!("unknown annotation `@{other}`")),
+                }
+            }
+
+            if self.eat_sym(Sym::Assign) {
+                if matches!(ty, Type::Opt(_)) {
+                    return self.fail(format!(
+                        "`{field_name}` is optional, so it is already `none` by default"
+                    ));
+                }
+                field.default = Some(self.default_literal(&ty, currency)?);
+            }
+
+            if is_key {
+                if key.is_some() {
+                    return Err(SyntaxError::new(
+                        format!("entity `{name}` has more than one `@key`"),
+                        line,
+                        col,
+                    ));
+                }
+                if !value::can_key(&ty) {
+                    return Err(SyntaxError::new(
+                        format!("`{field_name}` is a {ty}, which cannot be an entity key"),
+                        line,
+                        col,
+                    ));
+                }
+                key = Some(fields.len());
+            }
+
+            fields.push(field);
+            at.push((line, col));
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RBrace)?;
+
+        let Some(key) = key else {
+            return self.fail(format!("entity `{name}` has no `@key` field"));
+        };
+
+        for index in &indexes {
+            for column in &index.fields {
+                if !fields.iter().any(|field| &field.name == column) {
+                    return self.fail(format!("entity `{name}` has no field `{column}` to index"));
+                }
+            }
+        }
+
+        for (position, field) in fields.iter().enumerate() {
+            if position == key || field.default.is_some() {
+                continue;
+            }
+            let (line, col) = at[position];
+            if let Type::Enum(enum_name) = &field.ty
+                && self
+                    .enum_def(enum_name)
+                    .is_some_and(|def| def.default.is_none())
+            {
+                return Err(SyntaxError::new(
+                    format!(
+                        "`{enum_name}` needs a `@default` variant to be a field of `{name}`, or `{}` must be optional",
+                        field.name
+                    ),
+                    line,
+                    col,
+                ));
+            }
+            if value::zero(&field.ty, &self.enums).is_none() {
+                let ty = &field.ty;
+                return Err(SyntaxError::new(
+                    format!(
+                        "`{}` is a {ty} with no zero value; give it a default or make it `{ty}?`",
+                        field.name
+                    ),
+                    line,
+                    col,
+                ));
+            }
+        }
+
+        Ok(EntityDef {
+            name,
+            fields,
+            key,
+            indexes,
+        })
+    }
+
+    /// `index` stays a soft keyword, so it is still usable as a field name.
+    fn at_index_clause(&self) -> bool {
+        matches!(self.peek(), Token::Ident(word) if word == "index")
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|next| &next.token),
+                Some(Token::Sym(Sym::LParen))
+            )
+    }
+
+    fn index_clause(&mut self) -> Result<Index, SyntaxError> {
+        self.bump();
+        self.expect_sym(Sym::LParen)?;
+        let mut columns = Vec::new();
+        while !self.at_sym(Sym::RParen) {
+            columns.push(self.expect_ident()?);
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RParen)?;
+        if columns.is_empty() {
+            return self.fail("an index needs at least one field");
+        }
+        Ok(Index { fields: columns })
+    }
+
+    /// A field default is a literal, resolved here against the declared type and the
+    /// program currency, so nothing unresolved reaches the IR and a default always
+    /// agrees in type with the zero it replaces.
+    fn default_literal(&mut self, ty: &Type, currency: &Currency) -> Result<Literal, SyntaxError> {
+        let negated = self.eat_sym(Sym::Minus);
+        let spanned = self.bump();
+        let (line, col) = (spanned.line, spanned.col);
+        let bad = |found: &str| {
+            SyntaxError::new(format!("a {ty} field cannot default to {found}"), line, col)
+        };
+
+        let lit = match spanned.token {
+            Token::Number(number) => {
+                let digits = if negated {
+                    -number.digits
+                } else {
+                    number.digits
+                };
+                Number::new(digits, number.scale)
+                    .resolve(ty, currency)
+                    .map_err(|err| SyntaxError::new(err.to_string(), line, col))?
+            }
+            _ if negated => return Err(bad("a negated value")),
+            Token::Text(text) => Literal::Str(text),
+            Token::Word(Keyword::True) => Literal::Bool(true),
+            Token::Word(Keyword::False) => Literal::Bool(false),
+            Token::Ident(variant) => {
+                let Type::Enum(enum_name) = ty else {
+                    return Err(bad(&format!("`{variant}`")));
+                };
+                let Some(def) = self.enum_def(enum_name) else {
+                    return Err(bad(&format!("`{variant}`")));
+                };
+                if !def.has(&variant) {
+                    return Err(SyntaxError::new(
+                        format!("`{enum_name}` has no variant `{variant}`"),
+                        line,
+                        col,
+                    ));
+                }
+                Literal::Enum {
+                    ty: enum_name.clone(),
+                    variant,
+                }
+            }
+            other => return Err(bad(&other.to_string())),
+        };
+
+        let found = value::literal(&lit).ty();
+        if &found != ty {
+            return Err(SyntaxError::new(
+                format!("a {ty} field cannot default to a {found}"),
+                line,
+                col,
+            ));
+        }
+        Ok(lit)
+    }
+
+    fn enum_def(&self, name: &str) -> Option<&EnumDef> {
+        self.enums.iter().find(|def| def.name == name)
+    }
+
+    fn entity_def(&self, name: &str) -> Option<&EntityDef> {
+        self.entities.iter().find(|def| def.name == name)
+    }
+
+    fn handler(
+        &mut self,
+        projector: &Ident,
+        events: &[EventDef],
+        currency: &Currency,
+    ) -> Result<Handler, SyntaxError> {
+        self.expect_word(Keyword::On)?;
+        let path = self.expect_path()?;
+        let def = self.event_def(events, &path)?.clone();
+
+        let mut lower = Lower {
+            b: Builder::new(projector),
+            defaults: HashMap::new(),
+            currency: currency.clone(),
+        };
+
+        let envelope = if self.eat_word(Keyword::As) {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+
+        self.expect_sym(Sym::LBrace)?;
+        while !self.at_sym(Sym::RBrace) {
+            let field = self.expect_ident()?;
+            let Some(declared) = def.field(&field) else {
+                return self.fail(format!("{path} has no field `{field}`"));
+            };
+            lower.b.destructure(&field, Some(declared.ty.clone()));
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RBrace)?;
+
+        self.expect_sym(Sym::LBrace)?;
+        self.command_end = self.command_end();
+        self.event = Some(def);
+        self.envelope = envelope;
+        let body = self.statements(&mut lower, events)?;
+        self.expect_sym(Sym::RBrace)?;
+        self.event = None;
+        self.envelope = None;
+
+        Ok(lower.b.finish_handler(path, body))
+    }
+
+    fn in_handler(&self) -> bool {
+        self.event.is_some()
+    }
+
+    /// `e.at` / `e.id` / `e.position` become envelope slots; anything else is a
+    /// payload field, bound on demand.
+    fn envelope_access(
+        &mut self,
+        lower: &mut Lower,
+        name: &str,
+        span: Span,
+    ) -> Result<ExprId, SyntaxError> {
+        if !self.eat_sym(Sym::Dot) {
+            return Err(SyntaxError::new(
+                format!("`{name}` is the event envelope; read a field from it, like `{name}.at`"),
+                span.line,
+                span.col,
+            ));
+        }
+
+        let (line, col) = self.here();
+        let field = self.expect_ident()?;
+        lower.b.at(span);
+
+        if let Some(env) = EnvField::lookup(&field) {
+            let slot = lower.b.envelope(env);
+            return Ok(lower.b.read(slot));
+        }
+
+        let def = self.event.as_ref().expect("only called inside a handler");
+        let Some(declared) = def.field(&field) else {
+            return Err(SyntaxError::new(
+                format!(
+                    "{} has no field `{field}`, and the envelope carries only `at`, `id` and `position`",
+                    def.path
+                ),
+                line,
+                col,
+            ));
+        };
+        let slot = lower.b.payload(&field, Some(declared.ty.clone()));
+        Ok(lower.b.read(slot))
+    }
     fn event_decl(&mut self) -> Result<EventDef, SyntaxError> {
         self.expect_word(Keyword::Event)?;
         let path = self.expect_path()?;
@@ -329,6 +864,7 @@ impl Parser {
             "String" => Type::String,
             "Uuid" => Type::Uuid,
             "Money" => Type::Money,
+            "Timestamp" => Type::Timestamp,
             "Decimal" => {
                 self.expect_sym(Sym::LParen)?;
                 let number = self.expect_number()?;
@@ -338,7 +874,10 @@ impl Parser {
                     _ => return self.fail("a Decimal scale must be a small whole number"),
                 }
             }
-            other => return self.fail(format!("unknown type `{other}`")),
+            other => match self.enum_def(other) {
+                Some(def) => Type::Enum(def.name.clone()),
+                None => return self.fail(format!("unknown type `{other}`")),
+            },
         };
 
         if self.eat_sym(Sym::Question) {
@@ -517,6 +1056,86 @@ impl Parser {
         Ok(stmts)
     }
 
+    /// Rule 9: `@subject` is a property of the value, so it propagates from the
+    /// event field, through the destructured slot, into the entity field written
+    /// from it. Recorded here rather than authored on the entity.
+    fn propagate_subject(&mut self, lower: &Lower, entity: &str, field: &str, value: ExprId) {
+        let Some(Expr::Load(slot)) = lower.b.exprs().get(value) else {
+            return;
+        };
+        let Some(source) = lower.b.bound_field(*slot) else {
+            return;
+        };
+        let Some(subject) = self
+            .event
+            .as_ref()
+            .and_then(|event| event.field(source))
+            .and_then(|declared| declared.subject.clone())
+        else {
+            return;
+        };
+
+        let Some(target) = self
+            .entities
+            .iter_mut()
+            .find(|def| def.name == entity)
+            .and_then(|def| def.fields.iter_mut().find(|def| def.name == field))
+        else {
+            return;
+        };
+        check_subject(target, &subject);
+        target.subject.get_or_insert(subject);
+    }
+    fn entity_ref(&mut self) -> Result<(Ident, EntityDef), SyntaxError> {
+        let (line, col) = self.here();
+        let name = self.expect_ident()?;
+        match self.entity_def(&name) {
+            Some(def) => Ok((name, def.clone())),
+            None => Err(SyntaxError::new(
+                format!("entity `{name}` is not declared"),
+                line,
+                col,
+            )),
+        }
+    }
+
+    /// The `{ field: value, shorthand }` block shared by `put` and `patch`. Closes
+    /// the block itself, since both callers do the same thing after.
+    fn write_fields(
+        &mut self,
+        lower: &mut Lower,
+        def: &EntityDef,
+    ) -> Result<Vec<(Ident, ExprId)>, SyntaxError> {
+        let mut fields = Vec::new();
+        while !self.at_sym(Sym::RBrace) {
+            let (line, col) = self.here();
+            let name = self.expect_ident()?;
+            let Some(declared) = def.field(&name) else {
+                return Err(SyntaxError::new(
+                    format!("entity `{}` has no field `{name}`", def.name),
+                    line,
+                    col,
+                ));
+            };
+            let expected = declared.ty.clone();
+            let value = if self.eat_sym(Sym::Colon) {
+                self.expr(lower, Some(expected))?
+            } else {
+                if lower.b.lookup(&name).is_none() {
+                    return Err(self.not_in_scope(&name, line, col));
+                }
+                lower.b.at(Span::new(line, col));
+                lower.b.load(&name)
+            };
+            self.propagate_subject(lower, &def.name, &name, value);
+            fields.push((name, value));
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RBrace)?;
+        Ok(fields)
+    }
     fn statement(&mut self, lower: &mut Lower, events: &[EventDef]) -> Result<Stmt, SyntaxError> {
         match self.peek() {
             Token::Word(Keyword::If) => {
@@ -554,6 +1173,11 @@ impl Parser {
                 Ok(Stmt::Return(ret))
             }
             Token::Word(Keyword::Emit) => {
+                if self.in_handler() {
+                    return self
+                        .fail("`emit` appends an event, so it can only appear in a command");
+                }
+                let span = self.span_here();
                 self.bump();
                 let path = self.expect_path()?;
                 let def = self.event_def(events, &path)?;
@@ -586,7 +1210,66 @@ impl Parser {
                 Ok(Stmt::Emit {
                     event: path,
                     fields,
+                    span,
                 })
+            }
+            Token::Word(Keyword::Put) => {
+                if !self.in_handler() {
+                    return self
+                        .fail("`put` writes an entity, so it can only appear in a projector");
+                }
+                let span = self.span_here();
+                self.bump();
+                let (name, def) = self.entity_ref()?;
+                self.expect_sym(Sym::LBrace)?;
+                let fields = self.write_fields(lower, &def)?;
+                Ok(Stmt::Put {
+                    entity: name,
+                    fields,
+                    span,
+                })
+            }
+            Token::Word(Keyword::Patch) => {
+                if !self.in_handler() {
+                    return self
+                        .fail("`patch` writes an entity, so it can only appear in a projector");
+                }
+                let span = self.span_here();
+                self.bump();
+                let (name, def) = self.entity_ref()?;
+
+                self.expect_sym(Sym::LBracket)?;
+                let key = self.expr(lower, Some(def.key_field().ty.clone()))?;
+                self.expect_sym(Sym::RBracket)?;
+
+                self.expect_sym(Sym::LBrace)?;
+                self.stored = Some(Stored {
+                    entity: def.clone(),
+                    loads: Vec::new(),
+                    slots: HashMap::new(),
+                });
+                let fields = self.write_fields(lower, &def)?;
+                let stored = self.stored.take().expect("set just above");
+
+                Ok(Stmt::Patch {
+                    entity: name,
+                    key,
+                    loads: stored.loads,
+                    fields,
+                    span,
+                })
+            }
+            Token::Word(Keyword::Delete) => {
+                if !self.in_handler() {
+                    return self
+                        .fail("`delete` writes an entity, so it can only appear in a projector");
+                }
+                self.bump();
+                let (name, def) = self.entity_ref()?;
+                self.expect_sym(Sym::LBracket)?;
+                let key = self.expr(lower, Some(def.key_field().ty.clone()))?;
+                self.expect_sym(Sym::RBracket)?;
+                Ok(Stmt::Delete { entity: name, key })
             }
             Token::Word(Keyword::Let) => {
                 self.bump();
@@ -744,15 +1427,107 @@ impl Parser {
                 self.expect_sym(Sym::RParen)?;
                 Ok(value)
             }
+            Token::Word(Keyword::None) => match expect {
+                Some(Type::Opt(inner)) => Ok(lower.b.none(inner.as_ref().clone())),
+                Some(found) => Err(SyntaxError::new(
+                    format!("`none` needs an optional target, but this position is {found}"),
+                    spanned.line,
+                    spanned.col,
+                )),
+                None => Err(SyntaxError::new(
+                    "`none` needs an optional target to know what it is none of",
+                    spanned.line,
+                    spanned.col,
+                )),
+            },
+            Token::Sym(Sym::Dot) => {
+                let (line, col) = self.here();
+                let field = self.expect_ident()?;
+                let Some(stored) = self.stored.as_mut() else {
+                    return Err(SyntaxError::new(
+                        format!(
+                            "`.{field}` reads the stored value, which only a `patch` value can do"
+                        ),
+                        span.line,
+                        span.col,
+                    ));
+                };
+                let Some(declared) = stored.entity.field(&field) else {
+                    return Err(SyntaxError::new(
+                        format!("entity `{}` has no field `{field}`", stored.entity.name),
+                        line,
+                        col,
+                    ));
+                };
+                // One slot per distinct `.field` in this patch; the interpreter fills
+                // them from the stored row before any value expression runs, so this
+                // is an ordinary load by the time `eval` sees it.
+                let slot = match stored.slots.get(&field) {
+                    Some(slot) => *slot,
+                    None => {
+                        let ty = declared.ty.clone();
+                        let slot = lower.b.alloc(format!(".{field}"), Some(ty));
+                        stored.slots.insert(field.clone(), slot);
+                        stored.loads.push(Bind { field, slot });
+                        slot
+                    }
+                };
+                Ok(lower.b.read(slot))
+            }
             Token::Ident(name) => {
+                if self.envelope.as_deref() == Some(name.as_str()) {
+                    return self.envelope_access(lower, &name, span);
+                }
                 if lower.b.lookup(&name).is_some() {
                     return Ok(lower.b.load(&name));
                 }
-                match rounding_mode(&name) {
-                    Some(mode) => Ok(lower.b.rounding(mode)),
-                    None => Err(self.not_in_scope(&name, spanned.line, spanned.col)),
+                if let Some(Type::Enum(enum_name)) = expect.as_ref().map(inner_of)
+                    && let Some(def) = self.enum_def(enum_name)
+                {
+                    if !def.has(&name) {
+                        return Err(SyntaxError::new(
+                            format!("`{enum_name}` has no variant `{name}`"),
+                            spanned.line,
+                            spanned.col,
+                        ));
+                    }
+                    let ty = enum_name.clone();
+                    return Ok(lower.b.lit(Literal::Enum { ty, variant: name }));
+                }
+                if let Some(mode) = rounding_mode(&name) {
+                    return Ok(lower.b.rounding(mode));
+                }
+                match self.enums.iter().filter(|def| def.has(&name)).count() {
+                    1 => {
+                        let ty = self
+                            .enums
+                            .iter()
+                            .find(|def| def.has(&name))
+                            .expect("counted one")
+                            .name
+                            .clone();
+                        Ok(lower.b.lit(Literal::Enum { ty, variant: name }))
+                    }
+                    0 => Err(self.not_in_scope(&name, spanned.line, spanned.col)),
+                    _ => {
+                        let candidates: Vec<&str> = self
+                            .enums
+                            .iter()
+                            .filter(|def| def.has(&name))
+                            .map(|def| def.name.as_str())
+                            .collect();
+                        Err(SyntaxError::new(
+                            format!(
+                                "`{name}` is a variant of {}, so it is ambiguous here; the target type would decide it",
+                                candidates.join(" and ")
+                            ),
+                            spanned.line,
+                            spanned.col,
+                        ))
+                    }
                 }
             }
+
             other => Err(SyntaxError::new(
                 format!("expected a value, found {other}"),
                 spanned.line,
@@ -769,7 +1544,11 @@ impl Parser {
         at: &Spanned,
     ) -> Result<ExprId, SyntaxError> {
         let defaulted = expect.is_none();
-        let ty = expect.unwrap_or_else(|| default_type(number));
+        // A literal in a `T?` position is still a `T`; the write site wraps it.
+        let ty = match expect {
+            Some(ty) => inner_of(&ty).clone(),
+            None => default_type(number),
+        };
         let lit = number
             .resolve(&ty, &lower.currency)
             .map_err(|err| SyntaxError::new(err.to_string(), at.line, at.col))?;
@@ -842,6 +1621,14 @@ impl Parser {
     }
 }
 
+/// Looks through `T?` to the `T` a literal in that position is really making.
+fn inner_of(ty: &Type) -> &Type {
+    match ty {
+        Type::Opt(inner) => inner,
+        _ => ty,
+    }
+}
+
 fn default_type(number: Number) -> Type {
     if number.scale == 0 {
         Type::Int
@@ -861,15 +1648,7 @@ fn rounding_mode(name: &str) -> Option<Rounding> {
 
 fn type_of(lower: &Lower, id: ExprId) -> Option<Type> {
     match lower.b.exprs().get(id)? {
-        Expr::Lit(lit) => Some(match lit {
-            Literal::Bool(_) => Type::Bool,
-            Literal::Int(_) => Type::Int,
-            Literal::Decimal { scale, .. } => Type::Decimal(*scale),
-            Literal::Str(_) => Type::String,
-            Literal::Uuid(_) => Type::Uuid,
-            Literal::Money(_) => Type::Money,
-            Literal::Rounding(_) => Type::Rounding,
-        }),
+        Expr::Lit(lit) => Some(value::literal(lit).ty()),
         Expr::Load(slot) => lower.b.slot_type(*slot).cloned(),
         Expr::Unary { operand, .. } => type_of(lower, *operand),
         Expr::Binary { op, lhs, rhs } => match op {
@@ -887,3 +1666,11 @@ fn type_of(lower: &Lower, id: ExprId) -> Option<Type> {
         Expr::If { then, .. } => type_of(lower, *then),
     }
 }
+
+/// Rule 9: the two subject checks are not implemented yet. When they are, this is
+/// where the conflict one belongs, asserting what hekla's `enforce_subject_columns`
+/// does: a field written under two different subjects is an error, and a
+/// subject-bound value may not land in a field that discards the binding. The
+/// propagation that feeds them is live, and every handler stays in the IR, so the
+/// checker can recover both spans; only the checking is deferred.
+fn check_subject(_target: &EntityField, _incoming: &Ident) {}
