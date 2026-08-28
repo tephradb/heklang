@@ -1261,6 +1261,14 @@ fn eval(
             }
             Ok(Value::Json(Json::Obj(object)))
         }
+        Expr::Interp(parts) => {
+            let mut text = String::new();
+            for part in parts {
+                let value = eval(exprs, frame, *part, ctx.as_deref_mut())?;
+                text.push_str(&value::text(&value));
+            }
+            Ok(Value::Str(text))
+        }
         Expr::Call { builtin, args } => {
             let mut values = Vec::new();
             for arg in args {

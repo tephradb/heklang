@@ -1709,6 +1709,7 @@ impl Parser {
             },
             Token::Word(Keyword::Invoke) => self.invoke_expr(lower, span),
             Token::Sym(Sym::LBrace) => self.object_literal(lower, span),
+            Token::TextOpen(head) => self.interpolation(lower, head, span),
             Token::Sym(Sym::Dot) => {
                 let (line, col) = self.here();
                 let field = self.expect_ident()?;
@@ -1945,6 +1946,7 @@ fn type_of(lower: &Lower, id: ExprId) -> Option<Type> {
         Expr::If { then, .. } => type_of(lower, *then),
         Expr::Field { name, .. } => response_field(name),
         Expr::Object(_) => Some(Type::Json),
+        Expr::Interp(_) => Some(Type::String),
         Expr::Call { builtin, .. } => Some(match builtin {
             Builtin::UuidDerive => Type::Uuid,
             _ => Type::Response,
@@ -2387,6 +2389,42 @@ impl Parser {
         }
     }
 
+    /// `TextOpen`, then a hole, then a `TextPart` before each further hole, then
+    /// `TextClose`. The lexer flattened the nesting into that sequence, so this reads
+    /// it straight through without a stack of its own.
+    fn interpolation(
+        &mut self,
+        lower: &mut Lower,
+        head: String,
+        span: Span,
+    ) -> Result<ExprId, SyntaxError> {
+        lower.b.at(span);
+        let mut parts = vec![lower.b.str(&head)];
+        loop {
+            parts.push(self.expr(lower, None)?);
+            let spanned = self.bump();
+            match spanned.token {
+                Token::TextPart(text) => {
+                    lower.b.at(Span::new(spanned.line, spanned.col));
+                    parts.push(lower.b.str(&text));
+                }
+                Token::TextClose(text) => {
+                    lower.b.at(Span::new(spanned.line, spanned.col));
+                    parts.push(lower.b.str(&text));
+                    lower.b.at(span);
+                    return Ok(lower.b.expr(Expr::Interp(parts)));
+                }
+                other => {
+                    return Err(self.err(
+                        format!("expected the rest of the string, found {other}"),
+                        spanned.line,
+                        spanned.col,
+                    ));
+                }
+            }
+        }
+    }
+
     fn object_literal(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, SyntaxError> {
         if !self.in_body {
             return Err(self.err(
@@ -2685,6 +2723,7 @@ fn children(expr: &Expr) -> Vec<ExprId> {
         } => vec![*cond, *then, *otherwise],
         Expr::Field { receiver, .. } => vec![*receiver],
         Expr::Object(fields) => fields.iter().map(|(_, id)| *id).collect(),
+        Expr::Interp(parts) => parts.clone(),
         Expr::Call { args, .. } => args.clone(),
         Expr::Invoke { args, .. } => args.iter().map(|(_, id)| *id).collect(),
         Expr::Reveal {

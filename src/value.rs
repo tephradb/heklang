@@ -341,6 +341,16 @@ impl Json {
     }
 }
 
+/// A value's text form, for string interpolation. Rule 8's JSON table rather than
+/// `Display`, which quotes a `String`: one answer for how a value looks when it leaves
+/// the process, so a message and a request body cannot disagree about it.
+pub fn text(value: &Value) -> String {
+    match Json::from_value(value) {
+        Json::Str(text) => text,
+        other => other.to_string(),
+    }
+}
+
 impl fmt::Display for Json {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

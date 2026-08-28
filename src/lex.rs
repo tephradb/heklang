@@ -165,6 +165,12 @@ pub enum Token {
     Path(Vec<String>),
     Number(Number),
     Text(String),
+    /// An interpolated string, flattened into the token stream: `TextOpen`, then the
+    /// first hole's tokens, then a `TextPart` before each further hole, then
+    /// `TextClose`. Flat, so the parser stays a flat recursive-descent one.
+    TextOpen(String),
+    TextPart(String),
+    TextClose(String),
     Sym(Sym),
     End,
 }
@@ -177,6 +183,9 @@ impl fmt::Display for Token {
             Token::Path(segments) => write!(f, "`@{}`", segments.join(".")),
             Token::Number(_) => f.write_str("a number"),
             Token::Text(_) => f.write_str("a string"),
+            Token::TextOpen(_) | Token::TextPart(_) | Token::TextClose(_) => {
+                f.write_str("an interpolated string")
+            }
             Token::Sym(sym) => write!(f, "`{}`", sym.text()),
             Token::End => f.write_str("end of file"),
         }
@@ -236,6 +245,10 @@ struct Lexer {
     pos: usize,
     line: u32,
     col: u32,
+    /// One entry per open interpolation, holding the brace depth inside its hole.
+    /// This stack is the whole of the nesting rule: a string literal inside a hole
+    /// re-enters the scanner and pushes its own entry, so nothing special-cases it.
+    interp: Vec<u32>,
 }
 
 impl Lexer {
@@ -245,6 +258,7 @@ impl Lexer {
             pos: 0,
             line: 1,
             col: 1,
+            interp: Vec::new(),
         }
     }
 
@@ -309,6 +323,9 @@ impl Lexer {
             let token = match next {
                 c if c.is_ascii_digit() => self.number()?,
                 c if is_ident_start(c) => self.word(),
+                '"' if self.peek_at(1) == Some('"') && self.peek_at(2) == Some('"') => {
+                    self.raw_text()?
+                }
                 '"' => self.text()?,
                 '@' => self.path()?,
                 _ => self.symbol()?,
@@ -366,23 +383,73 @@ impl Lexer {
 
     fn text(&mut self) -> Result<Token, SyntaxError> {
         self.bump();
+        let (value, open) = self.scan_text()?;
+        if open {
+            self.interp.push(1);
+            return Ok(Token::TextOpen(value));
+        }
+        Ok(Token::Text(value))
+    }
+
+    /// Resumes a string after the `}` that closed a hole. Pops the interpolation when
+    /// the string ends, so the stack holds exactly the holes still open.
+    fn resume_text(&mut self) -> Result<Token, SyntaxError> {
+        let (value, open) = self.scan_text()?;
+        if open {
+            return Ok(Token::TextPart(value));
+        }
+        self.interp.pop();
+        Ok(Token::TextClose(value))
+    }
+
+    /// String content up to the closing quote or the next `{`. The flag says which of
+    /// the two stopped it.
+    fn scan_text(&mut self) -> Result<(String, bool), SyntaxError> {
         let mut value = String::new();
         loop {
             let Some(next) = self.bump() else {
                 return self.error("unterminated string");
             };
             match next {
-                '"' => return Ok(Token::Text(value)),
+                '"' => return Ok((value, false)),
+                '{' => return Ok((value, true)),
                 '\\' => match self.bump() {
                     Some('n') => value.push('\n'),
                     Some('t') => value.push('\t'),
                     Some('"') => value.push('"'),
                     Some('\\') => value.push('\\'),
+                    Some('{') => value.push('{'),
+                    // Unnecessary, since a close brace in string content is never a
+                    // delimiter. Accepted because an author who learns the open one
+                    // will reach for its pair.
+                    Some('}') => value.push('}'),
                     Some(other) => return self.error(format!("unknown escape `\\{other}`")),
                     None => return self.error("unterminated string"),
                 },
                 c => value.push(c),
             }
+        }
+    }
+
+    /// `"""..."""`: everything between the delimiters, verbatim. No escapes and no
+    /// interpolation, because the documents this form exists for are brace-dense.
+    fn raw_text(&mut self) -> Result<Token, SyntaxError> {
+        for _ in 0..3 {
+            self.bump();
+        }
+        let mut value = String::new();
+        loop {
+            let Some(next) = self.peek() else {
+                return self.error("unterminated multi-line string");
+            };
+            if next == '"' && self.peek_at(1) == Some('"') && self.peek_at(2) == Some('"') {
+                for _ in 0..3 {
+                    self.bump();
+                }
+                return Ok(Token::Text(value));
+            }
+            value.push(next);
+            self.bump();
         }
     }
 
@@ -417,6 +484,18 @@ impl Lexer {
 
     fn symbol(&mut self) -> Result<Token, SyntaxError> {
         let first = self.bump().expect("symbol starts with a character");
+
+        // Inside a hole, braces are counted, so a nested block or object literal is
+        // not mistaken for the end of the interpolation.
+        if let Some(depth) = self.interp.last_mut() {
+            match first {
+                '{' => *depth += 1,
+                '}' if *depth == 1 => return self.resume_text(),
+                '}' => *depth -= 1,
+                _ => {}
+            }
+        }
+
         let second = self.peek();
 
         let paired = match (first, second) {

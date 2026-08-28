@@ -479,6 +479,9 @@ pub enum Expr {
     },
     /// A JSON object literal, for an HTTP request body only (rule 8).
     Object(Vec<(Ident, ExprId)>),
+    /// An interpolated string. The literal chunks are ordinary `Lit(Str)` parts, so
+    /// this is a join over one uniform list rather than two interleaved ones.
+    Interp(Vec<ExprId>),
     Call {
         builtin: Builtin,
         args: Vec<ExprId>,
