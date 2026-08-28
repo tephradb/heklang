@@ -7,12 +7,11 @@ use heklang::{
 
 const URL: &str = "https://mail.example/confirm";
 
-const PRELUDE: &str = "currency USD
-event @order.placed {
+const PRELUDE: &str = "event @order.placed {
   order_id: Uuid,
   customer_id: Int,
   email: String @subject(customer_id),
-  total: Money,
+  total: Money(2),
 }
 event @order.cancelled { order_id: Uuid, customer_id: Int }
 event @order.notified { order_id: Uuid, notification_id: Uuid }
@@ -55,7 +54,7 @@ fn placed(seq: u32, customer_id: i64, total: i64) -> Event {
             ),
             ("customer_id", Value::Int(customer_id)),
             ("email", Value::str("ada@example.com")),
-            ("total", Value::Money(total)),
+            ("total", Value::money(total, 2)),
         ],
     )
 }
@@ -649,8 +648,7 @@ fn now_is_absent_from_a_fold_and_a_projector() {
     assert_eq!(message, "`state` folds the log, so it cannot read a clock");
 
     let message = parse(
-        "currency USD
-event @a.b { id: Uuid }
+        "event @a.b { id: Uuid }
 projector P {
   entity Row { id: Uuid @key, at: Timestamp? }
   on @a.b { id } { put Row { id, at: now() } }
@@ -668,8 +666,7 @@ projector P {
 #[test]
 fn two_now_calls_in_one_body_agree() {
     let program = parse(
-        "currency USD
-event @stamp.made { first: Timestamp, second: Timestamp }
+        "event @stamp.made { first: Timestamp, second: Timestamp }
 command Stamp() {
   emit @stamp.made { first: now(), second: now() }
 }
@@ -689,8 +686,7 @@ command Stamp() {
 #[test]
 fn a_command_that_appends_nothing_still_reads_a_clock() {
     let program = parse(
-        "currency USD
-event @a.b { id: Uuid }
+        "event @a.b { id: Uuid }
 command Give() {
   let at = now()
   return reject(\"no\", \"not today\")
@@ -825,8 +821,7 @@ fn folding_an_arm_twice_gives_the_same_state() {
 // ---------------------------------------------------------------------------------
 // No effect may trigger itself.
 
-const CYCLE: &str = "currency USD
-event @order.placed { order_id: Uuid }
+const CYCLE: &str = "event @order.placed { order_id: Uuid }
 
 command Replace(order_id: Uuid) {
   emit @order.placed { order_id }

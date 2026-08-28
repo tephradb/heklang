@@ -1,9 +1,8 @@
 use heklang::ir::{Expr, ExprId, Literal};
 use heklang::parse;
 
-const PRELUDE: &str = "currency USD
-event @order.placed { order_id: Uuid, customer_id: Int, total: Money }
-command Probe(total: Money, spend: Money, count: Int, rate: Decimal(4)) {
+const PRELUDE: &str = "event @order.placed { order_id: Uuid, customer_id: Int, total: Money(2) }
+command Probe(total: Money(2), spend: Money(2), count: Int, rate: Decimal(4)) {
 ";
 
 fn literals(body: &str) -> Result<Vec<String>, String> {
@@ -31,7 +30,7 @@ fn describe(lit: &Literal) -> String {
         Literal::Uuid(value) => format!("Uuid({value})"),
         Literal::Timestamp(micros) => format!("Timestamp({micros})"),
         Literal::None(inner) => format!("None({inner})"),
-        Literal::Money(value) => format!("Money({value})"),
+        Literal::Money { units, scale } => format!("Money({units}, scale {scale})"),
         Literal::Enum { ty, variant } => format!("{ty}.{variant}"),
         Literal::Rounding(mode) => format!("Rounding({mode})"),
     }
@@ -54,7 +53,10 @@ fn check_error(body: &str, expected: &str) {
 #[test]
 fn annotations_drive_resolution() {
     check("state open: Int = fold 0\nreturn", &["Int(0)"]);
-    check("state spent: Money = fold 0\nreturn", &["Money(0)"]);
+    check(
+        "state spent: Money(2) = fold 0\nreturn",
+        &["Money(0, scale 2)"],
+    );
     check(
         "state fee: Decimal(4) = fold 0.0825\nreturn",
         &["Decimal(825, scale 4)"],
@@ -64,9 +66,15 @@ fn annotations_drive_resolution() {
 #[test]
 fn addition_and_comparison_cross_hint() {
     check("let a = count + 1\nreturn", &["Int(1)"]);
-    check("let a = spend + 1\nreturn", &["Money(100)"]);
-    check("let a = spend > 1000.00\nreturn", &["Money(100000)"]);
-    check("let a = 1000.00 < spend\nreturn", &["Money(100000)"]);
+    check("let a = spend + 1\nreturn", &["Money(100, scale 2)"]);
+    check(
+        "let a = spend > 1000.00\nreturn",
+        &["Money(100000, scale 2)"],
+    );
+    check(
+        "let a = 1000.00 < spend\nreturn",
+        &["Money(100000, scale 2)"],
+    );
     check("let a = count >= 10\nreturn", &["Int(10)"]);
 }
 
@@ -115,27 +123,28 @@ fn over_precision_is_an_error_not_a_round() {
 }
 
 #[test]
-fn money_literals_follow_the_declared_currency() {
+fn money_literals_follow_the_declared_scale() {
+    // Currency is not in the type, the value or the config, so a money literal
+    // resolves against the field's own scale exactly as a decimal one does.
     let cases = [
-        ("USD", "1000.00", "Money(100000)"),
-        ("BHD", "1000.00", "Money(1000000)"),
-        ("ISK", "1000", "Money(1000)"),
-        ("JPY", "1000", "Money(1000)"),
+        (2, "1000.00", "Money(100000, scale 2)"),
+        (3, "1000.00", "Money(1000000, scale 3)"),
+        (4, "1000", "Money(10000000, scale 4)"),
+        (0, "1000", "Money(1000, scale 0)"),
     ];
-    for (code, literal, expected) in cases {
+    for (scale, literal, expected) in cases {
         let source = format!(
-            "currency {code}\ncommand Probe(spend: Money) {{\n  let a = spend > {literal}\n  return\n}}\n"
+            "command Probe(spend: Money({scale})) {{\n  let a = spend > {literal}\n  return\n}}\n"
         );
-        let program = parse(&source).unwrap_or_else(|err| panic!("{code}: {err}"));
+        let program = parse(&source).unwrap_or_else(|err| panic!("Money({scale}): {err}"));
         let node = program.commands[0].exprs.get(ExprId(1));
         match node {
-            Some(Expr::Lit(lit)) => assert_eq!(describe(lit), expected, "for {code}"),
-            other => panic!("{code}: expected a literal, found {other:?}"),
+            Some(Expr::Lit(lit)) => assert_eq!(describe(lit), expected, "for Money({scale})"),
+            other => panic!("Money({scale}): expected a literal, found {other:?}"),
         }
     }
 
-    let source =
-        "currency JPY\ncommand Probe(spend: Money) {\n  let a = spend > 1000.00\n  return\n}\n";
-    let err = parse(source).expect_err("JPY has no minor units");
-    assert_eq!(err.message, "2 decimal places is too precise for Money");
+    let source = "command Probe(spend: Money(0)) {\n  let a = spend > 1000.00\n  return\n}\n";
+    let err = parse(source).expect_err("Money(0) holds no decimal places");
+    assert_eq!(err.message, "2 decimal places is too precise for Money(0)");
 }

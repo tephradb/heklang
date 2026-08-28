@@ -7,7 +7,6 @@ use crate::ir::Number;
 pub enum Keyword {
     As,
     Command,
-    Currency,
     Delete,
     Effect,
     Else,
@@ -38,7 +37,6 @@ impl Keyword {
         Some(match word {
             "as" => Keyword::As,
             "command" => Keyword::Command,
-            "currency" => Keyword::Currency,
             "delete" => Keyword::Delete,
             "effect" => Keyword::Effect,
             "else" => Keyword::Else,
@@ -70,7 +68,6 @@ impl Keyword {
         match self {
             Keyword::As => "as",
             Keyword::Command => "command",
-            Keyword::Currency => "currency",
             Keyword::Delete => "delete",
             Keyword::Effect => "effect",
             Keyword::Else => "else",

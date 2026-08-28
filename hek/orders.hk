@@ -7,8 +7,8 @@ projector Orders {
     order_id: Uuid @key,
     customer_id: Int @index,
     email: String @max(200),
-    total: Money,
-    previous_total: Money,
+    total: Money(2),
+    previous_total: Money(2),
     status: Status,
     tracking: String?,
     placed_at: Timestamp?,
@@ -19,7 +19,7 @@ projector Orders {
   entity Customer {
     customer_id: Int @key,
     order_count: Int,
-    lifetime_spend: Money,
+    lifetime_spend: Money(2),
     name: String = "unknown",
   }
 
@@ -77,7 +77,7 @@ projector Notes {
 
 event @order.repriced {
   order_id: Uuid,
-  total: Money,
+  total: Money(2),
 }
 
 event @order.shipped {

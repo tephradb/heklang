@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use crate::currency::Currency;
 use crate::ir::{
     Arm, Assign, BinOp, Bind, Command, EnvBind, EnvField, EventPath, Expr, ExprId, Exprs, Filter,
     Handler, Ident, Literal, Number, Param, Slice, SliceId, Slot, Span, StateVar, Stmt, Type, UnOp,
@@ -183,17 +182,17 @@ impl Builder {
         self.lit(Literal::Str(value.to_string()))
     }
 
-    pub fn money(&mut self, units: i64) -> ExprId {
-        self.lit(Literal::Money(units))
+    pub fn money(&mut self, units: i64, scale: u8) -> ExprId {
+        self.lit(Literal::Money { units, scale })
     }
 
     pub fn rounding(&mut self, mode: Rounding) -> ExprId {
         self.lit(Literal::Rounding(mode))
     }
 
-    pub fn number(&mut self, digits: i128, scale: u8, ty: &Type, currency: &Currency) -> ExprId {
+    pub fn number(&mut self, digits: i128, scale: u8, ty: &Type) -> ExprId {
         let lit = Number::new(digits, scale)
-            .resolve(ty, currency)
+            .resolve(ty)
             .unwrap_or_else(|err| panic!("{err}"));
         self.lit(lit)
     }

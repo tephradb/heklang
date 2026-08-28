@@ -1,5 +1,3 @@
-currency USD
-
 // events/order.hk
 
 event @order.placed {
@@ -7,7 +5,7 @@ event @order.placed {
   customer_id: Int,
   email: String @subject(customer_id) @max(200),
   address: String @subject(customer_id) @max(200),
-  total: Money,
+  total: Money(2),
   tax_rate: Decimal(4),
   notes: String @no_index,
 }
@@ -15,7 +13,7 @@ event @order.placed {
 event @order.cancelled {
   order_id: Uuid,
   customer_id: Int,
-  refund: Money,
+  refund: Money(2),
 }
 
 event @customer.blocked {
@@ -30,7 +28,7 @@ command PlaceOrder(
   customer_id: Int,
   email: String,
   address: String,
-  total: Money,
+  total: Money(2),
   tax_rate: Decimal(4),
   notes: String?,
 ) {
@@ -43,7 +41,7 @@ command PlaceOrder(
     on @order.placed(customer_id) => open_orders + 1
     on @order.cancelled(customer_id) => open_orders - 1
 
-  state lifetime_spend: Money = fold 0
+  state lifetime_spend: Money(2) = fold 0
     on @order.placed(customer_id) { total } => lifetime_spend + total
 
   let customer = customer_id
@@ -83,7 +81,7 @@ command PlaceOrder(
   }
 }
 
-command BareDiscount(total: Money) {
+command BareDiscount(total: Money(2)) {
   let cut = total * 0.9
   return
 }

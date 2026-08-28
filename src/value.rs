@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 
-use crate::currency::Currency;
 use crate::ir::{EntityField, EnumDef, EventPath, Ident, Literal, Type};
 use crate::scaled::{self, Rounding};
 
@@ -16,7 +15,10 @@ pub enum Value {
     Str(String),
     Uuid(String),
     Timestamp(i64),
-    Money(i64),
+    Money {
+        units: i64,
+        scale: u8,
+    },
     Enum {
         ty: Ident,
         variant: Ident,
@@ -47,6 +49,10 @@ impl Value {
         Value::Decimal { units, scale }
     }
 
+    pub fn money(units: i64, scale: u8) -> Self {
+        Value::Money { units, scale }
+    }
+
     pub fn some(value: Value) -> Self {
         Value::Opt {
             inner: value.ty(),
@@ -66,7 +72,7 @@ impl Value {
             Value::Str(_) => Type::String,
             Value::Uuid(_) => Type::Uuid,
             Value::Timestamp(_) => Type::Timestamp,
-            Value::Money(_) => Type::Money,
+            Value::Money { scale, .. } => Type::Money(*scale),
             Value::Enum { ty, .. } => Type::Enum(ty.clone()),
             Value::Rounding(_) => Type::Rounding,
             Value::Json(_) => Type::Json,
@@ -79,23 +85,11 @@ impl Value {
     pub fn has_type(&self, ty: &Type) -> bool {
         &self.ty() == ty
     }
-
-    pub fn display<'a>(&'a self, currency: &'a Currency) -> ValueDisplay<'a> {
-        ValueDisplay {
-            value: self,
-            currency,
-        }
-    }
 }
 
-pub struct ValueDisplay<'a> {
-    value: &'a Value,
-    currency: &'a Currency,
-}
-
-impl fmt::Display for ValueDisplay<'_> {
+impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.value {
+        match self {
             Value::Bool(value) => write!(f, "{value}"),
             Value::Int(value) => write!(f, "{value}"),
             Value::Decimal { units, scale } => scaled::write(f, *units, *scale),
@@ -103,16 +97,15 @@ impl fmt::Display for ValueDisplay<'_> {
             Value::Uuid(value) => write!(f, "{value}"),
             Value::Timestamp(micros) => write!(f, "{micros}"),
             Value::Enum { variant, .. } => f.write_str(variant),
-            Value::Money(units) => {
-                scaled::write(f, *units, self.currency.scale)?;
-                write!(f, " {}", self.currency.code)
-            }
+            // No currency code: an amount carries a scale and nothing else, so a
+            // program that needs one declares an ordinary field beside it.
+            Value::Money { units, scale } => scaled::write(f, *units, *scale),
             Value::Rounding(mode) => write!(f, "{mode}"),
             Value::Json(json) => write!(f, "{json}"),
             Value::Response { status, .. } => write!(f, "<{status}>"),
             Value::Invoked(outcome) => write!(f, "{outcome}"),
             Value::Opt { value, .. } => match value {
-                Some(value) => write!(f, "{}", value.display(self.currency)),
+                Some(value) => write!(f, "{value}"),
                 None => f.write_str("none"),
             },
         }
@@ -142,28 +135,16 @@ impl Event {
     pub fn field(&self, name: &str) -> Option<&Value> {
         self.fields.get(name)
     }
-
-    pub fn display<'a>(&'a self, currency: &'a Currency) -> EventDisplay<'a> {
-        EventDisplay {
-            event: self,
-            currency,
-        }
-    }
 }
 
-pub struct EventDisplay<'a> {
-    event: &'a Event,
-    currency: &'a Currency,
-}
-
-impl fmt::Display for EventDisplay<'_> {
+impl fmt::Display for Event {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {{ ", self.event.path)?;
-        for (i, (name, value)) in self.event.fields.iter().enumerate() {
+        write!(f, "{} {{ ", self.path)?;
+        for (i, (name, value)) in self.fields.iter().enumerate() {
             if i > 0 {
                 f.write_str(", ")?;
             }
-            write!(f, "{name}: {}", value.display(self.currency))?;
+            write!(f, "{name}: {value}")?;
         }
         f.write_str(" }")
     }
@@ -199,7 +180,7 @@ pub fn zero(ty: &Type, enums: &[EnumDef]) -> Option<Value> {
         Type::Int => Value::Int(0),
         Type::Decimal(scale) => Value::decimal(0, *scale),
         Type::String => Value::Str(String::new()),
-        Type::Money => Value::Money(0),
+        Type::Money(scale) => Value::money(0, *scale),
         Type::Enum(name) => {
             let def = enums.iter().find(|def| &def.name == name)?;
             let variant = def.default_variant()?;
@@ -236,7 +217,7 @@ pub fn literal(lit: &Literal) -> Value {
         Literal::Str(value) => Value::Str(value.clone()),
         Literal::Uuid(value) => Value::Uuid(value.clone()),
         Literal::Timestamp(micros) => Value::Timestamp(*micros),
-        Literal::Money(units) => Value::Money(*units),
+        Literal::Money { units, scale } => Value::money(*units, *scale),
         Literal::Enum { ty, variant } => Value::Enum {
             ty: ty.clone(),
             variant: variant.clone(),
@@ -332,12 +313,13 @@ impl Json {
     /// Rule 8's conversion table, total so that an object literal always serialises.
     /// `Money` and `Decimal` become strings at their scale rather than numbers, so no
     /// precision is lost to a float on the far side.
-    pub fn from_value(value: &Value, currency: &Currency) -> Json {
+    pub fn from_value(value: &Value) -> Json {
         match value {
             Value::Bool(value) => Json::Bool(*value),
             Value::Int(value) => Json::Int(*value),
-            Value::Decimal { units, scale } => Json::Str(scaled::text(*units, *scale)),
-            Value::Money(units) => Json::Str(scaled::text(*units, currency.scale)),
+            Value::Decimal { units, scale } | Value::Money { units, scale } => {
+                Json::Str(scaled::text(*units, *scale))
+            }
             Value::Str(value) | Value::Uuid(value) => Json::Str(value.clone()),
             Value::Timestamp(micros) => Json::Int(*micros),
             Value::Enum { variant, .. } => Json::Str(variant.clone()),
@@ -352,7 +334,7 @@ impl Json {
                 ("message", outcome.message().map_or(Json::Null, Json::str)),
             ]),
             Value::Opt { value, .. } => match value {
-                Some(value) => Json::from_value(value, currency),
+                Some(value) => Json::from_value(value),
                 None => Json::Null,
             },
         }

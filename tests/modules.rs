@@ -1,14 +1,15 @@
 //! Multi-module loading: declaration order across files does not matter, and an
 //! error names the file it is in.
 
+use std::fs;
+
 use heklang::{Interpreter, Value, parse, parse_files};
 
-const EVENTS: &str = "event @order.placed { order_id: Uuid, customer_id: Int, total: Money }
+const EVENTS: &str = "event @order.placed { order_id: Uuid, customer_id: Int, total: Money(2) }
 event @order.shipped { order_id: Uuid, tracking: String }
 ";
 
-const COMMAND: &str = "currency USD
-command Place(order_id: Uuid, customer_id: Int, total: Money) {
+const COMMAND: &str = "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
   guard @order.placed(order_id)
   emit @order.placed { order_id, customer_id, total }
 }
@@ -17,7 +18,7 @@ command Place(order_id: Uuid, customer_id: Int, total: Money) {
 const PROJECTOR: &str = "projector Orders {
   entity Order {
     order_id: Uuid @key,
-    total: Money,
+    total: Money(2),
     tracking: String?,
   }
 
@@ -109,14 +110,14 @@ fn a_runtime_error_names_the_module_of_the_declaration_that_raised_it() {
         ("commands/place.hk", COMMAND),
         (
             "commands/discount.hk",
-            "command Discount(total: Money) {\n  let cut = total * 0.9\n  return\n}\n",
+            "command Discount(total: Money(2)) {\n  let cut = total * 0.9\n  return\n}\n",
         ),
     ])
     .expect("both commands parse");
 
     let mut interpreter = Interpreter::new(&program);
     let err = interpreter
-        .run("Discount", [("total", Value::Money(2_599))])
+        .run("Discount", [("total", Value::money(2_599, 2))])
         .expect_err("the multiplication is not exact");
 
     assert_eq!(err.module.as_deref(), Some("commands/discount.hk"));
@@ -164,47 +165,13 @@ fn a_projector_runtime_error_names_its_module() {
     );
 }
 
-// `currency` is an item like any other, so no module has to be the first one.
-
 #[test]
-fn currency_may_live_in_any_module() {
-    let program = parse_files([
-        ("events/order.hk", EVENTS),
-        (
-            "commands/place.hk",
-            COMMAND
-                .strip_prefix("currency USD\n")
-                .expect("has the header"),
-        ),
-        ("config.hk", "currency BHD\n"),
-    ])
-    .expect("currency is found wherever it sits");
-
-    assert_eq!(program.currency.code, "BHD");
-    assert_eq!(program.currency.scale, 3);
-}
-
-#[test]
-fn currency_must_be_declared_exactly_once() {
-    let message = parse_files([
-        ("events/order.hk", EVENTS),
-        ("commands/place.hk", COMMAND),
-        ("config.hk", "currency BHD\n"),
-    ])
-    .expect_err("two currency declarations")
-    .message;
-    assert_eq!(
-        message, "currency is already declared at commands/place.hk:1:1",
-        "the second declaration points at the first, across modules"
-    );
-
-    let message = parse_files([("events/order.hk", EVENTS)])
-        .expect_err("no currency at all")
-        .message;
-    assert_eq!(
-        message,
-        "no `currency` declaration; one module must declare it"
-    );
+fn a_program_needs_no_header_item() {
+    // There is nothing a module has to declare and nothing one module has to declare
+    // for the others, so a file of plain declarations is a whole program.
+    let program = parse_files([("events/order.hk", EVENTS)]).expect("declarations are enough");
+    assert_eq!(program.events.len(), 2);
+    assert!(program.commands.is_empty());
 }
 
 #[test]
@@ -213,18 +180,17 @@ fn a_single_source_still_parses_without_a_module_name() {
     let program = parse(&source).expect("the single-source path is unchanged");
     assert_eq!(program.commands.len(), 1);
 
-    let err = parse("currency USD\ncommand C(x: Int) {\n  let y = nope\n  return\n}\n")
+    let err = parse("command C(x: Int) {\n  let y = nope\n  return\n}\n")
         .expect_err("`nope` is not in scope");
     assert_eq!(err.file, None, "an unnamed source has no module to name");
-    assert_eq!(err.to_string(), "3:11: `nope` is not in scope");
+    assert_eq!(err.to_string(), "2:11: `nope` is not in scope");
 }
 
 #[test]
 fn the_demo_modules_load_as_separate_files() {
-    let commands =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/hek/place_order.hk"))
-            .expect("the demo command module");
-    let projectors = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/hek/orders.hk"))
+    let commands = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/hek/place_order.hk"))
+        .expect("the demo command module");
+    let projectors = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/hek/orders.hk"))
         .expect("the demo projector module");
 
     let program = parse_files([

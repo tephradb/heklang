@@ -1,5 +1,4 @@
 pub mod build;
-pub mod currency;
 pub mod interp;
 pub mod ir;
 pub mod lex;
@@ -8,7 +7,6 @@ pub mod scaled;
 pub mod value;
 
 pub use build::Builder;
-pub use currency::Currency;
 pub use interp::{
     AppendCondition, Counts, Error, ErrorKind, Execution, Http, Interpreter, Invocation, Journal,
     Outcome, Recorded, Reply, Row, Store,

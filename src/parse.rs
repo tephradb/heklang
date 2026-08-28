@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::mem;
 
 use crate::build::Builder;
-use crate::currency::Currency;
 use crate::ir::{
     Arm, BinOp, Bind, Builtin, Command, Effect, EntityDef, EntityField, EnumDef, EnvField,
     EventDef, EventPath, Expr, ExprId, Exprs, FieldDef, Filter, Handler, Ident, Index, Literal,
@@ -33,7 +32,6 @@ pub fn parse_files<'a>(
 struct Lower {
     b: Builder,
     defaults: HashMap<ExprId, Number>,
-    currency: Currency,
 }
 
 /// Parsing state that the expression ladder needs but cannot be threaded through it,
@@ -158,37 +156,6 @@ impl Parser {
         match self.module_at(pos) {
             Some(module) => format!("{module}:{line}:{col}"),
             None => format!("{line}:{col}"),
-        }
-    }
-
-    /// `currency` may sit in any module and must appear exactly once, so that no
-    /// module has to be "the first one".
-    fn currency_decl(&mut self) -> Result<Currency, SyntaxError> {
-        let mut found: Option<(String, usize)> = None;
-        for index in 0..self.tokens.len() {
-            if !matches!(self.tokens[index].token, Token::Word(Keyword::Currency)) {
-                continue;
-            }
-            let Some(Token::Ident(code)) = self.tokens.get(index + 1).map(|next| &next.token)
-            else {
-                self.pos = index + 1;
-                return self.fail("expected a currency code after `currency`");
-            };
-            let code = code.clone();
-            if let Some((_, first)) = &found {
-                let first = self.location(*first);
-                self.pos = index;
-                return self.fail(format!("currency is already declared at {first}"));
-            }
-            found = Some((code, index));
-        }
-
-        match found {
-            Some((code, _)) => Ok(Currency::from_code(&code)),
-            None => {
-                self.pos = 0;
-                self.fail("no `currency` declaration; one module must declare it")
-            }
         }
     }
 
@@ -356,8 +323,6 @@ impl Parser {
     }
 
     fn program(&mut self) -> Result<Program, SyntaxError> {
-        let currency = self.currency_decl()?;
-
         self.pos = 0;
         let items = self.pos;
         let mut events: Vec<EventDef> = Vec::new();
@@ -373,7 +338,7 @@ impl Parser {
                     events.push(event);
                 }
                 Token::Word(Keyword::Projector) => {
-                    let projector = self.projector_shell(&currency)?;
+                    let projector = self.projector_shell()?;
                     if projectors.iter().any(|other| other.name == projector.name) {
                         return self
                             .fail(format!("projector `{}` is declared twice", projector.name));
@@ -382,7 +347,6 @@ impl Parser {
                 }
                 Token::Word(Keyword::Command) => self.command_signature()?,
                 Token::Word(Keyword::Effect) => self.skip_item()?,
-                Token::Word(Keyword::Currency) => self.skip_currency(),
                 other => return self.fail(Self::expected_item(other)),
             }
         }
@@ -395,20 +359,19 @@ impl Parser {
             match self.peek() {
                 Token::End => break,
                 Token::Word(Keyword::Event) => self.skip_item()?,
-                Token::Word(Keyword::Currency) => self.skip_currency(),
                 Token::Word(Keyword::Command) => {
-                    let command = self.command_decl(&events, &currency)?;
+                    let command = self.command_decl(&events)?;
                     commands.push(command);
                 }
                 Token::Word(Keyword::Projector) => {
                     let (handlers, entities) =
-                        self.projector_handlers(&projectors[seen], &events, &currency)?;
+                        self.projector_handlers(&projectors[seen], &events)?;
                     projectors[seen].handlers = handlers;
                     projectors[seen].entities = entities;
                     seen += 1;
                 }
                 Token::Word(Keyword::Effect) => {
-                    let effect = self.effect_decl(&events, &currency)?;
+                    let effect = self.effect_decl(&events)?;
                     if effects.iter().any(|other| other.name == effect.name) {
                         return self.fail(format!("effect `{}` is declared twice", effect.name));
                     }
@@ -419,7 +382,6 @@ impl Parser {
         }
 
         let program = Program {
-            currency,
             events,
             commands,
             projectors,
@@ -431,8 +393,8 @@ impl Parser {
 
     /// Pass 1: a command's name and parameter types, so rule 7 can check an `invoke`
     /// against a command declared later or in another module. A parameter list is
-    /// `name: Type` and nothing else, with no defaults and no literals, so this needs
-    /// neither the currency nor the event table. That is what keeps it a pass-1 job.
+    /// `name: Type` and nothing else, with no defaults and no literals, so it never
+    /// consults the event table. That is what keeps it a pass-1 job.
     fn command_signature(&mut self) -> Result<(), SyntaxError> {
         self.expect_word(Keyword::Command)?;
         let (line, col) = self.here();
@@ -456,20 +418,15 @@ impl Parser {
         self.skip_braced()
     }
 
-    fn skip_currency(&mut self) {
-        self.bump();
-        self.bump();
-    }
-
     fn expected_item(found: &Token) -> String {
-        format!("expected `event`, `command`, `projector`, `effect` or `currency`, found {found}")
+        format!("expected `event`, `command`, `projector` or `effect`, found {found}")
     }
 
     /// Collects a projector's `enum` and `entity` declarations, leaving its handlers
     /// for the second pass, so a handler may reference an event declared later or in
     /// another file. Two sub-passes, because an entity field may name an enum
     /// declared below it.
-    fn projector_shell(&mut self, currency: &Currency) -> Result<Projector, SyntaxError> {
+    fn projector_shell(&mut self) -> Result<Projector, SyntaxError> {
         let module = self.module_at(self.pos).map(str::to_string);
         self.expect_word(Keyword::Projector)?;
         let name = self.expect_ident()?;
@@ -499,7 +456,7 @@ impl Parser {
             match self.peek() {
                 Token::Word(Keyword::Enum) => self.skip_braced()?,
                 Token::Word(Keyword::Entity) => {
-                    let def = self.entity_decl(currency)?;
+                    let def = self.entity_decl()?;
                     if entities.iter().any(|other| other.name == def.name) {
                         return self.fail(format!("entity `{}` is declared twice", def.name));
                     }
@@ -535,7 +492,6 @@ impl Parser {
         &mut self,
         projector: &Projector,
         events: &[EventDef],
-        currency: &Currency,
     ) -> Result<(Vec<Handler>, Vec<EntityDef>), SyntaxError> {
         self.expect_word(Keyword::Projector)?;
         self.expect_ident()?;
@@ -548,9 +504,7 @@ impl Parser {
         while !self.at_sym(Sym::RBrace) && !matches!(self.peek(), Token::End) {
             match self.peek() {
                 Token::Word(Keyword::Enum) | Token::Word(Keyword::Entity) => self.skip_braced()?,
-                Token::Word(Keyword::On) => {
-                    handlers.push(self.handler(&projector.name, events, currency)?)
-                }
+                Token::Word(Keyword::On) => handlers.push(self.handler(&projector.name, events)?),
                 other => return self.fail(Self::expected_member(other)),
             }
         }
@@ -656,7 +610,7 @@ impl Parser {
         })
     }
 
-    fn entity_decl(&mut self, currency: &Currency) -> Result<EntityDef, SyntaxError> {
+    fn entity_decl(&mut self) -> Result<EntityDef, SyntaxError> {
         self.expect_word(Keyword::Entity)?;
         let name = self.expect_ident()?;
         self.expect_sym(Sym::LBrace)?;
@@ -721,7 +675,7 @@ impl Parser {
                         "`{field_name}` is optional, so it is already `none` by default"
                     ));
                 }
-                field.default = Some(self.default_literal(&ty, currency)?);
+                field.default = Some(self.default_literal(&ty)?);
             }
 
             if is_key {
@@ -828,10 +782,10 @@ impl Parser {
         Ok(Index { fields: columns })
     }
 
-    /// A field default is a literal, resolved here against the declared type and the
-    /// program currency, so nothing unresolved reaches the IR and a default always
-    /// agrees in type with the zero it replaces.
-    fn default_literal(&mut self, ty: &Type, currency: &Currency) -> Result<Literal, SyntaxError> {
+    /// A field default is a literal, resolved here against the declared type, so
+    /// nothing unresolved reaches the IR and a default always agrees in type with the
+    /// zero it replaces.
+    fn default_literal(&mut self, ty: &Type) -> Result<Literal, SyntaxError> {
         let negated = self.eat_sym(Sym::Minus);
         let spanned = self.bump();
         let (line, col) = (spanned.line, spanned.col);
@@ -846,7 +800,7 @@ impl Parser {
                     number.digits
                 };
                 Number::new(digits, number.scale)
-                    .resolve(ty, currency)
+                    .resolve(ty)
                     .map_err(|err| self.err(err.to_string(), line, col))?
             }
             _ if negated => return Err(bad("a negated value")),
@@ -894,12 +848,7 @@ impl Parser {
         self.entities.iter().find(|def| def.name == name)
     }
 
-    fn handler(
-        &mut self,
-        projector: &Ident,
-        events: &[EventDef],
-        currency: &Currency,
-    ) -> Result<Handler, SyntaxError> {
+    fn handler(&mut self, projector: &Ident, events: &[EventDef]) -> Result<Handler, SyntaxError> {
         self.expect_word(Keyword::On)?;
         let path = self.expect_path()?;
         let def = self.event_def(events, &path)?.clone();
@@ -907,7 +856,6 @@ impl Parser {
         let mut lower = Lower {
             b: Builder::new(projector),
             defaults: HashMap::new(),
-            currency: currency.clone(),
         };
 
         let envelope = if self.eat_word(Keyword::As) {
@@ -1093,6 +1041,18 @@ impl Parser {
         Ok(EventDef::new(path, fields))
     }
 
+    /// The `(n)` a `Decimal` or a `Money` carries. Both are scaled integers and both
+    /// spell their scale the same way.
+    fn scale_arg(&mut self, what: &str) -> Result<u8, SyntaxError> {
+        self.expect_sym(Sym::LParen)?;
+        let number = self.expect_number()?;
+        self.expect_sym(Sym::RParen)?;
+        match (number.scale, u8::try_from(number.digits)) {
+            (0, Ok(scale)) => Ok(scale),
+            _ => self.fail(format!("a {what} scale must be a small whole number")),
+        }
+    }
+
     fn type_ref(&mut self) -> Result<Type, SyntaxError> {
         let name = self.expect_ident()?;
         let ty = match name.as_str() {
@@ -1100,17 +1060,9 @@ impl Parser {
             "Int" => Type::Int,
             "String" => Type::String,
             "Uuid" => Type::Uuid,
-            "Money" => Type::Money,
             "Timestamp" => Type::Timestamp,
-            "Decimal" => {
-                self.expect_sym(Sym::LParen)?;
-                let number = self.expect_number()?;
-                self.expect_sym(Sym::RParen)?;
-                match (number.scale, u8::try_from(number.digits)) {
-                    (0, Ok(scale)) => Type::Decimal(scale),
-                    _ => return self.fail("a Decimal scale must be a small whole number"),
-                }
-            }
+            "Decimal" => Type::Decimal(self.scale_arg("Decimal")?),
+            "Money" => Type::Money(self.scale_arg("Money")?),
             other => match self.enum_def(other) {
                 Some(def) => Type::Enum(def.name.clone()),
                 None => return self.fail(format!("unknown type `{other}`")),
@@ -1123,18 +1075,13 @@ impl Parser {
         Ok(ty)
     }
 
-    fn command_decl(
-        &mut self,
-        events: &[EventDef],
-        currency: &Currency,
-    ) -> Result<Command, SyntaxError> {
+    fn command_decl(&mut self, events: &[EventDef]) -> Result<Command, SyntaxError> {
         let module = self.module_at(self.pos).map(str::to_string);
         self.expect_word(Keyword::Command)?;
         let name = self.expect_ident()?;
         let mut lower = Lower {
             b: Builder::new(&name),
             defaults: HashMap::new(),
-            currency: currency.clone(),
         };
         lower.b.in_module(module.as_deref());
 
@@ -1876,7 +1823,7 @@ impl Parser {
             None => default_type(number),
         };
         let lit = number
-            .resolve(&ty, &lower.currency)
+            .resolve(&ty)
             .map_err(|err| self.err(err.to_string(), at.line, at.col))?;
         let id = lower.b.lit(lit);
         if defaulted {
@@ -1922,7 +1869,7 @@ impl Parser {
         let Some(number) = lower.defaults.get(&id).copied() else {
             return;
         };
-        if let Ok(lit) = number.resolve(ty, &lower.currency) {
+        if let Ok(lit) = number.resolve(ty) {
             lower.b.patch(id, Expr::Lit(lit));
             lower.defaults.remove(&id);
         }
@@ -2020,11 +1967,7 @@ fn response_field(name: &str) -> Option<Type> {
 fn check_subject(_target: &EntityField, _incoming: &Ident) {}
 
 impl Parser {
-    fn effect_decl(
-        &mut self,
-        events: &[EventDef],
-        currency: &Currency,
-    ) -> Result<Effect, SyntaxError> {
+    fn effect_decl(&mut self, events: &[EventDef]) -> Result<Effect, SyntaxError> {
         let module = self.module_at(self.pos).map(str::to_string);
         self.expect_word(Keyword::Effect)?;
         let name = self.expect_ident()?;
@@ -2037,7 +1980,7 @@ impl Parser {
                 return self.fail(format!("expected `on`, found {}", self.peek()));
             }
             let start = self.pos;
-            let arm = self.arm(&name, events, currency)?;
+            let arm = self.arm(&name, events)?;
             // Rule 1: one event selects exactly one arm, so two arms on a type would
             // make declaration order decide what a replay does.
             if let Some(index) = arms.iter().position(|other| other.event == arm.event) {
@@ -2062,12 +2005,7 @@ impl Parser {
         Ok(Effect { name, module, arms })
     }
 
-    fn arm(
-        &mut self,
-        effect: &Ident,
-        events: &[EventDef],
-        currency: &Currency,
-    ) -> Result<Arm, SyntaxError> {
+    fn arm(&mut self, effect: &Ident, events: &[EventDef]) -> Result<Arm, SyntaxError> {
         let span = self.span_here();
         self.expect_word(Keyword::On)?;
         let path = self.expect_path()?;
@@ -2076,7 +2014,6 @@ impl Parser {
         let mut lower = Lower {
             b: Builder::new(effect),
             defaults: HashMap::new(),
-            currency: currency.clone(),
         };
 
         let envelope = if self.eat_word(Keyword::As) {

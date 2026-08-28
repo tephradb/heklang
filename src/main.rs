@@ -2,9 +2,13 @@ use std::fs;
 use std::process::ExitCode;
 
 use heklang::{
-    Currency, Event, EventPath, Interpreter, Invocation, Journal, Key, Outcome, Program, Reply,
-    Store, Value, parse_files,
+    Event, EventPath, Interpreter, Invocation, Journal, Key, Outcome, Program, Reply, Store, Value,
+    parse_files,
 };
+
+/// The demo's money scale. A storage precision floor, not a claim about a currency: a
+/// program that handles several picks one that fits them all.
+const SCALE: u8 = 2;
 
 const COMMANDS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/place_order.hk");
 const PROJECTORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/orders.hk");
@@ -35,7 +39,7 @@ fn placed(seq: u32, customer_id: i64, email: &str, total: i64) -> Event {
             ("customer_id", Value::Int(customer_id)),
             ("email", Value::str(email)),
             ("address", Value::str("1 Seed St")),
-            ("total", Value::Money(total)),
+            ("total", Value::money(total, SCALE)),
             ("tax_rate", Value::decimal(825, 4)),
             ("notes", Value::str("")),
         ],
@@ -68,7 +72,7 @@ fn seed() -> Vec<Event> {
         [
             ("order_id", Value::uuid(uuid(100))),
             ("customer_id", Value::Int(8)),
-            ("refund", Value::Money(1_000)),
+            ("refund", Value::money(1_000, SCALE)),
         ],
     ));
 
@@ -89,7 +93,7 @@ fn place(
         ("customer_id", Value::Int(customer_id)),
         ("email", Value::str(email)),
         ("address", Value::str(address)),
-        ("total", Value::Money(2_599)),
+        ("total", Value::money(2_599, SCALE)),
         ("tax_rate", Value::decimal(825, 4)),
     ];
     if let Some(notes) = notes {
@@ -101,10 +105,7 @@ fn place(
             match &execution.outcome {
                 Outcome::Ok(events) => {
                     for event in events {
-                        println!(
-                            "{label:16} ok       {}",
-                            event.display(interpreter.currency())
-                        );
+                        println!("{label:16} ok       {event}");
                     }
                 }
                 Outcome::Invalid(message) => println!("{label:16} invalid  {message}"),
@@ -124,7 +125,7 @@ fn place(
 }
 
 fn discount(interpreter: &mut Interpreter<'_>, label: &str, units: i64) {
-    match interpreter.run("BareDiscount", [("total", Value::Money(units))]) {
+    match interpreter.run("BareDiscount", [("total", Value::money(units, SCALE))]) {
         Ok(_) => println!("{label:16} ok       exact, no rounding needed"),
         Err(err) => println!("{label:16} error    {err}"),
     }
@@ -157,12 +158,11 @@ fn main() -> ExitCode {
 
     let mut interpreter = Interpreter::with_log(&program, seed());
     println!(
-        "parsed {} events, {} commands, {} projectors and {} effects, currency {}, seeded log of {} events\n",
+        "parsed {} events, {} commands, {} projectors and {} effects, seeded log of {} events\n",
         program.events.len(),
         program.commands.len(),
         program.projectors.len(),
         program.effects.len(),
-        program.currency.code,
         interpreter.log().len()
     );
 
@@ -242,7 +242,6 @@ fn main() -> ExitCode {
     discount(&mut interpreter, "bare * on 25.99", 2_599);
     discount(&mut interpreter, "bare * on 20.00", 2_000);
 
-    let currency = program.currency.clone();
     println!("\nprojector Orders");
     // A fresh `put`, and a `Customer` row materialized from zeros by the patch.
     println!("  after the command scenarios");
@@ -250,7 +249,6 @@ fn main() -> ExitCode {
         rows(
             &store,
             "Customer",
-            &currency,
             &["1"],
             &["order_count", "lifetime_spend", "name"],
         );
@@ -263,7 +261,6 @@ fn main() -> ExitCode {
         rows(
             &store,
             "Customer",
-            &currency,
             &["1"],
             &["order_count", "lifetime_spend", "name"],
         );
@@ -277,7 +274,6 @@ fn main() -> ExitCode {
         rows(
             &store,
             "Order",
-            &currency,
             &["000000000010"],
             &["total", "previous_total", "status", "tracking"],
         );
@@ -291,7 +287,6 @@ fn main() -> ExitCode {
         rows(
             &store,
             "Order",
-            &currency,
             &["000000000020"],
             &["total", "status", "tracking", "placed_at"],
         );
@@ -394,8 +389,7 @@ fn rejected(label: &str, arm: &str) {
     }
 }
 
-const REJECTED_PRELUDE: &str = "currency USD
-event @order.placed {
+const REJECTED_PRELUDE: &str = "event @order.placed {
   order_id: Uuid,
   customer_id: Int,
   email: String @subject(customer_id),
@@ -443,7 +437,7 @@ fn short(key: &Key) -> String {
     }
 }
 
-fn rows(store: &Store, entity: &str, currency: &Currency, keys: &[&str], only: &[&str]) {
+fn rows(store: &Store, entity: &str, keys: &[&str], only: &[&str]) {
     for (key, row) in store.rows(entity) {
         let label = short(key);
         if !keys.is_empty() && !keys.contains(&label.as_str()) {
@@ -453,7 +447,7 @@ fn rows(store: &Store, entity: &str, currency: &Currency, keys: &[&str], only: &
             .0
             .iter()
             .filter(|(name, _)| only.is_empty() || only.contains(&name.as_str()))
-            .map(|(name, value)| format!("{name}: {}", value.display(currency)))
+            .map(|(name, value)| format!("{name}: {value}"))
             .collect();
         println!("  {entity}[{label}] {}", fields.join(", "));
     }
@@ -484,7 +478,7 @@ fn repriced(seq: u32, total: i64) -> Event {
         EventPath::new(["order", "repriced"]),
         [
             ("order_id", Value::uuid(uuid(seq))),
-            ("total", Value::Money(total)),
+            ("total", Value::money(total, SCALE)),
         ],
     )
 }

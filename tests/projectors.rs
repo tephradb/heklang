@@ -1,14 +1,15 @@
 //! `docs/projectors.md` as executable tests, one test per numbered rule.
 
+use std::fs;
+
 use heklang::ir::Stmt;
 use heklang::{Event, EventPath, Interpreter, Key, Store, Value, parse};
 
-const EVENTS: &str = "currency USD
-event @order.placed {
+const EVENTS: &str = "event @order.placed {
   order_id: Uuid,
   customer_id: Int,
   email: String @subject(customer_id) @max(200),
-  total: Money,
+  total: Money(2),
 }
 event @order.shipped { order_id: Uuid, tracking: String }
 event @order.purged { order_id: Uuid }
@@ -23,7 +24,7 @@ fn source(body: &str) -> String {
   entity Order {{
     order_id: Uuid @key,
     customer_id: Int @index,
-    total: Money,
+    total: Money(2),
     status: Status,
     tracking: String?,
   }}
@@ -31,7 +32,7 @@ fn source(body: &str) -> String {
   entity Customer {{
     customer_id: Int @key,
     order_count: Int,
-    lifetime_spend: Money,
+    lifetime_spend: Money(2),
   }}
 
 {body}
@@ -47,7 +48,7 @@ fn placed(seq: u32, customer_id: i64, total: i64) -> Event {
             ("order_id", Value::uuid(format!("order-{seq}"))),
             ("customer_id", Value::Int(customer_id)),
             ("email", Value::str("ada@example.com")),
-            ("total", Value::Money(total)),
+            ("total", Value::money(total, 2)),
         ],
     )
 }
@@ -130,7 +131,7 @@ fn as_binds_at_id_and_position() {
     assert_eq!(row.field("customer_id"), Some(&Value::Int(1)));
     assert_eq!(
         row.field("total"),
-        Some(&Value::Money(500)),
+        Some(&Value::money(500, 2)),
         "`e.total` reads a payload field that was never destructured"
     );
 }
@@ -196,7 +197,7 @@ fn put_writes_every_field_patch_only_the_listed_ones() {
         .expect("the row exists");
     assert_eq!(
         row.field("total"),
-        Some(&Value::Money(2_599)),
+        Some(&Value::money(2_599, 2)),
         "a field the patch did not list is left alone"
     );
     assert_eq!(
@@ -250,7 +251,7 @@ fn a_leading_dot_reads_the_stored_value_a_bare_name_does_not() {
         .expect("the row exists");
     assert_eq!(
         row.field("total"),
-        Some(&Value::Money(5_198)),
+        Some(&Value::money(5_198, 2)),
         "the put stored 2599, then the patch added the event's 2599 to it"
     );
 }
@@ -368,7 +369,7 @@ fn a_deleted_row_re_materializes_on_the_next_patch() {
         .expect("the patch brought the row back");
     assert_eq!(
         row.field("total"),
-        Some(&Value::Money(0)),
+        Some(&Value::money(0, 2)),
         "the re-materialized row starts from zeros, not from what was deleted"
     );
 }
@@ -400,12 +401,11 @@ fn uuid_and_timestamp_have_no_zero() {
 
 #[test]
 fn a_default_or_a_zero_always_has_the_declared_type() {
-    let source =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/hek/place_order.hk"))
-            .expect("the demo command source")
-            + "\n"
-            + &std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/hek/orders.hk"))
-                .expect("the demo projector source");
+    let source = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/hek/place_order.hk"))
+        .expect("the demo command source")
+        + "\n"
+        + &fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/hek/orders.hk"))
+            .expect("the demo projector source");
     let program = parse(&source).unwrap_or_else(|err| panic!("{err}"));
 
     for projector in &program.projectors {
@@ -433,36 +433,38 @@ fn a_default_or_a_zero_always_has_the_declared_type() {
 }
 
 #[test]
-fn a_money_default_resolves_at_the_currency_scale() {
-    for (code, units) in [("USD", 0), ("BHD", 0), ("JPY", 0)] {
+fn a_money_default_resolves_at_the_declared_scale() {
+    for scale in [0u8, 2, 4] {
         let source = format!(
-            "currency {code}
-event @a.b {{ x: Int }}
+            "event @a.b {{ x: Int }}
 projector P {{
-  entity Thing {{ id: Int @key, spend: Money = 0 }}
+  entity Thing {{ id: Int @key, spend: Money({scale}) = 0 }}
   on @a.b {{ x }} {{ delete Thing[x] }}
 }}
 "
         );
-        let program = parse(&source).unwrap_or_else(|err| panic!("{code}: {err}"));
+        let program = parse(&source).unwrap_or_else(|err| panic!("scale {scale}: {err}"));
         let entity = &program.projectors[0].entities[0];
         assert_eq!(
             entity.fields[1].default,
-            Some(heklang::Literal::Money(units)),
-            "for {code}"
+            Some(heklang::Literal::Money { units: 0, scale }),
+            "for Money({scale})"
         );
     }
 
-    let source = "currency JPY
-event @a.b { x: Int }
+    // Widening is exact; more written places than the field holds is an error rather
+    // than a silent round, exactly as for `Decimal`.
+    let source = "event @a.b { x: Int }
 projector P {
-  entity Thing { id: Int @key, spend: Money = 0.50 }
+  entity Thing { id: Int @key, spend: Money(0) = 0.50 }
   on @a.b { x } { delete Thing[x] }
 }
 ";
     assert_eq!(
-        parse(source).expect_err("JPY has no minor units").message,
-        "2 decimal places is too precise for Money"
+        parse(source)
+            .expect_err("Money(0) holds no decimal places")
+            .message,
+        "2 decimal places is too precise for Money(0)"
     );
 }
 
@@ -619,7 +621,7 @@ fn indexes_are_recorded_in_the_ir() {
 
 #[test]
 fn an_index_must_name_declared_fields() {
-    let message = err_entity_body("order_id: Uuid @key,\n    total: Money,\n\n    index (nope)");
+    let message = err_entity_body("order_id: Uuid @key,\n    total: Money(2),\n\n    index (nope)");
     assert_eq!(message, "entity `Order` has no field `nope` to index");
 }
 
@@ -690,15 +692,14 @@ fn discarding_a_subject_binding_is_an_error() {
 
 #[test]
 fn a_projector_may_precede_the_events_it_uses() {
-    let source = "currency USD
-projector P {
-  entity Order { order_id: Uuid @key, total: Money }
+    let source = "projector P {
+  entity Order { order_id: Uuid @key, total: Money(2) }
   on @order.placed { order_id, total } {
     put Order { order_id, total }
   }
 }
 
-event @order.placed { order_id: Uuid, total: Money }
+event @order.placed { order_id: Uuid, total: Money(2) }
 ";
     let program = parse(source).expect("events are collected before handler bodies are parsed");
     assert_eq!(program.projectors[0].handlers.len(), 1);
@@ -706,8 +707,7 @@ event @order.placed { order_id: Uuid, total: Money }
 
 #[test]
 fn an_entity_may_precede_the_enum_it_names() {
-    let source = "currency USD
-event @a.b { x: Int }
+    let source = "event @a.b { x: Int }
 projector P {
   entity Thing { id: Int @key, status: Status }
   enum Status { @default On, Off }
@@ -723,8 +723,7 @@ projector P {
 
 #[test]
 fn duplicate_projector_declarations_are_rejected() {
-    let source = "currency USD
-event @a.b { x: Int }
+    let source = "event @a.b { x: Int }
 projector P {
   entity Thing { id: Int @key }
   on @a.b { x } { delete Thing[x] }
@@ -742,8 +741,7 @@ projector P {
 
 #[test]
 fn entities_are_scoped_to_their_projector() {
-    let source = "currency USD
-event @a.b { x: Int }
+    let source = "event @a.b { x: Int }
 projector P {
   entity Thing { id: Int @key }
   on @a.b { x } { delete Thing[x] }
@@ -769,16 +767,15 @@ fn a_uuid_key_and_a_string_key_are_distinct() {
         Key::from_value(&Value::str(same)),
         "the key discriminant survives, so a Uuid never collides with a String"
     );
-    assert_eq!(Key::from_value(&Value::Money(1)), None);
+    assert_eq!(Key::from_value(&Value::money(1, 2)), None);
     assert_eq!(Key::from_value(&Value::Bool(true)), None);
 }
 
 #[test]
 fn a_key_must_be_an_orderable_scalar() {
-    for (ty, literal) in [("Money", "Money"), ("Bool", "Bool")] {
+    for (ty, literal) in [("Money(2)", "Money(2)"), ("Bool", "Bool")] {
         let source = format!(
-            "currency USD
-event @a.b {{ x: Int }}
+            "event @a.b {{ x: Int }}
 projector P {{
   entity Thing {{ id: {ty} @key }}
   on @a.b {{ x }} {{ delete Thing[x] }}
@@ -794,10 +791,10 @@ projector P {{
 
 #[test]
 fn an_entity_needs_exactly_one_key() {
-    let message = err_entity_body("order_id: Uuid, total: Money");
+    let message = err_entity_body("order_id: Uuid, total: Money(2)");
     assert_eq!(message, "entity `Order` has no `@key` field");
 
-    let message = err_entity_body("order_id: Uuid @key, total: Money @key");
+    let message = err_entity_body("order_id: Uuid @key, total: Money(2) @key");
     assert_eq!(message, "entity `Order` has more than one `@key`");
 }
 
@@ -814,8 +811,7 @@ fn emit_is_a_command_statement_and_the_writes_are_not() {
 
     for keyword in ["put", "patch", "delete"] {
         let source = format!(
-            "currency USD
-event @a.b {{ x: Int }}
+            "event @a.b {{ x: Int }}
 command C(x: Int) {{
   {keyword} Thing
   return
@@ -858,8 +854,7 @@ fn a_max_violation_reports_a_line_and_column() {
     // `notes` carries no `@max`, so writing it into a field that has one is the
     // schema bug the `@max` invariant forbids. Until the checker exists, this is
     // where it surfaces.
-    let source = "currency USD
-event @order.placed { order_id: Uuid, notes: String }
+    let source = "event @order.placed { order_id: Uuid, notes: String }
 projector P {
   entity Note {
     order_id: Uuid @key,
@@ -885,9 +880,9 @@ projector P {
 
     assert_eq!(
         err.to_string(),
-        "9:32: note is 17 characters, the most allowed is 8"
+        "8:32: note is 17 characters, the most allowed is 8"
     );
-    let line = source.lines().nth(8).expect("line 9");
+    let line = source.lines().nth(7).expect("line 8");
     assert_eq!(
         &line[31..36],
         "notes",
@@ -899,8 +894,7 @@ projector P {
 fn a_command_reports_the_same_violation_as_an_outcome() {
     // The same annotation, the other failure mode: a command has a validation
     // channel to route it through, so it is `Invalid` rather than an error.
-    let source = "currency USD
-event @order.placed { order_id: Uuid, notes: String @max(8) }
+    let source = "event @order.placed { order_id: Uuid, notes: String @max(8) }
 command C(order_id: Uuid, notes: String) {
   emit @order.placed { order_id, notes }
 }

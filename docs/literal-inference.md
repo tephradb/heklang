@@ -15,9 +15,8 @@ A literal resolves against a **target type**, which is either known from context
 
 - Against `Int`, the literal must have scale 0.
 - Against `Decimal(s)`, the literal widens from its written scale to `s`. Widening is exact.
-- Against `Money`, the literal widens from its written scale to the scale of the program's declared
-  currency, so `1000.00` is 100000 minor units under USD and 1000000 under BHD, but an error under
-  JPY, where the same amount is written `1000`.
+- Against `Money(n)`, exactly as for `Decimal(n)`: the literal widens from its written scale to `n`.
+  Currency is not involved, because it is not in the type (see `docs/money.md`).
 - Against any other type, it is an error.
 
 Widening is the only rescale allowed. A literal written with **more** decimal places than the target
@@ -30,8 +29,8 @@ compiler's to paper over.
 In order of priority:
 
 1. **An annotation.** A parameter type, a `state` type, an event field type in a filter or an `emit`,
-   or the declared type a `state` fold must produce. `state total: Money = fold 0` resolves `0` as
-   money.
+   or the declared type a `state` fold must produce. `state total: Money(2) = fold 0` resolves `0`
+   as money at scale 2.
 2. **The other operand of `+`, `-` or a comparison.** `lifetime_spend > 1000.00` resolves the literal
    as `Money` because the left side is money. This works in both directions: for `1000.00 < spend`
    the literal is resolved once the right side's type is known, and the already-emitted IR node is
@@ -57,18 +56,17 @@ safe target.
 
 ## Table
 
-Assume `currency USD` and a command with `total: Money`, `spend: Money`, `count: Int`,
-`rate: Decimal(4)`.
+Assume a command with `total: Money(2)`, `spend: Money(2)`, `count: Int`, `rate: Decimal(4)`.
 
 | Source | Resolves to |
 | --- | --- |
 | `state open: Int = fold 0` | `Int(0)` |
-| `state spent: Money = fold 0` | `Money(0)` |
+| `state spent: Money(2) = fold 0` | `Money(0, scale 2)` |
 | `state rate: Decimal(4) = fold 0.0825` | `Decimal(825, scale 4)` |
 | `count + 1` | `Int(1)` |
-| `spend + 1` | `Money(100)` |
-| `spend > 1000.00` | `Money(100000)` |
-| `1000.00 < spend` | `Money(100000)` |
+| `spend + 1` | `Money(100, scale 2)` |
+| `spend > 1000.00` | `Money(100000, scale 2)` |
+| `1000.00 < spend` | `Money(100000, scale 2)` |
 | `count >= 10` | `Int(10)` |
 | `1 + 0.5` | `Decimal(10, scale 1)`, `Decimal(5, scale 1)` |
 | `0.5 + 1` | `Decimal(5, scale 1)`, `Decimal(10, scale 1)` |
@@ -77,14 +75,14 @@ Assume `currency USD` and a command with `total: Money`, `spend: Money`, `count:
 | `total * 0.9` | `Decimal(9, scale 1)`, and the multiplication is an error unless exact |
 | `total.mul(0.9, HalfUp)` | `Decimal(9, scale 1)` |
 | `total / 3` | `Int(3)` |
-| `1000.00` as `Money` under JPY | error: 2 decimal places is too precise for Money |
+| `1000.00` as `Money(0)` | error: 2 decimal places is too precise for Money(0) |
 | `0.0825` as `Decimal(2)` | error: 4 decimal places is too precise for Decimal(2) |
 | `10.5` as `Int` | error: 1 decimal place is too precise for Int |
 
 ## Known gaps
 
 `type_of` in the parser is a heuristic, not a typechecker. It returns nothing for a method call, so
-`x.len() + 1` defaults the literal rather than hinting `Int`, and it reports `Money` for
-`Money / Money` where the real type is `Decimal(6)`. A wrong hint can only produce a runtime type
+`x.len() + 1` defaults the literal rather than hinting `Int`, and it reports `Money(n)` for
+`Money(n) / Money(n)` where the real type is `Decimal(6)`. A wrong hint can only produce a runtime type
 error, never silently wrong arithmetic, so this fails safe. The typechecker should replace it rather
 than extend it.

@@ -38,15 +38,17 @@ The one scoped namespace is a projector's own: entities and enums belong to the 
 declares them, so two projectors may each have a `Customer` (see `docs/projectors.md`, rule on
 scoping). Nothing else nests.
 
-## 3. `currency` is an item, declared exactly once
+## 3. There is no header item
 
-`currency USD` may sit in any module, not necessarily the first one, and must appear exactly once
-across the program. Two declarations is an error that points at the first, across modules; none is
-an error too.
+A module declares things, and that is all it does. There is nothing a file must open with and nothing
+one module has to declare on behalf of the others, so a file of plain declarations is already a whole
+program.
 
-Making it an item rather than a header is what lets module order be genuinely irrelevant. If it had
-to be the first token of the first file, then one module would be privileged and "any order" would
-be a half-truth.
+heklang briefly had a `currency USD` item here, on the theory that currency was deployment
+configuration. It is gone, and `docs/money.md` records why: a multi-tenant deployment serving stores
+in different currencies cannot have one configured currency, which is the normal case rather than the
+exception. Nothing replaced it, which is the outcome worth noticing: the feature that made module
+order awkward turned out to be the wrong feature rather than one needing a better home.
 
 ## Positions
 

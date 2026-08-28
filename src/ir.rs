@@ -1,7 +1,6 @@
 use std::error;
 use std::fmt;
 
-use crate::currency::Currency;
 use crate::scaled::{self, Rounding};
 
 pub type Ident = String;
@@ -41,7 +40,11 @@ pub enum Type {
     String,
     Uuid,
     Timestamp,
-    Money,
+    /// Its own type rather than a `Decimal`, because its operator table is what
+    /// catches the mistakes: money plus money is fine, money plus a bare decimal is
+    /// not. The scale is a storage precision floor, not a claim about any currency;
+    /// currency is not in the type, the value or the config.
+    Money(u8),
     Enum(Ident),
     Rounding,
     Json,
@@ -65,7 +68,7 @@ impl fmt::Display for Type {
             Type::String => f.write_str("String"),
             Type::Uuid => f.write_str("Uuid"),
             Type::Timestamp => f.write_str("Timestamp"),
-            Type::Money => f.write_str("Money"),
+            Type::Money(scale) => write!(f, "Money({scale})"),
             Type::Enum(name) => f.write_str(name),
             Type::Rounding => f.write_str("Rounding"),
             Type::Json => f.write_str("Json"),
@@ -104,7 +107,6 @@ impl fmt::Display for EventPath {
 
 #[derive(Debug, Clone)]
 pub struct Program {
-    pub currency: Currency,
     pub events: Vec<EventDef>,
     pub commands: Vec<Command>,
     pub projectors: Vec<Projector>,
@@ -548,7 +550,7 @@ pub enum Literal {
     Uuid(String),
     Timestamp(i64),
     None(Type),
-    Money(i64),
+    Money { units: i64, scale: u8 },
     Enum { ty: Ident, variant: Ident },
     Rounding(Rounding),
 }
@@ -564,11 +566,13 @@ impl Number {
         Self { digits, scale }
     }
 
-    pub fn resolve(self, ty: &Type, currency: &Currency) -> Result<Literal, NumberError> {
+    /// Resolves against a target type. `Money(n)` follows exactly the same rule as
+    /// `Decimal(n)`: widening is exact, and more written places than the target holds
+    /// is an error rather than a silent round.
+    pub fn resolve(self, ty: &Type) -> Result<Literal, NumberError> {
         let target = match ty {
             Type::Int => 0,
-            Type::Decimal(scale) => *scale,
-            Type::Money => currency.scale,
+            Type::Decimal(scale) | Type::Money(scale) => *scale,
             other => return Err(NumberError::NotNumeric(other.clone())),
         };
 
@@ -589,7 +593,10 @@ impl Number {
                 units,
                 scale: *scale,
             },
-            _ => Literal::Money(units),
+            _ => Literal::Money {
+                units,
+                scale: target,
+            },
         })
     }
 }

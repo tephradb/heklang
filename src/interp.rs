@@ -4,7 +4,6 @@ use std::fmt;
 
 use uuid::Uuid;
 
-use crate::currency::Currency;
 use crate::ir::{
     Assign, BinOp, Builtin, Command, Effect, EntityDef, EnvField, EventPath, Expr, ExprId, Exprs,
     Ident, Program, Projector, Return, Slice, SliceId, Slot, Span, Stmt, Type, UnOp,
@@ -386,10 +385,6 @@ impl<'a> Interpreter<'a> {
             interpreter.append(event);
         }
         interpreter
-    }
-
-    pub fn currency(&self) -> &Currency {
-        &self.program.currency
     }
 
     pub fn log(&self) -> &[Record] {
@@ -1256,13 +1251,13 @@ fn eval(
         Expr::Object(fields) => {
             // Rule 8's table. Sorted keys, so the same object built twice serialises
             // the same, which is one cause removed from verify's list (rule 14).
-            let Some(currency) = ctx.as_deref().map(|ctx| ctx.program.currency.clone()) else {
+            if ctx.is_none() {
                 return Err(at(ErrorKind::MalformedIr));
-            };
+            }
             let mut object = BTreeMap::new();
             for (name, value) in fields {
                 let value = eval(exprs, frame, *value, ctx.as_deref_mut())?;
-                object.insert(name.clone(), Json::from_value(&value, &currency));
+                object.insert(name.clone(), Json::from_value(&value));
             }
             Ok(Value::Json(Json::Obj(object)))
         }
@@ -1280,9 +1275,7 @@ fn eval(
             let Some(Value::Str(url)) = values.first().cloned() else {
                 return Err(at(ErrorKind::MalformedIr));
             };
-            let body = values
-                .get(1)
-                .map(|value| Json::from_value(value, &ctx.program.currency));
+            let body = values.get(1).map(Json::from_value);
             ctx.http(*builtin, &url, body).map_err(at)
         }
         Expr::Invoke { command, args } => {
@@ -1357,7 +1350,7 @@ fn unary(op: UnOp, value: Value) -> Result<Value, ErrorKind> {
             units: scaled::neg(units)?,
             scale,
         }),
-        (UnOp::Neg, Value::Money(value)) => Ok(Value::Money(scaled::neg(value)?)),
+        (UnOp::Neg, Value::Money { units, scale }) => Ok(Value::money(scaled::neg(units)?, scale)),
         (op, other) => Err(ErrorKind::BadUnaryOperand { op, ty: other.ty() }),
     }
 }
@@ -1385,7 +1378,13 @@ fn binary(op: BinOp, lhs: Value, rhs: Value) -> Result<Value, ErrorKind> {
                         scale: other,
                     },
                 ) if scale == other => a.cmp(b),
-                (Value::Money(a), Value::Money(b)) => a.cmp(b),
+                (
+                    Value::Money { units: a, scale },
+                    Value::Money {
+                        units: b,
+                        scale: other,
+                    },
+                ) if scale == other => a.cmp(b),
                 (Value::Str(a), Value::Str(b)) => a.cmp(b),
                 _ => {
                     return Err(ErrorKind::BadOperands {
@@ -1430,32 +1429,59 @@ fn binary(op: BinOp, lhs: Value, rhs: Value) -> Result<Value, ErrorKind> {
                     scale: *scale,
                 })
             }
-            (Value::Money(a), Value::Money(b)) if matches!(op, BinOp::Add | BinOp::Sub) => {
-                arith(op, *a, *b).map(Value::Money)
+            // Money keeps its own operator table, which is the whole reason it is not
+            // a `Decimal`. Two amounts add and subtract; a rate scales an amount; two
+            // amounts multiplied is a type error, as is an amount plus a bare decimal.
+            (
+                Value::Money { units: a, scale },
+                Value::Money {
+                    units: b,
+                    scale: other,
+                },
+            ) if scale == other && matches!(op, BinOp::Add | BinOp::Sub) => {
+                arith(op, *a, *b).map(|units| Value::money(units, *scale))
             }
-            (Value::Money(a), Value::Money(b)) if op == BinOp::Div => Ok(Value::Decimal {
+            (
+                Value::Money { units: a, scale },
+                Value::Money {
+                    units: b,
+                    scale: other,
+                },
+            ) if scale == other && op == BinOp::Div => Ok(Value::Decimal {
                 units: scaled::ratio(*a, *b, scaled::RATIO_SCALE)?,
                 scale: scaled::RATIO_SCALE,
             }),
-            (Value::Money(amount), Value::Int(factor)) if op == BinOp::Mul => {
-                arith(op, *amount, *factor).map(Value::Money)
+            (Value::Money { units, scale }, Value::Int(factor)) if op == BinOp::Mul => {
+                arith(op, *units, *factor).map(|units| Value::money(units, *scale))
             }
-            (Value::Int(factor), Value::Money(amount)) if op == BinOp::Mul => {
-                arith(op, *factor, *amount).map(Value::Money)
+            (Value::Int(factor), Value::Money { units, scale }) if op == BinOp::Mul => {
+                arith(op, *factor, *units).map(|units| Value::money(units, *scale))
             }
-            (Value::Money(amount), Value::Int(divisor)) if op == BinOp::Div => {
-                let units = scaled::div_exact(*amount, *divisor).map_err(inexact(op, "div"))?;
-                Ok(Value::Money(units))
+            (Value::Money { units, scale }, Value::Int(divisor)) if op == BinOp::Div => {
+                let units = scaled::div_exact(*units, *divisor).map_err(inexact(op, "div"))?;
+                Ok(Value::money(units, *scale))
             }
-            (Value::Money(amount), Value::Decimal { units, scale }) if op == BinOp::Mul => {
+            (
+                Value::Money {
+                    units: amount,
+                    scale,
+                },
+                Value::Decimal { units, scale: rate },
+            ) if op == BinOp::Mul => {
                 let units =
-                    scaled::mul_ratio_exact(*amount, *units, *scale).map_err(inexact(op, "mul"))?;
-                Ok(Value::Money(units))
+                    scaled::mul_ratio_exact(*amount, *units, *rate).map_err(inexact(op, "mul"))?;
+                Ok(Value::money(units, *scale))
             }
-            (Value::Decimal { units, scale }, Value::Money(amount)) if op == BinOp::Mul => {
+            (
+                Value::Decimal { units, scale: rate },
+                Value::Money {
+                    units: amount,
+                    scale,
+                },
+            ) if op == BinOp::Mul => {
                 let units =
-                    scaled::mul_ratio_exact(*amount, *units, *scale).map_err(inexact(op, "mul"))?;
-                Ok(Value::Money(units))
+                    scaled::mul_ratio_exact(*amount, *units, *rate).map_err(inexact(op, "mul"))?;
+                Ok(Value::money(units, *scale))
             }
             (Value::Str(a), Value::Str(b)) if op == BinOp::Add => Ok(Value::Str(format!("{a}{b}"))),
             _ => Err(ErrorKind::BadOperands {
@@ -1522,9 +1548,15 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
                 }),
             }
         }
-        (Value::Money(amount), "mul") => {
+        (
+            Value::Money {
+                units: amount,
+                scale,
+            },
+            "mul",
+        ) => {
             expect_arity(method, 2, &args)?;
-            let (units, scale) = match &args[0] {
+            let (rate, places) = match &args[0] {
                 Value::Decimal { units, scale } => (*units, *scale),
                 other => {
                     return Err(ErrorKind::BadArgument {
@@ -1535,11 +1567,18 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
                 }
             };
             let rounding = rounding_arg(method, &args[1])?;
-            Ok(Value::Money(scaled::mul_ratio(
-                *amount, units, scale, rounding,
-            )?))
+            Ok(Value::money(
+                scaled::mul_ratio(*amount, rate, places, rounding)?,
+                *scale,
+            ))
         }
-        (Value::Money(amount), "div") => {
+        (
+            Value::Money {
+                units: amount,
+                scale,
+            },
+            "div",
+        ) => {
             expect_arity(method, 2, &args)?;
             let divisor = match &args[0] {
                 Value::Int(divisor) => *divisor,
@@ -1552,7 +1591,10 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
                 }
             };
             let rounding = rounding_arg(method, &args[1])?;
-            Ok(Value::Money(scaled::div_round(*amount, divisor, rounding)?))
+            Ok(Value::money(
+                scaled::div_round(*amount, divisor, rounding)?,
+                *scale,
+            ))
         }
         (Value::Opt { value, .. }, "is_some") => {
             expect_arity(method, 0, &args)?;
@@ -1888,12 +1930,7 @@ impl Effects<'_> {
     fn invoke(&mut self, command: &Ident, args: BTreeMap<Ident, Value>) -> Result<Value, Error> {
         let rendered = Json::Obj(
             args.iter()
-                .map(|(name, value)| {
-                    (
-                        name.clone(),
-                        Json::from_value(value, &self.program.currency),
-                    )
-                })
+                .map(|(name, value)| (name.clone(), Json::from_value(value)))
                 .collect(),
         );
         let call = format!("invoke {command} {rendered}");

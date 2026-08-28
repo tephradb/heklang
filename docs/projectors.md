@@ -19,7 +19,7 @@ projector Orders {
     order_id: Uuid @key,
     customer_id: Int @index,
     email: String @max(200),
-    total: Money,
+    total: Money(2),
     status: Status,
     tracking: String?,
     placed_at: Timestamp?,
@@ -142,7 +142,7 @@ materialize the row.
 | `Bool` | `false` |
 | `Int` | `0` |
 | `Decimal(n)` | `0` at scale `n` |
-| `Money` | zero in the configured currency |
+| `Money(n)` | `0` at scale `n` |
 | `String` | `""` |
 | `T?` | `none` |
 | an enum | its `@default` variant (rule 6) |
@@ -191,9 +191,8 @@ designed against the shred cascade as a whole, not bolted onto `delete`.
 ### Defaults and zeros agree by construction
 
 A field default is written as a literal, and the parser resolves it against the field's declared type
-and the program's currency at the point of parse, exactly as it resolves every other numeric literal.
-So `= 0` on a `Money` field becomes zero minor units at the currency's scale, and `= 0` on a
-`Decimal(4)` field becomes zero at scale 4. Nothing unresolved reaches the IR.
+at the point of parse, exactly as it resolves every other numeric literal. So `= 0` on a `Money(2)`
+field becomes zero at scale 2, and `= 0` on a `Decimal(4)` field becomes zero at scale 4. Nothing unresolved reaches the IR.
 
 That is what makes rule 5 a guarantee rather than a hope: for every field, the default (if any) and
 the zero (if any) are both values of exactly the declared type, so materializing a row always
@@ -322,7 +321,7 @@ literals inherit its limits: a variant in a position whose type comes back as `N
 unique-across-enums rule rather than being resolved from context.
 
 Key types are restricted to those that can order and hash: `Int`, `String`, `Uuid`, `Timestamp` and
-enums. `Bool`, `Money` and `Decimal(n)` are rejected as keys, matching the runtime's requirement that
+enums. `Bool`, `Money(n)` and `Decimal(n)` are rejected as keys, matching the runtime's requirement that
 a key be an orderable scalar, since it doubles as the read API's pagination cursor.
 
 Compound indexes are recorded in full, but the runtime can only filter on an index's leftmost column

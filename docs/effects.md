@@ -231,7 +231,7 @@ table, which is part of the contract because it decides what a remote service ac
 | `Bool` | boolean |
 | `Int` | number |
 | `Decimal(n)` | string at scale `n`, e.g. `"0.0825"` |
-| `Money` | string at the currency's scale, e.g. `"25.99"` |
+| `Money(n)` | string at scale `n`, e.g. `"25.99"` |
 | `String` | string |
 | `Uuid` | string |
 | `Timestamp` | number, epoch microseconds |
@@ -240,7 +240,8 @@ table, which is part of the contract because it decides what a remote service ac
 | `some(x)` | whatever `x` converts to |
 
 `Money` and `Decimal` become strings rather than numbers so no precision is lost to a float on the
-far side, which is the same reason they are scaled integers here.
+far side, which is the same reason they are scaled integers here. Neither carries a currency; a
+program that needs one sends the field it declared for it (`docs/money.md`).
 
 **Object keys are sorted.** That is rule 14's defined iteration order (see below), and it is why the
 same object built twice serialises byte-identically.

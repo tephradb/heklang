@@ -2,8 +2,7 @@ use heklang::parse;
 
 #[test]
 fn a_command_may_precede_the_events_it_uses() {
-    let source = "currency USD
-command PlaceOrder(order_id: Uuid, customer_id: Int) {
+    let source = "command PlaceOrder(order_id: Uuid, customer_id: Int) {
   guard @order.placed(order_id)
 
   state open: Int = fold 0
@@ -24,16 +23,14 @@ event @order.placed {
 
 #[test]
 fn events_from_two_files_are_order_independent() {
-    let customer_first = "currency USD
-event @customer.blocked { customer_id: Int }
+    let customer_first = "event @customer.blocked { customer_id: Int }
 event @order.placed { order_id: Uuid, customer_id: Int }
 command C(order_id: Uuid, customer_id: Int) {
   guard @customer.blocked(customer_id), @order.placed(order_id)
   return
 }
 ";
-    let order_first = "currency USD
-event @order.placed { order_id: Uuid, customer_id: Int }
+    let order_first = "event @order.placed { order_id: Uuid, customer_id: Int }
 event @customer.blocked { customer_id: Int }
 command C(order_id: Uuid, customer_id: Int) {
   guard @customer.blocked(customer_id), @order.placed(order_id)
@@ -48,8 +45,7 @@ command C(order_id: Uuid, customer_id: Int) {
 
 #[test]
 fn a_filter_naming_a_later_let_points_at_the_definition() {
-    let source = "currency USD
-event @customer.blocked { customer_id: Int }
+    let source = "event @customer.blocked { customer_id: Int }
 command C(customer_id: Int) {
   state blocked: Bool = fold false
     on @customer.blocked(customer_id: customer) => true
@@ -60,7 +56,7 @@ command C(customer_id: Int) {
 ";
     let err = parse(source).expect_err("`customer` is defined below the declarations");
     assert!(
-        err.message.contains("is defined at 7:7"),
+        err.message.contains("is defined at 6:7"),
         "expected the definition site, got: {}",
         err.message
     );
@@ -73,8 +69,7 @@ command C(customer_id: Int) {
 
 #[test]
 fn a_body_reference_to_a_later_let_says_so() {
-    let source = "currency USD
-event @a.b { x: Int }
+    let source = "event @a.b { x: Int }
 command C(y: Int) {
   if y > 0 {
     let a = later
@@ -89,13 +84,12 @@ command C(y: Int) {
         "got: {}",
         err.message
     );
-    assert!(err.message.contains("7:7"), "got: {}", err.message);
+    assert!(err.message.contains("6:7"), "got: {}", err.message);
 }
 
 #[test]
 fn an_unknown_name_stays_a_plain_error() {
-    let source = "currency USD
-event @a.b { x: Int }
+    let source = "event @a.b { x: Int }
 command C(y: Int) {
   let a = nope
   return
@@ -107,8 +101,7 @@ command C(y: Int) {
 
 #[test]
 fn duplicate_declarations_are_rejected() {
-    let events = "currency USD
-event @a.b { x: Int }
+    let events = "event @a.b { x: Int }
 event @a.b { x: Int }
 ";
     assert_eq!(
@@ -116,8 +109,7 @@ event @a.b { x: Int }
         "event @a.b is declared twice"
     );
 
-    let commands = "currency USD
-command C(y: Int) { return }
+    let commands = "command C(y: Int) { return }
 command C(y: Int) { return }
 ";
     assert_eq!(
@@ -128,8 +120,7 @@ command C(y: Int) { return }
 
 #[test]
 fn a_state_without_fold_is_rejected() {
-    let source = "currency USD
-event @a.b { x: Int }
+    let source = "event @a.b { x: Int }
 command C(y: Int) {
   state seen: Bool = false
     on @a.b(x: y) => true
@@ -147,8 +138,7 @@ command C(y: Int) {
 
 #[test]
 fn an_effect_may_precede_the_command_it_invokes() {
-    let source = "currency USD
-effect Notify {
+    let source = "effect Notify {
   on @order.placed as e {
     invoke Record { order_id: e.order_id }
   }
