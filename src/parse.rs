@@ -345,6 +345,27 @@ impl Parser {
         self.fail(format!("expected `{}`, found {}", sym.text(), self.peek()))
     }
 
+    /// A comma with nothing after it but the closing paren.
+    fn at_trailing_comma(&self) -> bool {
+        self.at_sym(Sym::Comma)
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|spanned| &spanned.token),
+                Some(Token::Sym(Sym::RParen))
+            )
+    }
+
+    /// Closes a call's argument list. The last argument may carry a comma, the way the
+    /// last item of every other comma-separated list in the language already may: a
+    /// call written across lines gets one from any formatter, and where a comma is
+    /// legal the list should not care which item it follows. Not used for a call that
+    /// takes no arguments, where there is no last item for the comma to belong to.
+    fn end_args(&mut self) -> Result<(), SyntaxError> {
+        if self.at_trailing_comma() {
+            self.bump();
+        }
+        self.expect_sym(Sym::RParen)
+    }
+
     fn expect_word(&mut self, keyword: Keyword) -> Result<(), SyntaxError> {
         if self.eat_word(keyword) {
             return Ok(());
@@ -2418,7 +2439,7 @@ impl Parser {
             self.bump();
             self.expect_sym(Sym::LParen)?;
             let message = self.expr(lower, Some(Type::String))?;
-            self.expect_sym(Sym::RParen)?;
+            self.end_args()?;
             return Ok(Expect::Invalid { message, span });
         }
         if self.at_word(Keyword::Reject) {
@@ -2427,7 +2448,7 @@ impl Parser {
             let code = self.expr(lower, Some(Type::String))?;
             self.expect_sym(Sym::Comma)?;
             let message = self.expr(lower, Some(Type::String))?;
-            self.expect_sym(Sym::RParen)?;
+            self.end_args()?;
             return Ok(Expect::Reject {
                 code,
                 message,
@@ -2539,12 +2560,12 @@ impl Parser {
             };
             self.expect_sym(Sym::LParen)?;
             let url = self.expr(lower, Some(Type::String))?;
-            let body = if self.eat_sym(Sym::Comma) {
+            let body = if !self.at_trailing_comma() && self.eat_sym(Sym::Comma) {
                 Some(self.json_body(lower)?)
             } else {
                 None
             };
-            self.expect_sym(Sym::RParen)?;
+            self.end_args()?;
             return Ok(Expect::Http {
                 verb,
                 url,
@@ -2572,19 +2593,19 @@ impl Parser {
             let subject = self.expect_ident()?;
             self.expect_sym(Sym::Comma)?;
             let id = self.expr(lower, Some(Type::String))?;
-            self.expect_sym(Sym::RParen)?;
+            self.end_args()?;
             return Ok(Expect::Erase { subject, id, span });
         }
         if self.eat_soft("log") {
             self.expect_sym(Sym::LParen)?;
             let message = self.expr(lower, Some(Type::String))?;
-            self.expect_sym(Sym::RParen)?;
+            self.end_args()?;
             return Ok(Expect::Log { message, span });
         }
         if self.eat_soft("fail") {
             self.expect_sym(Sym::LParen)?;
             let message = self.expr(lower, Some(Type::String))?;
-            self.expect_sym(Sym::RParen)?;
+            self.end_args()?;
             return Ok(Expect::Failed { message, span });
         }
         if self.eat_soft("skipped") {
@@ -2734,14 +2755,14 @@ impl Parser {
                 let ret = if self.eat_word(Keyword::Invalid) {
                     self.expect_sym(Sym::LParen)?;
                     let message = self.expr(lower, Some(Type::String))?;
-                    self.expect_sym(Sym::RParen)?;
+                    self.end_args()?;
                     Return::Invalid(message)
                 } else if self.eat_word(Keyword::Reject) {
                     self.expect_sym(Sym::LParen)?;
                     let code = self.expr(lower, Some(Type::String))?;
                     self.expect_sym(Sym::Comma)?;
                     let message = self.expr(lower, Some(Type::String))?;
-                    self.expect_sym(Sym::RParen)?;
+                    self.end_args()?;
                     Return::Reject { code, message }
                 } else {
                     Return::Ok
@@ -3791,7 +3812,7 @@ impl Parser {
                 self.bump();
                 self.expect_sym(Sym::LParen)?;
                 let message = self.expr(lower, Some(Type::String))?;
-                self.expect_sym(Sym::RParen)?;
+                self.end_args()?;
                 Ok(Stmt::Fail { message, span })
             }
             "log" => {
@@ -3804,7 +3825,7 @@ impl Parser {
                 self.bump();
                 self.expect_sym(Sym::LParen)?;
                 let message = self.expr(lower, Some(Type::String))?;
-                self.expect_sym(Sym::RParen)?;
+                self.end_args()?;
                 Ok(Stmt::Log { message })
             }
             "erase" => {
@@ -3818,7 +3839,7 @@ impl Parser {
                 self.expect_sym(Sym::LParen)?;
                 let (line, col) = self.here();
                 let value = self.expr(lower, None)?;
-                self.expect_sym(Sym::RParen)?;
+                self.end_args()?;
 
                 // `erase` names a subject id rather than a subject-bound value, so
                 // rule 12's fold path does not apply to it: an id is on the trigger or
@@ -3993,7 +4014,7 @@ impl Parser {
         let seed = self.expr(lower, Some(Type::Uuid))?;
         self.expect_sym(Sym::Comma)?;
         let name = self.expr(lower, Some(Type::String))?;
-        self.expect_sym(Sym::RParen)?;
+        self.end_args()?;
         lower.b.at(span);
         Ok(lower.b.expr(Expr::Call {
             builtin: Builtin::UuidDerive,
@@ -4045,6 +4066,10 @@ impl Parser {
             self.in_body = outer;
             self.eat_sym(Sym::Comma);
         }
+        // A trailing comma closes the list; only a real third argument reaches rule 13.
+        if self.at_trailing_comma() {
+            self.bump();
+        }
         if self.at_sym(Sym::Comma) {
             // Rule 13: a timeout belongs to configuration, not to the call site.
             let (line, col) = self.here();
@@ -4082,7 +4107,7 @@ impl Parser {
         self.expect_sym(Sym::LParen)?;
         let (line, col) = self.here();
         let value = self.expr(lower, None)?;
-        self.expect_sym(Sym::RParen)?;
+        self.end_args()?;
 
         let (field, subject, subject_value) = match self.subject_source(lower, value) {
             Some(Source::Trigger(field)) => self.trigger_subject(lower, field, line, col)?,
@@ -4417,7 +4442,7 @@ impl Parser {
         let outer = mem::replace(&mut self.no_record_literal, false);
         let text = self.expr(lower, Some(Type::String))?;
         self.no_record_literal = outer;
-        self.expect_sym(Sym::RParen)?;
+        self.end_args()?;
         lower.b.at(span);
         Ok(lower.b.expr(Expr::Call {
             builtin,
@@ -4444,7 +4469,7 @@ impl Parser {
                 let hint = self.at_sym(Sym::LBrace).then_some(Type::Json);
                 let value = self.expr(lower, hint)?;
                 self.no_record_literal = outer;
-                self.expect_sym(Sym::RParen)?;
+                self.end_args()?;
                 lower.b.at(span);
                 Ok(lower.b.expr(Expr::Call {
                     builtin: Builtin::JsonEncode,

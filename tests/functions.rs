@@ -340,3 +340,67 @@ fn a_fn_is_declared_once() {
     let decls = "\nfn twice(n: Int) -> Int { return n }\nfn twice(n: Int) -> Int { return n }\n";
     assert_eq!(err(decls, EMIT), "fn `twice` is declared twice");
 }
+
+// ---------------------------------------------------------------------------------
+// Trailing commas.
+
+/// Every comma-separated list took a trailing comma except a fixed-arity builtin's
+/// argument list, whose parser read `arg`, `,`, `arg`, `)` literally. A port found it
+/// by writing a long `reject` across three lines.
+#[test]
+fn a_trailing_comma_closes_an_argument_list() {
+    let cases = [
+        (
+            "reject",
+            "  return reject(\n    \"code\",\n    \"a long message\",\n  )",
+        ),
+        ("invalid", "  return invalid(\"m\",)"),
+        (
+            "fn call",
+            "  emit @plan.created { plan_id, sku: effective_sku(sku, plan_id,), months }",
+        ),
+        (
+            "method",
+            "  emit @plan.created { plan_id, sku, months: months.min(1,) }",
+        ),
+        (
+            "Uuid.derive",
+            "  let u = Uuid.derive(plan_id, \"s\",)\n  emit @plan.created { plan_id, sku, months }",
+        ),
+        (
+            "Timestamp.parse",
+            "  let t = Timestamp.parse(\"2026-01-01T00:00:00Z\",)\n  emit @plan.created { plan_id, sku, months }",
+        ),
+    ];
+    for (what, body) in cases {
+        parse(&source("", body)).unwrap_or_else(|err| panic!("for {what}: {err}"));
+    }
+}
+
+/// The lists that already took one, so the rule is now the same everywhere rather
+/// than the same in most places.
+#[test]
+fn a_trailing_comma_closes_every_other_list() {
+    let decls = "\nrecord Pair { a: Int, b: Int, }\nfn pair(a: Int, b: Int,) -> Int {\n  let xs = [a, b,]\n  let p = Pair { a: a, b: b, }\n  return p.a + xs.len()\n}\n";
+    let body = "  emit @plan.created { plan_id, sku, months: pair(1, 2), }";
+    parse(&source(decls, body)).unwrap_or_else(|err| panic!("{err}"));
+}
+
+/// A comma is trailing only when the closing paren is next, so a call that takes no
+/// arguments has no last item for one to follow, and a real extra argument still
+/// reaches the error written for it.
+#[test]
+fn a_trailing_comma_needs_a_last_argument() {
+    let bare = parse(&source(
+        "",
+        "  let t = now(,)\n  emit @plan.created { plan_id, sku, months }",
+    ))
+    .expect_err("there is no argument for the comma to follow")
+    .message;
+    assert_eq!(bare, "expected `)`, found `,`");
+
+    let short = parse(&source("", "  return reject(\"code\",)"))
+        .expect_err("a missing argument is still missing")
+        .message;
+    assert_eq!(short, "expected a value, found `)`");
+}

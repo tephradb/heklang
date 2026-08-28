@@ -2009,3 +2009,35 @@ effect E {{
         "got: {message}"
     );
 }
+
+/// The effect-side half of the trailing-comma rule. `http.*` is the interesting one,
+/// because rule 13's arity error is written for a third positional argument and has to
+/// keep firing for one.
+#[test]
+fn a_trailing_comma_closes_an_effect_builtin() {
+    for body in [
+        "log(\"x\",)",
+        "fail(\"x\",)",
+        "erase(e.customer_id,)",
+        "let r = http.get(\"https://mail.example/confirm\",)",
+        "let r = http.post(\"https://mail.example/confirm\", { \"to\": \"x\" },)",
+        "let r = http.post(\"https://mail.example/confirm\", { \"to\": \"x\" }, headers = { \"K\": \"v\" },)",
+    ] {
+        let source = format!("effect E {{\n  on @order.placed as e {{\n    {body}\n  }}\n}}");
+        parse(&self::source(&source)).unwrap_or_else(|err| panic!("for {body}: {err}"));
+    }
+
+    let third = parse(&source(
+        "effect E {
+  on @order.placed as e {
+    let r = http.post(\"https://mail.example/confirm\", { \"to\": \"x\" }, 5,)
+  }
+}",
+    ))
+    .expect_err("a third positional argument is still rule 13")
+    .message;
+    assert_eq!(
+        third,
+        "`http.post` takes 2 arguments; a timeout is configuration rather than a call argument"
+    );
+}

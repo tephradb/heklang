@@ -56,17 +56,22 @@ program and produce a "declared twice" error naming two paths. The corpus is
 
 ## Helix
 
-Helix loads `hek.so` from `runtime/grammars/` and the queries from `runtime/queries/hek/`.
-For a home-manager setup, the pieces are:
+Wired up in `~/dev/tqwewe/config`, following the `bsn` grammar already there.
 
 `flake.nix`:
 
 ```nix
-heklang = {
-  url = "git+file:///home/ari/dev/tephradb/heklang";
+tree-sitter-hek = {
+  url = "path:/home/ari/dev/tephradb/heklang/tree-sitter-hek";
   flake = false;
 };
 ```
+
+A `path:` input rather than the `git+file:` shape `tree-sitter-bsn` uses, because `path:`
+reads the working tree: a grammar change reaches Helix after a `nix flake update`, with no
+commit in between. That is worth more than the consistency while the language is still
+moving. `git+file:///home/ari/dev/tephradb/heklang`, with `src` gaining
+`/tree-sitter-hek`, is the alternative once the grammar settles.
 
 `home/modules/helix.nix`, in the `let` block:
 
@@ -74,7 +79,7 @@ heklang = {
 hek-grammar = pkgs.tree-sitter.buildGrammar {
   language = "hek";
   version = "unstable";
-  src = "${inputs.heklang}/tree-sitter-hek";
+  src = inputs.tree-sitter-hek;
 };
 ```
 
@@ -97,6 +102,8 @@ in `programs.helix.settings.language`:
 }
 ```
 
+hek has no block comment form, so there is no `block-comment-tokens` entry.
+
 and beside the other `xdg.configFile` entries:
 
 ```nix
@@ -105,12 +112,21 @@ xdg.configFile."helix/runtime/grammars/hek.so" = {
   force = true;
 };
 xdg.configFile."helix/runtime/queries/hek" = {
-  source = "${inputs.heklang}/tree-sitter-hek/queries";
+  source = "${inputs.tree-sitter-hek}/queries";
   force = true;
 };
 ```
 
-hek has no block comment form, so there is no `block-comment-tokens` entry.
+### After changing the grammar
+
+```sh
+cd tree-sitter-hek && tree-sitter generate --abi 14 && tree-sitter test
+cd ~/dev/tqwewe/config && nix flake update tree-sitter-hek && ./update-home.sh
+```
+
+The input is content-locked, so the `nix flake update` is what makes Helix see the
+change. `hx --health hek` should show six ticks. A local `hek.so` built here is for
+`tree-sitter` command-line use only; Helix loads the `buildGrammar` output.
 
 ## Queries
 
@@ -119,6 +135,9 @@ hek has no block comment form, so there is no `block-comment-tokens` entry.
   `SCREAMING_SNAKE` is a `const` and a bare PascalCase name in a value position is an
   enum variant, neither of which a grammar can know.
 - `indents.scm`, `textobjects.scm`, `locals.scm`.
+- `tags.scm` — hek has no language server, so this is all the syntax symbol picker has
+  to work with: every top-level declaration, plus a projector's `enum` and `entity`.
+- `rainbows.scm`.
 
 Annotations (`@max`, `@key`) and event paths (`@order.placed`) are one token in the lexer
 and two nodes here, so a theme can colour them apart: `@attribute` and `@label`.

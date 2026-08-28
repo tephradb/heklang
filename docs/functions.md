@@ -170,3 +170,16 @@ another module. `docs/declarations.md` has the pass table.
   a value. Every one of the five helper files in the port is that.
 - **No overloading.** One name, one function, in one namespace with commands, projectors and effects
   kept separate from it for the reason in `docs/declarations.md`.
+- **A trailing comma closes an argument list**, in a call to a `fn`, a method, or any builtin
+  (`reject`, `invalid`, `log`, `fail`, `erase`, `Uuid.derive`, `Json.encode`, `http.*` and the
+  `docs/parsing.md` set). That matches the last field of a record literal, the last element of a
+  list, the last parameter of a signature and the last field of an `emit`, all of which already took
+  one. A call that takes no arguments does not, because there is no last item for the comma to
+  follow, so `now(,)` stays an error.
+
+  It had been the one exception, and only for the fixed-arity builtins, whose parsers read
+  `arg`, `,`, `arg`, `)` literally. A port found it by writing a long `reject` across three lines,
+  where every formatter puts a comma after the last argument, and got ``expected `)` `` with no
+  explanation. Rule 13's ``takes 2 arguments; a timeout is configuration`` still fires for a real
+  third argument, because a trailing comma is recognised as a comma followed by the closing paren
+  rather than by eating any comma that appears.
