@@ -19,7 +19,9 @@ pub fn parse(source: &str) -> Result<Program, SyntaxError> {
     .program()
 }
 
-struct Cmd {
+/// Per-declaration lowering state: the arena and scopes being built, plus the
+/// numeric literals that were typed by default and may still be retyped.
+struct Lower {
     b: Builder,
     defaults: HashMap<ExprId, Number>,
     currency: Currency,
@@ -352,7 +354,7 @@ impl Parser {
     ) -> Result<Command, SyntaxError> {
         self.expect_word(Keyword::Command)?;
         let name = self.expect_ident()?;
-        let mut cmd = Cmd {
+        let mut lower = Lower {
             b: Builder::new(&name),
             defaults: HashMap::new(),
             currency: currency.clone(),
@@ -363,7 +365,7 @@ impl Parser {
             let param = self.expect_ident()?;
             self.expect_sym(Sym::Colon)?;
             let ty = self.type_ref()?;
-            cmd.b.param(&param, ty);
+            lower.b.param(&param, ty);
             if !self.eat_sym(Sym::Comma) {
                 break;
             }
@@ -375,44 +377,44 @@ impl Parser {
         self.prologue = true;
         loop {
             match self.peek() {
-                Token::Word(Keyword::Guard) => self.guard_decl(&mut cmd, events)?,
-                Token::Word(Keyword::State) => self.state_decl(&mut cmd, events)?,
-                Token::Word(Keyword::Let) => self.hoisted_let(&mut cmd)?,
+                Token::Word(Keyword::Guard) => self.guard_decl(&mut lower, events)?,
+                Token::Word(Keyword::State) => self.state_decl(&mut lower, events)?,
+                Token::Word(Keyword::Let) => self.hoisted_let(&mut lower)?,
                 _ => break,
             }
         }
         self.prologue = false;
 
-        let body = self.statements(&mut cmd, events)?;
+        let body = self.statements(&mut lower, events)?;
         self.expect_sym(Sym::RBrace)?;
-        Ok(cmd.b.finish(body))
+        Ok(lower.b.finish(body))
     }
 
-    fn guard_decl(&mut self, cmd: &mut Cmd, events: &[EventDef]) -> Result<(), SyntaxError> {
+    fn guard_decl(&mut self, lower: &mut Lower, events: &[EventDef]) -> Result<(), SyntaxError> {
         self.expect_word(Keyword::Guard)?;
         loop {
-            let (path, filters) = self.slice_ref(cmd, events)?;
-            cmd.b.guard(path, filters);
+            let (path, filters) = self.slice_ref(lower, events)?;
+            lower.b.guard(path, filters);
             if !self.eat_sym(Sym::Comma) {
                 return Ok(());
             }
         }
     }
 
-    fn state_decl(&mut self, cmd: &mut Cmd, events: &[EventDef]) -> Result<(), SyntaxError> {
+    fn state_decl(&mut self, lower: &mut Lower, events: &[EventDef]) -> Result<(), SyntaxError> {
         self.expect_word(Keyword::State)?;
         let name = self.expect_ident()?;
         self.expect_sym(Sym::Colon)?;
         let ty = self.type_ref()?;
         self.expect_sym(Sym::Assign)?;
-        let init = self.expr(cmd, Some(ty.clone()))?;
-        let slot = cmd.b.state(&name, ty.clone(), init);
+        let init = self.expr(lower, Some(ty.clone()))?;
+        let slot = lower.b.state(&name, ty.clone(), init);
 
         while self.eat_word(Keyword::On) {
-            let (path, filters) = self.slice_ref(cmd, events)?;
+            let (path, filters) = self.slice_ref(lower, events)?;
             let def = self.event_def(events, &path)?;
 
-            cmd.b.push_scope();
+            lower.b.push_scope();
             let mut binds = Vec::new();
             if self.eat_sym(Sym::LBrace) {
                 while !self.at_sym(Sym::RBrace) {
@@ -420,7 +422,7 @@ impl Parser {
                     let Some(declared) = def.field(&field) else {
                         return self.fail(format!("{path} has no field `{field}`"));
                     };
-                    binds.push(cmd.b.bind(&field, Some(declared.ty.clone())));
+                    binds.push(lower.b.bind(&field, Some(declared.ty.clone())));
                     if !self.eat_sym(Sym::Comma) {
                         break;
                     }
@@ -429,28 +431,29 @@ impl Parser {
             }
 
             self.expect_sym(Sym::Arrow)?;
-            let value = self.expr(cmd, Some(ty.clone()))?;
-            cmd.b.pop_scope();
-            cmd.b
+            let value = self.expr(lower, Some(ty.clone()))?;
+            lower.b.pop_scope();
+            lower
+                .b
                 .slice(path, filters, binds, vec![Update { slot, value }]);
         }
 
         Ok(())
     }
 
-    fn hoisted_let(&mut self, cmd: &mut Cmd) -> Result<(), SyntaxError> {
+    fn hoisted_let(&mut self, lower: &mut Lower) -> Result<(), SyntaxError> {
         self.expect_word(Keyword::Let)?;
         let name = self.expect_ident()?;
         self.expect_sym(Sym::Assign)?;
-        let value = self.expr(cmd, None)?;
-        let ty = type_of(cmd, value);
-        cmd.b.hoist(&name, value, ty);
+        let value = self.expr(lower, None)?;
+        let ty = type_of(lower, value);
+        lower.b.hoist(&name, value, ty);
         Ok(())
     }
 
     fn slice_ref(
         &mut self,
-        cmd: &mut Cmd,
+        lower: &mut Lower,
         events: &[EventDef],
     ) -> Result<(EventPath, Vec<Filter>), SyntaxError> {
         let path = self.expect_path()?;
@@ -466,13 +469,13 @@ impl Parser {
             };
             let expected = declared.ty.clone();
             let value = if self.eat_sym(Sym::Colon) {
-                self.expr(cmd, Some(expected))?
+                self.expr(lower, Some(expected))?
             } else {
-                if cmd.b.lookup(&field).is_none() {
+                if lower.b.lookup(&field).is_none() {
                     return Err(self.not_in_scope(&field, line, col));
                 }
-                cmd.b.at(Span::new(line, col));
-                cmd.b.load(&field)
+                lower.b.at(Span::new(line, col));
+                lower.b.load(&field)
             };
             filters.push(Filter::new(field, value));
             if !self.eat_sym(Sym::Comma) {
@@ -495,29 +498,33 @@ impl Parser {
         }
     }
 
-    fn statements(&mut self, cmd: &mut Cmd, events: &[EventDef]) -> Result<Vec<Stmt>, SyntaxError> {
+    fn statements(
+        &mut self,
+        lower: &mut Lower,
+        events: &[EventDef],
+    ) -> Result<Vec<Stmt>, SyntaxError> {
         let mut stmts = Vec::new();
         while !self.at_sym(Sym::RBrace) && !matches!(self.peek(), Token::End) {
-            stmts.push(self.statement(cmd, events)?);
+            stmts.push(self.statement(lower, events)?);
         }
         Ok(stmts)
     }
 
-    fn block(&mut self, cmd: &mut Cmd, events: &[EventDef]) -> Result<Vec<Stmt>, SyntaxError> {
+    fn block(&mut self, lower: &mut Lower, events: &[EventDef]) -> Result<Vec<Stmt>, SyntaxError> {
         self.expect_sym(Sym::LBrace)?;
-        let stmts = self.statements(cmd, events)?;
+        let stmts = self.statements(lower, events)?;
         self.expect_sym(Sym::RBrace)?;
         Ok(stmts)
     }
 
-    fn statement(&mut self, cmd: &mut Cmd, events: &[EventDef]) -> Result<Stmt, SyntaxError> {
+    fn statement(&mut self, lower: &mut Lower, events: &[EventDef]) -> Result<Stmt, SyntaxError> {
         match self.peek() {
             Token::Word(Keyword::If) => {
                 self.bump();
-                let cond = self.expr(cmd, Some(Type::Bool))?;
-                let then = self.block(cmd, events)?;
+                let cond = self.expr(lower, Some(Type::Bool))?;
+                let then = self.block(lower, events)?;
                 let otherwise = if self.eat_word(Keyword::Else) {
-                    self.block(cmd, events)?
+                    self.block(lower, events)?
                 } else {
                     Vec::new()
                 };
@@ -531,14 +538,14 @@ impl Parser {
                 self.bump();
                 let ret = if self.eat_word(Keyword::Invalid) {
                     self.expect_sym(Sym::LParen)?;
-                    let message = self.expr(cmd, Some(Type::String))?;
+                    let message = self.expr(lower, Some(Type::String))?;
                     self.expect_sym(Sym::RParen)?;
                     Return::Invalid(message)
                 } else if self.eat_word(Keyword::Reject) {
                     self.expect_sym(Sym::LParen)?;
-                    let code = self.expr(cmd, Some(Type::String))?;
+                    let code = self.expr(lower, Some(Type::String))?;
                     self.expect_sym(Sym::Comma)?;
-                    let message = self.expr(cmd, Some(Type::String))?;
+                    let message = self.expr(lower, Some(Type::String))?;
                     self.expect_sym(Sym::RParen)?;
                     Return::Reject { code, message }
                 } else {
@@ -561,13 +568,13 @@ impl Parser {
                     };
                     let expected = declared.ty.clone();
                     let value = if self.eat_sym(Sym::Colon) {
-                        self.expr(cmd, Some(expected))?
+                        self.expr(lower, Some(expected))?
                     } else {
-                        if cmd.b.lookup(&name).is_none() {
+                        if lower.b.lookup(&name).is_none() {
                             return Err(self.not_in_scope(&name, line, col));
                         }
-                        cmd.b.at(Span::new(line, col));
-                        cmd.b.load(&name)
+                        lower.b.at(Span::new(line, col));
+                        lower.b.load(&name)
                     };
                     fields.push((name, value));
                     if !self.eat_sym(Sym::Comma) {
@@ -585,9 +592,9 @@ impl Parser {
                 self.bump();
                 let name = self.expect_ident()?;
                 self.expect_sym(Sym::Assign)?;
-                let value = self.expr(cmd, None)?;
-                let ty = type_of(cmd, value);
-                let slot = cmd.b.alloc(&name, ty);
+                let value = self.expr(lower, None)?;
+                let ty = type_of(lower, value);
+                let slot = lower.b.alloc(&name, ty);
                 Ok(Stmt::Assign { slot, value })
             }
             Token::Word(Keyword::State) | Token::Word(Keyword::Guard) => {
@@ -597,32 +604,32 @@ impl Parser {
         }
     }
 
-    fn expr(&mut self, cmd: &mut Cmd, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
-        self.or_expr(cmd, expect)
+    fn expr(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
+        self.or_expr(lower, expect)
     }
 
-    fn or_expr(&mut self, cmd: &mut Cmd, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
-        let mut lhs = self.and_expr(cmd, expect)?;
+    fn or_expr(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
+        let mut lhs = self.and_expr(lower, expect)?;
         while let Some(span) = self.eat_at(Sym::OrOr) {
-            let rhs = self.and_expr(cmd, Some(Type::Bool))?;
-            cmd.b.at(span);
-            lhs = cmd.b.binary(BinOp::Or, lhs, rhs);
+            let rhs = self.and_expr(lower, Some(Type::Bool))?;
+            lower.b.at(span);
+            lhs = lower.b.binary(BinOp::Or, lhs, rhs);
         }
         Ok(lhs)
     }
 
-    fn and_expr(&mut self, cmd: &mut Cmd, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
-        let mut lhs = self.cmp_expr(cmd, expect)?;
+    fn and_expr(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
+        let mut lhs = self.cmp_expr(lower, expect)?;
         while let Some(span) = self.eat_at(Sym::AndAnd) {
-            let rhs = self.cmp_expr(cmd, Some(Type::Bool))?;
-            cmd.b.at(span);
-            lhs = cmd.b.binary(BinOp::And, lhs, rhs);
+            let rhs = self.cmp_expr(lower, Some(Type::Bool))?;
+            lower.b.at(span);
+            lhs = lower.b.binary(BinOp::And, lhs, rhs);
         }
         Ok(lhs)
     }
 
-    fn cmp_expr(&mut self, cmd: &mut Cmd, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
-        let lhs = self.add_expr(cmd, expect)?;
+    fn cmp_expr(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
+        let lhs = self.add_expr(lower, expect)?;
         let Some((op, span)) = self.eat_op(&[
             (Sym::Eq, BinOp::Eq),
             (Sym::Ne, BinOp::Ne),
@@ -634,107 +641,115 @@ impl Parser {
             return Ok(lhs);
         };
 
-        let hint = self.hint_from(cmd, lhs);
-        let rhs = self.add_expr(cmd, hint)?;
-        self.settle(cmd, lhs, rhs);
-        cmd.b.at(span);
-        Ok(cmd.b.binary(op, lhs, rhs))
+        let hint = self.hint_from(lower, lhs);
+        let rhs = self.add_expr(lower, hint)?;
+        self.settle(lower, lhs, rhs);
+        lower.b.at(span);
+        Ok(lower.b.binary(op, lhs, rhs))
     }
 
-    fn add_expr(&mut self, cmd: &mut Cmd, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
-        let mut lhs = self.mul_expr(cmd, expect.clone())?;
+    fn add_expr(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
+        let mut lhs = self.mul_expr(lower, expect.clone())?;
         while let Some((op, span)) =
             self.eat_op(&[(Sym::Plus, BinOp::Add), (Sym::Minus, BinOp::Sub)])
         {
-            let hint = self.hint_from(cmd, lhs).or_else(|| expect.clone());
-            let rhs = self.mul_expr(cmd, hint)?;
-            self.settle(cmd, lhs, rhs);
-            cmd.b.at(span);
-            lhs = cmd.b.binary(op, lhs, rhs);
+            let hint = self.hint_from(lower, lhs).or_else(|| expect.clone());
+            let rhs = self.mul_expr(lower, hint)?;
+            self.settle(lower, lhs, rhs);
+            lower.b.at(span);
+            lhs = lower.b.binary(op, lhs, rhs);
         }
         Ok(lhs)
     }
 
-    fn mul_expr(&mut self, cmd: &mut Cmd, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
-        let mut lhs = self.unary_expr(cmd, expect)?;
+    fn mul_expr(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
+        let mut lhs = self.unary_expr(lower, expect)?;
         while let Some((op, span)) = self.eat_op(&[
             (Sym::Star, BinOp::Mul),
             (Sym::Slash, BinOp::Div),
             (Sym::Percent, BinOp::Rem),
         ]) {
-            let rhs = self.unary_expr(cmd, None)?;
-            cmd.b.at(span);
-            lhs = cmd.b.binary(op, lhs, rhs);
+            let rhs = self.unary_expr(lower, None)?;
+            lower.b.at(span);
+            lhs = lower.b.binary(op, lhs, rhs);
         }
         Ok(lhs)
     }
 
-    fn unary_expr(&mut self, cmd: &mut Cmd, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
+    fn unary_expr(
+        &mut self,
+        lower: &mut Lower,
+        expect: Option<Type>,
+    ) -> Result<ExprId, SyntaxError> {
         if let Some(span) = self.eat_at(Sym::Bang) {
-            let operand = self.unary_expr(cmd, Some(Type::Bool))?;
-            cmd.b.at(span);
-            return Ok(cmd.b.unary(UnOp::Not, operand));
+            let operand = self.unary_expr(lower, Some(Type::Bool))?;
+            lower.b.at(span);
+            return Ok(lower.b.unary(UnOp::Not, operand));
         }
         if let Some(span) = self.eat_at(Sym::Minus) {
-            let operand = self.unary_expr(cmd, expect)?;
-            cmd.b.at(span);
-            return Ok(cmd.b.unary(UnOp::Neg, operand));
+            let operand = self.unary_expr(lower, expect)?;
+            lower.b.at(span);
+            return Ok(lower.b.unary(UnOp::Neg, operand));
         }
-        self.postfix_expr(cmd, expect)
+        self.postfix_expr(lower, expect)
     }
 
-    fn postfix_expr(&mut self, cmd: &mut Cmd, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
-        let mut value = self.primary(cmd, expect)?;
+    fn postfix_expr(
+        &mut self,
+        lower: &mut Lower,
+        expect: Option<Type>,
+    ) -> Result<ExprId, SyntaxError> {
+        let mut value = self.primary(lower, expect)?;
         while self.eat_sym(Sym::Dot) {
             let span = self.span_here();
             let method = self.expect_ident()?;
             self.expect_sym(Sym::LParen)?;
             let mut args = Vec::new();
             while !self.at_sym(Sym::RParen) {
-                args.push(self.expr(cmd, None)?);
+                args.push(self.expr(lower, None)?);
                 if !self.eat_sym(Sym::Comma) {
                     break;
                 }
             }
             self.expect_sym(Sym::RParen)?;
-            cmd.b.at(span);
-            value = cmd.b.method(value, &method, args);
+            lower.b.at(span);
+            value = lower.b.method(value, &method, args);
         }
         Ok(value)
     }
 
-    fn primary(&mut self, cmd: &mut Cmd, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
+    fn primary(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
         let spanned = self.bump();
         let span = Span::new(spanned.line, spanned.col);
-        cmd.b.at(span);
+        lower.b.at(span);
         match spanned.token {
-            Token::Number(number) => self.number(cmd, number, expect, &spanned),
-            Token::Text(text) => Ok(cmd.b.lit(Literal::Str(text))),
-            Token::Word(Keyword::True) => Ok(cmd.b.bool(true)),
-            Token::Word(Keyword::False) => Ok(cmd.b.bool(false)),
+            Token::Number(number) => self.number(lower, number, expect, &spanned),
+            Token::Text(text) => Ok(lower.b.lit(Literal::Str(text))),
+            Token::Word(Keyword::True) => Ok(lower.b.bool(true)),
+            Token::Word(Keyword::False) => Ok(lower.b.bool(false)),
             Token::Word(Keyword::If) => {
-                let cond = self.expr(cmd, Some(Type::Bool))?;
+                let cond = self.expr(lower, Some(Type::Bool))?;
                 self.expect_sym(Sym::LBrace)?;
-                let then = self.expr(cmd, expect.clone())?;
+                let then = self.expr(lower, expect.clone())?;
                 self.expect_sym(Sym::RBrace)?;
                 self.expect_word(Keyword::Else)?;
                 self.expect_sym(Sym::LBrace)?;
-                let otherwise = self.expr(cmd, expect)?;
+                let otherwise = self.expr(lower, expect)?;
                 self.expect_sym(Sym::RBrace)?;
-                cmd.b.at(span);
-                Ok(cmd.b.if_expr(cond, then, otherwise))
+                lower.b.at(span);
+                Ok(lower.b.if_expr(cond, then, otherwise))
             }
             Token::Sym(Sym::LParen) => {
-                let value = self.expr(cmd, expect)?;
+                let value = self.expr(lower, expect)?;
                 self.expect_sym(Sym::RParen)?;
                 Ok(value)
             }
             Token::Ident(name) => {
-                if cmd.b.lookup(&name).is_some() {
-                    return Ok(cmd.b.load(&name));
+                if lower.b.lookup(&name).is_some() {
+                    return Ok(lower.b.load(&name));
                 }
                 match rounding_mode(&name) {
-                    Some(mode) => Ok(cmd.b.rounding(mode)),
+                    Some(mode) => Ok(lower.b.rounding(mode)),
                     None => Err(self.not_in_scope(&name, spanned.line, spanned.col)),
                 }
             }
@@ -748,7 +763,7 @@ impl Parser {
 
     fn number(
         &mut self,
-        cmd: &mut Cmd,
+        lower: &mut Lower,
         number: Number,
         expect: Option<Type>,
         at: &Spanned,
@@ -756,55 +771,55 @@ impl Parser {
         let defaulted = expect.is_none();
         let ty = expect.unwrap_or_else(|| default_type(number));
         let lit = number
-            .resolve(&ty, &cmd.currency)
+            .resolve(&ty, &lower.currency)
             .map_err(|err| SyntaxError::new(err.to_string(), at.line, at.col))?;
-        let id = cmd.b.lit(lit);
+        let id = lower.b.lit(lit);
         if defaulted {
-            cmd.defaults.insert(id, number);
+            lower.defaults.insert(id, number);
         }
         Ok(id)
     }
 
-    fn hint_from(&self, cmd: &Cmd, id: ExprId) -> Option<Type> {
-        if cmd.defaults.contains_key(&id) {
+    fn hint_from(&self, lower: &Lower, id: ExprId) -> Option<Type> {
+        if lower.defaults.contains_key(&id) {
             return None;
         }
-        type_of(cmd, id)
+        type_of(lower, id)
     }
 
-    fn settle(&self, cmd: &mut Cmd, lhs: ExprId, rhs: ExprId) {
+    fn settle(&self, lower: &mut Lower, lhs: ExprId, rhs: ExprId) {
         match (
-            cmd.defaults.get(&lhs).copied(),
-            cmd.defaults.get(&rhs).copied(),
+            lower.defaults.get(&lhs).copied(),
+            lower.defaults.get(&rhs).copied(),
         ) {
             (Some(left), Some(right)) => {
                 if left.scale > right.scale {
-                    self.retype(cmd, rhs, &default_type(left));
+                    self.retype(lower, rhs, &default_type(left));
                 } else if right.scale > left.scale {
-                    self.retype(cmd, lhs, &default_type(right));
+                    self.retype(lower, lhs, &default_type(right));
                 }
             }
             (Some(_), None) => {
-                if let Some(ty) = type_of(cmd, rhs) {
-                    self.retype(cmd, lhs, &ty);
+                if let Some(ty) = type_of(lower, rhs) {
+                    self.retype(lower, lhs, &ty);
                 }
             }
             (None, Some(_)) => {
-                if let Some(ty) = type_of(cmd, lhs) {
-                    self.retype(cmd, rhs, &ty);
+                if let Some(ty) = type_of(lower, lhs) {
+                    self.retype(lower, rhs, &ty);
                 }
             }
             (None, None) => {}
         }
     }
 
-    fn retype(&self, cmd: &mut Cmd, id: ExprId, ty: &Type) {
-        let Some(number) = cmd.defaults.get(&id).copied() else {
+    fn retype(&self, lower: &mut Lower, id: ExprId, ty: &Type) {
+        let Some(number) = lower.defaults.get(&id).copied() else {
             return;
         };
-        if let Ok(lit) = number.resolve(ty, &cmd.currency) {
-            cmd.b.patch(id, Expr::Lit(lit));
-            cmd.defaults.remove(&id);
+        if let Ok(lit) = number.resolve(ty, &lower.currency) {
+            lower.b.patch(id, Expr::Lit(lit));
+            lower.defaults.remove(&id);
         }
     }
 
@@ -844,8 +859,8 @@ fn rounding_mode(name: &str) -> Option<Rounding> {
     })
 }
 
-fn type_of(cmd: &Cmd, id: ExprId) -> Option<Type> {
-    match cmd.b.exprs().get(id)? {
+fn type_of(lower: &Lower, id: ExprId) -> Option<Type> {
+    match lower.b.exprs().get(id)? {
         Expr::Lit(lit) => Some(match lit {
             Literal::Bool(_) => Type::Bool,
             Literal::Int(_) => Type::Int,
@@ -855,8 +870,8 @@ fn type_of(cmd: &Cmd, id: ExprId) -> Option<Type> {
             Literal::Money(_) => Type::Money,
             Literal::Rounding(_) => Type::Rounding,
         }),
-        Expr::Load(slot) => cmd.b.slot_type(*slot).cloned(),
-        Expr::Unary { operand, .. } => type_of(cmd, *operand),
+        Expr::Load(slot) => lower.b.slot_type(*slot).cloned(),
+        Expr::Unary { operand, .. } => type_of(lower, *operand),
         Expr::Binary { op, lhs, rhs } => match op {
             BinOp::Eq
             | BinOp::Ne
@@ -866,9 +881,9 @@ fn type_of(cmd: &Cmd, id: ExprId) -> Option<Type> {
             | BinOp::Ge
             | BinOp::And
             | BinOp::Or => Some(Type::Bool),
-            _ => type_of(cmd, *lhs).or_else(|| type_of(cmd, *rhs)),
+            _ => type_of(lower, *lhs).or_else(|| type_of(lower, *rhs)),
         },
         Expr::Method { .. } => None,
-        Expr::If { then, .. } => type_of(cmd, *then),
+        Expr::If { then, .. } => type_of(lower, *then),
     }
 }
