@@ -3,7 +3,7 @@ use std::mem;
 
 use crate::build::Builder;
 use crate::ir::{
-    Arm, BinOp, Bind, Builtin, Command, ConstDef, Effect, EntityDef, EntityField, EnumDef,
+    Absent, Arm, BinOp, Bind, Builtin, Command, ConstDef, Effect, EntityDef, EntityField, EnumDef,
     EnvField, EventDef, EventPath, Expr, ExprId, Exprs, FieldDef, Filter, FoldSubject, Function,
     Handler, Ident, Index, Iter, Literal, Number, Program, Projector, RecordDef, RecordField,
     Return, Slot, Span, Stmt, Type, UnOp, Update,
@@ -2099,11 +2099,23 @@ impl Parser {
                     span,
                 })
             }
-            Token::Word(Keyword::Patch) => {
+            // Rule 5: one parse for both, because the two statements differ only in
+            // what they do with a row that is not there.
+            Token::Word(Keyword::Patch) | Token::Word(Keyword::Update) => {
+                let word = match self.peek() {
+                    Token::Word(Keyword::Update) => Keyword::Update,
+                    _ => Keyword::Patch,
+                };
+                let absent = match word {
+                    Keyword::Update => Absent::Skip,
+                    _ => Absent::Materialize,
+                };
+                let text = word.text();
                 self.not_in_fn("write a read model", self.span_here())?;
                 if self.kind != Kind::Projector {
-                    return self
-                        .fail("`patch` writes an entity, so it can only appear in a projector");
+                    return self.fail(format!(
+                        "`{text}` writes an entity, so it can only appear in a projector"
+                    ));
                 }
                 let span = self.span_here();
                 self.bump();
@@ -2125,6 +2137,7 @@ impl Parser {
                 Ok(Stmt::Patch {
                     entity: name,
                     key,
+                    absent,
                     loads: stored.loads,
                     fields,
                     span,
@@ -2410,7 +2423,7 @@ impl Parser {
                     None => {
                         return Err(self.err(
                             format!(
-                                "`.{field}` reads the stored value, which only a `patch` value can do"
+                                "`.{field}` reads the stored value, which only a `patch` or `update` value can do"
                             ),
                             span.line,
                             span.col,
@@ -2933,6 +2946,7 @@ impl Parser {
                 | Keyword::Emit
                 | Keyword::Put
                 | Keyword::Patch
+                | Keyword::Update
                 | Keyword::Delete
                 | Keyword::Let
                 | Keyword::Invoke

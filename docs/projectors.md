@@ -70,17 +70,17 @@ envelope, by design: the envelope is available exactly when the author asked for
 | Statement | Meaning |
 | --- | --- |
 | `put Entity { ... }` | writes all fields |
-| `patch Entity[key] { ... }` | writes the listed fields |
+| `patch Entity[key] { ... }` | writes the listed fields, materializing the row if it is absent |
+| `update Entity[key] { ... }` | writes the listed fields, dropping the write if the row is absent |
 | `delete Entity[key]` | removes the row |
 
-All three are unconditional write instructions from the language's point of view. They cannot fail in
-a way the program observes, so they return nothing and there is no error an author can catch. What a
-runtime does with a patch against a missing key is a runtime concern, except as constrained by rule
-5.
+All four are unconditional write instructions from the language's point of view. They cannot fail in
+a way the program observes, so they return nothing and there is no error an author can catch.
 
-`put` requires every declared field to be present. `patch` writes only what is listed and leaves the
-rest of the row alone. `delete` removes the row without recording that it did, which is
-not the same as erasing anything; see "`delete` is not a tombstone" under rule 5.
+`put` requires every declared field to be present. `patch` and `update` write only what is listed and
+leave the rest of the row alone; they differ only in what an absent row means, which is rule 5.
+`delete` removes the row without recording that it did, which is not the same as erasing anything;
+see "`delete` is not a tombstone" under rule 5.
 
 A bare `T` written into a `T?` field wraps, so `tracking` destructured as a `String` satisfies a
 `String?` column and `e.at` satisfies a `Timestamp?` one. This is not a new rule: it is the coercion
@@ -89,7 +89,8 @@ exact inner-type match, so a `Uuid` still does not satisfy a `String?`.
 
 ## 3. Stored-value reference
 
-Inside a `patch` value expression, a leading dot means the **current stored value** of that field:
+Inside a `patch` or `update` value expression, a leading dot means the **current stored value** of
+that field:
 
 ```
 patch Customer[customer_id] { order_count: .order_count + 1 }
@@ -101,8 +102,12 @@ to an event must never silently change the meaning of a projector body. If a bar
 back to the stored value, then declaring a new event field named `order_count` would quietly rebind
 every `order_count` in every handler that destructures it.
 
-`.field` is legal only in `patch` value position. Not in `put`, which writes a whole row and has no
-prior value to read, and not in filters.
+`.field` is legal only in a `patch` or `update` value position. Not in `put`, which writes a whole
+row and has no prior value to read, and not in filters.
+
+Inside an `update` the story is cleaner than inside a `patch`: the statement only proceeds when the
+row exists, so a stored load is always filled from a real row and the zero table of rule 5 is not
+consulted at all on this path.
 
 **Rejected: naming the row.** `patch C[k] as c { n: c.n + 1 }` is consistent with `as e` on the
 handler, but it is wordier and reads oddly for a row that is being written rather than read. The
@@ -110,17 +115,18 @@ leading dot costs one character and carries the same information.
 
 ### How it lowers
 
-Each distinct `.field` in one `patch` gets a frame slot. The interpreter fills those slots from the
-stored row before evaluating any of the patch's value expressions, so `.order_count` is an ordinary
-slot load by the time the expression layer sees it. That is why `.lifetime_spend + total` cross-hints
-its literals exactly like any other typed load, and why the expression evaluator needs no new node
-for this feature. It is also why "only in `patch` value position" is structural rather than a check:
-nowhere else allocates a stored load.
+Each distinct `.field` in one `patch` or `update` gets a frame slot. The interpreter fills those
+slots from the stored row before evaluating any of the write's value expressions, so `.order_count`
+is an ordinary slot load by the time the expression layer sees it. That is why
+`.lifetime_spend + total` cross-hints its literals exactly like any other typed load, and why the
+expression evaluator needs no new node for this feature. It is also why "only in a value position of
+one of those two" is structural rather than a check: nowhere else allocates a stored load.
 
 ## 4. No general reads
 
 A handler cannot read entity state except through rule 3. It cannot read a different entity, cannot
-read a different row, and cannot branch on stored state.
+read a different row, and cannot branch on stored state, with the one narrow exception `update`
+carves out below.
 
 This keeps a projector a pure fold over the event log, so rebuild determinism is structural rather
 than a rule authors can violate.
@@ -131,6 +137,18 @@ read-modify-write across entities possible. It lost because with it, whether a p
 the same rows depends on the handler bodies being written carefully; without it, that property holds
 by construction. Rule 3 covers the read-modify-write case that actually comes up, which is
 incrementing a counter on the row being written.
+
+### What `update` reads, and why it is not a read
+
+`update` does look at stored state: at whether the row is there. The carve-out is that **no value
+derived from that look reaches the program.** The statement returns nothing (rule 2), so the one bit
+decides whether a write lands and nothing else, and a row's presence at position N is a pure function
+of events 0 to N, so a rebuild from position 0 takes the same branch and produces the same rows.
+
+What rule 4 exists to prevent is a *value* out of the store shaping a decision the author wrote,
+because that is what makes rebuild determinism depend on how carefully a body is written. One
+unobservable bit does not. It is the same argument that already licenses rule 3, which reads a stored
+value outright.
 
 ## 5. Zero values
 
@@ -165,6 +183,66 @@ error naming the field and both fixes.
 at the cost of making "absent" and "present but unset" indistinguishable in the data. The compile
 error is the cheaper of the two.
 
+### Choosing between `patch` and `update`
+
+The zero table is what makes `patch` total, and `update` is the statement that declines it. Which one
+a write wants follows from the entity it writes rather than from the handler or the event, and the
+question is one sentence:
+
+> What does an absent row mean for this entity?
+
+- Absent means **"zero of this thing"**: counters, totals, running sums, first-time aggregates.
+  `patch` is right, and materializing from zeros is the feature rather than a fallback. `Customer`
+  with an `order_count` is the case rule 5 was written for: a customer with no row yet has placed
+  zero orders, which is exactly what the zero says.
+- Absent means **"this thing does not exist"**: a plan, an order, a shop, anything the read model
+  treats as an identity. `update` is right, and a `patch` there **manufactures a record**.
+
+The worked example is the one that produced this rule. A merchant-facing plan catalogue:
+
+```
+on @plan.deleted { plan_id } { delete Plan[plan_id] }
+
+on @plan.sold { plan_id, price } {
+  patch Plan[plan_id] {
+    total_sold: .total_sold + 1,
+    revenue: .revenue + price,
+  }
+}
+```
+
+A sale arrives for a plan that was deleted. The `patch` materializes a `Plan` from zeros and fills in
+the sale's two columns, so the catalogue now holds a row with a real id, a real revenue figure, an
+empty title, a zero price and a `created_at` of `none`. It looks like a plan. Nothing failed, nothing
+logged, and a rebuild reproduces it faithfully, because the row is what the handlers say to write.
+Written as `update Plan[plan_id]`, the sale for a deleted plan is dropped and the catalogue stays
+correct.
+
+The original this was ported from read the row and returned early when it was missing. Rule 4 forbids
+that, so `update` is how the same intent is spelled here: not "read, then decide", but "write, and
+say what absent means".
+
+**Rejected: `patch? Entity[key]`.** It makes the relationship to `patch` explicit and reserves no
+word. It loses because `?` already means "optional type" everywhere else in the language, and this
+would give the character a second, unrelated job: "optional write". `update` is SQL's word for
+exactly this, where `UPDATE ... WHERE key = k` affects zero rows when the key is absent, so a reader
+arrives with the right meaning already. It is `patch` that is the unusual one here: HTTP's PATCH on a
+missing resource is a 404, not a create.
+
+**Rejected: a property of the entity**, declared once and applied to every write. The rule above is
+stated per entity, and a real port is the strongest case for it: all seventeen `patch` statements
+across its three projectors write identity entities and all seventeen want `update`, so the
+declaration would carry the whole decision and the call sites would carry none of it. It loses
+anyway, because it makes `patch Plan[k]` unreadable without scrolling to the declaration, and the
+difference between manufacturing a record and dropping a write is precisely what should be legible
+where the write is. It is also not composable: an identity entity with one genuine counter column
+would have no way out.
+
+**Rejected: changing `patch`'s default** so that materializing is the opt-in. The same port evidence
+argues for it, seventeen to zero. It loses because it silently changes what every projector already
+written does, including this repo's own `Customer` counter, and because it trades a decision made at
+the write site for one inherited from a keyword's history.
+
 ### `delete` is not a tombstone
 
 `delete` removes the row. It does not record that the row was removed, so rule 5 then applies
@@ -178,15 +256,21 @@ an erasure mechanism.** Reaching for it to remove someone's data leaves a hollow
 next event that touches the key, which is worse than not deleting at all, because the row looks like
 data rather than like a gap.
 
+**`update` is how an author declines that price.** A handler that writes `update` rather than `patch`
+leaves a deleted row deleted, because there is nothing to update. That is the half of this gap a
+statement can close, and it closes it at the write site where the author already knows which they
+meant.
+
 Erasure is `hekla erase`, which drops the per-subject key and shreds the value across the log and
 every read model at once, in constant time and without a rewrite. A projector `delete` is a
 read-model edit and nothing more.
 
-**Open: what a shred should cascade to.** heklang has no way to say that a row keyed by, or derived
-from, a shredded subject should itself go, nor to distinguish "deleted" from "never seen" so a late
-event can be dropped rather than materializing. Both want a tombstone the fold can see, which is a
-real addition to rule 4's no-reads model rather than a small one. Left open on purpose; it should be
-designed against the shred cascade as a whole, not bolted onto `delete`.
+**Still open: what a shred should cascade to.** heklang has no way to say that a row keyed by, or
+derived from, a shredded subject should itself go. `update` does not touch this: it lets a handler
+decline to resurrect a row, and says nothing about which rows a shredded subject should take with it.
+That still wants a tombstone the fold can see, which is a real addition to rule 4's no-reads model
+rather than a small one, and it should be designed against the shred cascade as a whole rather than
+bolted onto `delete`.
 
 ### Defaults and zeros agree by construction
 
@@ -302,44 +386,48 @@ an informed one rather than a rediscovery.
 
 | Rule | heklang | hekla today |
 | --- | --- | --- |
-| 5 | `patch` materializes a missing row from zeros | `patch` is a documented no-op when the row does not exist |
+| 2, 5 | `update` drops the write when the row is absent | this is hekla's only form: its `patch` is a documented no-op on a missing row |
+| 5 | `patch` materializes a missing row from zeros | no such statement; a materializing write has to be spelled as a `put` |
 | 5, 6 | entity fields have zeros and defaults | no defaults anywhere; `put` requires every non-optional field, an omitted column binds NULL |
 | 1 | `.position` is available through `as` | a handler sees `id`, `timestamp`, `type` and `data` only; the log position never reaches it |
 | 4 | no general reads | `get(entity, key)` reads any row, through the current batch's uncommitted writes |
+
+The first two rows are one divergence read from both ends, and the direction is worth being precise
+about: **hekla's `patch` is heklang's `update`.** So the runtime does not need to learn the skipping
+form, it needs to learn the materializing one, and the name it already uses means the other thing.
+A port of these rules to hekla is a rename plus an addition, not a behaviour change to an existing
+statement.
 
 One representation choice also diverges. `Timestamp` here is an `i64` of epoch microseconds; the
 runtime's envelope timestamp is an RFC 3339 string and its timestamp column stores text, with no
 formatting or arithmetic defined on it. Both orderings agree, so this is safe, but it means a
 conversion at the runtime boundary.
 
-## Open problem: `patch` on an absent row
+## What the port wrote before `update`
 
-Rule 5 materializes a missing row from zeros, and that is right for the case it was written for: a
-counter incremented by an event that arrives before the row exists should not need the author to
-think about ordering.
+The FlowWarranty port recorded `patch` on an absent row as an open problem, and the workaround was
+that there was none: every write went through, so a sale for a deleted plan materialized a hollow
+`Plan` and the port's README carried a note saying so.
 
-It is wrong for the case a real port hit. A warranty sale arrives for a plan that was deleted. There
-is no general read, so the handler cannot check; the `patch` materializes a `Plan` row from zeros and
-fills in the sale's columns. The result is a row with a real id, a real revenue figure, an empty
-title and a zero price, sitting in a merchant-facing catalogue. **It looks like a plan.**
+```
+// before: the sale for a deleted plan materializes a hollow row
+patch Plan[plan_id] { total_sold: .total_sold + 1, revenue: .revenue + price }
 
-This is `docs/projectors.md`'s own "`delete` is not a tombstone" landing on production-shaped data.
-The original read the row first and returned early when it was missing; with no general reads that
-option is gone, so the write always happens.
+// after
+update Plan[plan_id] { total_sold: .total_sold + 1, revenue: .revenue + price }
+```
 
-**What the read model needs is a way to say "drop this write if the row is absent."** That is a
-language addition distinct from `patch`, not a variation of it: `patch` means "change these columns,
-materializing if needed" and this means "change these columns only if there is something to change".
-Both are wanted, and neither is the other's default.
+The count is the interesting part. All seventeen `patch` statements in the port become `update`,
+eight in its plans projector, four in its shops projector and five in its warranties projector. Not
+one of them wanted rule 5's zeros, because all three entities are identities rather than counters.
+That is the evidence behind the guidance under rule 5, and behind not making it a per-entity
+declaration: a rule that would have been right seventeen times out of seventeen there is still one an
+author should state where the write is.
 
-**Rejected as the answer: making plan deletion a soft delete.** It works, and it pushes the problem
-into every projector: every read of every entity has to remember to filter the tombstone, and the one
-that forgets is a bug that looks exactly like this one. A rule the read model enforces once beats a
-discipline every handler has to keep.
-
-Recorded rather than implemented because the shape is not obvious. It is not clear yet whether this
-is a second statement, a modifier on `patch`, or a property of the entity, and picking wrong here
-adds surface that cannot be taken back.
+**Rejected at the time, and still rejected: making plan deletion a soft delete.** It works, and it
+pushes the problem into every projector: every read of every entity has to remember to filter the
+tombstone, and the one that forgets is a bug that looks exactly like this one. A rule the read model
+enforces once beats a discipline every handler has to keep.
 
 ## Checker obligations
 

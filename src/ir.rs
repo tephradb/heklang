@@ -819,9 +819,13 @@ pub enum Stmt {
         fields: Vec<(Ident, ExprId)>,
         span: Span,
     },
+    /// Both `patch` and `update`. They differ in one thing, what an absent row means,
+    /// so they are one node with that one thing on it: everything else, rule 3's stored
+    /// loads, rule 9's subject propagation and the `@max` check, treats them alike.
     Patch {
         entity: Ident,
         key: ExprId,
+        absent: Absent,
         loads: Vec<Bind>,
         fields: Vec<(Ident, ExprId)>,
         span: Span,
@@ -853,6 +857,16 @@ pub enum Stmt {
     /// expression statements.
     Discard(ExprId),
     Return(Return),
+}
+
+/// What a `patch` or an `update` does when the row it names is not there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Absent {
+    /// `patch`: rule 5's zeros, so the write always lands.
+    Materialize,
+    /// `update`: the write is dropped, because an absent row means the thing does not
+    /// exist rather than that it is at zero.
+    Skip,
 }
 
 #[derive(Debug, Clone)]

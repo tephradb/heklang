@@ -5,9 +5,9 @@ use std::fmt;
 use uuid::Uuid;
 
 use crate::ir::{
-    Assign, BinOp, Builtin, Command, Effect, EntityDef, EnvField, EventPath, Expr, ExprId, Exprs,
-    Function, Ident, Iter, Number, Program, Projector, Return, Slice, SliceId, Slot, Span, Stmt,
-    Type, UnOp,
+    Absent, Assign, BinOp, Builtin, Command, Effect, EntityDef, EnvField, EventPath, Expr, ExprId,
+    Exprs, Function, Ident, Iter, Number, Program, Projector, Return, Slice, SliceId, Slot, Span,
+    Stmt, Type, UnOp,
 };
 use crate::scaled::{self, Rounding};
 use crate::value::{self, Event, Invoked, Json, Key, Record, Value};
@@ -980,6 +980,7 @@ fn exec_stmt(
         Stmt::Patch {
             entity,
             key,
+            absent,
             loads,
             fields,
             span,
@@ -989,11 +990,13 @@ fn exec_stmt(
             let def = entity_def(projector, entity, *span)?;
             let key = key_of(&key_value, exprs.span(*key))?;
 
-            // Rule 5: a missing row materializes from zeros, so a patch always has
-            // a prior value for `.field` to read.
-            let mut row = match store.get(entity, &key) {
-                Some(row) => row.clone(),
-                None => materialize(def, projector, program, &key, *span)?,
+            // Rule 5: a `patch` materializes from zeros, so it always has a prior value
+            // for `.field` to read. An `update` drops the write instead, which is why a
+            // stored load below can only ever come from a row that really exists.
+            let mut row = match (store.get(entity, &key), absent) {
+                (Some(row), _) => row.clone(),
+                (None, Absent::Materialize) => materialize(def, projector, program, &key, *span)?,
+                (None, Absent::Skip) => return Ok(Flow::Next),
             };
             for load in loads {
                 let value = row.0.get(&load.field).cloned().ok_or_else(|| {

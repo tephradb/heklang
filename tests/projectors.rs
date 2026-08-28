@@ -267,7 +267,7 @@ fn a_dot_field_outside_a_patch_is_an_error() {
     }
   }");
     assert!(
-        message.contains("only a `patch` value can do"),
+        message.contains("only a `patch` or `update` value can do"),
         "got: {message}"
     );
 
@@ -275,7 +275,7 @@ fn a_dot_field_outside_a_patch_is_an_error() {
         "  on @order.placed { order_id } {\n    let x = .total\n    delete Order[order_id]\n  }",
     );
     assert!(
-        message.contains("only a `patch` value can do"),
+        message.contains("only a `patch` or `update` value can do"),
         "got: {message}"
     );
 }
@@ -371,6 +371,122 @@ fn a_deleted_row_re_materializes_on_the_next_patch() {
         row.field("total"),
         Some(&Value::money(0, 2)),
         "the re-materialized row starts from zeros, not from what was deleted"
+    );
+}
+
+#[test]
+fn update_applies_to_a_row_that_exists() {
+    let store = project(
+        &format!(
+            "{PLACE}\n\n  on @order.shipped {{ order_id, tracking }} {{\n    update Order[order_id] {{ status: Shipped, tracking }}\n  }}"
+        ),
+        vec![placed(1, 7, 2_599), shipped(1, "TRK-1")],
+    );
+
+    let row = store
+        .get("Order", &Key::Uuid("order-1".into()))
+        .expect("the row was put before the update");
+    assert_eq!(
+        row.field("status"),
+        Some(&Value::Enum {
+            ty: "Status".into(),
+            variant: "Shipped".into()
+        })
+    );
+    assert_eq!(
+        row.field("tracking"),
+        Some(&Value::some(Value::str("TRK-1"))),
+        "an update writes exactly what a patch would have"
+    );
+}
+
+#[test]
+fn update_on_an_absent_row_creates_nothing() {
+    let store = project(
+        "  on @order.shipped { order_id, tracking } {
+    update Order[order_id] { status: Shipped, tracking }
+  }",
+        vec![shipped(1, "TRK-1")],
+    );
+
+    assert_eq!(
+        store.get("Order", &Key::Uuid("order-1".into())),
+        None,
+        "no row, not a row whose columns happen to be unchanged"
+    );
+    assert_eq!(store.len("Order"), 0);
+}
+
+/// The story rule 3 tells about `update`: the load can only have come from a real row,
+/// because an absent one never reaches the value expressions.
+#[test]
+fn a_dot_field_inside_an_update_reads_the_stored_value() {
+    let store = project(
+        &format!(
+            "{PLACE}\n\n  on @order.shipped {{ order_id }} {{\n    update Order[order_id] {{ total: .total + 1.00 }}\n  }}"
+        ),
+        vec![placed(1, 7, 2_599), shipped(1, "TRK-1")],
+    );
+
+    let row = store
+        .get("Order", &Key::Uuid("order-1".into()))
+        .expect("the row exists");
+    assert_eq!(row.field("total"), Some(&Value::money(2_699, 2)));
+}
+
+/// The side-by-side the rule exists for: one handler, one absent key, two entities, and
+/// the answer differs because what absent means differs.
+#[test]
+fn update_and_patch_on_the_same_absent_key_differ() {
+    let store = project(
+        "  on @order.placed { order_id, customer_id } {
+    update Order[order_id] { status: Shipped }
+    patch Customer[customer_id] { order_count: .order_count + 1 }
+  }",
+        vec![placed(1, 7, 2_599)],
+    );
+
+    assert_eq!(
+        store.get("Order", &Key::Uuid("order-1".into())),
+        None,
+        "an identity: absent means the order does not exist"
+    );
+    let counter = store
+        .get("Customer", &Key::Int(7))
+        .expect("a counter: absent means zero of it");
+    assert_eq!(counter.field("order_count"), Some(&Value::Int(1)));
+}
+
+#[test]
+fn a_deleted_row_stays_deleted_under_update() {
+    let store = project(
+        &format!(
+            "{PLACE}\n\n  on @order.purged {{ order_id }} {{\n    delete Order[order_id]\n  }}\n\n  on @order.shipped {{ order_id, tracking }} {{\n    update Order[order_id] {{ status: Shipped, tracking }}\n  }}"
+        ),
+        vec![placed(1, 7, 2_599), purged(1), shipped(1, "TRK-1")],
+    );
+
+    assert_eq!(
+        store.get("Order", &Key::Uuid("order-1".into())),
+        None,
+        "the half of `delete` is not a tombstone that a statement can close"
+    );
+}
+
+#[test]
+fn update_outside_a_projector_says_where_it_belongs() {
+    let source = format!(
+        "{EVENTS}command Ship(order_id: Uuid) {{
+  update Order[order_id] {{ status: Shipped }}
+}}
+"
+    );
+    let message = parse(&source)
+        .expect_err("only a projector writes a read model")
+        .message;
+    assert_eq!(
+        message,
+        "`update` writes an entity, so it can only appear in a projector"
     );
 }
 
