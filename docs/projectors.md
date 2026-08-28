@@ -379,6 +379,13 @@ problem. That is a static check and it belongs in the checker. Until the checker
 error is the backstop, and a projector that trips it is reporting a mismatch between two declarations
 rather than a bad event.
 
+**A record satisfies the invariant by construction**, and that is the argument for `@max` living on
+the record field (`docs/declarations.md`). The bound an event field carries and the bound an entity
+column carries are two declarations that can disagree, which is the whole reason this invariant needs
+stating. A record's fields are one declaration, reached from both ends, so there is nothing for the
+two to disagree about. Before that annotation existed the invariant was not violated by record-shaped
+data, it was silent about it: every string inside a record was unbounded at both ends.
+
 **`update` makes the backstop patchier, which is an argument for the checker rather than against
 `update`.** A write that is dropped never evaluates its field values, so a schema mismatch inside an
 `update` is reported only on the runs where the row happens to exist. The check was always meant to

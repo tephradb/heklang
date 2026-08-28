@@ -680,6 +680,58 @@ impl Parser {
         )
     }
 
+    /// The annotations a record field takes, which is `@max` and nothing else so far.
+    /// `@subject` gets its own message because it is the obvious next thing to try and
+    /// the reason it is absent is not obvious; see `docs/declarations.md`.
+    fn length_annotations(&mut self, ty: &Type, field: &str) -> Result<Option<usize>, SyntaxError> {
+        let mut max_len = None;
+        while let Token::Path(segments) = self.peek().clone() {
+            let (line, col) = self.here();
+            self.bump();
+            let [annotation] = segments.as_slice() else {
+                return self.fail("an annotation name cannot contain `.`");
+            };
+            match annotation.as_str() {
+                "max" => max_len = Some(self.max_annotation(ty, field)?),
+                "subject" => {
+                    return Err(self.err(
+                        format!(
+                            "a record field cannot be `@subject`, so `{field}` cannot carry personal data; a subject-bound value is recovered from the schema path, and a record reached through a container has no path to recover it from"
+                        ),
+                        line,
+                        col,
+                    ));
+                }
+                other => {
+                    return Err(self.err(format!("unknown annotation `@{other}`"), line, col));
+                }
+            }
+        }
+        Ok(max_len)
+    }
+
+    /// `@max(n)`, and the check that there is something to bound. A length on anything
+    /// but a string used to parse and then quietly do nothing.
+    fn max_annotation(&mut self, ty: &Type, field: &str) -> Result<usize, SyntaxError> {
+        let (line, col) = self.here();
+        if !matches!(inner_of(ty), Type::String) {
+            return Err(self.err(
+                format!("`@max` bounds a length, so it applies to a String; `{field}` is a {ty}"),
+                line,
+                col,
+            ));
+        }
+        self.expect_sym(Sym::LParen)?;
+        let number = self.expect_number()?;
+        if number.scale != 0 {
+            return self.fail("`@max` takes a whole number");
+        }
+        let Ok(max) = usize::try_from(number.digits) else {
+            return self.fail("`@max` is too large");
+        };
+        self.expect_sym(Sym::RParen)?;
+        Ok(max)
+    }
     /// Pass B. The name was taken in pass A, so this reads only the body.
     fn record_fields(&mut self) -> Result<Vec<RecordField>, SyntaxError> {
         self.expect_word(Keyword::Record)?;
@@ -699,7 +751,12 @@ impl Parser {
             }
             self.expect_sym(Sym::Colon)?;
             let ty = self.type_ref()?;
-            fields.push(RecordField { name: field, ty });
+            let max_len = self.length_annotations(&ty, &field)?;
+            fields.push(RecordField {
+                name: field,
+                ty,
+                max_len,
+            });
             if !self.eat_sym(Sym::Comma) {
                 break;
             }
@@ -1002,16 +1059,7 @@ impl Parser {
                         fields: vec![field_name.clone()],
                     }),
                     "max" => {
-                        self.expect_sym(Sym::LParen)?;
-                        let number = self.expect_number()?;
-                        if number.scale != 0 {
-                            return self.fail("`@max` takes a whole number");
-                        }
-                        let Ok(max) = usize::try_from(number.digits) else {
-                            return self.fail("`@max` is too large");
-                        };
-                        field.max_len = Some(max);
-                        self.expect_sym(Sym::RParen)?;
+                        field.max_len = Some(self.max_annotation(&field.ty.clone(), &field_name)?);
                     }
                     other => return self.fail(format!("unknown annotation `@{other}`")),
                 }
@@ -1443,16 +1491,8 @@ impl Parser {
                         self.expect_sym(Sym::RParen)?;
                     }
                     "max" => {
-                        self.expect_sym(Sym::LParen)?;
-                        let number = self.expect_number()?;
-                        if number.scale != 0 {
-                            return self.fail("`@max` takes a whole number");
-                        }
-                        let Ok(max) = usize::try_from(number.digits) else {
-                            return self.fail("`@max` is too large");
-                        };
+                        let max = self.max_annotation(&field.ty.clone(), &name)?;
                         field = field.max_len(max);
-                        self.expect_sym(Sym::RParen)?;
                     }
                     "no_index" => field = field.no_index(),
                     other => return self.fail(format!("unknown annotation `@{other}`")),

@@ -939,7 +939,8 @@ fn exec_stmt(
                 let value = coerce(eval(program, exprs, frame, *value, None)?, &declared.ty);
                 // An over-length value is the runtime's validation channel, so it
                 // leaves as `Outcome::Invalid` rather than as an error.
-                if let Some(fault) = check_field(&declared.ty, declared.max_len, name, &value, at)?
+                if let Some(fault) =
+                    check_field(program, &declared.ty, declared.max_len, name, &value, at)?
                 {
                     return Ok(Flow::Return(Ret::Invalid(fault.to_string())));
                 }
@@ -1162,7 +1163,7 @@ fn eval_field(
         ));
     };
     let value = coerce(eval(program, exprs, frame, value, None)?, &declared.ty);
-    if let Some(fault) = check_field(&declared.ty, declared.max_len, name, &value, at)? {
+    if let Some(fault) = check_field(program, &declared.ty, declared.max_len, name, &value, at)? {
         return Err(Error::at(fault, at));
     }
     Ok(value)
@@ -1183,6 +1184,7 @@ pub fn coerce(value: Value, ty: &Type) -> Value {
 }
 
 fn check_field(
+    program: &Program,
     ty: &Type,
     max_len: Option<usize>,
     name: &Ident,
@@ -1198,17 +1200,58 @@ fn check_field(
             span,
         ));
     }
+    Ok(bounded(program, name, max_len, value))
+}
+
+/// A value against the `@max` its field declared, and then against every `@max`
+/// declared inside it. A record carries its own bounds, so they travel with the value
+/// rather than with the field it landed in; see `docs/declarations.md`.
+///
+/// An optional is peeled before the length test. `String? @max(200)` bounds the string
+/// it holds, and that it did not was a hole a record made visible rather than one a
+/// record introduced.
+fn bounded(
+    program: &Program,
+    at: &str,
+    max_len: Option<usize>,
+    value: &Value,
+) -> Option<ErrorKind> {
+    let value = match value {
+        Value::Opt {
+            value: Some(held), ..
+        } => held.as_ref(),
+        Value::Opt { value: None, .. } => return None,
+        other => other,
+    };
     if let (Some(max), Value::Str(text)) = (max_len, value) {
         let len = text.chars().count();
         if len > max {
-            return Ok(Some(ErrorKind::TooLong {
-                field: name.clone(),
+            return Some(ErrorKind::TooLong {
+                field: at.to_string(),
                 len,
                 max,
-            }));
+            });
         }
     }
-    Ok(None)
+    // The path, not the field, so a `List(LineItem)` says which element is too long.
+    match value {
+        Value::Record { ty, fields } => {
+            let def = program.record(ty)?;
+            fields.iter().find_map(|(name, held)| {
+                let max_len = def.field(name).and_then(|field| field.max_len);
+                bounded(program, &format!("{at}.{name}"), max_len, held)
+            })
+        }
+        Value::List { items, .. } => items
+            .iter()
+            .enumerate()
+            .find_map(|(index, item)| bounded(program, &format!("{at}[{index}]"), None, item)),
+        Value::Map { entries, .. } => entries.iter().find_map(|(key, held)| {
+            let key = value::text(&key_value(key));
+            bounded(program, &format!("{at}[{key}]"), None, held)
+        }),
+        _ => None,
+    }
 }
 
 fn key_of(value: &Value, span: Span) -> Result<Key, Error> {

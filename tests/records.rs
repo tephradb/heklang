@@ -494,3 +494,138 @@ command C(note: String) {
     assert_eq!(event.fields.get("present"), Some(&Value::Bool(true)));
     assert_eq!(event.fields.get("absent"), Some(&Value::Bool(true)));
 }
+
+/// A record field takes `@max`, and it is the only place the bound can go: an entity
+/// column of record type has nothing to put a length on. See `docs/declarations.md`.
+#[test]
+fn a_record_field_takes_max() {
+    let source = "record LineItem { id: Int, title: String @max(8) }
+
+event @order.paid { items: List(LineItem) }
+
+command Pay(items: List(LineItem)) {
+  emit @order.paid { items }
+}
+";
+    let program = parse(source).expect("a record field takes `@max`");
+    let record = program.record("LineItem").expect("the record");
+    assert_eq!(record.field("title").expect("the field").max_len, Some(8));
+    assert_eq!(record.field("id").expect("the field").max_len, None);
+}
+
+/// The bound travels with the value, so it is checked wherever the record lands. The
+/// path names the element rather than the field the list arrived in.
+#[test]
+fn a_bound_inside_a_record_is_checked_through_a_container() {
+    let source = "record LineItem { id: Int, title: String @max(8) }
+
+event @order.paid { items: List(LineItem) }
+
+command Pay(items: List(LineItem)) {
+  emit @order.paid { items }
+}
+";
+    let program = parse(source).expect("this parses");
+    let mut interpreter = Interpreter::new(&program);
+    let items = Value::list(
+        Type::Record("LineItem".into()),
+        [
+            Value::record(
+                "LineItem",
+                [("id", Value::Int(1)), ("title", Value::str("fine"))],
+            ),
+            Value::record(
+                "LineItem",
+                [
+                    ("id", Value::Int(2)),
+                    ("title", Value::str("far too long to fit")),
+                ],
+            ),
+        ],
+    );
+    let execution = interpreter
+        .run("Pay", vec![("items", items)])
+        .unwrap_or_else(|err| panic!("{err}"));
+
+    match execution.outcome {
+        Outcome::Invalid(message) => assert_eq!(
+            message,
+            "items[1].title is 19 characters, the most allowed is 8"
+        ),
+        other => panic!("expected an over-length value to be invalid, got {other:?}"),
+    }
+}
+
+/// `@max` bounds a length, so there has to be a length to bound. This used to parse
+/// everywhere and quietly do nothing, which is what made a record-typed entity column
+/// look like it carried a constraint.
+#[test]
+fn max_on_something_with_no_length_is_rejected() {
+    let cases = [
+        (
+            "record R { n: Int @max(3) }",
+            "`@max` bounds a length, so it applies to a String; `n` is a Int",
+        ),
+        (
+            "event @a.b { n: Int @max(3) }",
+            "`@max` bounds a length, so it applies to a String; `n` is a Int",
+        ),
+        (
+            "record Item { s: String }\nevent @a.b { n: Int }\nprojector P { entity R { n: Int @key, item: Item @max(3) }\n on @a.b { n } { patch R[n] { } } }",
+            "`@max` bounds a length, so it applies to a String; `item` is a Item",
+        ),
+    ];
+    for (source, expected) in cases {
+        let message = parse(source)
+            .expect_err("a length on something with no length")
+            .message;
+        assert_eq!(message, expected, "for: {source}");
+    }
+}
+
+/// `String?` takes a bound too, and the string it holds is what gets measured. That it
+/// did not is a hole a record made visible rather than one a record introduced.
+#[test]
+fn an_optional_string_is_bounded() {
+    let source = "event @a.b { note: String? @max(4) }
+
+command Note(note: String?) {
+  emit @a.b { note }
+}
+";
+    let program = parse(source).expect("an optional String takes `@max`");
+    let mut interpreter = Interpreter::new(&program);
+
+    let execution = interpreter
+        .run("Note", vec![("note", Value::str("toolong"))])
+        .unwrap_or_else(|err| panic!("{err}"));
+    match execution.outcome {
+        Outcome::Invalid(message) => {
+            assert_eq!(message, "note is 7 characters, the most allowed is 4");
+        }
+        other => panic!("expected an over-length value to be invalid, got {other:?}"),
+    }
+
+    let execution = interpreter
+        .run("Note", vec![("note", Value::none(Type::String))])
+        .unwrap_or_else(|err| panic!("{err}"));
+    assert!(
+        matches!(execution.outcome, Outcome::Ok(_)),
+        "an absent value has no length to be too long"
+    );
+}
+
+/// A record cannot carry personal data, and the reason is not the same as `@max`'s
+/// absence was: subject-ness is recovered from the schema path, and a record reached
+/// through a container has no path to recover it from.
+#[test]
+fn a_record_field_cannot_be_subject_bound() {
+    let message =
+        parse("record R { owner: Int, name: String @subject(owner) }\nevent @a.b { n: Int }\n")
+            .expect_err("a record field cannot be `@subject`")
+            .message;
+    assert!(
+        message.starts_with("a record field cannot be `@subject`"),
+        "got: {message}"
+    );
+}

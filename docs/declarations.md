@@ -77,6 +77,43 @@ Entities were the only product type before this, and they are the wrong shape fo
 is scoped to a projector and reachable only through `put` and `patch`, so a `Map(Uuid, Plan)` had
 nothing to hold.
 
+### `@max` on a record field
+
+A `String` field takes `@max(n)`, the same annotation an event field and an entity column take:
+
+```
+record LineItem {
+  id: Int,
+  title: String @max(255),
+  variant_title: String? @max(255),
+}
+```
+
+It is checked wherever the record lands: at `emit`, where an over-length value is `Outcome::Invalid`,
+and at a projector write, where it is a hard error, exactly as for a bare `String` field in either
+place. The check reaches through containers, so a `List(LineItem)` bounds every element's `title`,
+and the error names the path (`line_items[0].title`) rather than the record.
+
+**This is the only place the bound can go, which is why it belongs here.** An entity column of record
+type has nothing to bound: `@max` on it would apply to the row's whole record value rather than to a
+string inside it. So without this a `String` inside a record is unbounded everywhere, and there is no
+other declaration to move the constraint to.
+
+`@max` names a length, so it applies to `String` and `String?` and nothing else. `@max` on an `Int`,
+a container or a record is an error naming the type. That check is new here and applies to event
+fields and entity columns too, where it used to be accepted and silently do nothing.
+
+**Rejected: `@max` on the entity column instead.** It is where the constraint is enforced for a bare
+string, so it looks like the consistent choice. It cannot express this one: the column's type is
+`LineItem`, and there is no syntax for "the `title` inside it", nor should there be, because that is
+the record's business rather than the column's.
+
+**`@subject` is deliberately not here yet.** A record field cannot be subject-bound, so a record
+cannot carry personal data through the crypto-shredding path. That is a real restriction rather than
+an oversight of the same shape as `@max`: `docs/effects.md` rule 12 recovers subject-ness from the
+schema path, and a record reached through a container has no path the parser can name. Nothing needs
+it yet, so it stays recorded rather than designed.
+
 ### Reading `Name {` as a literal
 
 A record literal is claimed only when `Name` is a declared record, is not shadowed by a local, and no

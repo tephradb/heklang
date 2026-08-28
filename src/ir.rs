@@ -199,6 +199,9 @@ impl RecordDef {
 pub struct RecordField {
     pub name: Ident,
     pub ty: Type,
+    /// The only place a string inside a record can be bounded: an entity column of
+    /// record type has nothing to put a length on. See `docs/declarations.md`.
+    pub max_len: Option<usize>,
 }
 
 /// A module-scope constant. The value is a literal, so the declaration needs no
