@@ -12,18 +12,19 @@ use crate::scaled::Rounding;
 use crate::value;
 
 pub fn parse(source: &str) -> Result<Program, SyntaxError> {
-    Parser {
-        tokens: lex(source)?,
-        pos: 0,
-        prologue: false,
-        command_end: 0,
-        enums: Vec::new(),
-        entities: Vec::new(),
-        event: None,
-        envelope: None,
-        stored: None,
-    }
-    .program()
+    Parser::open([(None, source)])?.program()
+}
+
+/// Parses several modules as one program. Declaration order across modules does not
+/// matter, and an error names the module it is in.
+pub fn parse_files<'a>(
+    files: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<Program, SyntaxError> {
+    let files: Vec<(Option<&str>, &str)> = files
+        .into_iter()
+        .map(|(name, source)| (Some(name), source))
+        .collect();
+    Parser::open(files)?.program()
 }
 
 /// Per-declaration lowering state: the arena and scopes being built, plus the
@@ -38,6 +39,9 @@ struct Lower {
 /// since those functions take only the unit being lowered and a type hint.
 struct Parser {
     tokens: Vec<Spanned>,
+    /// First token index of each module, with its name. Sorted, so a position maps
+    /// back to the module it came from.
+    modules: Vec<(usize, Option<String>)>,
     pos: usize,
     prologue: bool,
     command_end: usize,
@@ -59,6 +63,104 @@ struct Stored {
 }
 
 impl Parser {
+    /// Lexes every module into one token stream, remembering where each begins so a
+    /// position can be mapped back to the module it came from. Line and column stay
+    /// module-relative, because each module is lexed on its own.
+    fn open<'a>(
+        files: impl IntoIterator<Item = (Option<&'a str>, &'a str)>,
+    ) -> Result<Self, SyntaxError> {
+        let mut tokens = Vec::new();
+        let mut modules = Vec::new();
+        for (name, source) in files {
+            let mut lexed = lex(source).map_err(|err| match name {
+                Some(name) => err.in_file(name),
+                None => err,
+            })?;
+            lexed.pop();
+            modules.push((tokens.len(), name.map(str::to_string)));
+            tokens.append(&mut lexed);
+        }
+        tokens.push(Spanned {
+            token: Token::End,
+            line: 0,
+            col: 0,
+        });
+
+        Ok(Parser {
+            tokens,
+            modules,
+            pos: 0,
+            prologue: false,
+            command_end: 0,
+            enums: Vec::new(),
+            entities: Vec::new(),
+            event: None,
+            envelope: None,
+            stored: None,
+        })
+    }
+
+    fn module_at(&self, pos: usize) -> Option<&str> {
+        self.modules
+            .iter()
+            .rev()
+            .find(|(start, _)| *start <= pos)
+            .and_then(|(_, name)| name.as_deref())
+    }
+
+    fn err(&self, message: impl Into<String>, line: u32, col: u32) -> SyntaxError {
+        let error = SyntaxError::new(message, line, col);
+        match self.module_at(self.pos) {
+            Some(module) => error.in_file(module),
+            None => error,
+        }
+    }
+
+    /// A `file:line:col` for a token elsewhere in the stream, for messages that point
+    /// at a first declaration from the site of a second.
+    fn location(&self, pos: usize) -> String {
+        let (line, col) = self
+            .tokens
+            .get(pos)
+            .map(|spanned| (spanned.line, spanned.col))
+            .unwrap_or((0, 0));
+        match self.module_at(pos) {
+            Some(module) => format!("{module}:{line}:{col}"),
+            None => format!("{line}:{col}"),
+        }
+    }
+
+    /// `currency` may sit in any module and must appear exactly once, so that no
+    /// module has to be "the first one".
+    fn currency_decl(&mut self) -> Result<Currency, SyntaxError> {
+        let mut found: Option<(String, usize)> = None;
+        for index in 0..self.tokens.len() {
+            if !matches!(self.tokens[index].token, Token::Word(Keyword::Currency)) {
+                continue;
+            }
+            let Some(Token::Ident(code)) = self.tokens.get(index + 1).map(|next| &next.token)
+            else {
+                self.pos = index + 1;
+                return self.fail("expected a currency code after `currency`");
+            };
+            let code = code.clone();
+            if let Some((_, first)) = &found {
+                let first = self.location(*first);
+                self.pos = index;
+                return self.fail(format!("currency is already declared at {first}"));
+            }
+            found = Some((code, index));
+        }
+
+        match found {
+            Some((code, _)) => Ok(Currency::from_code(&code)),
+            None => {
+                self.pos = 0;
+                self.fail("no `currency` declaration; one module must declare it")
+            }
+        }
+    }
+
     fn peek(&self) -> &Token {
         self.tokens
             .get(self.pos)
@@ -130,7 +232,7 @@ impl Parser {
             }
             (None, _) => format!("`{name}` is not in scope"),
         };
-        SyntaxError::new(message, line, col)
+        self.err(message, line, col)
     }
 
     fn bump(&mut self) -> Spanned {
@@ -147,7 +249,7 @@ impl Parser {
 
     fn fail<T>(&self, message: impl Into<String>) -> Result<T, SyntaxError> {
         let (line, col) = self.here();
-        Err(SyntaxError::new(message, line, col))
+        Err(self.err(message, line, col))
     }
 
     fn at_sym(&self, sym: Sym) -> bool {
@@ -223,10 +325,9 @@ impl Parser {
     }
 
     fn program(&mut self) -> Result<Program, SyntaxError> {
-        self.expect_word(Keyword::Currency)?;
-        let code = self.expect_ident()?;
-        let currency = Currency::from_code(&code);
+        let currency = self.currency_decl()?;
 
+        self.pos = 0;
         let items = self.pos;
         let mut events: Vec<EventDef> = Vec::new();
         let mut projectors: Vec<Projector> = Vec::new();
@@ -249,6 +350,7 @@ impl Parser {
                     projectors.push(projector);
                 }
                 Token::Word(Keyword::Command) => self.skip_item()?,
+                Token::Word(Keyword::Currency) => self.skip_currency(),
                 other => return self.fail(Self::expected_item(other)),
             }
         }
@@ -260,6 +362,7 @@ impl Parser {
             match self.peek() {
                 Token::End => break,
                 Token::Word(Keyword::Event) => self.skip_item()?,
+                Token::Word(Keyword::Currency) => self.skip_currency(),
                 Token::Word(Keyword::Command) => {
                     let command = self.command_decl(&events, &currency)?;
                     if commands
@@ -289,8 +392,13 @@ impl Parser {
         })
     }
 
+    fn skip_currency(&mut self) {
+        self.bump();
+        self.bump();
+    }
+
     fn expected_item(found: &Token) -> String {
-        format!("expected `event`, `command` or `projector`, found {found}")
+        format!("expected `event`, `command`, `projector` or `currency`, found {found}")
     }
 
     /// Collects a projector's `enum` and `entity` declarations, leaving its handlers
@@ -298,6 +406,7 @@ impl Parser {
     /// another file. Two sub-passes, because an entity field may name an enum
     /// declared below it.
     fn projector_shell(&mut self, currency: &Currency) -> Result<Projector, SyntaxError> {
+        let module = self.module_at(self.pos).map(str::to_string);
         self.expect_word(Keyword::Projector)?;
         let name = self.expect_ident()?;
         self.expect_sym(Sym::LBrace)?;
@@ -345,6 +454,7 @@ impl Parser {
 
         Ok(Projector {
             name,
+            module,
             enums,
             entities,
             handlers: Vec::new(),
@@ -444,15 +554,11 @@ impl Parser {
             let (line, col) = self.here();
             let variant = self.expect_ident()?;
             if variants.contains(&variant) {
-                return Err(SyntaxError::new(
-                    format!("`{name}` declares `{variant}` twice"),
-                    line,
-                    col,
-                ));
+                return Err(self.err(format!("`{name}` declares `{variant}` twice"), line, col));
             }
             if marked {
                 if default.is_some() {
-                    return Err(SyntaxError::new(
+                    return Err(self.err(
                         format!("`{name}` has more than one `@default` variant"),
                         line,
                         col,
@@ -499,7 +605,7 @@ impl Parser {
             let (line, col) = self.here();
             let field_name = self.expect_ident()?;
             if fields.iter().any(|field| field.name == field_name) {
-                return Err(SyntaxError::new(
+                return Err(self.err(
                     format!("entity `{name}` declares `{field_name}` twice"),
                     line,
                     col,
@@ -547,14 +653,14 @@ impl Parser {
 
             if is_key {
                 if key.is_some() {
-                    return Err(SyntaxError::new(
+                    return Err(self.err(
                         format!("entity `{name}` has more than one `@key`"),
                         line,
                         col,
                     ));
                 }
                 if !value::can_key(&ty) {
-                    return Err(SyntaxError::new(
+                    return Err(self.err(
                         format!("`{field_name}` is a {ty}, which cannot be an entity key"),
                         line,
                         col,
@@ -593,7 +699,7 @@ impl Parser {
                     .enum_def(enum_name)
                     .is_some_and(|def| def.default.is_none())
             {
-                return Err(SyntaxError::new(
+                return Err(self.err(
                     format!(
                         "`{enum_name}` needs a `@default` variant to be a field of `{name}`, or `{}` must be optional",
                         field.name
@@ -604,7 +710,7 @@ impl Parser {
             }
             if value::zero(&field.ty, &self.enums).is_none() {
                 let ty = &field.ty;
-                return Err(SyntaxError::new(
+                return Err(self.err(
                     format!(
                         "`{}` is a {ty} with no zero value; give it a default or make it `{ty}?`",
                         field.name
@@ -656,9 +762,8 @@ impl Parser {
         let negated = self.eat_sym(Sym::Minus);
         let spanned = self.bump();
         let (line, col) = (spanned.line, spanned.col);
-        let bad = |found: &str| {
-            SyntaxError::new(format!("a {ty} field cannot default to {found}"), line, col)
-        };
+        let bad =
+            |found: &str| self.err(format!("a {ty} field cannot default to {found}"), line, col);
 
         let lit = match spanned.token {
             Token::Number(number) => {
@@ -669,7 +774,7 @@ impl Parser {
                 };
                 Number::new(digits, number.scale)
                     .resolve(ty, currency)
-                    .map_err(|err| SyntaxError::new(err.to_string(), line, col))?
+                    .map_err(|err| self.err(err.to_string(), line, col))?
             }
             _ if negated => return Err(bad("a negated value")),
             Token::Text(text) => Literal::Str(text),
@@ -683,7 +788,7 @@ impl Parser {
                     return Err(bad(&format!("`{variant}`")));
                 };
                 if !def.has(&variant) {
-                    return Err(SyntaxError::new(
+                    return Err(self.err(
                         format!("`{enum_name}` has no variant `{variant}`"),
                         line,
                         col,
@@ -699,7 +804,7 @@ impl Parser {
 
         let found = value::literal(&lit).ty();
         if &found != ty {
-            return Err(SyntaxError::new(
+            return Err(self.err(
                 format!("a {ty} field cannot default to a {found}"),
                 line,
                 col,
@@ -776,7 +881,7 @@ impl Parser {
         span: Span,
     ) -> Result<ExprId, SyntaxError> {
         if !self.eat_sym(Sym::Dot) {
-            return Err(SyntaxError::new(
+            return Err(self.err(
                 format!("`{name}` is the event envelope; read a field from it, like `{name}.at`"),
                 span.line,
                 span.col,
@@ -794,7 +899,7 @@ impl Parser {
 
         let def = self.event.as_ref().expect("only called inside a handler");
         let Some(declared) = def.field(&field) else {
-            return Err(SyntaxError::new(
+            return Err(self.err(
                 format!(
                     "{} has no field `{field}`, and the envelope carries only `at`, `id` and `position`",
                     def.path
@@ -891,6 +996,7 @@ impl Parser {
         events: &[EventDef],
         currency: &Currency,
     ) -> Result<Command, SyntaxError> {
+        let module = self.module_at(self.pos).map(str::to_string);
         self.expect_word(Keyword::Command)?;
         let name = self.expect_ident()?;
         let mut lower = Lower {
@@ -898,6 +1004,7 @@ impl Parser {
             defaults: HashMap::new(),
             currency: currency.clone(),
         };
+        lower.b.in_module(module.as_deref());
 
         self.expect_sym(Sym::LParen)?;
         while !self.at_sym(Sym::RParen) {
@@ -1091,11 +1198,7 @@ impl Parser {
         let name = self.expect_ident()?;
         match self.entity_def(&name) {
             Some(def) => Ok((name, def.clone())),
-            None => Err(SyntaxError::new(
-                format!("entity `{name}` is not declared"),
-                line,
-                col,
-            )),
+            None => Err(self.err(format!("entity `{name}` is not declared"), line, col)),
         }
     }
 
@@ -1111,7 +1214,7 @@ impl Parser {
             let (line, col) = self.here();
             let name = self.expect_ident()?;
             let Some(declared) = def.field(&name) else {
-                return Err(SyntaxError::new(
+                return Err(self.err(
                     format!("entity `{}` has no field `{name}`", def.name),
                     line,
                     col,
@@ -1429,12 +1532,12 @@ impl Parser {
             }
             Token::Word(Keyword::None) => match expect {
                 Some(Type::Opt(inner)) => Ok(lower.b.none(inner.as_ref().clone())),
-                Some(found) => Err(SyntaxError::new(
+                Some(found) => Err(self.err(
                     format!("`none` needs an optional target, but this position is {found}"),
                     spanned.line,
                     spanned.col,
                 )),
-                None => Err(SyntaxError::new(
+                None => Err(self.err(
                     "`none` needs an optional target to know what it is none of",
                     spanned.line,
                     spanned.col,
@@ -1443,29 +1546,36 @@ impl Parser {
             Token::Sym(Sym::Dot) => {
                 let (line, col) = self.here();
                 let field = self.expect_ident()?;
-                let Some(stored) = self.stored.as_mut() else {
-                    return Err(SyntaxError::new(
-                        format!(
-                            "`.{field}` reads the stored value, which only a `patch` value can do"
-                        ),
-                        span.line,
-                        span.col,
-                    ));
+
+                let ty = match self.stored.as_ref() {
+                    None => {
+                        return Err(self.err(
+                            format!(
+                                "`.{field}` reads the stored value, which only a `patch` value can do"
+                            ),
+                            span.line,
+                            span.col,
+                        ));
+                    }
+                    Some(stored) => match stored.entity.field(&field) {
+                        Some(declared) => declared.ty.clone(),
+                        None => {
+                            return Err(self.err(
+                                format!("entity `{}` has no field `{field}`", stored.entity.name),
+                                line,
+                                col,
+                            ));
+                        }
+                    },
                 };
-                let Some(declared) = stored.entity.field(&field) else {
-                    return Err(SyntaxError::new(
-                        format!("entity `{}` has no field `{field}`", stored.entity.name),
-                        line,
-                        col,
-                    ));
-                };
+
                 // One slot per distinct `.field` in this patch; the interpreter fills
                 // them from the stored row before any value expression runs, so this
                 // is an ordinary load by the time `eval` sees it.
+                let stored = self.stored.as_mut().expect("checked just above");
                 let slot = match stored.slots.get(&field) {
                     Some(slot) => *slot,
                     None => {
-                        let ty = declared.ty.clone();
                         let slot = lower.b.alloc(format!(".{field}"), Some(ty));
                         stored.slots.insert(field.clone(), slot);
                         stored.loads.push(Bind { field, slot });
@@ -1485,7 +1595,7 @@ impl Parser {
                     && let Some(def) = self.enum_def(enum_name)
                 {
                     if !def.has(&name) {
-                        return Err(SyntaxError::new(
+                        return Err(self.err(
                             format!("`{enum_name}` has no variant `{name}`"),
                             spanned.line,
                             spanned.col,
@@ -1516,7 +1626,7 @@ impl Parser {
                             .filter(|def| def.has(&name))
                             .map(|def| def.name.as_str())
                             .collect();
-                        Err(SyntaxError::new(
+                        Err(self.err(
                             format!(
                                 "`{name}` is a variant of {}, so it is ambiguous here; the target type would decide it",
                                 candidates.join(" and ")
@@ -1528,7 +1638,7 @@ impl Parser {
                 }
             }
 
-            other => Err(SyntaxError::new(
+            other => Err(self.err(
                 format!("expected a value, found {other}"),
                 spanned.line,
                 spanned.col,
@@ -1551,7 +1661,7 @@ impl Parser {
         };
         let lit = number
             .resolve(&ty, &lower.currency)
-            .map_err(|err| SyntaxError::new(err.to_string(), at.line, at.col))?;
+            .map_err(|err| self.err(err.to_string(), at.line, at.col))?;
         let id = lower.b.lit(lit);
         if defaulted {
             lower.defaults.insert(id, number);

@@ -164,26 +164,42 @@ impl error::Error for ErrorKind {}
 pub struct Error {
     pub kind: ErrorKind,
     pub span: Option<Span>,
+    /// Stamped at the `run` / `project` boundary, which is the innermost place that
+    /// knows which module the running declaration came from.
+    pub module: Option<String>,
 }
 
 impl Error {
     pub fn new(kind: ErrorKind) -> Self {
-        Self { kind, span: None }
+        Self {
+            kind,
+            span: None,
+            module: None,
+        }
     }
 
     pub fn at(kind: ErrorKind, span: Span) -> Self {
         Self {
             kind,
             span: Some(span),
+            module: None,
         }
+    }
+
+    fn in_module(mut self, module: Option<&str>) -> Self {
+        if self.module.is_none() {
+            self.module = module.map(str::to_string);
+        }
+        self
     }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.span {
-            Some(span) => write!(f, "{span}: {}", self.kind),
-            None => write!(f, "{}", self.kind),
+        match (&self.module, self.span) {
+            (Some(module), Some(span)) => write!(f, "{module}:{span}: {}", self.kind),
+            (None, Some(span)) => write!(f, "{span}: {}", self.kind),
+            _ => write!(f, "{}", self.kind),
         }
     }
 }
@@ -342,7 +358,11 @@ impl<'a> Interpreter<'a> {
             .program
             .projector(name)
             .ok_or_else(|| ErrorKind::UnknownProjector(name.to_string()))?;
+        self.fold_into(projector)
+            .map_err(|err| err.in_module(projector.module.as_deref()))
+    }
 
+    fn fold_into(&self, projector: &Projector) -> Result<Store, Error> {
         let mut store = Store::default();
         for record in &self.log {
             for handler in &projector.handlers {
@@ -384,7 +404,20 @@ impl<'a> Interpreter<'a> {
         let command = program
             .command(name)
             .ok_or_else(|| ErrorKind::UnknownCommand(name.to_string()))?;
+        let module = command.module.as_deref();
 
+        // Every failure below is inside this command, so the module is stamped once here
+        // rather than at each raise site.
+        self.execute(command, args)
+            .map_err(|err| err.in_module(module))
+    }
+
+    fn execute(
+        &mut self,
+        command: &Command,
+        args: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
+    ) -> Result<Execution, Error> {
+        let program = self.program;
         let mut frame = Frame::new(command.frame);
         let mut args: BTreeMap<Ident, Value> = args
             .into_iter()

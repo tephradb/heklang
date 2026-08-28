@@ -74,7 +74,8 @@ runtime does with a patch against a missing key is a runtime concern, except as 
 5.
 
 `put` requires every declared field to be present. `patch` writes only what is listed and leaves the
-rest of the row alone.
+rest of the row alone. `delete` removes the row without recording that it did, which is
+not the same as erasing anything; see "`delete` is not a tombstone" under rule 5.
 
 A bare `T` written into a `T?` field wraps, so `tracking` destructured as a `String` satisfies a
 `String?` column and `e.at` satisfies a `Timestamp?` one. This is not a new rule: it is the coercion
@@ -158,6 +159,29 @@ error naming the field and both fixes.
 **Rejected: the nil UUID and epoch zero.** They make the zero table total and remove a compile error,
 at the cost of making "absent" and "present but unset" indistinguishable in the data. The compile
 error is the cheaper of the two.
+
+### `delete` is not a tombstone
+
+`delete` removes the row. It does not record that the row was removed, so rule 5 then applies
+unchanged to whatever arrives next: a `patch` naming that key materializes a fresh row from zeros.
+A late `@order.shipped` after an `@order.purged` leaves an `Order` whose `total` is zero and whose
+`placed_at` is `none`, a row in the read model for an order that no longer exists.
+
+That is the price of rule 5, and it is paid deliberately, because the same rule is what lets a
+counter increment without a read. But it has a consequence worth stating outright: **`delete` is not
+an erasure mechanism.** Reaching for it to remove someone's data leaves a hollow row behind on the
+next event that touches the key, which is worse than not deleting at all, because the row looks like
+data rather than like a gap.
+
+Erasure is `hekla erase`, which drops the per-subject key and shreds the value across the log and
+every read model at once, in constant time and without a rewrite. A projector `delete` is a
+read-model edit and nothing more.
+
+**Open: what a shred should cascade to.** heklang has no way to say that a row keyed by, or derived
+from, a shredded subject should itself go, nor to distinguish "deleted" from "never seen" so a late
+event can be dropped rather than materializing. Both want a tombstone the fold can see, which is a
+real addition to rule 4's no-reads model rather than a small one. Left open on purpose; it should be
+designed against the shred cascade as a whole, not bolted onto `delete`.
 
 ### Defaults and zeros agree by construction
 

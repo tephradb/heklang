@@ -17,5 +17,5 @@ pub use ir::{
     Type, UnOp, Update,
 };
 pub use lex::SyntaxError;
-pub use parse::parse;
+pub use parse::{parse, parse_files};
 pub use value::{Event, Key, Record, Value};

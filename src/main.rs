@@ -2,7 +2,7 @@ use std::fs;
 use std::process::ExitCode;
 
 use heklang::{
-    Currency, Event, EventPath, Interpreter, Key, Outcome, Program, Store, Value, parse,
+    Currency, Event, EventPath, Interpreter, Key, Outcome, Program, Store, Value, parse_files,
 };
 
 const COMMANDS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/place_order.hk");
@@ -127,13 +127,18 @@ fn discount(interpreter: &mut Interpreter<'_>, label: &str, units: i64) {
     }
 }
 
+fn read(path: &str) -> Result<String, String> {
+    fs::read_to_string(path).map_err(|err| format!("{path}: {err}"))
+}
+
 fn load() -> Result<Program, String> {
-    let mut source = fs::read_to_string(COMMANDS).map_err(|err| format!("{COMMANDS}: {err}"))?;
-    let projectors =
-        fs::read_to_string(PROJECTORS).map_err(|err| format!("{PROJECTORS}: {err}"))?;
-    source.push('\n');
-    source.push_str(&projectors);
-    parse(&source).map_err(|err| format!("{err}"))
+    let commands = read(COMMANDS)?;
+    let projectors = read(PROJECTORS)?;
+    parse_files([
+        ("commands/place_order.hk", commands.as_str()),
+        ("projectors/orders.hk", projectors.as_str()),
+    ])
+    .map_err(|err| err.to_string())
 }
 
 fn main() -> ExitCode {

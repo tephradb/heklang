@@ -189,6 +189,9 @@ pub struct SyntaxError {
     pub message: String,
     pub line: u32,
     pub col: u32,
+    /// The module the error is in. `None` when the source had no name, which is what
+    /// `parse` of a single string gives.
+    pub file: Option<String>,
 }
 
 impl SyntaxError {
@@ -197,13 +200,22 @@ impl SyntaxError {
             message: message.into(),
             line,
             col,
+            file: None,
         }
+    }
+
+    pub fn in_file(mut self, file: impl Into<String>) -> Self {
+        self.file = Some(file.into());
+        self
     }
 }
 
 impl fmt::Display for SyntaxError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}: {}", self.line, self.col, self.message)
+        match &self.file {
+            Some(file) => write!(f, "{file}:{}:{}: {}", self.line, self.col, self.message),
+            None => write!(f, "{}:{}: {}", self.line, self.col, self.message),
+        }
     }
 }
 

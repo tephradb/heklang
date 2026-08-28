@@ -178,6 +178,9 @@ impl FieldDef {
 #[derive(Debug, Clone)]
 pub struct Projector {
     pub name: Ident,
+    /// The module this was declared in. A projector is one braced block, so all of
+    /// its handlers share it.
+    pub module: Option<Ident>,
     pub enums: Vec<EnumDef>,
     pub entities: Vec<EntityDef>,
     pub handlers: Vec<Handler>,
@@ -301,6 +304,8 @@ pub struct EnvBind {
 #[derive(Debug, Clone)]
 pub struct Command {
     pub name: Ident,
+    /// The module this was declared in, for error messages. `None` for an unnamed source.
+    pub module: Option<Ident>,
     pub params: Vec<Param>,
     pub frame: usize,
     pub exprs: Exprs,

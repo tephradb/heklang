@@ -10,6 +10,7 @@ use crate::scaled::Rounding;
 
 pub struct Builder {
     name: Ident,
+    module: Option<Ident>,
     params: Vec<Param>,
     exprs: Exprs,
     prologue: Vec<Assign>,
@@ -27,6 +28,7 @@ impl Builder {
     pub fn new(name: impl Into<Ident>) -> Self {
         Self {
             name: name.into(),
+            module: None,
             params: Vec::new(),
             exprs: Exprs::default(),
             prologue: Vec::new(),
@@ -39,6 +41,10 @@ impl Builder {
             binds: Vec::new(),
             envelope: Vec::new(),
         }
+    }
+
+    pub fn in_module(&mut self, module: Option<&str>) {
+        self.module = module.map(str::to_string);
     }
 
     pub fn push_scope(&mut self) {
@@ -221,6 +227,7 @@ impl Builder {
     pub fn finish(self, body: Vec<Stmt>) -> Command {
         Command {
             name: self.name,
+            module: self.module,
             params: self.params,
             frame: self.frame as usize,
             exprs: self.exprs,
