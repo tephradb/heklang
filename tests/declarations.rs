@@ -156,3 +156,73 @@ event @order.recorded { order_id: Uuid }
     assert_eq!(program.effects.len(), 1);
     assert_eq!(program.effects[0].arms.len(), 1);
 }
+
+/// `else if` is a chain rather than a block, so a multi-way dispatch does not nest one
+/// level per arm. The expression form always required `else`; the statement form used to
+/// require `{` after it as well.
+#[test]
+fn else_if_chains_without_nesting() {
+    let source = "event @order.placed { order_id: Uuid, kind: Int }
+
+command Route(order_id: Uuid, kind: Int) {
+  if kind == 1 {
+    return
+  } else if kind == 2 {
+    return invalid(\"two\")
+  } else if kind == 3 {
+    return reject(\"three\", \"no\")
+  } else {
+    emit @order.placed { order_id, kind }
+  }
+}
+";
+    let program = parse(source).expect("`else if` continues the chain");
+    let command = &program.commands[0];
+    assert_eq!(command.body.len(), 1, "the whole dispatch is one statement");
+}
+
+/// The three declaration kinds are separate name spaces. `invoke` reaches only commands
+/// and nothing reaches an effect by name, so a shared space would only force renames.
+#[test]
+fn the_three_kinds_have_separate_namespaces() {
+    let source = "event @order.placed { order_id: Uuid }
+
+command Same(order_id: Uuid) {
+  emit @order.placed { order_id }
+}
+
+projector Same {
+  entity Row { order_id: Uuid @key }
+
+  on @order.placed { order_id } {
+    put Row { order_id }
+  }
+}
+
+effect Same {
+  on @order.placed as e {
+    log(\"placed\")
+  }
+}
+";
+    let program = parse(source).expect("one name per kind does not collide across kinds");
+    assert_eq!(program.command("Same").map(|c| c.params.len()), Some(1));
+    assert_eq!(program.projector("Same").map(|p| p.entities.len()), Some(1));
+    assert_eq!(program.effect("Same").map(|e| e.arms.len()), Some(1));
+
+    // Each kind still rejects its own duplicate.
+    for (kind, item) in [
+        ("command", "command Dup(order_id: Uuid) { return }"),
+        ("projector", "projector Dup { entity R { x: Int @key } }"),
+        (
+            "effect",
+            "effect Dup { on @order.placed as e { log(\"x\") } }",
+        ),
+    ] {
+        let doubled = format!("event @order.placed {{ order_id: Uuid }}\n{item}\n{item}\n");
+        let message = parse(&doubled)
+            .expect_err("the same kind twice is still an error")
+            .message;
+        assert_eq!(message, format!("{kind} `Dup` is declared twice"));
+    }
+}

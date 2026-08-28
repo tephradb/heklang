@@ -1339,7 +1339,13 @@ impl Parser {
                 let cond = self.expr(lower, Some(Type::Bool))?;
                 let then = self.block(lower, events)?;
                 let otherwise = if self.eat_word(Keyword::Else) {
-                    self.block(lower, events)?
+                    // `else if` is one statement rather than a block, so a chain of
+                    // conditions reads as a chain instead of nesting one level per arm.
+                    if self.at_word(Keyword::If) {
+                        vec![self.statement(lower, events)?]
+                    } else {
+                        self.block(lower, events)?
+                    }
                 } else {
                     Vec::new()
                 };
