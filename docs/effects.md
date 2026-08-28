@@ -532,6 +532,27 @@ there is no bare `Uuid` expression, only the qualified call.
 `reveal` takes a subject-bound value and hands back the plaintext. It decides nothing about it;
 everything below is about the two ways it can hand back something else.
 
+### The seal is in the type
+
+`@subject(customer_id)` on an event field is the authored form; `Sealed(String, customer_id)` is what
+propagates from it. `Opt` stays outermost, so `String? @subject(x)` is `Opt(Sealed(String, x))` and
+everything that already looks through an optional keeps working with one extra unwrap.
+
+`Sealed` is not spellable. An author writes the annotation and never the type, which is what keeps
+one place able to create a seal.
+
+**A seal survives a `let`, and that is the point.** Subject-ness used to be a property of how an
+expression was *spelled*, recovered by looking at the slot an expression loaded from. One `let`
+laundered it:
+
+```
+let copy = e.email
+log(reveal(copy))          // used to be: `reveal` takes a subject-bound value...
+```
+
+A type composes where a spelling does not, so this now works, and so does folding it, passing it and
+storing it.
+
 ### What it takes: a field of the trigger, or a fold of one
 
 ```
@@ -544,29 +565,38 @@ on @shop.sync.requested as e { shop_id } {
 ```
 
 A credential is almost never on the event being handled. It was appended when the shop connected,
-long before, so **subject binding propagates through a `state` fold**: a variable folded from a
-`@subject(...)` field is still subject-bound and can be revealed. That is the same propagation
-`docs/projectors.md` rule 9 already performs through a projector write, and it works the same way,
-by recovering a schema fact in the parser rather than by carrying anything on the value.
+long before, so **the seal propagates through a `state` fold**: the variable's declared type is what
+the author wrote, and folding sealed content onto it seals it. That is the same propagation
+`docs/projectors.md` rule 9 performs through a projector write.
 
-An arm makes the variable subject-bound when its result **is** the field, a bare load of a
-destructured `@subject(...)` name. A transformed one (`=> access_token.trim()`) is not: the result is
-a new value, and the schema says nothing about it. This is the same line `reveal` already draws for a
-trigger field, and it is why the fold above holds `String?` rather than folding an
-`unwrap_or("")` into a `String`.
+An arm seals the variable when its result **is** sealed content. A transformed one
+(`=> access_token.trim()`) is not, and it no longer needs a rule of its own: reading content through
+a method is rejected where it is written, which is a better place for the error than the `reveal`
+further down that used to suffer from it.
 
-**The subject id is folded too.** It cannot come from the slice's filter, because a fold is not
-always filtered on its subject: a fold of `customer_name @subject(customer_id)` filtered on
-`warranty_id` is an ordinary shape. So each subject-bound variable gets a companion the author never
-writes, folded by the same arms, holding the subject of the value currently held. It is absent
-exactly when the fold never matched, which is what makes the seed distinguishable from a real value
-below.
+### The subject rides on the value
 
-**Rejected: an opaque handle carried on the value.** A subject-bound field would be a distinct type
-all the way through, and the decrypt boundary would be enforced instead of documented. That is the
-right end state and it is recorded under "What `reveal` models" as a known gap; it touches every
-value path, including JSON, projector writes, `@max` and interpolation, and it is a larger pass than
-this one.
+A sealed value carries the field, the subject and the **id** its key is filed under. That is what
+`reveal` reads, and it is why nothing has to be recovered from the parse tree:
+
+```rust
+Value::Sealed { field, subject, id, inner }
+```
+
+It is made in one place, where an event field enters a frame, and taken off again on the way into
+the log or the store. heklang models the key lifecycle rather than ciphertext at rest, so storage
+holds plain values; the seal exists to carry the id, not to encrypt.
+
+**This replaced a companion fold.** Each subject-bound variable used to get a second, hidden state
+variable that folded the subject id alongside the value, because the id could not come from the
+slice's filter: a fold of `customer_name @subject(customer_id)` filtered on `warranty_id` is an
+ordinary shape. Carrying the id on the value deletes that machinery, along with `FoldSubject`,
+`StateVar.subject`, `Parser::subject_source` and three of `Expr::Reveal`'s four fields.
+
+**One thing changed shape in the error.** A terminal reveal now names the **field** whose content is
+unreadable rather than the local the source happened to reveal, because the field is what the value
+carries. That is what this document always showed, and it is the more useful of the two now that a
+value can travel.
 
 #### One variable, one subject
 
@@ -751,12 +781,15 @@ The interpreter models the **key lifecycle**: a subject is erased or it is not, 
 way, and `reveal` fails once it has moved. That is what rules 9 and 12 actually turn on, and it is
 enough to test both honestly.
 
-It does not model ciphertext. A subject-bound event field is an ordinary `String` here, so **nothing
-forces a value through `reveal` before it leaves the process**. In hekla the same field is a
-`CipherHandle`, opaque until revealed, so the decrypt boundary is enforced rather than documented.
-Closing the gap means a distinct type carried through the whole pipeline, including the projector
-write path where `docs/projectors.md` rule 9 propagates subjects today. Recorded as a known gap, not
-a bug.
+It does not model ciphertext at rest, and does not need to. A sealed value is an ordinary value
+behind a wrapper that carries its subject and id; the log and the store hold plain values, because
+what rules 9 and 12 turn on is whether a key is alive, not what the bytes look like.
+
+What **is** enforced now is the boundary itself: content behind a seal cannot be read without
+`reveal`, so a program that would hand a `CipherHandle` to hekla and expect a `String` no longer
+passes `hek check`. That was the gap this document used to record here, and it mattered for a
+specific reason: **green did not mean runnable.** A checker for hekla whose green light does not
+imply hekla can run the program is not doing its job.
 
 ## Where this diverges from the runtime
 

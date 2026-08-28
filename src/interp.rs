@@ -487,6 +487,7 @@ impl<'a> Interpreter<'a> {
         let mut frame = Frame::new(arm.frame);
         for bind in &arm.binds {
             let value = field(&record.event, &bind.field)?.clone();
+            let value = seal(program, &record.event, &bind.field, value)?;
             frame.set(bind.slot, value)?;
         }
         for bind in &arm.envelope {
@@ -615,6 +616,7 @@ impl<'a> Interpreter<'a> {
                 let mut frame = Frame::new(handler.frame);
                 for bind in &handler.binds {
                     let value = field(&record.event, &bind.field)?.clone();
+                    let value = seal(self.program, &record.event, &bind.field, value)?;
                     frame.set(bind.slot, value)?;
                 }
                 for bind in &handler.envelope {
@@ -821,6 +823,7 @@ fn fold(
 
             for bind in &slice.binds {
                 let value = field(event, &bind.field)?.clone();
+                let value = seal(program, event, &bind.field, value)?;
                 frame.set(bind.slot, value)?;
             }
             for update in &slice.updates {
@@ -1601,29 +1604,12 @@ fn eval(
             Value::Opt { .. } => Err(at(ErrorKind::MalformedIr)),
             other => Ok(other),
         },
-        Expr::Reveal {
-            value,
-            field,
-            subject,
-            subject_value,
-        } => {
-            let plaintext = eval(program, exprs, frame, *value, ctx.as_deref_mut())?;
-            // Rule 12: an absent value was never encrypted, so no key can be missing
-            // for it. This is the row that must not collapse into the erased one.
-            if matches!(plaintext, Value::Opt { value: None, .. }) {
-                return Ok(plaintext);
-            }
-            let id = eval(program, exprs, frame, *subject_value, ctx.as_deref_mut())?;
-            // A fold tracks the subject of the value it is holding, and holds none
-            // until it matches something. The value is then the author's own seed,
-            // which nothing sealed, so there is no key to ask about.
-            let Some(id) = subject_id(&id, span)? else {
-                return Ok(plaintext);
-            };
+        Expr::Reveal(inner) => {
+            let value = eval(program, exprs, frame, *inner, ctx.as_deref_mut())?;
             let Some(ctx) = ctx else {
                 return Err(at(ErrorKind::MalformedIr));
             };
-            ctx.reveal(field, subject, &id, plaintext)
+            ctx.reveal(value, span)
         }
     }
 }
@@ -1693,6 +1679,49 @@ fn call_void(
         Flow::Next | Flow::Return(Ret::Ok) => Ok(()),
         _ => Err(Error::at(ErrorKind::MalformedIr, span)),
     }
+}
+/// Wraps a subject-bound field in its seal as it enters a frame, so `reveal` can find
+/// the subject and the id on the value rather than through a side channel. This is the
+/// only place a seal is made, and the writing paths take it off again: heklang models
+/// the key lifecycle, not ciphertext at rest. See `docs/effects.md` rule 12.
+fn seal(program: &Program, event: &Event, name: &Ident, value: Value) -> Result<Value, Error> {
+    let Some(subject) = program
+        .event(&event.path)
+        .and_then(|def| def.field(name))
+        .and_then(|def| def.subject.clone())
+    else {
+        return Ok(value);
+    };
+    let span = Span::default();
+    let Some(id) = subject_id(field(event, &subject)?, span)? else {
+        return Err(Error::at(ErrorKind::MalformedIr, span));
+    };
+    // Rule 12: an absent optional was never encrypted, so there is no key behind it
+    // and nothing to seal. That is the row that must not collapse into the erased one.
+    Ok(match value {
+        Value::Opt { value: None, inner } => Value::Opt {
+            inner: Type::sealed(inner, subject),
+            value: None,
+        },
+        Value::Opt {
+            inner,
+            value: Some(held),
+        } => Value::Opt {
+            inner: Type::sealed(inner, subject.clone()),
+            value: Some(Box::new(Value::Sealed {
+                field: name.clone(),
+                subject,
+                id,
+                inner: held,
+            })),
+        },
+        plain => Value::Sealed {
+            field: name.clone(),
+            subject,
+            id,
+            inner: Box::new(plain),
+        },
+    })
 }
 
 /// The (index, item) pairs a `for` or a comprehension walks. A map yields its key
@@ -2755,22 +2784,34 @@ impl Effects<'_> {
 
     /// Rule 12. Not journaled, so it re-runs on every attempt, which is exactly why
     /// rule 9 forbids reaching one after an `erase`.
-    fn reveal(
-        &mut self,
-        field: &Ident,
-        subject: &Ident,
-        id: &str,
-        plaintext: Value,
-    ) -> Result<Value, Error> {
-        if self.erased.contains(&(subject.clone(), id.to_string())) {
-            return Err(ErrorKind::Erased {
-                field: field.clone(),
-                subject: subject.clone(),
-                id: id.to_string(),
+    /// Rule 12. The field, the subject and the id all ride on the value, so this needs
+    /// nothing but the value. An absent optional comes back as it went in **without**
+    /// consulting the key store: it was never encrypted, and "never set" and "key
+    /// destroyed" are different facts that must not collapse.
+    fn reveal(&mut self, value: Value, span: Span) -> Result<Value, Error> {
+        match value {
+            Value::Sealed {
+                field,
+                subject,
+                id,
+                inner,
+            } => {
+                if self.erased.contains(&(subject.clone(), id.clone())) {
+                    return Err(Error::at(ErrorKind::Erased { field, subject, id }, span));
+                }
+                Ok(*inner)
             }
-            .into());
+            Value::Opt {
+                inner,
+                value: Some(held),
+            } => Ok(Value::Opt {
+                inner: inner.unsealed(),
+                value: Some(Box::new(self.reveal(*held, span)?)),
+            }),
+            // Not sealed at all. The parser rejects that, so this is a pass-through
+            // rather than a case with meaning.
+            other => Ok(other),
         }
-        Ok(plaintext)
     }
 
     fn erase(&mut self, subject: &Ident, id: &str) {

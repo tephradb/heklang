@@ -682,7 +682,7 @@ fn reveal_needs_a_subject_bound_field() {
   }
 }");
     assert!(
-        message.contains("`order_id` is not subject-encrypted"),
+        message.contains("`reveal` takes subject-bound content and this is a plain Uuid"),
         "got: {message}"
     );
 }
@@ -1136,8 +1136,8 @@ fn a_fold_from_two_events_with_the_same_subject_reveals() {
     );
     assert_eq!(interpreter.lines(), ["sent"]);
 
-    // The companion tracks the subject of the value it is holding, so erasing some
-    // other customer changes nothing.
+    // The seal carries the subject of the value it is holding, so erasing some other
+    // customer changes nothing.
     let mut interpreter = Interpreter::with_log(&program, log.clone());
     interpreter.script(URL, [Reply::Status(200)]);
     interpreter.erase_subject("customer_id", "3");
@@ -1146,8 +1146,10 @@ fn a_fold_from_two_events_with_the_same_subject_reveals() {
         Ok(Invocation::Done)
     ));
 
-    // Erasing the right one is rule 12's terminal skip, named for the variable the
-    // source reveals rather than for the field it folded.
+    // Erasing the right one is rule 12's terminal skip, named for the field whose
+    // content is unreadable rather than for the local the source happened to reveal.
+    // The seal rides on the value now, so the field is what it can name, and that is
+    // what `docs/effects.md` always documented.
     let mut interpreter = Interpreter::with_log(&program, log);
     interpreter.script(URL, [Reply::Status(200)]);
     interpreter.erase_subject("customer_id", "7");
@@ -1156,7 +1158,7 @@ fn a_fold_from_two_events_with_the_same_subject_reveals() {
         panic!("expected a terminal skip");
     };
     assert!(
-        message.starts_with("reveal cannot decrypt `contact`"),
+        message.starts_with("reveal cannot decrypt `email`"),
         "{message}"
     );
 }
@@ -1289,10 +1291,11 @@ fn a_non_subject_arm_into_a_subject_bound_variable_is_rejected() {
     }
 }
 
-/// Subject-ness is a property of the field, so anything computed from it is a new value
-/// the schema says nothing about. That is the same line a trigger field is held to.
+/// The transform is now caught **at the transform**, not at the `reveal` further down.
+/// That is the whole gain of putting the seal in the type: the error lands on the
+/// mistake rather than on the line that suffers from it.
 #[test]
-fn a_transformed_arm_drops_the_binding() {
+fn a_transform_of_sealed_content_is_rejected_where_it_is_written() {
     let message = err("effect E {
   on @order.reviewed as e { customer_id } {
     state contact: String? = fold none
@@ -1302,10 +1305,60 @@ fn a_transformed_arm_drops_the_binding() {
   }
 }");
     assert!(
-        message.contains("`contact` folds no subject-bound value"),
+        message.contains("`trim` reads content sealed under `customer_id`"),
         "got: {message}"
     );
-    assert!(message.contains("drops the binding"), "got: {message}");
+    assert!(message.contains("`reveal` it first"), "got: {message}");
+}
+
+/// `unwrap_or` gets its own reason, because it is the specific mistake a port makes:
+/// a plaintext sentinel standing in for content that has a key.
+#[test]
+fn unwrap_or_on_sealed_content_names_the_mixture() {
+    let message = err("effect E {
+  on @order.reviewed as e { customer_id } {
+    log(reveal(e.comment.unwrap_or(\"\")))
+  }
+}");
+    assert!(
+        message.contains("plaintext default and content sealed under `customer_id` in one slot"),
+        "got: {message}"
+    );
+}
+
+/// Presence is not content, so the one thing that may be asked of an unrevealed
+/// optional is whether it holds anything at all.
+#[test]
+fn a_presence_check_needs_no_reveal() {
+    program(
+        "effect E {
+  on @order.reviewed as e { customer_id } {
+    if e.comment.is_none() {
+      log(\"no comment\")
+      return
+    }
+    log(\"has one\")
+  }
+}",
+    );
+}
+
+/// A `let` keeps the seal. This is the case the old side channels laundered: the
+/// binding lived on how the expression was spelled, so one `let` lost it.
+#[test]
+fn a_let_keeps_the_seal() {
+    let program = program(
+        "effect E {
+  on @order.placed as e {
+    let copy = e.email
+    log(reveal(copy))
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let (interpreter, outcome) = deliver(&program, vec![placed(1, 7, 100)], vec![], &mut journal);
+    outcome.expect("delivered");
+    assert_eq!(interpreter.lines(), ["ada@example.com"]);
 }
 
 /// The rules are about the variable, so they hold in a command as well as an effect.

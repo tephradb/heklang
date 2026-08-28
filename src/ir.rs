@@ -511,18 +511,6 @@ pub struct StateVar {
     pub ty: Type,
     pub slot: Slot,
     pub init: ExprId,
-    /// Rule 12: set when every arm folds a `@subject(...)` field, which is what makes
-    /// the variable revealable. The seed never carries one, and that is allowed.
-    pub subject: Option<FoldSubject>,
-}
-
-/// What makes a folded value revealable. `field` is the `@subject(...)` field naming
-/// the key; `value` reads a companion fold that tracks that field's id alongside the
-/// value, and is absent exactly when the variable still holds its seed.
-#[derive(Debug, Clone)]
-pub struct FoldSubject {
-    pub field: Ident,
-    pub value: ExprId,
 }
 
 #[derive(Debug, Clone)]
@@ -672,14 +660,9 @@ pub enum Expr {
     /// nothing else: no source token spells it, so an absent value here is malformed
     /// IR rather than a runtime case. See `docs/optionals.md`.
     Unwrap(ExprId),
-    /// Rule 12. The subject field and value are recovered by the parser, because
-    /// subject-ness is a property of the schema path rather than of the value.
-    Reveal {
-        value: ExprId,
-        field: Ident,
-        subject: Ident,
-        subject_value: ExprId,
-    },
+    /// Rule 12. Nothing but the value: subject-ness is a property of the value now,
+    /// so the field, the subject and its id all ride on it. See `docs/effects.md`.
+    Reveal(ExprId),
 }
 
 /// What a `for` or a comprehension binds. `index` is the key over a map and the

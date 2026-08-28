@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ir::{
     Arm, Assign, BinOp, Bind, Command, EnvBind, EnvField, EventPath, Expr, ExprId, Exprs, Filter,
-    FoldSubject, Function, Handler, Ident, Literal, Number, Param, Slice, SliceId, Slot, Span,
-    StateVar, Stmt, Type, UnOp, Update,
+    Function, Handler, Ident, Literal, Number, Param, Slice, SliceId, Slot, Span, StateVar, Stmt,
+    Type, UnOp, Update,
 };
 use crate::scaled::Rounding;
 
@@ -111,7 +111,6 @@ impl Builder {
             ty,
             slot,
             init,
-            subject: None,
         });
         slot
     }
@@ -121,10 +120,16 @@ impl Builder {
     }
 
     /// Rule 12: recorded once the whole fold is parsed, because it is a property of
-    /// every arm agreeing rather than of any one of them.
-    pub fn set_state_subject(&mut self, slot: Slot, subject: FoldSubject) {
+    /// every arm agreeing rather than of any one of them. The seal lands on the
+    /// declared type, the same way it lands on an entity column.
+    pub fn seal_state(&mut self, slot: Slot, subject: Ident) {
         if let Some(state) = self.states.iter_mut().find(|state| state.slot == slot) {
-            state.subject = Some(subject);
+            state.ty = seal(state.ty.clone(), subject.clone());
+        }
+        if let Some(ty) = self.slot_types.get_mut(slot.0 as usize)
+            && let Some(ty) = ty.as_mut()
+        {
+            *ty = seal(ty.clone(), subject);
         }
     }
 
@@ -395,5 +400,14 @@ impl Builder {
             .iter()
             .find(|bind| bind.slot == slot)
             .map(|bind| bind.field.as_str())
+    }
+}
+
+/// `Opt` stays outermost, so an optional subject-bound value is an optional whose
+/// content is sealed rather than a sealed optional. See `docs/effects.md` rule 12.
+pub fn seal(ty: Type, subject: Ident) -> Type {
+    match ty {
+        Type::Opt(inner) => Type::opt(seal(*inner, subject)),
+        other => Type::sealed(other, subject),
     }
 }

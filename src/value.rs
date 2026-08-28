@@ -49,6 +49,16 @@ pub enum Value {
         inner: Type,
         value: Option<Box<Value>>,
     },
+    /// Content behind the decrypt boundary, carrying the subject and the id its key is
+    /// filed under so `reveal` needs no side channel to find them. Lives only in a
+    /// frame: a value is unsealed on its way into the log or the store, because
+    /// heklang models the key lifecycle rather than ciphertext at rest.
+    Sealed {
+        field: Ident,
+        subject: Ident,
+        id: String,
+        inner: Box<Value>,
+    },
 }
 
 impl Value {
@@ -125,16 +135,32 @@ impl Value {
             Value::List { inner, .. } => Type::list(inner.clone()),
             Value::Map { key, value, .. } => Type::map(key.clone(), value.clone()),
             Value::Opt { inner, .. } => Type::opt(inner.clone()),
+            Value::Sealed { subject, inner, .. } => Type::sealed(inner.ty(), subject.clone()),
         }
     }
 
-    /// A seal is transparent here: heklang models the key lifecycle rather than
-    /// ciphertext, so a sealed position holds an ordinary value of its inner type.
-    /// The boundary it guards is a parse-time rule. See `docs/effects.md` rule 12.
+    /// A seal is transparent to the runtime: heklang models the key lifecycle rather
+    /// than ciphertext, so a sealed position accepts the plain value as readily as a
+    /// sealed one. The boundary it guards is a parse-time rule, which is what makes
+    /// this safe to be lenient about. See `docs/effects.md` rule 12.
     pub fn has_type(&self, ty: &Type) -> bool {
-        match ty {
-            Type::Sealed(inner, _) => self.has_type(inner),
+        match (self, ty) {
+            (Value::Sealed { inner, .. }, _) => inner.has_type(&ty.unsealed()),
+            (_, Type::Sealed(inner, _)) => self.has_type(inner),
             _ => &self.ty() == ty,
+        }
+    }
+
+    /// The value behind the seal, if there is one. A plain value is its own content,
+    /// which is what lets the writing paths call this unconditionally.
+    pub fn unsealed(self) -> Value {
+        match self {
+            Value::Sealed { inner, .. } => inner.unsealed(),
+            Value::Opt { inner, value } => Value::Opt {
+                inner: inner.unsealed(),
+                value: value.map(|value| Box::new(value.unsealed())),
+            },
+            other => other,
         }
     }
 }
@@ -142,6 +168,9 @@ impl Value {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            // Never the content. A checked program cannot print one, so this is what a
+            // debug print of an intermediate frame shows rather than program output.
+            Value::Sealed { subject, .. } => write!(f, "<sealed under {subject}>"),
             Value::Bool(value) => write!(f, "{value}"),
             Value::Int(value) => write!(f, "{value}"),
             Value::Decimal { units, scale } => scaled::write(f, *units, *scale),
@@ -441,6 +470,10 @@ impl Json {
     /// precision is lost to a float on the far side.
     pub fn from_value(value: &Value) -> Json {
         match value {
+            // Rule 12 rejects sealed content in a body at parse time, so reaching this
+            // is a bug rather than a program error. Null rather than the content, so
+            // the bug cannot become a leak.
+            Value::Sealed { .. } => Json::Null,
             Value::Bool(value) => Json::Bool(*value),
             Value::Int(value) => Json::Int(*value),
             Value::Decimal { units, scale } | Value::Money { units, scale } => {
