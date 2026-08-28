@@ -2419,6 +2419,8 @@ impl Parser {
             Expr::Call { builtin, .. } => Some(match builtin {
                 Builtin::UuidDerive => Type::Uuid,
                 Builtin::JsonEncode => Type::String,
+                Builtin::TimestampParse => Type::opt(Type::Timestamp),
+                Builtin::MoneyParse(scale) => Type::opt(Type::Money(*scale)),
                 _ => Type::Response,
             }),
             Expr::Invoke { .. } => Some(Type::Outcome),
@@ -2444,6 +2446,11 @@ fn uuid_member(member: &str) -> String {
 /// program runs: a `for` variable and, once records exist, a field access.
 fn method_type(receiver: &Type, method: &str) -> Option<Type> {
     Some(match (receiver, method) {
+        (Type::String, "trim" | "lower" | "upper" | "strip_prefix" | "after_last") => Type::String,
+        (Type::String, "len") => Type::Int,
+        (Type::String, "is_empty" | "contains" | "starts_with") => Type::Bool,
+        (Type::String, "to_int") => Type::opt(Type::Int),
+        (Type::String, "to_uuid") => Type::opt(Type::Uuid),
         (Type::Json, "string") => Type::opt(Type::String),
         (Type::Json, "int") => Type::opt(Type::Int),
         (Type::Json, "bool") => Type::opt(Type::Bool),
@@ -2467,6 +2474,9 @@ fn method_type(receiver: &Type, method: &str) -> Option<Type> {
 fn arg_hint(receiver: &Type, method: &str, index: usize) -> Option<Type> {
     Some(match (receiver, method, index) {
         (Type::Opt(inner), "unwrap_or", 0) => inner.as_ref().clone(),
+        (Type::String, "contains" | "starts_with" | "strip_prefix" | "after_last", 0) => {
+            Type::String
+        }
         (Type::List(item), "push" | "remove" | "contains", 0) => item.as_ref().clone(),
         (Type::Map(key, _), "get" | "remove" | "contains" | "set", 0) => key.as_ref().clone(),
         (Type::Map(_, value), "set", 1) => value.as_ref().clone(),
@@ -2837,6 +2847,9 @@ impl Parser {
             "Uuid" if self.at_sym(Sym::Dot) => self.uuid_call(lower, span).map(Some),
             "Map" if self.at_sym(Sym::Dot) => self.map_empty(lower, expect, span).map(Some),
             "Json" if self.at_sym(Sym::Dot) => self.json_member(lower, span).map(Some),
+            "Timestamp" | "Money" if self.at_sym(Sym::Dot) => {
+                self.parse_member(lower, name, expect, span).map(Some)
+            }
             "reveal" if called => self.reveal_call(lower, span).map(Some),
             "now" if called => {
                 // Rule 11's clock rule: a clock exists where its result is pinned or
@@ -3240,6 +3253,52 @@ impl Parser {
         let index = index_name.map(|name| lower.b.alloc(name, index_ty));
         let item = lower.b.alloc(item_name, Some(item_ty));
         Ok(Iter { index, item, over })
+    }
+
+    /// `Timestamp.parse(text)` and `Money.parse(text)`, the two values a webhook or a
+    /// GraphQL response delivers as a string. Both return an optional, because the text
+    /// comes from outside and may be anything.
+    fn parse_member(
+        &mut self,
+        lower: &mut Lower,
+        ty: &str,
+        expect: Option<&Type>,
+        span: Span,
+    ) -> Result<ExprId, SyntaxError> {
+        self.expect_sym(Sym::Dot)?;
+        let (line, col) = self.here();
+        let member = self.expect_ident()?;
+        if member != "parse" {
+            return Err(self.err(
+                format!("`{ty}` has no `{member}`; it has `parse(text)`"),
+                line,
+                col,
+            ));
+        }
+        let builtin = if ty == "Timestamp" {
+            Builtin::TimestampParse
+        } else {
+            // The scale is a property of where the amount lands, not of the text, so
+            // it comes from the target the way `Money.empty` would.
+            let Some(Type::Money(scale)) = expect.map(inner_of) else {
+                return Err(self.err(
+                    "`Money.parse` needs a target scale to know what it is parsing into; that comes from the field, parameter or `state` it fills",
+                    span.line,
+                    span.col,
+                ));
+            };
+            Builtin::MoneyParse(*scale)
+        };
+        self.expect_sym(Sym::LParen)?;
+        let outer = mem::replace(&mut self.no_record_literal, false);
+        let text = self.expr(lower, Some(Type::String))?;
+        self.no_record_literal = outer;
+        self.expect_sym(Sym::RParen)?;
+        lower.b.at(span);
+        Ok(lower.b.expr(Expr::Call {
+            builtin,
+            args: vec![text],
+        }))
     }
 
     /// `Json.empty` and `Json.encode(value)`. The encoder is rule 8's table pointed at

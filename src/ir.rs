@@ -621,6 +621,10 @@ pub enum Builtin {
     HttpDelete,
     UuidDerive,
     JsonEncode,
+    TimestampParse,
+    /// Carries the target scale, which comes from where the result lands rather than
+    /// from the text: `"10.5"` is a different value at scale 2 and at scale 3.
+    MoneyParse(u8),
 }
 
 impl Builtin {
@@ -637,7 +641,13 @@ impl Builtin {
 
     /// Whether this is an HTTP verb rather than one of the pure builtins.
     pub fn is_http(self) -> bool {
-        !matches!(self, Builtin::UuidDerive | Builtin::JsonEncode)
+        !matches!(
+            self,
+            Builtin::UuidDerive
+                | Builtin::JsonEncode
+                | Builtin::TimestampParse
+                | Builtin::MoneyParse(_)
+        )
     }
 
     /// Whether this verb carries a request body.
@@ -657,6 +667,8 @@ impl Builtin {
             Builtin::HttpDelete => "http.delete",
             Builtin::UuidDerive => "Uuid.derive",
             Builtin::JsonEncode => "Json.encode",
+            Builtin::TimestampParse => "Timestamp.parse",
+            Builtin::MoneyParse(_) => "Money.parse",
         }
     }
 }
