@@ -693,12 +693,16 @@ The last line is the one worth noticing: the `unwrap_or` was there to reach a `S
 also what dropped the subject binding, so removing the sentinel and gaining the propagation are the
 same edit.
 
-## Open problem: consuming an optional the code has proved present
+## Consuming an optional the code has proved present
 
-There is no way to consume an optional a branch has already shown is there. The port carries
-`NO_..._FACTS` constants that exist only to satisfy `unwrap_or` on a branch that cannot be taken,
-three lines below the `is_some()` that proved it. Those constants are a bug waiting to be read as
-data, and they exist because narrowing does not.
+`docs/optionals.md` has the rule. A branch that proves an optional present makes it its inner type
+for as long as the proof holds, which is what deletes the port's `NO_..._FACTS` constants: whole
+records of zeros that existed only to satisfy an `unwrap_or` on a branch three lines below the
+`is_some()` that had already proved it could not be taken.
+
+It matters here because the same shape reaches `reveal`: `record-warranty-sale` reveals `String?`
+trigger fields whose guard is three lines up and invisible to the type. Rule 12's optional-in,
+optional-out covers the fold, and narrowing covers the guard.
 
 ## Checker obligations
 

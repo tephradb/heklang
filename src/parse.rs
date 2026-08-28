@@ -73,6 +73,9 @@ struct Parser {
     /// Set while parsing an `if` or `for` header, where the `{` that follows opens a
     /// block. Without it `if plan { ... }` reads as a record literal.
     no_record_literal: bool,
+    /// Narrowings a statement introduced for the rest of its block, and what each
+    /// slot type was before, so `statements` can put them back where the block ends.
+    narrowings: Vec<(Slot, Option<Type>)>,
     /// The handler being parsed: its event, and the name its `as` clause bound. For a
     /// multi-path arm `event` holds the shared fields and `triggers` holds what was
     /// listed, so a missing field can say whether it is absent or merely not shared.
@@ -158,6 +161,7 @@ impl Parser {
             records: Vec::new(),
             consts: Vec::new(),
             no_record_literal: false,
+            narrowings: Vec::new(),
             event: None,
             triggers: Vec::new(),
             envelope: None,
@@ -1806,11 +1810,42 @@ impl Parser {
         lower: &mut Lower,
         events: &[EventDef],
     ) -> Result<Vec<Stmt>, SyntaxError> {
+        // A narrowing ends where its block does, so this is the one place that has to
+        // put back what the statements in it proved.
+        let depth = self.narrowings.len();
         let mut stmts = Vec::new();
         while !self.at_sym(Sym::RBrace) && !matches!(self.peek(), Token::End) {
             stmts.push(self.statement(lower, events)?);
         }
+        self.unnarrow(lower, depth);
         Ok(stmts)
+    }
+
+    /// Narrows for one branch of an `if`, when the proof is about that branch.
+    fn hold(
+        &self,
+        lower: &mut Lower,
+        proof: Option<(Slot, bool)>,
+        branch: bool,
+    ) -> Option<(Slot, Option<Type>)> {
+        let (slot, present) = proof?;
+        if present != branch {
+            return None;
+        }
+        lower.b.narrow(slot).map(|previous| (slot, previous))
+    }
+
+    fn release(&self, lower: &mut Lower, held: Option<(Slot, Option<Type>)>) {
+        if let Some((slot, previous)) = held {
+            lower.b.widen(slot, previous);
+        }
+    }
+
+    fn unnarrow(&mut self, lower: &mut Lower, depth: usize) {
+        while self.narrowings.len() > depth {
+            let (slot, previous) = self.narrowings.pop().expect("the loop checked this");
+            lower.b.widen(slot, previous);
+        }
     }
 
     fn block(&mut self, lower: &mut Lower, events: &[EventDef]) -> Result<Vec<Stmt>, SyntaxError> {
@@ -1901,18 +1936,43 @@ impl Parser {
             Token::Word(Keyword::If) => {
                 self.bump();
                 let cond = self.header_expr(lower, Some(Type::Bool))?;
+                // What this condition proves, and on which side. See
+                // `docs/optionals.md`; the condition is lowered before either block is
+                // parsed, which is what lets a single-pass parser narrow at all.
+                let proof = narrowing(lower, cond);
+
+                let held = self.hold(lower, proof, true);
                 let then = self.block(lower, events)?;
+                self.release(lower, held);
+
+                let held = self.hold(lower, proof, false);
                 let otherwise = if self.eat_word(Keyword::Else) {
                     // `else if` is one statement rather than a block, so a chain of
                     // conditions reads as a chain instead of nesting one level per arm.
                     if self.at_word(Keyword::If) {
-                        vec![self.statement(lower, events)?]
+                        // What a chain proves as a whole depends on every arm above,
+                        // so a narrowing proved inside one does not escape it.
+                        let depth = self.narrowings.len();
+                        let stmt = self.statement(lower, events)?;
+                        self.unnarrow(lower, depth);
+                        vec![stmt]
                     } else {
                         self.block(lower, events)?
                     }
                 } else {
                     Vec::new()
                 };
+                self.release(lower, held);
+
+                // The early-return shape: reaching past this `if` means the condition
+                // was false, because the branch it guards never falls through.
+                if let Some((slot, false)) = proof
+                    && always_returns(&then)
+                    && let Some(previous) = lower.b.narrow(slot)
+                {
+                    self.narrowings.push((slot, previous));
+                }
+
                 Ok(Stmt::If {
                     cond,
                     then,
@@ -2223,6 +2283,21 @@ impl Parser {
 
             if self.eat_sym(Sym::LParen) {
                 let receiver = self.type_of(lower, value);
+                // Narrowing changes what the optional methods mean, so reading one off
+                // a narrowed value is a mistake worth catching here rather than at run
+                // time, where it would arrive as "Int has no method `unwrap_or`".
+                if matches!(name.as_str(), "is_some" | "is_none" | "unwrap_or")
+                    && matches!(lower.b.exprs().get(value), Some(Expr::Unwrap(_)))
+                    && let Some(ty) = &receiver
+                {
+                    return Err(self.err(
+                        format!(
+                            "`{name}` reads an optional, and the branch above already proved this one present, so it is a {ty} here; use it directly"
+                        ),
+                        line,
+                        col,
+                    ));
+                }
                 let outer = mem::replace(&mut self.no_record_literal, false);
                 let mut args = Vec::new();
                 while !self.at_sym(Sym::RParen) {
@@ -2562,6 +2637,12 @@ impl Parser {
             Expr::Lit(lit) => Some(value::literal(lit).ty()),
             Expr::Load(slot) => lower.b.slot_type(*slot).cloned(),
             Expr::Unary { operand, .. } => self.type_of(lower, *operand),
+            // The narrowing already checked the slot held an optional; a load of
+            // anything else is left alone rather than made into a second rule.
+            Expr::Unwrap(inner) => match self.type_of(lower, *inner)? {
+                Type::Opt(inner) => Some(*inner),
+                other => Some(other),
+            },
             Expr::Binary { op, lhs, rhs } => match op {
                 BinOp::Eq
                 | BinOp::Ne
@@ -2676,6 +2757,41 @@ fn response_field(name: &str) -> Option<Type> {
 /// propagation that feeds them is live, and every handler stays in the IR, so the
 /// checker can recover both spans; only the checking is deferred.
 fn check_subject(_target: &EntityField, _incoming: &Ident) {}
+
+/// What a condition proves about one optional, and on which branch: `true` means the
+/// value is present in the `then` branch. Recognised on a single test, because a
+/// conjunction and a disjunction narrow in opposite directions and getting that wrong
+/// is silent. See `docs/optionals.md`.
+fn narrowing(lower: &Lower, cond: ExprId) -> Option<(Slot, bool)> {
+    let exprs = lower.b.exprs();
+    let (test, sense) = match exprs.get(cond)? {
+        Expr::Unary {
+            op: UnOp::Not,
+            operand,
+        } => (*operand, false),
+        _ => (cond, true),
+    };
+    let Expr::Method {
+        receiver,
+        method,
+        args,
+    } = exprs.get(test)?
+    else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    let present = match method.as_str() {
+        "is_some" => sense,
+        "is_none" => !sense,
+        _ => return None,
+    };
+    let Expr::Load(slot) = exprs.get(*receiver)? else {
+        return None;
+    };
+    matches!(lower.b.slot_type(*slot), Some(Type::Opt(_))).then_some((*slot, present))
+}
 
 /// Rule 12: the `@subject(...)` a fold arm's result carries. It carries one only when
 /// the result **is** a destructured field, because anything computed from it is a new
@@ -3269,6 +3385,12 @@ impl Parser {
     /// value, and after rule 12 there are two paths it can travel: the trigger's
     /// binding, or a `state` fold.
     fn subject_source(&self, lower: &Lower, value: ExprId) -> Option<Source> {
+        // A narrowed load is still that load: proving a value present says nothing
+        // about where it came from.
+        let value = match lower.b.exprs().get(value) {
+            Some(Expr::Unwrap(inner)) => *inner,
+            _ => value,
+        };
         let Some(Expr::Load(slot)) = lower.b.exprs().get(value) else {
             return None;
         };
@@ -3973,6 +4095,7 @@ fn children(expr: &Expr) -> Vec<ExprId> {
     match expr {
         Expr::Lit(_) | Expr::Load(_) => Vec::new(),
         Expr::Unary { operand, .. } => vec![*operand],
+        Expr::Unwrap(inner) => vec![*inner],
         Expr::Binary { lhs, rhs, .. } => vec![*lhs, *rhs],
         Expr::Method { receiver, args, .. } => {
             let mut ids = vec![*receiver];

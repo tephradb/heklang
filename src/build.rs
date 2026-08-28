@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ir::{
     Arm, Assign, BinOp, Bind, Command, EnvBind, EnvField, EventPath, Expr, ExprId, Exprs, Filter,
@@ -22,6 +22,8 @@ pub struct Builder {
     binds: Vec<Bind>,
     envelope: Vec<EnvBind>,
     now: Option<Slot>,
+    /// The slots a branch has proved present. A load of one lowers to an `Unwrap`.
+    narrowed: HashSet<Slot>,
 }
 
 impl Builder {
@@ -41,6 +43,7 @@ impl Builder {
             binds: Vec::new(),
             envelope: Vec::new(),
             now: None,
+            narrowed: HashSet::new(),
         }
     }
 
@@ -183,7 +186,28 @@ impl Builder {
         let slot = self
             .lookup(name)
             .unwrap_or_else(|| panic!("`{name}` is not in scope"));
-        self.expr(Expr::Load(slot))
+        let id = self.expr(Expr::Load(slot));
+        if self.narrowed.contains(&slot) {
+            return self.expr(Expr::Unwrap(id));
+        }
+        id
+    }
+
+    /// Narrows a slot to the type a branch proved it holds, returning what it was so
+    /// the caller can put it back. A slot that is not an optional, or one already
+    /// narrowed, is left alone: nesting the same test twice is not two narrowings.
+    pub fn narrow(&mut self, slot: Slot) -> Option<Option<Type>> {
+        let Some(Type::Opt(inner)) = self.slot_type(slot).cloned() else {
+            return None;
+        };
+        let previous = self.slot_types[slot.0 as usize].replace(*inner);
+        self.narrowed.insert(slot);
+        Some(previous)
+    }
+
+    pub fn widen(&mut self, slot: Slot, previous: Option<Type>) {
+        self.slot_types[slot.0 as usize] = previous;
+        self.narrowed.remove(&slot);
     }
 
     pub fn read(&mut self, slot: Slot) -> ExprId {

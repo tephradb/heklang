@@ -605,6 +605,10 @@ pub enum Expr {
         command: Ident,
         args: Vec<(Ident, ExprId)>,
     },
+    /// A load of a slot a branch has proved present. Synthesised by narrowing and by
+    /// nothing else: no source token spells it, so an absent value here is malformed
+    /// IR rather than a runtime case. See `docs/optionals.md`.
+    Unwrap(ExprId),
     /// Rule 12. The subject field and value are recovered by the parser, because
     /// subject-ness is a property of the schema path rather than of the value.
     Reveal {

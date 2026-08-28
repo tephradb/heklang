@@ -992,6 +992,55 @@ fn a_fold_from_two_events_with_the_same_subject_reveals() {
     );
 }
 
+/// Narrowing and rule 12 meet here: proving a folded value present says nothing about
+/// where it came from, so the `reveal` still finds the subject the fold recorded.
+#[test]
+fn a_narrowed_optional_can_be_revealed() {
+    let program = program(
+        "effect E {
+  on @order.reviewed as e { customer_id } {
+    state contact: String? = fold none
+      on @order.placed(customer_id) { email } => email
+
+    if contact.is_some() {
+      http.post(\"https://mail.example/confirm\", { \"to\": reveal(contact) })
+      log(\"sent\")
+    }
+  }
+}",
+    );
+
+    let mut journal = Journal::default();
+    let mut interpreter =
+        Interpreter::with_log(&program, vec![placed(1, 7, 100), reviewed(2, 7, None)]);
+    interpreter.script(URL, [Reply::Status(200)]);
+    interpreter
+        .deliver("E", 1, &mut journal)
+        .expect("a narrowed fold reveals");
+    assert!(
+        posted(&journal).contains("\"to\":\"ada@example.com\""),
+        "{}",
+        posted(&journal)
+    );
+
+    // The subject the fold recorded is still the one the key is looked up by.
+    let mut interpreter =
+        Interpreter::with_log(&program, vec![placed(1, 7, 100), reviewed(2, 7, None)]);
+    interpreter.script(URL, [Reply::Status(200)]);
+    interpreter.erase_subject("customer_id", "7");
+    assert!(matches!(
+        interpreter.deliver("E", 1, &mut Journal::default()),
+        Ok(Invocation::Skipped(_))
+    ));
+
+    // Nothing folded, so the branch is not taken and nothing is revealed.
+    let mut interpreter = Interpreter::with_log(&program, vec![reviewed(2, 7, None)]);
+    interpreter
+        .deliver("E", 0, &mut Journal::default())
+        .expect("no orders");
+    assert!(interpreter.lines().is_empty());
+}
+
 /// The seed is not subject-bound and cannot be: it is evaluated before the fold, with
 /// no event behind it. Revealing a variable that never matched hands back what the
 /// author wrote, without consulting a key store that has nothing to say about it.
@@ -1230,7 +1279,8 @@ fn a_fold_into_an_optional_state_holds_an_optional() {
     if customer.is_none() {
       log(\"no order\")
     } else {
-      log(\"customer {customer.unwrap_or(0)}\")
+      // Narrowed by the `is_none` above, so this is an `Int` rather than an `Int?`.
+      log(\"customer {customer}\")
     }
   }
 }",

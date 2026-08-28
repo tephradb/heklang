@@ -1463,6 +1463,16 @@ fn eval(
             };
             ctx.invoke(command, values)
         }
+        // Narrowing proved this slot present, so an absent value here means the proof
+        // and the lowering disagree, which is a bug in the parser rather than in the
+        // program. See `docs/optionals.md`.
+        Expr::Unwrap(inner) => match eval(program, exprs, frame, *inner, ctx)? {
+            Value::Opt {
+                value: Some(value), ..
+            } => Ok(*value),
+            Value::Opt { .. } => Err(at(ErrorKind::MalformedIr)),
+            other => Ok(other),
+        },
         Expr::Reveal {
             value,
             field,

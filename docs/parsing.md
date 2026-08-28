@@ -29,7 +29,7 @@ the alternative reads better in the abstract and worse in use:
 - **`strip_prefix` returns the string unchanged** when the prefix is absent, rather than `String?`.
   It is written after a `starts_with` that has already decided, so an optional there would be an
   `unwrap_or` on a branch that cannot be taken, which is exactly the shape
-  `docs/effects.md`'s open problem on narrowing is about. The pair is the API: `starts_with` asks,
+  `docs/optionals.md`'s narrowing rule is for. The pair is the API: `starts_with` asks,
   `strip_prefix` acts.
 - **`after_last` returns the whole string** when the separator is absent. That is what makes
   `gid.after_last("/").to_int()` safe on something that is not a global id: the chain still ends in
