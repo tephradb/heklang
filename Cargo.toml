@@ -2,6 +2,8 @@
 name = "heklang"
 version = "0.1.0"
 edition = "2024"
+# `cargo run` stays the demo; the checker is `cargo run --bin hek`.
+default-run = "heklang"
 
 [dependencies]
 uuid = { version = "1.26.0", default-features = false, features = ["std", "v5"] }
