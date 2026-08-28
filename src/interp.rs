@@ -1097,6 +1097,22 @@ fn exec_stmt(
             eval(program, exprs, frame, *value, effects(sink))?;
             Ok(Flow::Next)
         }
+        Stmt::Call {
+            function,
+            scope,
+            args,
+            span,
+        } => {
+            let mut values = Vec::new();
+            for arg in args {
+                values.push(eval(program, exprs, frame, *arg, effects(sink))?);
+            }
+            let def = program
+                .function_in(scope.as_deref(), function)
+                .ok_or_else(|| Error::at(ErrorKind::UnknownFunction(function.clone()), *span))?;
+            call_void(program, def, values, *span, effects(sink))?;
+            Ok(Flow::Next)
+        }
         Stmt::Return(ret) => {
             let ret = match ret {
                 Return::Ok => Ret::Ok,
@@ -1614,16 +1630,13 @@ fn eval(
 /// effect-local one needs `log` and `fail`, which only `Sink::Effect` carries. Handing
 /// a pure helper an effect sink is safe because purity is a parse-time rule, which is
 /// the same reason `Sink::Pure` enforces nothing.
-///
-/// The parser proved every path returns, so falling out of the body is malformed IR
-/// rather than a case with a value.
-fn call_function(
+fn enter_function(
     program: &Program,
     def: &Function,
     args: Vec<Value>,
     span: Span,
     ctx: Option<&mut Effects<'_>>,
-) -> Result<Value, Error> {
+) -> Result<Flow, Error> {
     let mut frame = Frame::new(def.frame);
     if args.len() != def.params.len() {
         return Err(Error::at(ErrorKind::MalformedIr, span));
@@ -1639,10 +1652,42 @@ fn call_function(
         None => Sink::Pure,
     };
     match exec_block(&def.exprs, &def.body, &mut frame, program, &mut sink)? {
-        Flow::Return(Ret::Value(value)) => Ok(coerce(value, &def.ret)),
         // Rule 4, on the error channel because a call is an expression. `run_arm`
         // catches it where it catches the arm's own `fail`.
         Flow::Return(Ret::Fail(message)) => Err(Error::at(ErrorKind::Failed(message), span)),
+        flow => Ok(flow),
+    }
+}
+
+/// A call whose value is used. The parser proved every path returns, so falling out of
+/// the body is malformed IR rather than a case with a value.
+fn call_function(
+    program: &Program,
+    def: &Function,
+    args: Vec<Value>,
+    span: Span,
+    ctx: Option<&mut Effects<'_>>,
+) -> Result<Value, Error> {
+    let Some(ret) = def.ret.as_ref() else {
+        return Err(Error::at(ErrorKind::MalformedIr, span));
+    };
+    match enter_function(program, def, args, span, ctx)? {
+        Flow::Return(Ret::Value(value)) => Ok(coerce(value, ret)),
+        _ => Err(Error::at(ErrorKind::MalformedIr, span)),
+    }
+}
+
+/// A call to a `fn` that returns nothing. Both ways out are ordinary here: a bare
+/// `return`, and falling off the end.
+fn call_void(
+    program: &Program,
+    def: &Function,
+    args: Vec<Value>,
+    span: Span,
+    ctx: Option<&mut Effects<'_>>,
+) -> Result<(), Error> {
+    match enter_function(program, def, args, span, ctx)? {
+        Flow::Next | Flow::Return(Ret::Ok) => Ok(()),
         _ => Err(Error::at(ErrorKind::MalformedIr, span)),
     }
 }

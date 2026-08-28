@@ -1770,7 +1770,10 @@ command Receive(order_id: Uuid, payload: Json) {{
     );
     let program = parse(&source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
     assert_eq!(program.command("Receive").unwrap().params[1].ty, Type::Json);
-    assert_eq!(program.function("topic_of").unwrap().ret, Type::String);
+    assert_eq!(
+        program.function("topic_of").unwrap().ret,
+        Some(Type::String)
+    );
 }
 
 /// `Response` was in the same position `Json` had been in: a real type with a real
@@ -2397,6 +2400,111 @@ fn an_effect_local_fn_cannot_emit() {
 }");
     assert!(
         message.contains("an effect never appends events"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn an_effect_local_fn_may_return_nothing() {
+    let program = program(
+        "effect E {
+  fn confirm(order_id: Uuid, to: String) {
+    let response = http.post(\"https://mail.example/confirm\", { \"to\": to })
+    if response.status >= 400 {
+      fail(\"mail rejected {response.status}\")
+    }
+    invoke RecordNotified { order_id, notification_id: order_id }
+    log(\"confirmed\")
+  }
+
+  on @order.placed as e {
+    confirm(e.order_id, reveal(e.email))
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let (interpreter, outcome) = deliver(
+        &program,
+        vec![placed(1, 7, 2_599)],
+        vec![Reply::Status(200)],
+        &mut journal,
+    );
+    assert_eq!(outcome.expect("delivered"), Invocation::Done);
+    assert_eq!(interpreter.lines(), ["confirmed"]);
+    assert_eq!(interpreter.log().len(), 2);
+}
+
+/// A `return` with no value leaves the helper, not the arm. That is what makes a void
+/// helper usable as an early-exit guard the way the arm's own `return` is not.
+#[test]
+fn a_bare_return_leaves_the_helper_and_not_the_arm() {
+    let program = program(
+        "effect E {
+  fn confirm(to: String) {
+    let response = http.post(\"https://mail.example/confirm\", { \"to\": to })
+    if response.status == 401 {
+      log(\"unauthorized, skipping\")
+      return
+    }
+    log(\"confirmed\")
+  }
+
+  on @order.placed as e {
+    confirm(reveal(e.email))
+    log(\"arm finished\")
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let (interpreter, outcome) = deliver(
+        &program,
+        vec![placed(1, 7, 100)],
+        vec![Reply::Status(401)],
+        &mut journal,
+    );
+    assert_eq!(outcome.expect("delivered"), Invocation::Done);
+    assert_eq!(
+        interpreter.lines(),
+        ["unauthorized, skipping", "arm finished"]
+    );
+}
+
+#[test]
+fn a_void_call_is_a_statement_rather_than_a_value() {
+    let message = err("effect E {
+  fn confirm(to: String) { log(to) }
+  on @order.placed as e { let done = confirm(reveal(e.email)) }
+}");
+    assert_eq!(
+        message,
+        "`confirm` returns nothing, so a call to it is a statement rather than a value"
+    );
+}
+
+#[test]
+fn a_return_in_a_void_fn_takes_no_value() {
+    let message = err("effect E {
+  fn confirm(to: String) { return to }
+  on @order.placed as e { confirm(reveal(e.email)) }
+}");
+    assert_eq!(
+        message,
+        "this `fn` returns nothing, so `return` takes no value"
+    );
+}
+
+/// The cycle check reaches a call that is a statement, which has no `Expr::CallFn` for
+/// the expression walk to find.
+#[test]
+fn a_cycle_between_void_helpers_is_rejected() {
+    let message = err("effect E {
+  fn a(n: Int) { b(n) }
+  fn b(n: Int) { a(n) }
+
+  on @order.placed as e { a(1) }
+}");
+    assert!(
+        message.contains("`a` calls `b` calls `a`"),
         "got: {message}"
     );
 }

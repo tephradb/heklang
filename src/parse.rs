@@ -707,25 +707,38 @@ impl Parser {
         for (param, ty) in self.param_list(true)? {
             lower.b.param(&param, ty);
         }
-        self.expect_sym(Sym::To)?;
-        let ret = self.fn_type()?;
+        let ret = self.fn_result(kind)?;
         self.expect_sym(Sym::LBrace)?;
 
         self.kind = kind;
-        self.returns = Some(ret.clone());
+        self.returns = ret.clone();
         let body = self.statements(&mut lower, events)?;
         self.returns = None;
         self.kind = Kind::Command;
         self.expect_sym(Sym::RBrace)?;
 
         // Falls-through, the analysis rule 9 already uses. A `for` body does not count,
-        // because the container it walks can be empty.
-        if !always_returns(&body) {
+        // because the container it walks can be empty. A `fn` returning nothing has
+        // nothing to fall through to, so the check is about the declared type.
+        if let Some(ret) = &ret
+            && !always_returns(&body)
+        {
             return self.fail(format!(
                 "`{name}` can finish without returning a {ret}; every path out of a `fn` returns one"
             ));
         }
         Ok(lower.b.finish_fn(ret, body))
+    }
+
+    /// The `-> Type` after a parameter list. Optional for an effect-local `fn` and
+    /// required everywhere else: a pure function that returns nothing does nothing, so
+    /// the omission is worth rejecting where the body cannot have an effect.
+    fn fn_result(&mut self, kind: Kind) -> Result<Option<Type>, SyntaxError> {
+        if kind == Kind::EffectFn && !self.at_sym(Sym::To) {
+            return Ok(None);
+        }
+        self.expect_sym(Sym::To)?;
+        Ok(Some(self.fn_type()?))
     }
 
     /// A `fn` in scope here: the enclosing effect's own before module scope. The two
@@ -754,17 +767,56 @@ impl Parser {
         name: Ident,
         span: Span,
     ) -> Result<ExprId, SyntaxError> {
+        let args = self.call_args(lower, &name, span)?;
+        lower.b.at(span);
+        let scope = self.fn_scope(&name);
+        Ok(lower.b.expr(Expr::CallFn {
+            function: name,
+            scope,
+            args,
+        }))
+    }
+
+    /// A call to a `fn` that returns nothing, which only an effect-local one can be.
+    /// It is a statement and never an expression, so there is nothing to lower it into
+    /// an arena slot for.
+    fn void_call(&mut self, lower: &mut Lower) -> Result<Stmt, SyntaxError> {
+        let span = self.span_here();
+        let name = self.expect_ident()?;
+        let scope = self.fn_scope(&name);
+        let args = self.call_args(lower, &name, span)?;
+        Ok(Stmt::Call {
+            function: name,
+            scope,
+            args,
+            span,
+        })
+    }
+
+    /// Whether a bare `name(` here is a call to a `fn` that returns nothing.
+    fn starts_void_call(&self, name: &str) -> bool {
+        matches!(
+            self.tokens.get(self.pos + 1).map(|next| &next.token),
+            Some(Token::Sym(Sym::LParen))
+        ) && self.fn_sig(name).is_some_and(|sig| sig.ret.is_none())
+    }
+
+    /// The argument list, shared by the two call forms. Each argument is checked
+    /// against its declared parameter, so literal inference and enum resolution work
+    /// through a call the way they work through `emit`.
+    fn call_args(
+        &mut self,
+        lower: &mut Lower,
+        name: &str,
+        span: Span,
+    ) -> Result<Vec<ExprId>, SyntaxError> {
         // Rule 3: a fold has to reproduce without a journal, and an effect-local `fn`
         // is the one helper that may call out. A module `fn` is pure by construction,
         // so a fold may still call one of those.
         if self.local_fns.iter().any(|sig| sig.name == name) {
             self.not_in_fold(&format!("call `{name}`, which may call out"), span)?;
         }
-        let params = self
-            .fn_sig(&name)
-            .expect("checked by caller")
-            .params
-            .clone();
+        let params = self.fn_sig(name).expect("checked by caller").params.clone();
         self.expect_sym(Sym::LParen)?;
         let outer = mem::replace(&mut self.no_record_literal, false);
         let mut args = Vec::new();
@@ -789,13 +841,7 @@ impl Parser {
             let (name_of, _) = &params[args.len()];
             return Err(self.err(format!("`{name}` needs `{name_of}`"), span.line, span.col));
         }
-        lower.b.at(span);
-        let scope = self.fn_scope(&name);
-        Ok(lower.b.expr(Expr::CallFn {
-            function: name,
-            scope,
-            args,
-        }))
+        Ok(args)
     }
 
     fn expected_item(found: &Token) -> String {
@@ -2787,6 +2833,20 @@ impl Parser {
                     let value = self.expr(lower, Some(want))?;
                     return Ok(Stmt::Return(Return::Value(value)));
                 }
+                // The symmetric half of the check above, for the one signature that
+                // declares no result. Without it a `return 5` here would silently be a
+                // bare `return` and the `5` would fail as the next statement.
+                if self.kind == Kind::EffectFn {
+                    let (line, col) = self.here();
+                    if !self.ends_return() {
+                        return Err(self.err(
+                            "this `fn` returns nothing, so `return` takes no value".to_string(),
+                            line,
+                            col,
+                        ));
+                    }
+                    return Ok(Stmt::Return(Return::Ok));
+                }
                 let ret = if self.eat_word(Keyword::Invalid) {
                     self.expect_sym(Sym::LParen)?;
                     let message = self.expr(lower, Some(Type::String))?;
@@ -2973,6 +3033,7 @@ impl Parser {
             Token::Ident(name) if self.starts_effect_statement(name) => {
                 self.effect_statement(lower, events)
             }
+            Token::Ident(name) if self.starts_void_call(name) => self.void_call(lower),
             other => self.fail(format!("expected a statement, found {other}")),
         }
     }
@@ -3260,6 +3321,15 @@ impl Parser {
                     return Ok(value);
                 }
                 if self.at_sym(Sym::LParen) && self.fn_sig(&name).is_some() {
+                    if self.fn_sig(&name).is_some_and(|sig| sig.ret.is_none()) {
+                        return Err(self.err(
+                            format!(
+                                "`{name}` returns nothing, so a call to it is a statement rather than a value"
+                            ),
+                            span.line,
+                            span.col,
+                        ));
+                    }
                     return self.call_fn(lower, name, span);
                 }
                 if !self.no_record_literal
@@ -3724,13 +3794,8 @@ impl Parser {
             ));
         }
         let params = self.param_list(true)?;
-        self.expect_sym(Sym::To)?;
-        let ret = self.fn_type()?;
-        self.local_fns.push(Signature {
-            name,
-            params,
-            ret: Some(ret),
-        });
+        let ret = self.fn_result(Kind::EffectFn)?;
+        self.local_fns.push(Signature { name, params, ret });
         self.skip_braced()
     }
 
@@ -5098,6 +5163,7 @@ fn roots(stmt: &Stmt) -> Vec<ExprId> {
         Stmt::Delete { key, .. } => vec![*key],
         Stmt::Fail { message, .. } | Stmt::Log { message } => vec![*message],
         Stmt::Erase { value, .. } | Stmt::Discard(value) => vec![*value],
+        Stmt::Call { args, .. } => args.clone(),
         Stmt::Return(Return::Ok) => Vec::new(),
         Stmt::Return(Return::Invalid(message) | Return::Value(message)) => vec![*message],
         Stmt::Return(Return::Reject { code, message }) => vec![*code, *message],
@@ -5181,6 +5247,14 @@ type Callee = (Option<Ident>, Ident);
 fn calls(exprs: &Exprs, body: &[Stmt]) -> Vec<Callee> {
     let mut found = Vec::new();
     walk_stmts(body, &mut |stmt| {
+        // A void call is a statement, so it has no `Expr::CallFn` for the walk below
+        // to find.
+        if let Stmt::Call {
+            function, scope, ..
+        } = stmt
+        {
+            found.push((scope.clone(), function.clone()));
+        }
         for root in roots(stmt) {
             collect(exprs, root, &mut found, &|_, expr, out| {
                 if let Expr::CallFn {

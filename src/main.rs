@@ -476,6 +476,19 @@ fn connected(shop_id: i64, domain: &str, token: &str) -> Event {
     )
 }
 
+/// The second trigger for `SyncShop`, and the reason its request lives in a helper:
+/// the other arm reaches the same one.
+fn reconnected(shop_id: i64, domain: &str, token: &str) -> Event {
+    Event::new(
+        EventPath::new(["shop", "reconnected"]),
+        [
+            ("shop_id", Value::Int(shop_id)),
+            ("shop_domain", Value::str(domain)),
+            ("access_token", Value::str(token)),
+        ],
+    )
+}
+
 fn sync_requested(shop_id: i64) -> Event {
     Event::new(
         EventPath::new(["shop", "sync", "requested"]),
@@ -494,17 +507,25 @@ fn shop_demo(program: &Program) {
         sync_requested(1),
         sync_requested(2),
         sync_requested(3),
+        reconnected(1, "one.example", "shpat-one-rotated"),
     ];
 
     let mut interpreter = Interpreter::with_log(program, log);
-    interpreter.script(SYNC, [Reply::Status(200)]);
+    // The second is for the reconnect arm, which reaches the same helper and takes its
+    // early `return` rather than failing the invocation.
+    interpreter.script(SYNC, [Reply::Status(200), Reply::Status(401)]);
     // Shop 3 connected and was then redacted. Nothing static catches that, which is
     // exactly what rule 12's message says.
     interpreter.erase_subject("shop_id", "3");
 
-    let labels = ["connected", "never connected", "erased subject"];
+    let labels = [
+        "connected",
+        "never connected",
+        "erased subject",
+        "reconnect arm",
+    ];
     let mut seen = 0usize;
-    for (label, position) in labels.iter().zip([2u64, 3, 4]) {
+    for (label, position) in labels.iter().zip([2u64, 3, 4, 5]) {
         let mut journal = Journal::default();
         match interpreter.deliver("SyncShop", position, &mut journal) {
             Ok(Invocation::Done) => println!("{label:16} done"),

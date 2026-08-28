@@ -60,17 +60,16 @@ A `fn` declared inside an `effect` is the one helper that is not pure. It may `h
 
 ```
 effect CreateMasterProduct {
-  fn create(shop_id: Int, shop_domain: String, access_token: String) -> Bool {
+  fn create(shop_id: Int, shop_domain: String, access_token: String) {
     let response = http.post(admin_url(shop_domain), { ... }, headers = admin_headers(access_token))
     if response.status == 401 {
       log("productCreate got 401, retrying on next reconnect")
-      return false
+      return
     }
     if graphql_error(response, "productCreate").is_some() {
       fail("productCreate failed")
     }
     invoke RecordMasterProductCreated { shop_id, product_id, default_variant_id }
-    return true
   }
 
   on @shop.onboarding.completed, @shop.reconnected as e { shop_id } {
@@ -108,6 +107,46 @@ The error says the same thing, and names the fix rather than the rule alone:
 an effect-local `fn` cannot decrypt; it stays in the arm, which is what keeps rule 9's
 erase-last check inside one statement tree, so pass the revealed value in as a parameter
 ```
+
+### It may return nothing
+
+```
+fn create(shop_id: Int, shop_domain: String, access_token: String) {
+  ...
+  invoke RecordMasterProductCreated { shop_id, product_id, default_variant_id }
+}
+```
+
+This is the only signature in the language that may omit `-> Type`, and a module `fn` still must
+declare one. That is not an oversight of symmetry: **a pure function that returns nothing does
+nothing**, so at module scope the omission is always a mistake and is worth rejecting. An
+effect-local helper has effects, so no result is the honest signature. Four of the port's seven
+impure helpers are written this way.
+
+A call to one is a **statement**, never an expression:
+
+```
+create(shop_id, domain, reveal(token))       // a statement
+let done = create(...)                       // `create` returns nothing, so a call to it is a
+                                             // statement rather than a value
+```
+
+Making it a statement in the IR rather than an expression whose value is discarded is what lets the
+error say that, at the call, instead of surfacing several lines later as a type that will not fit.
+
+A bare `return` leaves **the helper**, not the arm, which is what makes a void helper usable as an
+early-exit guard:
+
+```
+if response.status == 401 {
+  log("productCreate got 401, retrying on next reconnect")
+  return                       // the arm carries on
+}
+```
+
+`fail(...)` is the one that ends the invocation, wherever it is written. A helper's `fail` produces
+the same outcome and the same trace entry as an arm's; only the channel it travels on differs,
+because a call is an expression and cannot carry a control-flow result out.
 
 ### What else it may not do
 
@@ -164,7 +203,8 @@ there is no way to write a loop that does not end.
 
 A `fn` that can finish without producing its return type is a compile error. The analysis is the
 falls-through one rule 9 already uses: an `if` with no `else`, or with a branch that falls out of it,
-does not count as returning.
+does not count as returning. A `fn` that declares no return type is exempt, because there is nothing
+for it to fall through to.
 
 A `for` body does not count either, because a container can be empty and the loop can run zero times.
 That is the case a reader is most likely to get wrong, and it is exactly the shape a search helper

@@ -182,7 +182,9 @@ pub struct Function {
     pub name: Ident,
     pub module: Option<Ident>,
     pub params: Vec<Param>,
-    pub ret: Type,
+    /// Absent only for an effect-local `fn`. A module `fn` must declare one, because a
+    /// pure function that returns nothing does nothing. See `docs/functions.md`.
+    pub ret: Option<Type>,
     pub frame: usize,
     pub exprs: Exprs,
     pub body: Vec<Stmt>,
@@ -893,6 +895,15 @@ pub enum Stmt {
     /// A bare `invoke` or `http.*` whose result is unused. A closed rule, not general
     /// expression statements.
     Discard(ExprId),
+    /// A call to a `fn` that returns nothing, which only an effect-local one can be.
+    /// A statement rather than an `Expr::CallFn` under a `Discard`, because there is no
+    /// value for an expression to be.
+    Call {
+        function: Ident,
+        scope: Option<Ident>,
+        args: Vec<ExprId>,
+        span: Span,
+    },
     Return(Return),
 }
 

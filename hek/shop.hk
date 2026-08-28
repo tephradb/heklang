@@ -25,6 +25,27 @@ event @shop.sync.requested {
 // effects/sync_shop.hk
 
 effect SyncShop {
+  // Effect-local, so it may call out. It takes the revealed token rather than the
+  // handle, which is what keeps every decrypt at the arm's own level and leaves rule
+  // 9's erase-last check over one arm's statement tree. It declares no result, because
+  // there is nothing for a caller to decide from: `fail` is the only other way out.
+  fn sync(shop_id: Int, domain: String, secret: String) {
+    let response = http.post(
+      "https://{domain}/admin/api/sync",
+      { "shop": shop_id },
+      headers = { "X-Access-Token": secret },
+    )
+    if response.status == 401 {
+      // Leaves the helper, not the arm.
+      log("shop {shop_id} rejected the token, skipping")
+      return
+    }
+    if response.status >= 400 {
+      fail("sync rejected with status {response.status}")
+    }
+    log("synced shop {shop_id} at {domain}")
+  }
+
   on @shop.sync.requested as e { shop_id } {
     state domain: String = fold ""
       on @shop.connected(shop_id) { shop_domain } => shop_domain
@@ -47,14 +68,13 @@ effect SyncShop {
 
     // `secret` is a String from here, proved by the branch above, so nothing has to
     // invent a fallback it can never reach.
-    let response = http.post(
-      "https://{domain}/admin/api/sync",
-      { "shop": shop_id },
-      headers = { "X-Access-Token": secret },
-    )
-    if response.status >= 400 {
-      fail("sync rejected with status {response.status}")
-    }
-    log("synced shop {shop_id} at {domain}")
+    sync(shop_id, domain, secret)
+  }
+
+  // The second arm is the whole reason `sync` is a helper: without one, that request
+  // and its two status checks are written twice, and the second copy is where they
+  // drift apart.
+  on @shop.reconnected as e { shop_id, shop_domain, access_token } {
+    sync(shop_id, shop_domain, reveal(access_token))
   }
 }

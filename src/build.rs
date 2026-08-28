@@ -273,7 +273,7 @@ impl Builder {
         })
     }
 
-    pub fn finish_fn(self, ret: Type, body: Vec<Stmt>) -> Function {
+    pub fn finish_fn(self, ret: Option<Type>, body: Vec<Stmt>) -> Function {
         Function {
             name: self.name,
             module: self.module,

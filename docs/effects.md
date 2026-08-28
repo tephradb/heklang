@@ -423,13 +423,13 @@ An `effect` may declare its own helpers, and unlike a module `fn` one of these m
 
 ```
 effect SyncShop {
-  fn sync(shop_id: Int, domain: String, secret: String) -> Bool {
+  fn sync(shop_id: Int, domain: String, secret: String) {
     let response = http.post("https://{domain}/admin/api/sync", { "shop": shop_id },
       headers = { "X-Access-Token": secret })
     if response.status >= 400 {
       fail("sync rejected with status {response.status}")
     }
-    return true
+    log("synced shop {shop_id} at {domain}")
   }
 
   on @shop.sync.requested as e { shop_id } { ... sync(shop_id, domain, reveal(token)) }

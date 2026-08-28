@@ -404,3 +404,13 @@ fn a_trailing_comma_needs_a_last_argument() {
         .message;
     assert_eq!(short, "expected a value, found `)`");
 }
+
+/// Only an effect-local `fn` may declare no result. A pure function that returns
+/// nothing does nothing, so at module scope the omission is worth rejecting.
+#[test]
+fn a_module_fn_still_needs_a_return_type() {
+    let message = parse(&source("fn note(sku: String) { }", "return ok"))
+        .expect_err("a module `fn` declares a result")
+        .message;
+    assert!(message.contains("expected `->`"), "got: {message}");
+}
