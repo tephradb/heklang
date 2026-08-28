@@ -1773,6 +1773,94 @@ command Receive(order_id: Uuid, payload: Json) {{
     assert_eq!(program.function("topic_of").unwrap().ret, Type::String);
 }
 
+/// `Response` was in the same position `Json` had been in: a real type with a real
+/// value and real field access, unreachable from the grammar, so a pure helper over a
+/// response could be written everywhere except in its own signature.
+#[test]
+fn a_response_is_declarable_in_a_fn_signature() {
+    let program = program(
+        "fn graphql_error(response: Response, field: String) -> String? {
+  if response.status >= 400 {
+    return \"status {response.status}\"
+  }
+  let data = response.body.json(\"data\").unwrap_or(Json.empty)
+  let errors = data.json(field).unwrap_or(Json.empty).array(\"userErrors\").unwrap_or([])
+  for item in errors {
+    return item.string(\"message\").unwrap_or(\"unknown error\")
+  }
+  return none
+}
+
+effect E {
+  on @order.placed as e {
+    let response = http.post(\"https://mail.example/confirm\", { \"q\": \"\" })
+    log(\"{graphql_error(response, \"productCreate\").unwrap_or(\"ok\")}\")
+  }
+}",
+    );
+    assert_eq!(
+        program.function("graphql_error").unwrap().params[0].ty,
+        Type::Response
+    );
+
+    let mut journal = Journal::default();
+    let (interpreter, outcome) = deliver(
+        &program,
+        vec![placed(1, 7, 100)],
+        vec![Reply::Body(200, graphql_body())],
+        &mut journal,
+    );
+    outcome.expect("delivered");
+    assert_eq!(
+        interpreter.lines(),
+        ["bad sku"],
+        "the helper read both halves of the response"
+    );
+}
+
+/// A `Response` is transport, not data. Reading one is pure, so a helper may take one;
+/// storing one is not, so nothing else may name it, and the rejection is the ordinary
+/// unknown-type message rather than a special case.
+#[test]
+fn a_response_is_not_declarable_anywhere_else() {
+    let cases = [
+        ("an event field", "event @a.b { r: Response }"),
+        (
+            "a record field",
+            "record R { r: Response }\nevent @a.b { x: Int }",
+        ),
+        (
+            "a command parameter",
+            "event @a.b { x: Int }\ncommand C(r: Response) { emit @a.b { x: 1 } }",
+        ),
+        (
+            "an entity column",
+            "event @a.b { x: Int }\nprojector P {\n  entity E { id: Int @key, r: Response }\n  on @a.b { x } { delete E[x] }\n}",
+        ),
+    ];
+    for (what, source) in cases {
+        assert_eq!(
+            parse(source).unwrap_err().message,
+            "unknown type `Response`",
+            "for {what}"
+        );
+    }
+}
+
+/// The allowance sits above the general type parser rather than inside its recursion,
+/// so a container of them is still rejected in the one position that admits a bare one.
+#[test]
+fn a_container_of_responses_is_rejected() {
+    for ty in ["List(Response)", "Map(String, Response)"] {
+        let source = format!("event @a.b {{ x: Int }}\nfn f(rs: {ty}) -> Int {{\n  return 1\n}}\n");
+        assert_eq!(
+            parse(&source).unwrap_err().message,
+            "unknown type `Response`",
+            "for {ty}"
+        );
+    }
+}
+
 /// Rule 8's table pointed at a string instead of a socket, which is why it cannot
 /// disagree with what a request body would have carried.
 #[test]

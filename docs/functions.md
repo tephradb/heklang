@@ -93,6 +93,50 @@ fn first_error(items: List(Json)) -> String {
 }
 ```
 
+## A `Response` may be a parameter
+
+```
+fn graphql_error(response: Response, field: String) -> String? {
+  let errors = response.body.array("errors").unwrap_or([])
+  ...
+}
+```
+
+A `Response` is what `http.get` and its siblings return. It is the one type a `fn` may name that no
+other declaration may, and the rule behind that is a sentence: **a `Response` is transport, not
+data.** Reading one is pure, so a helper may take one; storing one is not, so nothing else may name
+it.
+
+Concretely, `Response` is spellable in a `fn` parameter and in a `fn` return type, and nowhere else.
+An event field, an entity column, a record field, a `state` declaration and a command parameter all
+still report `unknown type`, and so do `List(Response)` and `Map(String, Response)`, because the
+allowance sits above the general type parser rather than inside its recursion.
+
+**Why storing one is the thing being prevented.** An event is the durable record, and a `Response` in
+one puts a status code and a transport body in the log forever, where a replay years later folds over
+whatever the remote host happened to answer. Rule 3 in `docs/effects.md` asks a fold to reproduce
+without a journal; a stored `Response` is the shape that makes that impossible while looking like
+ordinary data. The read model has the same problem one step later.
+
+**This was a gap, not a decision.** `Type::Response` and `Value::Response { status, body }` were both
+already in the IR, and `.status` / `.body` were already checked; only the spelling was missing, so a
+pure helper over a response could be written everywhere except in its own signature. The section
+above counts four of a port's ten effect-local helpers as "already pure, and therefore module-scope
+`fn`s here". Two of those four take a `Response`, so the count that argued effect-local `fn` down
+from ten to six was assuming this worked.
+
+**Rejected: teaching the general type parser.** One arm on `type_ref` reaches every position at once,
+including the event field, and an accidental rejection elsewhere (an entity column has no zero value
+for a `Response`, so it fails for an unrelated reason) is not the same as a rule.
+
+**Rejected: passing `.body` at the call site.** The port's two helpers read only `body`, so both
+could take a `Json` instead, and it needs no language change. It does not generalise: `.status` is
+read at twelve sites, five of them the same unauthorized check, and the first helper that wants one
+is back here.
+
+`Outcome`, which `invoke` returns, has the same shape and is deliberately left unspellable. Nothing
+in either tree names it, and the rule above would extend to it unchanged the day something does.
+
 ## What a `fn` makes possible, and is therefore not in the language
 
 **`Timestamp.add_months(n)` is deliberately deferred.** A real port carries 33 lines of calendar

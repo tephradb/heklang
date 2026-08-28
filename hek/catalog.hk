@@ -50,6 +50,15 @@ fn audit_id(seller_id: Int, at: Int) -> Uuid {
   return Uuid.derive(NAMESPACE, "{seller_id}/{at}")
 }
 
+// A `Response` is the one type only a `fn` may name. Reading one is pure, so a helper
+// may take one; storing one is not, so no event, column or record may.
+fn audit_note(response: Response) -> String {
+  if response.status >= 400 {
+    return "rejected ({response.status})"
+  }
+  return "accepted"
+}
+
 // events/catalog.hk
 
 event @item.listed {
@@ -171,6 +180,8 @@ effect AuditCatalog {
       // leaves headers out.
       headers = { "Idempotency-Key": "{audit_id(seller_id, e.position)}" },
     )
+
+    log("audit {audit_note(response)} for seller {seller_id}")
 
     // A string literal inside the braces of another string literal. Before the lexer
     // nested, this needed a helper whose only job was to move the `""` out.

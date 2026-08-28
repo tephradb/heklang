@@ -591,7 +591,7 @@ impl Parser {
             return Err(self.err(format!("command `{name}` is declared twice"), line, col));
         }
 
-        let params = self.param_list()?;
+        let params = self.param_list(false)?;
         self.commands.push(Signature {
             name,
             params,
@@ -602,6 +602,21 @@ impl Parser {
 
     /// Pass C. Parameters and the result type only, so a call can be checked against a
     /// `fn` declared later or in another module.
+    /// A `fn` parameter or return type. The one position that admits a `Response`,
+    /// because reading one is pure and storing one is not: see `docs/functions.md`.
+    /// It sits above `type_ref` rather than inside it, so `List(Response)` stays
+    /// rejected along with every other position.
+    fn fn_type(&mut self) -> Result<Type, SyntaxError> {
+        if !matches!(self.peek(), Token::Ident(name) if name == "Response") {
+            return self.type_ref();
+        }
+        self.bump();
+        if self.eat_sym(Sym::Question) {
+            return Ok(Type::opt(Type::Response));
+        }
+        Ok(Type::Response)
+    }
+
     fn fn_signature(&mut self) -> Result<(), SyntaxError> {
         self.expect_word(Keyword::Fn)?;
         let (line, col) = self.here();
@@ -609,9 +624,9 @@ impl Parser {
         if self.functions.iter().any(|other| other.name == name) {
             return Err(self.err(format!("fn `{name}` is declared twice"), line, col));
         }
-        let params = self.param_list()?;
+        let params = self.param_list(true)?;
         self.expect_sym(Sym::To)?;
-        let ret = self.type_ref()?;
+        let ret = self.fn_type()?;
         self.functions.push(Signature {
             name,
             params,
@@ -620,13 +635,20 @@ impl Parser {
         self.skip_braced()
     }
 
-    fn param_list(&mut self) -> Result<Vec<(Ident, Type)>, SyntaxError> {
+    /// Shared with `command`, whose parameters are application input and so may not be
+    /// a `Response`. Only a `fn` passes `true`.
+    fn param_list(&mut self, response_ok: bool) -> Result<Vec<(Ident, Type)>, SyntaxError> {
         let mut params = Vec::new();
         self.expect_sym(Sym::LParen)?;
         while !self.at_sym(Sym::RParen) {
             let param = self.expect_ident()?;
             self.expect_sym(Sym::Colon)?;
-            params.push((param, self.type_ref()?));
+            let ty = if response_ok {
+                self.fn_type()?
+            } else {
+                self.type_ref()?
+            };
+            params.push((param, ty));
             if !self.eat_sym(Sym::Comma) {
                 break;
             }
@@ -647,11 +669,11 @@ impl Parser {
         };
         lower.b.in_module(module.as_deref());
 
-        for (param, ty) in self.param_list()? {
+        for (param, ty) in self.param_list(true)? {
             lower.b.param(&param, ty);
         }
         self.expect_sym(Sym::To)?;
-        let ret = self.type_ref()?;
+        let ret = self.fn_type()?;
         self.expect_sym(Sym::LBrace)?;
 
         self.kind = Kind::Function;
