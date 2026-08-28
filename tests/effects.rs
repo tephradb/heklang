@@ -603,6 +603,38 @@ fn an_erase_on_a_path_that_fails_does_not_poison_the_join() {
     );
 }
 
+/// A loop body may run again, so an `erase` in it reaches a `reveal` lexically above
+/// it. Two passes reach the fixed point, which is what a lexical check gets wrong.
+#[test]
+fn an_erase_in_a_loop_reaches_a_reveal_above_it() {
+    let message = err("effect E {
+  on @order.placed as e {
+    state ids: List(Int) = fold []
+      on @order.placed(customer_id: e.customer_id) { customer_id } => ids.push(customer_id)
+
+    for id in ids {
+      log(reveal(e.email))
+      erase(e.customer_id)
+    }
+  }
+}");
+    assert!(
+        message.contains("can run after the `erase`"),
+        "got: {message}"
+    );
+
+    // The same two statements outside a loop are fine in that order, which is what
+    // makes the loop the thing being tested rather than the order.
+    program(
+        "effect E {
+  on @order.placed as e {
+    log(reveal(e.email))
+    erase(e.customer_id)
+  }
+}",
+    );
+}
+
 #[test]
 fn an_erase_is_not_an_expression() {
     let message = err("effect E {

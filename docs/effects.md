@@ -331,11 +331,17 @@ loses on rule 5: there is nothing an author can do differently on either answer,
 is gone by the time they read it. Dropping the result costs nothing and keeps `erase` out of
 expression position, which is what keeps this analysis exact rather than conservative.
 
-**If a loop is ever added**, this analysis has to change shape, and it is worth writing down what to:
-iterate to a fixed point, and treat an erase anywhere in a loop body as poisoning the whole body,
-including statements lexically above it. That is exactly the case a lexical check gets silently
-wrong, which is why the analysis is written as reachability now, while the control flow is still a
-tree.
+**A `for` body iterates to a fixed point**, because it may run again: an `erase` anywhere in one is
+reachable from every reveal in it, including a reveal lexically *above* it. Two passes reach the
+fixed point, since the lattice has two elements. That is exactly the case a lexical check gets
+silently wrong, which is why the analysis is written as reachability:
+
+```
+for id in ids {
+  log(reveal(e.email))       // rejected: the erase below reaches it on the next turn
+  erase(e.customer_id)
+}
+```
 
 **It stays one arm wide, and that is a decision now rather than a happy accident.** An effect may
 declare its own helpers, and one of those may call out. It may not `reveal` or `erase`: those stay in
