@@ -620,6 +620,7 @@ pub enum Builtin {
     HttpPatch,
     HttpDelete,
     UuidDerive,
+    JsonEncode,
 }
 
 impl Builtin {
@@ -632,6 +633,11 @@ impl Builtin {
             "delete" => Builtin::HttpDelete,
             _ => return None,
         })
+    }
+
+    /// Whether this is an HTTP verb rather than one of the pure builtins.
+    pub fn is_http(self) -> bool {
+        !matches!(self, Builtin::UuidDerive | Builtin::JsonEncode)
     }
 
     /// Whether this verb carries a request body.
@@ -650,6 +656,7 @@ impl Builtin {
             Builtin::HttpPatch => "http.patch",
             Builtin::HttpDelete => "http.delete",
             Builtin::UuidDerive => "Uuid.derive",
+            Builtin::JsonEncode => "Json.encode",
         }
     }
 }
@@ -682,6 +689,9 @@ pub enum Literal {
         items: Vec<Literal>,
     },
     EmptyMap(Type, Type),
+    /// `Json.empty`, an object with no members. A literal rather than an expression so
+    /// it can be a seed, a default and a const.
+    EmptyJson,
     Record {
         ty: Ident,
         fields: Vec<(Ident, Literal)>,

@@ -9,13 +9,13 @@ pub mod value;
 pub use build::Builder;
 pub use interp::{
     AppendCondition, Counts, Error, ErrorKind, Execution, Http, Interpreter, Invocation, Journal,
-    Outcome, Recorded, Reply, Row, Store,
+    Outcome, Recorded, Reply, Request, Row, Store,
 };
 pub use ir::{
-    Arm, Assign, BinOp, Bind, Builtin, Command, Effect, EntityDef, EntityField, EnumDef, EnvBind,
-    EnvField, EventDef, EventPath, Expr, ExprId, Exprs, FieldDef, Filter, Handler, Ident, Index,
-    Literal, Number, NumberError, Param, Program, Projector, Return, Slice, SliceId, Slot, Span,
-    StateVar, Stmt, Type, UnOp, Update,
+    Arm, Assign, BinOp, Bind, Builtin, Command, ConstDef, Effect, EntityDef, EntityField, EnumDef,
+    EnvBind, EnvField, EventDef, EventPath, Expr, ExprId, Exprs, FieldDef, Filter, Function,
+    Handler, Ident, Index, Iter, Literal, Number, NumberError, Param, Program, Projector,
+    RecordDef, RecordField, Return, Slice, SliceId, Slot, Span, StateVar, Stmt, Type, UnOp, Update,
 };
 pub use lex::SyntaxError;
 pub use parse::{parse, parse_files};

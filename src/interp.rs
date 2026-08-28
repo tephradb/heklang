@@ -417,6 +417,11 @@ impl<'a> Interpreter<'a> {
     }
 
     /// HTTP calls actually performed, so a replay can be shown not re-firing them.
+    /// Every request that actually left, including the attempts rule 5 absorbed.
+    pub fn requests(&self) -> &[Request] {
+        &self.http.sent
+    }
+
     pub fn http_calls(&self) -> usize {
         self.http.performed
     }
@@ -1398,8 +1403,15 @@ fn eval(
             for arg in args {
                 values.push(eval(program, exprs, frame, *arg, ctx.as_deref_mut())?);
             }
-            if *builtin == Builtin::UuidDerive {
-                return uuid_derive(&values).map_err(at);
+            match builtin {
+                Builtin::UuidDerive => return uuid_derive(&values).map_err(at),
+                // Rule 8's table pointed at a string instead of a socket, so a value
+                // encoded here and the same value in a request body cannot disagree.
+                Builtin::JsonEncode => {
+                    let value = values.first().ok_or_else(|| at(ErrorKind::MalformedIr))?;
+                    return Ok(Value::Str(Json::from_value(value).to_string()));
+                }
+                _ => {}
             }
             let Some(ctx) = ctx else {
                 return Err(at(ErrorKind::MalformedIr));
@@ -1407,8 +1419,15 @@ fn eval(
             let Some(Value::Str(url)) = values.first().cloned() else {
                 return Err(at(ErrorKind::MalformedIr));
             };
-            let body = values.get(1).map(Json::from_value);
-            ctx.http(*builtin, &url, body).map_err(at)
+            // The headers are the last argument and always present, so the shape is
+            // (url, headers) or (url, body, headers).
+            let headers = values.last().map(Json::from_value).unwrap_or(Json::Null);
+            let body = if builtin.has_body() {
+                values.get(1).map(Json::from_value)
+            } else {
+                None
+            };
+            ctx.http(*builtin, &url, body, headers).map_err(at)
         }
         Expr::Invoke { command, args } => {
             let mut values: BTreeMap<Ident, Value> = BTreeMap::new();
@@ -1926,6 +1945,10 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
         (Value::Json(json), "string") => json_field(json, method, &args, Type::String),
         (Value::Json(json), "int") => json_field(json, method, &args, Type::Int),
         (Value::Json(json), "bool") => json_field(json, method, &args, Type::Bool),
+        // A GraphQL response is nested, so two accessors beyond rule 8's three: one
+        // step down, and one step into an array.
+        (Value::Json(json), "json") => json_field(json, method, &args, Type::Json),
+        (Value::Json(json), "array") => json_field(json, method, &args, Type::list(Type::Json)),
         (Value::Invoked(outcome), "ok") => {
             expect_arity(method, 0, &args)?;
             Ok(Value::Bool(outcome.ok()))
@@ -1994,6 +2017,11 @@ fn json_field(json: &Json, method: &str, args: &[Value], want: Type) -> Result<V
         (Json::Str(value), Type::String) => Some(Value::Str(value.clone())),
         (Json::Int(value), Type::Int) => Some(Value::Int(*value)),
         (Json::Bool(value), Type::Bool) => Some(Value::Bool(*value)),
+        (Json::Obj(_), Type::Json) => Some(Value::Json(found.clone())),
+        (Json::Arr(items), Type::List(_)) => Some(Value::list(
+            Type::Json,
+            items.iter().cloned().map(Value::Json),
+        )),
         _ => None,
     });
     Ok(match found {
@@ -2075,6 +2103,17 @@ pub struct Http {
     scripted: BTreeMap<String, VecDeque<Reply>>,
     performed: usize,
     absorbed: usize,
+    sent: Vec<Request>,
+}
+
+/// One request as it left, so a test can assert what was sent rather than only what
+/// came back. The `Idempotency-Key` case is why headers are worth seeing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Request {
+    pub verb: &'static str,
+    pub url: String,
+    pub body: Option<Json>,
+    pub headers: Json,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2095,9 +2134,21 @@ impl Http {
     /// The terminal response, or `None` when every attempt was retryable, which wedges.
     /// Rule 5 lives here: a retryable status or a transport error is absorbed and
     /// retried with the same request, so only a decidable result reaches the handler.
-    fn call(&mut self, url: &str) -> Option<(i64, Json)> {
+    fn call(
+        &mut self,
+        builtin: Builtin,
+        url: &str,
+        body: Option<Json>,
+        headers: Json,
+    ) -> Option<(i64, Json)> {
         for _ in 0..ATTEMPTS {
             self.performed += 1;
+            self.sent.push(Request {
+                verb: builtin.name(),
+                url: url.to_string(),
+                body: body.clone(),
+                headers: headers.clone(),
+            });
             let reply = self
                 .scripted
                 .get_mut(url)
@@ -2205,11 +2256,15 @@ impl Effects<'_> {
         at
     }
 
+    /// The journal key is the verb, the URL and the body, and deliberately **not** the
+    /// headers. A changed idempotency key must land on the same entry, or a replay
+    /// would re-send the request it was written to suppress.
     fn http(
         &mut self,
         builtin: Builtin,
         url: &str,
         body: Option<Json>,
+        headers: Json,
     ) -> Result<Value, ErrorKind> {
         let call = match &body {
             Some(body) => format!("{} {url} {body}", builtin.name()),
@@ -2220,7 +2275,7 @@ impl Effects<'_> {
             return Ok(Value::Response { status, body });
         }
 
-        let Some((status, body)) = self.http.call(url) else {
+        let Some((status, body)) = self.http.call(builtin, url, body.clone(), headers) else {
             return Err(ErrorKind::Unreachable(url.to_string()));
         };
         self.record(

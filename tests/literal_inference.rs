@@ -35,6 +35,7 @@ fn describe(lit: &Literal) -> String {
         Literal::Rounding(mode) => format!("Rounding({mode})"),
         Literal::List { inner, items } => format!("List({inner}, {})", items.len()),
         Literal::Record { ty, fields } => format!("{ty}({} fields)", fields.len()),
+        Literal::EmptyJson => "EmptyJson".to_string(),
         Literal::EmptyMap(key, value) => format!("EmptyMap({key}, {value})"),
     }
 }

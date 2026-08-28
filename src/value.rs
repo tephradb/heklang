@@ -308,6 +308,7 @@ pub fn literal(lit: &Literal) -> Value {
         Literal::Rounding(mode) => Value::Rounding(*mode),
         Literal::List { inner, items } => Value::list(inner.clone(), items.iter().map(literal)),
         Literal::EmptyMap(key, value) => Value::map(key.clone(), value.clone(), []),
+        Literal::EmptyJson => Value::Json(Json::Obj(BTreeMap::new())),
         Literal::Record { ty, fields } => Value::Record {
             ty: ty.clone(),
             fields: fields
@@ -410,6 +411,10 @@ impl Json {
                 .map(|(name, value)| (name.into(), value))
                 .collect(),
         )
+    }
+
+    pub fn arr(items: impl IntoIterator<Item = Json>) -> Self {
+        Json::Arr(items.into_iter().collect())
     }
 
     pub fn get(&self, key: &str) -> Option<&Json> {

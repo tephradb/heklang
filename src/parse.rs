@@ -1426,6 +1426,7 @@ impl Parser {
             "Timestamp" => Type::Timestamp,
             "Decimal" => Type::Decimal(self.scale_arg("Decimal")?),
             "Money" => Type::Money(self.scale_arg("Money")?),
+            "Json" => Type::Json,
             "List" => {
                 self.expect_sym(Sym::LParen)?;
                 let inner = self.type_ref()?;
@@ -2150,7 +2151,7 @@ impl Parser {
                 )),
             },
             Token::Word(Keyword::Invoke) => self.invoke_expr(lower, span),
-            Token::Sym(Sym::LBrace) => self.object_literal(lower, span),
+            Token::Sym(Sym::LBrace) => self.object_literal(lower, expect.as_ref(), span),
             Token::Sym(Sym::LBracket) => self.bracketed(lower, expect, span),
             Token::TextOpen(head) => self.interpolation(lower, head, span),
             Token::Sym(Sym::Dot) => {
@@ -2417,6 +2418,7 @@ impl Parser {
             Expr::Comp { yields, .. } => Some(Type::list(self.type_of(lower, *yields)?)),
             Expr::Call { builtin, .. } => Some(match builtin {
                 Builtin::UuidDerive => Type::Uuid,
+                Builtin::JsonEncode => Type::String,
                 _ => Type::Response,
             }),
             Expr::Invoke { .. } => Some(Type::Outcome),
@@ -2442,6 +2444,11 @@ fn uuid_member(member: &str) -> String {
 /// program runs: a `for` variable and, once records exist, a field access.
 fn method_type(receiver: &Type, method: &str) -> Option<Type> {
     Some(match (receiver, method) {
+        (Type::Json, "string") => Type::opt(Type::String),
+        (Type::Json, "int") => Type::opt(Type::Int),
+        (Type::Json, "bool") => Type::opt(Type::Bool),
+        (Type::Json, "json") => Type::opt(Type::Json),
+        (Type::Json, "array") => Type::opt(Type::list(Type::Json)),
         (Type::Opt(inner), "unwrap_or") => inner.as_ref().clone(),
         (Type::Opt(_), "is_some" | "is_none") => Type::Bool,
         (Type::List(inner), "first") => Type::opt(inner.as_ref().clone()),
@@ -2829,6 +2836,7 @@ impl Parser {
             "http" if self.at_sym(Sym::Dot) => self.http_call(lower, span).map(Some),
             "Uuid" if self.at_sym(Sym::Dot) => self.uuid_call(lower, span).map(Some),
             "Map" if self.at_sym(Sym::Dot) => self.map_empty(lower, expect, span).map(Some),
+            "Json" if self.at_sym(Sym::Dot) => self.json_member(lower, span).map(Some),
             "reveal" if called => self.reveal_call(lower, span).map(Some),
             "now" if called => {
                 // Rule 11's clock rule: a clock exists where its result is pinned or
@@ -2919,6 +2927,22 @@ impl Parser {
             args.push(self.expr(lower, Some(Type::Json))?);
             self.in_body = outer;
         }
+
+        // Named, because the existing positional-third-argument error teaches rule 13
+        // and should keep firing for one.
+        let mut headers = None;
+        if self.at_sym(Sym::Comma)
+            && matches!(self.tokens.get(self.pos + 1).map(|t| &t.token), Some(Token::Ident(name)) if name == "headers")
+        {
+            self.bump();
+            self.bump();
+            self.expect_sym(Sym::Assign)?;
+            let outer = self.in_body;
+            self.in_body = true;
+            headers = Some(self.expr(lower, Some(Type::Json))?);
+            self.in_body = outer;
+            self.eat_sym(Sym::Comma);
+        }
         if self.at_sym(Sym::Comma) {
             // Rule 13: a timeout belongs to configuration, not to the call site.
             let (line, col) = self.here();
@@ -2934,6 +2958,13 @@ impl Parser {
             ));
         }
         self.expect_sym(Sym::RParen)?;
+        // Always present in the IR, empty when unwritten, so the interpreter reads one
+        // shape rather than two.
+        lower.b.at(span);
+        args.push(match headers {
+            Some(headers) => headers,
+            None => lower.b.lit(Literal::EmptyJson),
+        });
         lower.b.at(span);
         Ok(lower.b.expr(Expr::Call { builtin, args }))
     }
@@ -3211,6 +3242,40 @@ impl Parser {
         Ok(Iter { index, item, over })
     }
 
+    /// `Json.empty` and `Json.encode(value)`. The encoder is rule 8's table pointed at
+    /// a string instead of a socket, which is why it is not a second serialisation.
+    fn json_member(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, SyntaxError> {
+        self.expect_sym(Sym::Dot)?;
+        let (line, col) = self.here();
+        let member = self.expect_ident()?;
+        match member.as_str() {
+            "empty" => {
+                lower.b.at(span);
+                Ok(lower.b.lit(Literal::EmptyJson))
+            }
+            "encode" => {
+                self.expect_sym(Sym::LParen)?;
+                let outer = mem::replace(&mut self.no_record_literal, false);
+                // Any value encodes, so there is no hint to give, except that a `{`
+                // here is an object rather than something that needs a target.
+                let hint = self.at_sym(Sym::LBrace).then_some(Type::Json);
+                let value = self.expr(lower, hint)?;
+                self.no_record_literal = outer;
+                self.expect_sym(Sym::RParen)?;
+                lower.b.at(span);
+                Ok(lower.b.expr(Expr::Call {
+                    builtin: Builtin::JsonEncode,
+                    args: vec![value],
+                }))
+            }
+            other => Err(self.err(
+                format!("`Json` has no `{other}`; it has `empty` and `encode(value)`"),
+                line,
+                col,
+            )),
+        }
+    }
+
     /// `Map.empty`, on the type for the reason `Uuid.derive` is: the global namespace
     /// is closed to constructors.
     fn map_empty(
@@ -3307,8 +3372,17 @@ impl Parser {
         value
     }
 
-    fn object_literal(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, SyntaxError> {
-        if !self.in_body {
+    fn object_literal(
+        &mut self,
+        lower: &mut Lower,
+        expect: Option<&Type>,
+        span: Span,
+    ) -> Result<ExprId, SyntaxError> {
+        // Legal where a `Json` is expected, which since `Json` became a declarable type
+        // includes a `fn` return and a command parameter, not only an HTTP body. Rule
+        // 7 still holds: `invoke` checks its fields against declared parameter types,
+        // so an object only reaches one whose parameter is a `Json`.
+        if !self.in_body && expect != Some(&Type::Json) {
             return Err(self.err(
                 "an object literal is an HTTP request body; `invoke` takes a typed struct, checked against the command's parameters",
                 span.line,
@@ -3316,6 +3390,7 @@ impl Parser {
             ));
         }
 
+        let outer = mem::replace(&mut self.no_record_literal, false);
         let mut fields: Vec<(Ident, ExprId)> = Vec::new();
         while !self.at_sym(Sym::RBrace) {
             let (line, col) = self.here();
@@ -3340,6 +3415,7 @@ impl Parser {
             }
         }
         self.expect_sym(Sym::RBrace)?;
+        self.no_record_literal = outer;
         lower.b.at(span);
         Ok(lower.b.expr(Expr::Object(fields)))
     }

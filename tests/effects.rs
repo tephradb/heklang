@@ -1,8 +1,8 @@
 //! `docs/effects.md` as executable tests, one test per numbered rule.
 
 use heklang::{
-    Event, EventPath, Interpreter, Invocation, Invoked, Journal, Program, Recorded, Reply, Type,
-    Value, parse,
+    Event, EventPath, Interpreter, Invocation, Invoked, Journal, Json, Program, Recorded, Reply,
+    Type, Value, parse,
 };
 
 const URL: &str = "https://mail.example/confirm";
@@ -1237,4 +1237,224 @@ fn two_arms_of_one_effect_are_two_nodes() {
   }
 }");
     assert!(message.contains("can trigger itself"), "got: {message}");
+}
+
+// ---------------------------------------------------------------------------------
+// Rule 8, second half: `Json` as a declarable type, and headers on a call.
+
+const NESTED: &str = r#"{"data":{"productCreate":{"product":{"id":"gid://x/7"},"userErrors":[{"message":"bad sku"}]}}}"#;
+
+fn graphql_body() -> Json {
+    Json::obj([(
+        "data",
+        Json::obj([(
+            "productCreate",
+            Json::obj([
+                ("product", Json::obj([("id", Json::str("gid://x/7"))])),
+                (
+                    "userErrors",
+                    Json::arr([Json::obj([("message", Json::str("bad sku"))])]),
+                ),
+            ]),
+        )]),
+    )])
+}
+
+/// A GraphQL response is nested, so one step down and one step into an array, both
+/// optional for the same reason rule 8's three are.
+#[test]
+fn json_steps_down_and_into_an_array() {
+    let program = program(
+        "effect E {
+  on @order.placed as e {
+    let response = http.post(\"https://mail.example/confirm\", { \"q\": \"\" })
+    let data = response.body.json(\"data\").unwrap_or(Json.empty)
+    let errors = data.json(\"productCreate\").unwrap_or(Json.empty).array(\"userErrors\").unwrap_or([])
+    log(\"{errors.len()} {data.json(\"nope\").is_none()}\")
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let (interpreter, outcome) = deliver(
+        &program,
+        vec![placed(1, 7, 100)],
+        vec![Reply::Body(200, graphql_body())],
+        &mut journal,
+    );
+    outcome.expect("delivered");
+    assert_eq!(interpreter.lines(), ["1 true"]);
+    assert_eq!(
+        NESTED,
+        graphql_body().to_string(),
+        "the fixture is the shape"
+    );
+}
+
+/// `Json` was in the IR and unreachable from the grammar, which meant a command could
+/// not take a webhook payload at all.
+#[test]
+fn json_is_a_declarable_type() {
+    let source = format!(
+        "{PRELUDE}
+fn topic_of(payload: Json) -> String {{
+  return payload.string(\"topic\").unwrap_or(\"unknown\")
+}}
+
+command Receive(order_id: Uuid, payload: Json) {{
+  emit @order.notified {{ order_id, notification_id: order_id }}
+}}
+"
+    );
+    let program = parse(&source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+    assert_eq!(program.command("Receive").unwrap().params[1].ty, Type::Json);
+    assert_eq!(program.function("topic_of").unwrap().ret, Type::String);
+}
+
+/// Rule 8's table pointed at a string instead of a socket, which is why it cannot
+/// disagree with what a request body would have carried.
+#[test]
+fn json_encode_is_the_same_table_as_a_body() {
+    let program = program(
+        "effect E {
+  on @order.placed as e {
+    log(Json.encode({ \"total\": e.total, \"id\": e.order_id }))
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let (interpreter, outcome) = deliver(&program, vec![placed(1, 7, 2_599)], vec![], &mut journal);
+    outcome.expect("delivered");
+    assert_eq!(
+        interpreter.lines(),
+        [r#"{"id":"0190d1a1-0000-7000-8000-000000000001","total":"25.99"}"#],
+        "Money keeps its scale as a string, exactly as it does in a body"
+    );
+
+    let message = err("effect E {
+  on @order.placed as e {
+    log(Json.nope(1))
+  }
+}");
+    assert_eq!(
+        message,
+        "`Json` has no `nope`; it has `empty` and `encode(value)`"
+    );
+}
+
+/// A named argument, so the positional-third-argument error keeps teaching rule 13.
+#[test]
+fn headers_are_a_named_argument() {
+    let program = program(
+        "effect E {
+  on @order.placed as e {
+    let response = http.post(
+      \"https://mail.example/confirm\",
+      { \"to\": reveal(e.email) },
+      headers = {
+        \"Authorization\": \"Bearer k\",
+        \"Idempotency-Key\": \"{e.id}\",
+      },
+    )
+    log(\"{response.status}\")
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let (interpreter, outcome) = deliver(
+        &program,
+        vec![placed(1, 7, 100)],
+        vec![Reply::Status(200)],
+        &mut journal,
+    );
+    outcome.expect("delivered");
+
+    let sent = &interpreter.requests()[0];
+    assert_eq!(sent.verb, "http.post");
+    let Json::Obj(headers) = &sent.headers else {
+        panic!("expected an object, got {:?}", sent.headers);
+    };
+    assert_eq!(headers.get("Authorization"), Some(&Json::str("Bearer k")));
+    // The case that matters beyond convenience: this is what stops a second send.
+    assert!(headers.contains_key("Idempotency-Key"));
+
+    // A positional third argument is still the timeout error.
+    let message = err("effect E {
+  on @order.placed as e {
+    let response = http.post(\"https://x\", { \"a\": 1 }, 30)
+    log(\"x\")
+  }
+}");
+    assert!(
+        message.contains("a timeout is configuration rather than a call argument"),
+        "got: {message}"
+    );
+}
+
+/// The journal key is the verb, the URL and the body. Not the headers: a changed
+/// idempotency key has to land on the entry that already suppressed the send.
+#[test]
+fn a_changed_header_does_not_re_fire_a_journaled_call() {
+    let program = program(
+        "effect E {
+  on @order.placed as e {
+    let response = http.post(
+      \"https://mail.example/confirm\",
+      { \"to\": \"x\" },
+      headers = { \"Idempotency-Key\": \"{e.position}\" },
+    )
+    log(\"sent\")
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let (mut interpreter, outcome) = deliver(
+        &program,
+        vec![placed(1, 7, 100)],
+        vec![Reply::Status(200), Reply::Status(200)],
+        &mut journal,
+    );
+    outcome.expect("delivered");
+    let performed = interpreter.http_calls();
+
+    interpreter.deliver("E", 0, &mut journal).expect("replayed");
+    assert_eq!(
+        interpreter.http_calls(),
+        performed,
+        "the replay is a journal hit, so nothing left the process"
+    );
+}
+
+/// An object literal is a `Json` value now, so it is legal where one is expected
+/// rather than only inside a body. Rule 7 still holds, because `invoke` checks its
+/// fields against declared parameter types.
+#[test]
+fn an_object_literal_is_legal_where_a_json_is_expected() {
+    let source = format!(
+        "{PRELUDE}
+fn auth(token: String) -> Json {{
+  return {{ \"Authorization\": \"Bearer {{token}}\" }}
+}}
+
+effect E {{
+  on @order.placed as e {{
+    let response = http.get(\"https://x\", headers = auth(\"k\"))
+    log(\"{{response.status}}\")
+  }}
+}}
+"
+    );
+    parse(&source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+
+    // Still rejected where nothing expects a `Json`, which is what keeps rule 7's
+    // "an object literal is not an invoke input".
+    let message = err("effect E {
+  on @order.placed as e {
+    let x = { \"a\": 1 }
+    log(\"x\")
+  }
+}");
+    assert!(
+        message.starts_with("an object literal is an HTTP request body"),
+        "got: {message}"
+    );
 }

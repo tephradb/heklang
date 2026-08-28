@@ -250,10 +250,29 @@ the rule.
 | `body.string("id")` | `String?` |
 | `body.int("count")` | `Int?` |
 | `body.bool("accepted")` | `Bool?` |
+| `body.json("data")` | `Json?` |
+| `body.array("errors")` | `List(Json)?` |
 
 The one-step form is preferred over `body.get("id").as_string()` because every read of an untyped
 body is a branch anyway, and the two-step form makes the author write two of them. There is no
 dynamic field access and no indexing syntax.
+
+`json` and `array` are the two beyond the original three, and a GraphQL response is why: the useful
+value is at `data.<field>.userErrors`, three steps down and then an array. Each step stays fallible
+for the reason the first three are, and `Json.empty` exists so a chain of them reads as one line
+(`response.body.json("data").unwrap_or(Json.empty).array("errors").unwrap_or([])`).
+
+**`Json` is a declarable type**, so a command parameter, a `fn` parameter and a `fn` return may be
+one. It was in the IR from the start and unreachable from the grammar, which meant a command could
+not take a webhook payload at all, and a real port's entry point for an entire integration could not
+be spelled. An **object literal** is therefore legal anywhere a `Json` is expected, not only inside a
+request body; rule 7 is unaffected, because `invoke` checks its fields against declared parameter
+types and an object only reaches a parameter that is a `Json`.
+
+**`Json.encode(value) -> String`** is the table below pointed at a string instead of a socket. A
+Shopify metafield of type `json` takes its value as a *string*, and the original carried a whole
+hand-written encoder for that one call. Because it is the same table, a value encoded here and the
+same value in a request body cannot disagree, which a second encoder could not promise.
 
 A **JSON object literal** `{ "key": expr, ... }` builds a request body. Values convert by a total
 table, which is part of the contract because it decides what a remote service actually receives:
@@ -430,6 +449,28 @@ Rule 9 makes a local erase-then-reveal impossible, so by construction every term
 operator sees is caused by something else. Without that second sentence they hunt for an `erase` in a
 file that does not contain one.
 
+## Headers
+
+```
+http.post(url, body, headers = { "Authorization": "Bearer {token}" })
+```
+
+A **named** argument, not a third positional one, because the third positional slot already has an
+error attached to it that teaches rule 13, and that error should keep firing for someone who writes a
+timeout there.
+
+The case that matters beyond convenience is the `Idempotency-Key`. It is what stops a transactional
+email being sent twice, so it has to survive the same replay the journal is protecting against, which
+settles a question the journal key would otherwise raise:
+
+**The journal key is the verb, the URL and the body, and deliberately not the headers.** A replay
+that recomputes a different idempotency key, or a deploy that adds one, must still land on the entry
+that already recorded the send. Keying on headers would turn "the same call with a new key" into a
+new call, which is exactly the second send the key exists to prevent.
+
+Headers are always present in the IR and empty when unwritten, so the interpreter reads one shape
+rather than two.
+
 ## 13. Timeouts are configuration, not syntax
 
 No language change. Recorded because the gap is real: hekla hardcodes a 10s connect and 30s global
@@ -540,7 +581,8 @@ because nothing else exists yet:
 
 ## Known gaps
 
-- **HTTP headers**, on the request and the response. hekla passes both; heklang passes neither yet.
+- **Response headers.** Request headers are `http.post(url, body, headers = { ... })`; nothing reads
+  the response's yet.
 - **Retry configuration** (rule 13).
 - **Opaque subject values**, above.
 - **The second erase rule** (rule 9).
