@@ -1208,6 +1208,9 @@ fn eval_field(
 pub fn coerce(value: Value, ty: &Type) -> Value {
     match ty {
         Type::Opt(inner) if value.has_type(inner) => Value::some(value),
+        // Writing a plain value into a sealed position is the encrypting direction and
+        // needs no ceremony; reading content back out is what `reveal` is for.
+        Type::Sealed(inner, _) => coerce(value, inner),
         _ => value,
     }
 }

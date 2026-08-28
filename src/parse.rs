@@ -1743,6 +1743,12 @@ impl Parser {
                 }
             }
 
+            // Rule 12: the annotation is the authored form and the type is what
+            // propagates from it. Sealed after the annotation loop, so `@max` still
+            // measures the value rather than its wrapper.
+            if let Some(subject) = field.subject.clone() {
+                field.ty = seal(field.ty, subject);
+            }
             fields.push(field);
             if !self.eat_sym(Sym::Comma) {
                 break;
@@ -5458,6 +5464,16 @@ fn scan(exprs: &Exprs, stmts: &[Stmt], incoming: Option<Span>) -> Result<Reach, 
 /// The declared type of the field a subject files its keys under. `@subject(x)` must
 /// name a field of the same event, so the event carrying the annotation carries `x`
 /// too; absent when nothing is scoped to the name at all.
+/// `Opt` stays outermost, so an optional subject-bound field is an optional whose
+/// content is sealed rather than a sealed optional. Everything that looks through an
+/// optional (`inner_of`, narrowing, `fills`) keeps working with one extra unwrap.
+fn seal(ty: Type, subject: Ident) -> Type {
+    match ty {
+        Type::Opt(inner) => Type::opt(seal(*inner, subject)),
+        other => Type::sealed(other, subject),
+    }
+}
+
 fn subject_field<'a>(events: &'a [EventDef], subject: &str) -> Option<&'a Type> {
     events
         .iter()

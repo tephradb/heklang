@@ -56,6 +56,12 @@ pub enum Type {
     /// key is restricted to, which is where sorted iteration comes from.
     Map(Box<Type>, Box<Type>),
     Opt(Box<Type>),
+    /// Content behind the decrypt boundary, and the subject field its key is filed
+    /// under. Built from `@subject(...)` on an event field and nowhere else: it is not
+    /// spellable, so an author writes the annotation and the type is derived. `Opt` is
+    /// always outermost, so `String? @subject(x)` is `Opt(Sealed(String, x))`.
+    /// See `docs/effects.md` rule 12.
+    Sealed(Box<Type>, Ident),
 }
 
 impl Type {
@@ -69,6 +75,30 @@ impl Type {
 
     pub fn map(key: Type, value: Type) -> Self {
         Type::Map(Box::new(key), Box::new(value))
+    }
+
+    pub fn sealed(inner: Type, subject: impl Into<Ident>) -> Self {
+        Type::Sealed(Box::new(inner), subject.into())
+    }
+
+    /// The subject this type's content is filed under, looking through `Opt` because
+    /// `Opt` is always outermost. `None` for anything not sealed.
+    pub fn subject(&self) -> Option<&Ident> {
+        match self {
+            Type::Sealed(_, subject) => Some(subject),
+            Type::Opt(inner) => inner.subject(),
+            _ => None,
+        }
+    }
+
+    /// The same type with its seal removed, which is what `reveal` returns. Looks
+    /// through `Opt`: `Opt(Sealed(String, x))` unseals to `Opt(String)`.
+    pub fn unsealed(&self) -> Type {
+        match self {
+            Type::Sealed(inner, _) => inner.as_ref().clone(),
+            Type::Opt(inner) => Type::opt(inner.unsealed()),
+            other => other.clone(),
+        }
     }
 }
 
@@ -90,6 +120,7 @@ impl fmt::Display for Type {
             Type::List(inner) => write!(f, "List({inner})"),
             Type::Map(key, value) => write!(f, "Map({key}, {value})"),
             Type::Opt(inner) => write!(f, "{inner}?"),
+            Type::Sealed(inner, subject) => write!(f, "{inner} @subject({subject})"),
         }
     }
 }

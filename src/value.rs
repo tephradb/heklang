@@ -128,8 +128,14 @@ impl Value {
         }
     }
 
+    /// A seal is transparent here: heklang models the key lifecycle rather than
+    /// ciphertext, so a sealed position holds an ordinary value of its inner type.
+    /// The boundary it guards is a parse-time rule. See `docs/effects.md` rule 12.
     pub fn has_type(&self, ty: &Type) -> bool {
-        &self.ty() == ty
+        match ty {
+            Type::Sealed(inner, _) => self.has_type(inner),
+            _ => &self.ty() == ty,
+        }
     }
 }
 
@@ -243,6 +249,8 @@ impl Defs<'_> {
 /// absence, which is what makes a field of either type without a default an error.
 pub fn zero(ty: &Type, defs: Defs<'_>) -> Option<Value> {
     Some(match ty {
+        // A seal is transparent: the zero of sealed content is the content's own.
+        Type::Sealed(inner, _) => zero(inner, defs)?,
         Type::Bool => Value::Bool(false),
         Type::Int => Value::Int(0),
         Type::Decimal(scale) => Value::decimal(0, *scale),

@@ -1724,11 +1724,13 @@ fn a_command_outcome_is_not_an_effect_outcome() {
     );
 }
 
+/// A plain field on purpose: the suggestion is about a missing `()`, and reaching for
+/// a subject-bound field here would test the decrypt boundary instead.
 #[test]
 fn a_parenless_field_on_a_non_response_still_suggests_the_method() {
     let message = err("effect E {
-  on @order.placed as e {
-    log(e.email.trim)
+  on @order.audited as e {
+    log(e.tool.trim)
   }
 }");
     assert_eq!(message, "no field `trim` on String; did you mean `trim()`?");
@@ -2681,4 +2683,44 @@ fn a_cycle_between_void_helpers_is_rejected() {
         message.contains("`a` calls `b` calls `a`"),
         "got: {message}"
     );
+}
+
+// ---------------------------------------------------------------------------------
+// Rule 12: the seal is in the type. `@subject(...)` is the authored form and
+// `Type::Sealed` is what propagates from it. See `docs/effects.md`.
+
+#[test]
+fn a_subject_bound_field_has_a_sealed_type() {
+    let program = program("effect E {\n  on @order.placed as e { log(\"x\") }\n}");
+    let def = program
+        .event(&EventPath::new(["order", "placed"]))
+        .expect("the prelude declares it");
+
+    let email = &def.field("email").expect("declared").ty;
+    assert_eq!(email, &Type::sealed(Type::String, "customer_id"));
+    assert_eq!(email.subject().map(String::as_str), Some("customer_id"));
+    assert_eq!(email.unsealed(), Type::String);
+
+    // A plain field carries no seal, and asking is not an error.
+    let plain = &def.field("customer_id").expect("declared").ty;
+    assert_eq!(plain, &Type::Int);
+    assert_eq!(plain.subject(), None);
+}
+
+/// `Opt` stays outermost, so everything that looks through an optional keeps working
+/// with one extra unwrap rather than two orderings to remember.
+#[test]
+fn an_optional_subject_bound_field_seals_inside_the_optional() {
+    let program = program("effect E {\n  on @order.placed as e { log(\"x\") }\n}");
+    let def = program
+        .event(&EventPath::new(["order", "reviewed"]))
+        .expect("the prelude declares it");
+
+    let comment = &def.field("comment").expect("declared").ty;
+    assert_eq!(
+        comment,
+        &Type::opt(Type::sealed(Type::String, "customer_id"))
+    );
+    assert_eq!(comment.subject().map(String::as_str), Some("customer_id"));
+    assert_eq!(comment.unsealed(), Type::opt(Type::String));
 }
