@@ -367,6 +367,22 @@ impl Parser {
             )
     }
 
+    /// `erase(subject, value)` rather than `erase(value)`: a bare name, then a comma
+    /// that is not the trailing one. The third token is load-bearing, because
+    /// `erase(customer_id,)` is a legal one-argument call and a two-token lookahead
+    /// would reparse it as a malformed two-argument one.
+    fn at_named_subject(&self) -> bool {
+        matches!(self.peek(), Token::Ident(_))
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|spanned| &spanned.token),
+                Some(Token::Sym(Sym::Comma))
+            )
+            && !matches!(
+                self.tokens.get(self.pos + 2).map(|spanned| &spanned.token),
+                Some(Token::Sym(Sym::RParen))
+            )
+    }
+
     /// Closes a call's argument list. The last argument may carry a comma, the way the
     /// last item of every other comma-separated list in the language already may: a
     /// call written across lines gets one from any formatter, and where a comma is
@@ -4018,30 +4034,62 @@ impl Parser {
                 )?;
                 self.bump();
                 self.expect_sym(Sym::LParen)?;
+
+                // Naming the subject is what a value the parser cannot trace back to a
+                // field needs, and it is the spelling `docs/testing.md` already uses
+                // for the matching expectation.
+                let named = if self.at_named_subject() {
+                    let name = self.expect_ident()?;
+                    self.expect_sym(Sym::Comma)?;
+                    Some(name)
+                } else {
+                    None
+                };
+
                 let (line, col) = self.here();
                 let value = self.expr(lower, None)?;
                 self.end_args()?;
 
-                // `erase` names a subject id rather than a subject-bound value, so
-                // rule 12's fold path does not apply to it: an id is on the trigger or
-                // it is not an id this arm can be sure of.
-                let Some(Source::Trigger(subject)) = self.subject_source(lower, value) else {
+                let subject = match named {
+                    Some(name) => {
+                        self.check_named_subject(lower, &name, value, line, col)?;
+                        name
+                    }
+                    // Without a name the subject has to be recovered, and only a
+                    // trigger field carries one. Rule 12's fold path does not apply:
+                    // it tracks the subject of a *value*, and this is the id itself.
+                    None => {
+                        let Some(Source::Trigger(subject)) = self.subject_source(lower, value)
+                        else {
+                            return Err(self.err(
+                                "`erase` takes a field of the triggering event, like `e.customer_id`, or names its subject: `erase(customer_id, id)`"
+                                    .to_string(),
+                                line,
+                                col,
+                            ));
+                        };
+                        subject
+                    }
+                };
+
+                let Some(field) = subject_field(events, &subject) else {
                     return Err(self.err(
-                        "`erase` takes a field of the triggering event, like `e.customer_id`"
-                            .to_string(),
+                        format!(
+                            "nothing is scoped to `{subject}`, so there is no key to erase; `erase` takes the subject id that a field is declared `@subject(...)` of"
+                        ),
                         line,
                         col,
                     ));
                 };
-                let scoped = events.iter().any(|def| {
-                    def.fields
-                        .iter()
-                        .any(|field| field.subject.as_deref() == Some(subject.as_str()))
-                });
-                if !scoped {
+                // The declared type of the field the key is filed under. Skipped when
+                // the value's type is unknown, the way every other optional check here
+                // is skipped rather than guessed.
+                if let Some(found) = self.type_of(lower, value)
+                    && &found != field
+                {
                     return Err(self.err(
                         format!(
-                            "nothing is scoped to `{subject}`, so there is no key to erase; `erase` takes the subject id that a field is declared `@subject(...)` of"
+                            "`{subject}` files its keys under a {field}, so `erase` cannot take a {found}"
                         ),
                         line,
                         col,
@@ -4059,6 +4107,30 @@ impl Parser {
                 Ok(Stmt::Discard(value))
             }
         }
+    }
+
+    /// Rule 9's second rule, which only the named form can reach: an id learned by
+    /// revealing must not be erased, because a repeat request for an already-erased
+    /// subject then cannot be read at all. The inferring form cannot reach it, since a
+    /// `reveal` is not a trigger field load.
+    fn check_named_subject(
+        &self,
+        lower: &Lower,
+        subject: &str,
+        value: ExprId,
+        line: u32,
+        col: u32,
+    ) -> Result<(), SyntaxError> {
+        if let Some(at) = reveal_in(lower.b.exprs(), value) {
+            return Err(self.err(
+                format!(
+                    "the id at {at} was learned by revealing, so `erase({subject}, ...)` would make a repeat request for an erased subject unreadable; take a subject id from a plaintext field"
+                ),
+                line,
+                col,
+            ));
+        }
+        Ok(())
     }
 
     /// Rule 5's gating. Each wrong context gets a message about that context, so the
@@ -5381,6 +5453,40 @@ fn scan(exprs: &Exprs, stmts: &[Stmt], incoming: Option<Span>) -> Result<Reach, 
         erased,
         falls_through: true,
     })
+}
+
+/// The declared type of the field a subject files its keys under. `@subject(x)` must
+/// name a field of the same event, so the event carrying the annotation carries `x`
+/// too; absent when nothing is scoped to the name at all.
+fn subject_field<'a>(events: &'a [EventDef], subject: &str) -> Option<&'a Type> {
+    events
+        .iter()
+        .filter(|def| {
+            def.fields
+                .iter()
+                .any(|field| field.subject.as_deref() == Some(subject))
+        })
+        .find_map(|def| {
+            def.fields
+                .iter()
+                .find(|field| field.name == subject)
+                .map(|field| &field.ty)
+        })
+}
+
+/// The first `reveal` anywhere in one expression, by span. The statement-level
+/// `first_reveal` below is rule 9's; this is the same walk over a single root.
+fn reveal_in(exprs: &Exprs, root: ExprId) -> Option<Span> {
+    let mut found: Vec<ExprId> = Vec::new();
+    collect(exprs, root, &mut found, &|id, expr, out| {
+        if matches!(expr, Expr::Reveal { .. }) {
+            out.push(id);
+        }
+    });
+    found
+        .into_iter()
+        .min_by_key(|id| id.0)
+        .map(|id| exprs.span(id))
 }
 
 /// The earliest `reveal` among a statement's own expressions. The arena is built in

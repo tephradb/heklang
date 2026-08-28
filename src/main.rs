@@ -2,8 +2,8 @@ use std::fs;
 use std::process::ExitCode;
 
 use heklang::{
-    Event, EventPath, Interpreter, Invocation, Journal, Key, Outcome, Program, Reply, Store,
-    TestOutcome, Value, parse_files, run_tests,
+    Effectful, Event, EventPath, Interpreter, Invocation, Journal, Key, Outcome, Program, Reply,
+    Store, TestOutcome, Value, parse_files, run_tests,
 };
 
 /// The demo's money scale. A storage precision floor, not a claim about a currency: a
@@ -17,6 +17,7 @@ const TESTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/tests.hk");
 const CATALOG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/catalog.hk");
 const SHOP: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/shop.hk");
 const PLANS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/plans.hk");
+const REDACT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/redact.hk");
 const AUDIT: &str = "https://audit.example/catalog";
 const SYNC: &str = "https://one.example/admin/api/sync";
 const CONFIRM: &str = "https://mail.example/confirm";
@@ -169,6 +170,13 @@ fn load_catalog() -> Result<Program, String> {
 fn load_shop() -> Result<Program, String> {
     let shop = read(SHOP)?;
     parse_files([("shop/shop.hk", shop.as_str())]).map_err(|err| err.to_string())
+}
+
+/// The redact module, its own program too. Both `erase` forms need a log where one
+/// subject id is on the trigger and the rest have to be folded out of history.
+fn load_redact() -> Result<Program, String> {
+    let redact = read(REDACT)?;
+    parse_files([("redact/redact.hk", redact.as_str())]).map_err(|err| err.to_string())
 }
 
 /// The plans module, its own program too. Rule 5's two answers need a log where the
@@ -372,6 +380,14 @@ fn main() -> ExitCode {
         }
     }
 
+    match load_redact() {
+        Ok(redact) => redact_demo(&redact),
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::FAILURE;
+        }
+    }
+
     suite(&program);
 
     ExitCode::SUCCESS
@@ -547,6 +563,83 @@ fn shop_demo(program: &Program) {
     if let Some(sent) = interpreter.requests().first() {
         println!("\n  {} sent {}", sent.url, sent.headers);
     }
+}
+
+fn tenant_connected(tenant_id: i64, key: &str) -> Event {
+    Event::new(
+        EventPath::new(["tenant", "connected"]),
+        [
+            ("tenant_id", Value::Int(tenant_id)),
+            ("api_key", Value::str(key)),
+        ],
+    )
+}
+
+fn member_joined(tenant_id: i64, member_id: i64, email: &str) -> Event {
+    Event::new(
+        EventPath::new(["tenant", "member", "joined"]),
+        [
+            ("tenant_id", Value::Int(tenant_id)),
+            ("member_id", Value::Int(member_id)),
+            ("email", Value::str(email)),
+        ],
+    )
+}
+
+fn member_left(tenant_id: i64, member_id: i64) -> Event {
+    Event::new(
+        EventPath::new(["tenant", "member", "left"]),
+        [
+            ("tenant_id", Value::Int(tenant_id)),
+            ("member_id", Value::Int(member_id)),
+        ],
+    )
+}
+
+fn redact_requested(tenant_id: i64) -> Event {
+    Event::new(
+        EventPath::new(["tenant", "redact", "requested"]),
+        [("tenant_id", Value::Int(tenant_id))],
+    )
+}
+
+/// One redact, and the two `erase` forms in one arm: the tenant key is on the trigger
+/// and infers, the member keys come out of a fold and name their subject.
+fn redact_demo(program: &Program) {
+    println!("\nmodule redact.hk");
+
+    let log = vec![
+        tenant_connected(1, "key-one"),
+        member_joined(1, 7, "ada@example.com"),
+        member_joined(1, 8, "grace@example.com"),
+        // Left before the redact, so the fold drops them: a redact erases what the
+        // tenant still holds, which is what makes the fold the right shape.
+        member_joined(1, 9, "alan@example.com"),
+        member_left(1, 9),
+        // A second tenant, untouched, so the fold's filter is visible in the output.
+        member_joined(2, 10, "edsger@example.com"),
+        redact_requested(1),
+    ];
+
+    let position = (log.len() - 1) as u64;
+    let mut interpreter = Interpreter::with_log(program, log);
+    let mut journal = Journal::default();
+    match interpreter.deliver("RedactTenant", position, &mut journal) {
+        Ok(outcome) => println!("  {outcome:?}"),
+        Err(err) => {
+            println!("  error {err}");
+            return;
+        }
+    }
+    for line in interpreter.lines() {
+        println!("  {line}");
+    }
+    for entry in interpreter.trace() {
+        if let Effectful::Erase { subject, id } = entry {
+            println!("  erased {subject}={id}");
+        }
+    }
+    println!("  tenant 2's member 10 keeps their key, and member 9 left before the request");
 }
 
 fn tier(name: &str) -> Value {

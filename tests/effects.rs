@@ -32,6 +32,15 @@ event @order.audited {
   tool: String,
 }
 
+// A tenant grouping many subjects, which is the shape a bulk erase needs: the ids come
+// from a fold rather than from the event being handled.
+event @tenant.redacted { tenant_id: Int }
+event @tenant.member.joined {
+  tenant_id: Int,
+  member_id: Int,
+  secret: String @subject(member_id),
+}
+
 command RecordNotified(order_id: Uuid, notification_id: Uuid) {
   guard @order.notified(order_id)
 
@@ -679,6 +688,134 @@ fn reveal_needs_a_subject_bound_field() {
 }
 
 // ---------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
+// Rule 9: naming the subject. The form a bulk erase needs, where the ids come from a
+// fold and the parser has no field name to recover.
+
+fn joined(tenant_id: i64, member_id: i64) -> Event {
+    Event::new(
+        EventPath::new(["tenant", "member", "joined"]),
+        [
+            ("tenant_id", Value::Int(tenant_id)),
+            ("member_id", Value::Int(member_id)),
+            ("secret", Value::str(format!("token-{member_id}"))),
+        ],
+    )
+}
+
+const REDACT: &str = "effect E {
+  on @tenant.redacted as e { tenant_id } {
+    state members: List(Int) = fold []
+      on @tenant.member.joined(tenant_id) { member_id } => members.push(member_id)
+
+    for id in members {
+      erase(member_id, id)
+    }
+  }
+}";
+
+#[test]
+fn erase_may_name_its_subject() {
+    let program = program(REDACT);
+    let log = vec![
+        joined(1, 7),
+        joined(1, 8),
+        // A second tenant, so the fold's filter is doing something.
+        joined(2, 9),
+        Event::new(
+            EventPath::new(["tenant", "redacted"]),
+            [("tenant_id", Value::Int(1))],
+        ),
+    ];
+    let mut interpreter = Interpreter::with_log(&program, log);
+    let mut journal = Journal::default();
+    let outcome = interpreter
+        .deliver("E", 3, &mut journal)
+        .expect("delivered");
+    assert_eq!(outcome, Invocation::Done);
+
+    let erased: Vec<&Effectful> = interpreter
+        .trace()
+        .iter()
+        .filter(|entry| matches!(entry, Effectful::Erase { .. }))
+        .collect();
+    assert_eq!(
+        erased,
+        [
+            &Effectful::Erase {
+                subject: "member_id".to_string(),
+                id: "7".to_string()
+            },
+            &Effectful::Erase {
+                subject: "member_id".to_string(),
+                id: "8".to_string()
+            },
+        ],
+        "tenant 2's member must not be erased"
+    );
+}
+
+#[test]
+fn a_named_subject_must_be_declared() {
+    let message = err("effect E {
+  on @tenant.redacted as e { tenant_id } {
+    for id in [1, 2] {
+      erase(nobody, id)
+    }
+  }
+}");
+    assert!(
+        message.contains("nothing is scoped to `nobody`"),
+        "got: {message}"
+    );
+}
+
+/// Rule 9's second rule, which only this form can reach: the inferring form takes a
+/// trigger field, and a `reveal` is not one.
+#[test]
+fn a_named_subject_rejects_a_revealed_id() {
+    let message = err("effect E {
+  on @order.placed as e { customer_id } {
+    erase(customer_id, reveal(e.email).len())
+  }
+}");
+    assert!(
+        message.contains("was learned by revealing"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("take a subject id from a plaintext field"),
+        "expected the fix, got: {message}"
+    );
+}
+
+#[test]
+fn a_named_subject_checks_the_value_type() {
+    let message = err("effect E {
+  on @order.placed as e { customer_id } {
+    erase(customer_id, e.order_id)
+  }
+}");
+    assert!(
+        message.contains("files its keys under a Int"),
+        "got: {message}"
+    );
+    assert!(message.contains("cannot take a Uuid"), "got: {message}");
+}
+
+/// The lookahead is three tokens, not two. `erase(customer_id,)` is a bare trigger
+/// field plus the trailing comma every argument list takes, so it stays one argument.
+#[test]
+fn a_trailing_comma_does_not_make_a_named_subject() {
+    program(
+        "effect E {
+  on @order.placed as e { customer_id } {
+    erase(customer_id,)
+  }
+}",
+    );
+}
+
 // Rule 10: no marker on unjournaled builtins.
 
 #[test]
@@ -1206,10 +1343,11 @@ fn the_fold_rules_hold_in_a_command_too() {
     );
 }
 
-/// `erase` names a subject id rather than a subject-bound value, so it stays on the
-/// trigger: an id folded off an earlier event is not one this arm can be sure of.
+/// The **inferring** form stays trigger-only. Rule 12's fold path tracks the subject of
+/// a value, and this is the id itself, so there is no field name to recover from a
+/// folded one. The error offers the other form rather than just refusing.
 #[test]
-fn erase_still_takes_a_field_of_the_trigger() {
+fn the_inferring_erase_stays_on_the_trigger() {
     let message = err("effect E {
   on @order.reviewed as e { customer_id } {
     state who: Int? = fold none
@@ -1221,6 +1359,10 @@ fn erase_still_takes_a_field_of_the_trigger() {
     assert!(
         message.contains("`erase` takes a field of the triggering event"),
         "got: {message}"
+    );
+    assert!(
+        message.contains("erase(customer_id, id)"),
+        "expected the named form to be offered, got: {message}"
     );
 }
 

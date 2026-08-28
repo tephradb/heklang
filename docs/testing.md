@@ -184,6 +184,10 @@ document, and the assertion an author wants is "it carried this id", not a copy 
 `invoke` arguments are matched exactly, because a command's arguments **are** its whole input, so
 there is nothing there to be uninterested in.
 
+**`erase` reads the same here as in an arm.** The expectation names the subject and the id, and so
+does the statement's named form (`erase(customer_id, id)` in `docs/effects.md` rule 9), so the two
+are one spelling met twice rather than two spellings met once.
+
 **`log` is in the trace.** It is not journaled (rule 10 of `docs/effects.md`), so it runs again on a
 replay, and being able to assert on the line is how a test pins the branch an arm took when the arm's
 only other output is a decision not to call out.

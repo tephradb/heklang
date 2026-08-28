@@ -348,10 +348,58 @@ declare its own helpers, and one of those may call out. It may not `reveal` or `
 the arm, so this analysis never has to follow a call, never needs a summary per function, and never
 has to explain a path through code the author was not looking at. See `docs/functions.md`.
 
-**Known gap: the second rule is not implemented.** hekla also says do not erase a subject whose id
+### Naming the subject
+
+`erase(value)` recovers the subject from the value: it must be a field of the triggering event, and
+the `@subject(...)` declaration on that event says which key namespace it names. When the id does
+not come from the trigger there is no name to recover, so the second form supplies it:
+
+```
+on @shop.redact.received as e { shop_id } {
+  state customers: List(Int) = fold []
+    on @order.paid(shop_id) { customer_id } => customers.push(customer_id)
+
+  for id in customers {
+    erase(customer_id, id)          // the subject name, then the value
+  }
+  erase(shop_id)                    // the inferring form, unchanged
+}
+```
+
+This is the shape a mandatory GDPR shop-redact has: one webhook, and every customer the shop holds
+data for. The ids come from a fold of plaintext tags, which is as deterministic and replayable as a
+trigger field; what a fold cannot supply is the **name**.
+
+`docs/testing.md` already spells the matching expectation `expect erase(<subject>, "<id>")`, so the
+statement and the expectation now read the same.
+
+**What it gives up, said plainly.** heklang cannot check that the value really is a `customer_id`,
+only that the author said so: `erase(customer_id, some_other_int)` compiles. Erasing a key that does
+not exist is a no-op, but erasing the **wrong namespace** destroys the wrong subject's key. That is
+why the inferring form stays the default and this one is for the case it cannot reach.
+
+Three things are still checked:
+
+- the name is a declared subject, the same check the inferring form makes;
+- the value's type is the type of the field the keys are filed under, so
+  `erase(customer_id, e.email)` is rejected, and so is an optional id;
+- **the value contains no `reveal`**, which is rule 9's second rule below. The inferring form cannot
+  reach it, because a `reveal` is not a trigger field load, so it becomes reachable exactly here and
+  arrives with this form.
+
+**Rejected: inferring the name through the fold.** It would mean proving every element of
+`customers` is a `customer_id`: element-level provenance through `List.push`, inside a fold arm,
+through an `if`/`else`. That is more analysis than anything else in the language, rule 12's "a
+transformed arm drops the binding" already points against it, and it would have to be *exact*,
+because a wrong namespace destroys the wrong key. The choice is between exact inference and an
+explicit name, and there is no third option that is both safe and cheap.
+
+**The second rule holds where it can be reached.** hekla also says do not erase a subject whose id
 you learned by revealing, because a repeat request for an already-erased subject then cannot be read
-at all. Enforcing it needs data flow that round-trips through an HTTP response, which is more than
-this pass builds. Take subject ids from a plaintext field or a read model.
+at all. The inferring form cannot express it: a `reveal` is not a trigger field load. The named form
+can, so it checks the value for one and rejects it by span. What is still not caught is an id that
+round-trips through an HTTP response, which needs data flow this pass does not build. Take subject
+ids from a plaintext field.
 
 ## 10. No marker on unjournaled builtins
 
@@ -384,7 +432,7 @@ is about a small set of well-named things, and it stops holding when either half
 | `Uuid.derive(seed, name)` | `Uuid` | pure |
 | `log(message)` | nothing | **no** |
 | `reveal(field)` | `String` | **no**, re-decrypts every attempt |
-| `erase(subject_value)` | nothing | yes |
+| `erase(value)` / `erase(subject, value)` | nothing | yes |
 
 **There is no `Uuid.new`, no `Uuid.random` and no `random`, anywhere in the language.** Not in
 effects, not in commands, not in projectors. "Never mint a random id" is therefore unrepresentable
@@ -777,7 +825,8 @@ it, because a narrowed load lowers differently.
   the response's yet.
 - **Retry configuration** (rule 13).
 - **Opaque subject values**, above.
-- **The second erase rule** (rule 9).
+- **The second erase rule** (rule 9), for an id that round-trips through an HTTP response. The
+  `reveal` case is now checked where it can be written.
 - **Arrays** in a JSON body can be carried but not taken apart (rule 8).
 - **The journal key is a readable description**, not a content hash. It is stable and it prints,
   which is what a harness wants; a real host hashes it.
