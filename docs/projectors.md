@@ -379,6 +379,11 @@ problem. That is a static check and it belongs in the checker. Until the checker
 error is the backstop, and a projector that trips it is reporting a mismatch between two declarations
 rather than a bad event.
 
+**`update` makes the backstop patchier, which is an argument for the checker rather than against
+`update`.** A write that is dropped never evaluates its field values, so a schema mismatch inside an
+`update` is reported only on the runs where the row happens to exist. The check was always meant to
+be static; this makes the interim version depend on the data, which the real one will not.
+
 ## Where this diverges from the runtime
 
 Four of these rules describe behaviour hekla does not have today. Recorded so that a future change is
@@ -434,7 +439,9 @@ enforces once beats a discipline every handler has to keep.
 Two static checks are specified here, recorded in the IR, and not yet enforced. Both are backstopped
 at runtime or are outright no-ops, and both belong to the eventual checker rather than the parser:
 
-1. **The `@max` invariant** above. Backstopped by a spanned runtime error.
+1. **The `@max` invariant** above. Backstopped by a spanned runtime error, and only on the writes
+   that actually land: an `update` against an absent row evaluates nothing, so the backstop is now
+   data-dependent as well as late.
 2. **Rule 9's subject checks.** Both are static, and both are an explicit no-op today rather than a
    panic, so ordinary parsing runs through them. hekla's `enforce_subject_columns` is the reference
    for what they assert: a subject-bound value may only be written into a subject-bound field, the
