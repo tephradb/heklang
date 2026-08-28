@@ -1,0 +1,19 @@
+{
+  "grammars": [
+    {
+      "name": "hek",
+      "camelcase": "Hek",
+      "scope": "source.hek",
+      "path": ".",
+      "file-types": ["hk"],
+      "highlights": ["queries/highlights.scm"],
+      "locals": ["queries/locals.scm"]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "hek grammar for tree-sitter",
+    "authors": [{ "name": "Ari Seyhun" }]
+  }
+}

@@ -1,0 +1,204 @@
+================================================================================
+guard, folds and a hoisted let
+================================================================================
+
+command PlaceOrder(order_id: Uuid, customer_id: Int, notes: String?) {
+  guard @order.placed(order_id), @order.cancelled(order_id)
+
+  state email_taken: Bool = fold false
+    on @order.placed(email) => true
+
+  state lifetime_spend: Money(2) = fold 0
+    on @order.placed(customer_id) { total } => lifetime_spend + total
+    on @order.cancelled(customer_id) { refund } => lifetime_spend - refund
+
+  let customer = customer_id
+  state blocked: Bool = fold false
+    on @customer.blocked(customer_id: customer) => true
+
+  if blocked {
+    return reject("customer_blocked", "this customer cannot place orders")
+  } else if email_taken {
+    return invalid("that email has already placed an order")
+  } else {
+    return
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (command_declaration
+    (type_identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (type
+          (primitive_type)))
+      (parameter
+        (identifier)
+        (type
+          (primitive_type)))
+      (parameter
+        (identifier)
+        (type
+          (primitive_type))))
+    (block
+      (guard_declaration
+        (slice_reference
+          (event_path)
+          (filter
+            (identifier)))
+        (slice_reference
+          (event_path)
+          (filter
+            (identifier))))
+      (state_declaration
+        (identifier)
+        (type
+          (primitive_type))
+        (boolean_literal)
+        (fold_arm
+          (slice_reference
+            (event_path)
+            (filter
+              (identifier)))
+          (boolean_literal)))
+      (state_declaration
+        (identifier)
+        (type
+          (scaled_type
+            (integer_literal)))
+        (integer_literal)
+        (fold_arm
+          (slice_reference
+            (event_path)
+            (filter
+              (identifier)))
+          (destructure
+            (identifier))
+          (binary_expression
+            (identifier)
+            (identifier)))
+        (fold_arm
+          (slice_reference
+            (event_path)
+            (filter
+              (identifier)))
+          (destructure
+            (identifier))
+          (binary_expression
+            (identifier)
+            (identifier))))
+      (let_statement
+        (identifier)
+        (identifier))
+      (state_declaration
+        (identifier)
+        (type
+          (primitive_type))
+        (boolean_literal)
+        (fold_arm
+          (slice_reference
+            (event_path)
+            (filter
+              (identifier)
+              (identifier)))
+          (boolean_literal)))
+      (if_statement
+        (identifier)
+        (block
+          (return_statement
+            (outcome_expression
+              (arguments
+                (string
+                  (string_content))
+                (string
+                  (string_content))))))
+        (if_statement
+          (identifier)
+          (block
+            (return_statement
+              (outcome_expression
+                (arguments
+                  (string
+                    (string_content))))))
+          (block
+            (return_statement)))))))
+
+================================================================================
+for over a map, emit with shorthand fields
+================================================================================
+
+command ListItem(item_id: Uuid, tier: Tier) {
+  for other_id, other in items {
+    if other_id != item_id && other.sku == wanted {
+      return reject("sku_taken", "taken")
+    }
+  }
+
+  emit @item.listed {
+    item_id,
+    item: Item { sku: wanted, price, tags },
+    tier,
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (command_declaration
+    (type_identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (type
+          (primitive_type)))
+      (parameter
+        (identifier)
+        (type
+          (type_identifier))))
+    (block
+      (for_statement
+        (iter_bindings
+          (identifier)
+          (identifier)
+          (identifier))
+        (block
+          (if_statement
+            (binary_expression
+              (binary_expression
+                (identifier)
+                (identifier))
+              (binary_expression
+                (field_expression
+                  (identifier)
+                  (identifier))
+                (identifier)))
+            (block
+              (return_statement
+                (outcome_expression
+                  (arguments
+                    (string
+                      (string_content))
+                    (string
+                      (string_content)))))))))
+      (emit_statement
+        (event_path)
+        (field_initializer_list
+          (field_initializer
+            (identifier))
+          (field_initializer
+            (identifier)
+            (record_literal
+              (type_identifier)
+              (field_initializer_list
+                (field_initializer
+                  (identifier)
+                  (identifier))
+                (field_initializer
+                  (identifier))
+                (field_initializer
+                  (identifier)))))
+          (field_initializer
+            (identifier)))))))

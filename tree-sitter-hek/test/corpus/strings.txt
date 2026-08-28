@@ -1,0 +1,135 @@
+================================================================================
+plain strings and every escape
+================================================================================
+
+const A: String = "plain"
+const B: String = "a\nb\tc\"d\\e\{f\}g"
+const C: String = "a } brace in content is ordinary text"
+const D: String = ""
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (const_declaration
+    (identifier)
+    (type
+      (primitive_type))
+    (string
+      (string_content)))
+  (const_declaration
+    (identifier)
+    (type
+      (primitive_type))
+    (string
+      (string_content)
+      (escape_sequence)
+      (string_content)
+      (escape_sequence)
+      (string_content)
+      (escape_sequence)
+      (string_content)
+      (escape_sequence)
+      (string_content)
+      (escape_sequence)
+      (string_content)
+      (escape_sequence)
+      (string_content)))
+  (const_declaration
+    (identifier)
+    (type
+      (primitive_type))
+    (string
+      (string_content)))
+  (const_declaration
+    (identifier)
+    (type
+      (primitive_type))
+    (string)))
+
+================================================================================
+interpolation, including a string inside a hole
+================================================================================
+
+effect Audit {
+  on @a.b {
+    log("seller {seller_id} now lists {listed}, house: {tagged(house, HOUSE_TAG)}")
+    fail("audit rejected: {response.body.string("error").unwrap_or("no reason")}")
+    log("{duration_months / 12}-Year Warranty")
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (effect_declaration
+    (type_identifier)
+    (event_handler
+      (event_path)
+      (block
+        (expression_statement
+          (call_expression
+            (identifier)
+            (arguments
+              (string
+                (string_content)
+                (interpolation
+                  (identifier))
+                (string_content)
+                (interpolation
+                  (identifier))
+                (string_content)
+                (interpolation
+                  (call_expression
+                    (identifier)
+                    (arguments
+                      (identifier)
+                      (identifier))))))))
+        (expression_statement
+          (call_expression
+            (identifier)
+            (arguments
+              (string
+                (string_content)
+                (interpolation
+                  (method_call
+                    (method_call
+                      (field_expression
+                        (identifier)
+                        (identifier))
+                      (identifier)
+                      (arguments
+                        (string
+                          (string_content))))
+                    (identifier)
+                    (arguments
+                      (string
+                        (string_content)))))))))
+        (expression_statement
+          (call_expression
+            (identifier)
+            (arguments
+              (string
+                (interpolation
+                  (binary_expression
+                    (identifier)
+                    (integer_literal)))
+                (string_content)))))))))
+
+================================================================================
+a raw string is verbatim
+================================================================================
+
+const MUTATION: String = """
+mutation productCreate($input: ProductInput!) {
+  productCreate(input: $input) { product { id } }
+}
+"""
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (const_declaration
+    (identifier)
+    (type
+      (primitive_type))
+    (raw_string)))

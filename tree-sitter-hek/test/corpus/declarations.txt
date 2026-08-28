@@ -1,0 +1,226 @@
+================================================================================
+enum with a default variant
+================================================================================
+
+enum Tier { @default Free, Paid }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (enum_declaration
+    (type_identifier)
+    (enum_variant
+      (annotation
+        (annotation_name))
+      (identifier))
+    (enum_variant
+      (identifier))))
+
+================================================================================
+record with a bounded field and containers
+================================================================================
+
+record Item {
+  sku: String @max(60),
+  price: Money(2),
+  tags: List(String),
+  aliases: Map(Uuid, String),
+  note: String?,
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (record_declaration
+    (type_identifier)
+    (record_field
+      (identifier)
+      (type
+        (primitive_type))
+      (annotation
+        (annotation_name)
+        (annotation_arguments
+          (integer_literal))))
+    (record_field
+      (identifier)
+      (type
+        (scaled_type
+          (integer_literal))))
+    (record_field
+      (identifier)
+      (type
+        (list_type
+          (type
+            (primitive_type)))))
+    (record_field
+      (identifier)
+      (type
+        (map_type
+          (type
+            (primitive_type))
+          (type
+            (primitive_type)))))
+    (record_field
+      (identifier)
+      (type
+        (primitive_type)))))
+
+================================================================================
+const of every writable literal shape
+================================================================================
+
+const TAG: String = "house"
+const LIMIT: Int = 2
+const NAMESPACE: Uuid = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+const NO_SKU: String? = none
+const EMPTY: Map(Uuid, Item) = Map.empty
+const ITEM: Item = Item { sku: TAG, price: 0.00, tags: [TAG] }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (const_declaration
+    (identifier)
+    (type
+      (primitive_type))
+    (string
+      (string_content)))
+  (const_declaration
+    (identifier)
+    (type
+      (primitive_type))
+    (integer_literal))
+  (const_declaration
+    (identifier)
+    (type
+      (primitive_type))
+    (string
+      (string_content)))
+  (const_declaration
+    (identifier)
+    (type
+      (primitive_type))
+    (none_literal))
+  (const_declaration
+    (identifier)
+    (type
+      (map_type
+        (type
+          (primitive_type))
+        (type
+          (type_identifier))))
+    (field_expression
+      (identifier)
+      (identifier)))
+  (const_declaration
+    (identifier)
+    (type
+      (type_identifier))
+    (record_literal
+      (type_identifier)
+      (field_initializer_list
+        (field_initializer
+          (identifier)
+          (identifier))
+        (field_initializer
+          (identifier)
+          (decimal_literal))
+        (field_initializer
+          (identifier)
+          (list
+            (identifier)))))))
+
+================================================================================
+event with every annotation
+================================================================================
+
+event @shop.connected {
+  shop_id: Int,
+  shop_domain: String @max(255),
+  access_token: String @subject(shop_id) @no_index @max(4096),
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (event_declaration
+    (event_path)
+    (event_field
+      (identifier)
+      (type
+        (primitive_type)))
+    (event_field
+      (identifier)
+      (type
+        (primitive_type))
+      (annotation
+        (annotation_name)
+        (annotation_arguments
+          (integer_literal))))
+    (event_field
+      (identifier)
+      (type
+        (primitive_type))
+      (annotation
+        (annotation_name)
+        (annotation_arguments
+          (identifier)))
+      (annotation
+        (annotation_name))
+      (annotation
+        (annotation_name)
+        (annotation_arguments
+          (integer_literal))))))
+
+================================================================================
+fn with a return type
+================================================================================
+
+fn effective_sku(sku: String?, item_id: Uuid) -> String {
+  let given = sku.unwrap_or("").trim()
+  if given.is_empty() {
+    return "CATALOG:{item_id}"
+  }
+  return given
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (type
+          (primitive_type)))
+      (parameter
+        (identifier)
+        (type
+          (primitive_type))))
+    (type
+      (primitive_type))
+    (block
+      (let_statement
+        (identifier)
+        (method_call
+          (method_call
+            (identifier)
+            (identifier)
+            (arguments
+              (string)))
+          (identifier)
+          (arguments)))
+      (if_statement
+        (method_call
+          (identifier)
+          (identifier)
+          (arguments))
+        (block
+          (return_statement
+            (string
+              (string_content)
+              (interpolation
+                (identifier))))))
+      (return_statement
+        (identifier)))))

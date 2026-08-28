@@ -1,0 +1,251 @@
+================================================================================
+given, run and an event expectation
+================================================================================
+
+test "a first order is appended as written" {
+  given @order.placed { order_id: ADA, total: 25.99 }
+
+  run PlaceOrder {
+    order_id: ADA,
+    address: address(12),
+  }
+
+  expect @order.placed { order_id: ADA, total: 25.99 }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (test_declaration
+    (string
+      (string_content))
+    (test_body
+      (given_clause
+        (event_path)
+        (field_initializer_list
+          (field_initializer
+            (identifier)
+            (identifier))
+          (field_initializer
+            (identifier)
+            (decimal_literal))))
+      (run_clause
+        (identifier)
+        (field_initializer_list
+          (field_initializer
+            (identifier)
+            (identifier))
+          (field_initializer
+            (identifier)
+            (call_expression
+              (identifier)
+              (arguments
+                (integer_literal))))))
+      (expect_clause
+        (event_expectation
+          (event_path)
+          (field_initializer_list
+            (field_initializer
+              (identifier)
+              (identifier))
+            (field_initializer
+              (identifier)
+              (decimal_literal))))))))
+
+================================================================================
+outcomes and nothing
+================================================================================
+
+test "a blank address is the caller's mistake" {
+  run PlaceOrder { address: "   " }
+
+  expect invalid("address must not be blank")
+  expect reject("email_taken", "that email has already placed an order")
+  expect nothing
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (test_declaration
+    (string
+      (string_content))
+    (test_body
+      (run_clause
+        (identifier)
+        (field_initializer_list
+          (field_initializer
+            (identifier)
+            (string
+              (string_content)))))
+      (expect_clause
+        (outcome_expression
+          (arguments
+            (string
+              (string_content)))))
+      (expect_clause
+        (outcome_expression
+          (arguments
+            (string
+              (string_content))
+            (string
+              (string_content)))))
+      (expect_clause))))
+
+================================================================================
+project and row expectations
+================================================================================
+
+test "a placed order writes the row" {
+  given @order.placed { order_id: ADA }
+
+  project Orders
+
+  expect Order[ADA] { customer_id: 1, status: Placed, tracking: none }
+  expect no Plan[1]
+  expect Customer[1]
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (test_declaration
+    (string
+      (string_content))
+    (test_body
+      (given_clause
+        (event_path)
+        (field_initializer_list
+          (field_initializer
+            (identifier)
+            (identifier))))
+      (project_clause
+        (identifier))
+      (expect_clause
+        (row_expectation
+          (identifier)
+          (identifier)
+          (field_initializer_list
+            (field_initializer
+              (identifier)
+              (integer_literal))
+            (field_initializer
+              (identifier)
+              (identifier))
+            (field_initializer
+              (identifier)
+              (none_literal)))))
+      (expect_clause
+        (row_expectation
+          (identifier)
+          (integer_literal)))
+      (expect_clause
+        (row_expectation
+          (identifier)
+          (integer_literal))))))
+
+================================================================================
+respond, erased, deliver and every trace expectation
+================================================================================
+
+test "confirming an order records the notification" {
+  given @order.placed { order_id: ADA }
+
+  respond "https://mail.example/confirm" 503
+  respond "https://mail.example/confirm" 200 { "ok": true }
+  respond "https://mail.example/other" timeout
+  erased customer_id "1"
+
+  deliver NotifyCustomer
+
+  expect http.post("https://mail.example/confirm", { "to": "ada@example.com" })
+  expect http.get("https://mail.example/confirm")
+  expect log("confirmed an order")
+  expect fail("confirmation rejected")
+  expect erase(customer_id, "1")
+  expect invoke RecordNotified { order_id: ADA }
+  expect skipped
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (test_declaration
+    (string
+      (string_content))
+    (test_body
+      (given_clause
+        (event_path)
+        (field_initializer_list
+          (field_initializer
+            (identifier)
+            (identifier))))
+      (respond_clause
+        (string
+          (string_content))
+        (integer_literal))
+      (respond_clause
+        (string
+          (string_content))
+        (integer_literal)
+        (object_literal
+          (object_entry
+            (string
+              (string_content))
+            (boolean_literal))))
+      (respond_clause
+        (string
+          (string_content)))
+      (erased_clause
+        (identifier)
+        (string
+          (string_content)))
+      (deliver_clause
+        (identifier))
+      (expect_clause
+        (method_call
+          (identifier)
+          (identifier)
+          (arguments
+            (string
+              (string_content))
+            (object_literal
+              (object_entry
+                (string
+                  (string_content))
+                (string
+                  (string_content)))))))
+      (expect_clause
+        (method_call
+          (identifier)
+          (identifier)
+          (arguments
+            (string
+              (string_content)))))
+      (expect_clause
+        (call_expression
+          (identifier)
+          (arguments
+            (string
+              (string_content)))))
+      (expect_clause
+        (call_expression
+          (identifier)
+          (arguments
+            (string
+              (string_content)))))
+      (expect_clause
+        (call_expression
+          (identifier)
+          (arguments
+            (identifier)
+            (string
+              (string_content)))))
+      (expect_clause
+        (invoke_expression
+          (identifier)
+          (field_initializer_list
+            (field_initializer
+              (identifier)
+              (identifier)))))
+      (expect_clause))))

@@ -1,0 +1,14 @@
+{
+  "name": "tree-sitter-hek",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for hek (heklang)",
+  "main": "grammar.js",
+  "type": "commonjs",
+  "keywords": ["tree-sitter", "hek", "heklang", "parser"],
+  "license": "MIT",
+  "scripts": {
+    "build": "tree-sitter generate --abi 14",
+    "test": "tree-sitter test",
+    "parse": "tree-sitter parse ../hek/*.hk --quiet --stat"
+  }
+}

@@ -561,6 +561,7 @@ impl Parser {
         };
         self.check_recursion(&program)?;
         self.check_cycles(&program)?;
+        self.check_zeros(&program)?;
 
         // E: every test, against the finished program. Order is irrelevant here for
         // the same reason it is everywhere else: nothing a test names is scoped.
@@ -902,16 +903,6 @@ impl Parser {
         Ok(value)
     }
 
-    /// The declarations a zero value consults, with the projector's enums shadowing
-    /// the module's.
-    fn defs(&self) -> value::Defs<'_> {
-        value::Defs {
-            local: &self.enums,
-            enums: &self.module_enums,
-            records: &self.records,
-        }
-    }
-
     fn record_def(&self, name: &str) -> Option<&RecordDef> {
         self.records.iter().find(|def| def.name == name)
     }
@@ -1148,7 +1139,6 @@ impl Parser {
         self.expect_sym(Sym::LBrace)?;
 
         let mut fields: Vec<EntityField> = Vec::new();
-        let mut at: Vec<(u32, u32)> = Vec::new();
         let mut indexes: Vec<Index> = Vec::new();
         let mut key: Option<usize> = None;
 
@@ -1224,7 +1214,6 @@ impl Parser {
             }
 
             fields.push(field);
-            at.push((line, col));
             if !self.eat_sym(Sym::Comma) {
                 break;
             }
@@ -1240,38 +1229,6 @@ impl Parser {
                 if !fields.iter().any(|field| &field.name == column) {
                     return self.fail(format!("entity `{name}` has no field `{column}` to index"));
                 }
-            }
-        }
-
-        for (position, field) in fields.iter().enumerate() {
-            if position == key || field.default.is_some() {
-                continue;
-            }
-            let (line, col) = at[position];
-            if let Type::Enum(enum_name) = &field.ty
-                && self
-                    .enum_def(enum_name)
-                    .is_some_and(|def| def.default.is_none())
-            {
-                return Err(self.err(
-                    format!(
-                        "`{enum_name}` needs a `@default` variant to be a field of `{name}`, or `{}` must be optional",
-                        field.name
-                    ),
-                    line,
-                    col,
-                ));
-            }
-            if value::zero(&field.ty, self.defs()).is_none() {
-                let ty = &field.ty;
-                return Err(self.err(
-                    format!(
-                        "`{}` is a {ty} with no zero value; give it a default or make it `{ty}?`",
-                        field.name
-                    ),
-                    line,
-                    col,
-                ));
             }
         }
 
@@ -4729,6 +4686,74 @@ impl Parser {
     /// A `fn` may not call itself, directly or through another. Termination by
     /// construction rather than by a cap, which is the argument the self-trigger check
     /// already makes: a fold arm re-runs on every attempt and must not be able to hang.
+    /// Rule 5: the zero table is read by `materialize` and by nothing else, and a
+    /// materializing `patch` on an absent key is the only thing that reaches it. So an
+    /// entity written only by `put`, `update` and `delete` needs no zeros, and asking
+    /// it for one asks for a sentinel. Runs after pass D, because the answer is in the
+    /// handlers rather than in the declaration.
+    fn check_zeros(&self, program: &Program) -> Result<(), SyntaxError> {
+        for projector in &program.projectors {
+            let defs = value::Defs {
+                local: &projector.enums,
+                enums: &self.module_enums,
+                records: &self.records,
+            };
+            let mut patched: Vec<(&Ident, Span)> = Vec::new();
+            for handler in &projector.handlers {
+                walk_stmts(&handler.body, &mut |stmt| {
+                    if let Stmt::Patch {
+                        entity,
+                        absent: Absent::Materialize,
+                        span,
+                        ..
+                    } = stmt
+                    {
+                        patched.push((entity, *span));
+                    }
+                });
+            }
+
+            for (entity, span) in patched {
+                let Some(def) = projector.entity(entity) else {
+                    continue;
+                };
+                for (position, field) in def.fields.iter().enumerate() {
+                    // The subscript supplies the key, and a default is the zero the
+                    // author chose.
+                    if position == def.key || field.default.is_some() {
+                        continue;
+                    }
+                    if value::zero(&field.ty, defs).is_some() {
+                        continue;
+                    }
+                    let ty = &field.ty;
+                    // An enum with no `@default` has no zero for a different reason
+                    // than a `Uuid` does, and it has one more fix.
+                    let complaint = match ty {
+                        Type::Enum(name) => format!(
+                            "`{}` is a `{name}` with no `@default` variant; give the enum one, give the field a default, or make this an `update`",
+                            field.name
+                        ),
+                        _ => format!(
+                            "`{}` is a {ty} with no zero value; give it a default, make it `{ty}?`, or make this an `update`",
+                            field.name
+                        ),
+                    };
+                    let error = SyntaxError::new(
+                        format!("this `patch` materializes a `{entity}`, and {complaint}"),
+                        span.line,
+                        span.col,
+                    );
+                    return Err(match &projector.module {
+                        Some(module) => error.in_file(module),
+                        None => error,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn check_recursion(&self, program: &Program) -> Result<(), SyntaxError> {
         let Some(path) = fn_cycle(program) else {
             return Ok(());

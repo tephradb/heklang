@@ -1,0 +1,213 @@
+================================================================================
+entity with a key, indexes and a default
+================================================================================
+
+projector Orders {
+  enum Status { @default Placed, Shipped }
+
+  entity Order {
+    order_id: Uuid @key,
+    customer_id: Int @index,
+    email: String @max(200),
+    status: Status,
+    tracking: String?,
+    name: String = "unknown",
+
+    index (customer_id, status)
+  }
+
+  on @order.placed as e { order_id, customer_id, email } {
+    put Order {
+      order_id, customer_id, email,
+      status: Placed,
+      tracking: none,
+      name: e.id,
+    }
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (projector_declaration
+    (type_identifier)
+    (enum_declaration
+      (type_identifier)
+      (enum_variant
+        (annotation
+          (annotation_name))
+        (identifier))
+      (enum_variant
+        (identifier)))
+    (entity_declaration
+      (type_identifier)
+      (entity_field
+        (identifier)
+        (type
+          (primitive_type))
+        (annotation
+          (annotation_name)))
+      (entity_field
+        (identifier)
+        (type
+          (primitive_type))
+        (annotation
+          (annotation_name)))
+      (entity_field
+        (identifier)
+        (type
+          (primitive_type))
+        (annotation
+          (annotation_name)
+          (annotation_arguments
+            (integer_literal))))
+      (entity_field
+        (identifier)
+        (type
+          (type_identifier)))
+      (entity_field
+        (identifier)
+        (type
+          (primitive_type)))
+      (entity_field
+        (identifier)
+        (type
+          (primitive_type))
+        (string
+          (string_content)))
+      (index_clause
+        (index_keyword)
+        (identifier)
+        (identifier)))
+    (event_handler
+      (event_path)
+      (identifier)
+      (destructure
+        (identifier)
+        (identifier)
+        (identifier))
+      (block
+        (put_statement
+          (identifier)
+          (field_initializer_list
+            (field_initializer
+              (identifier))
+            (field_initializer
+              (identifier))
+            (field_initializer
+              (identifier))
+            (field_initializer
+              (identifier)
+              (identifier))
+            (field_initializer
+              (identifier)
+              (none_literal))
+            (field_initializer
+              (identifier)
+              (field_expression
+                (identifier)
+                (identifier)))))))))
+
+================================================================================
+patch, update, delete and a stored read
+================================================================================
+
+projector Plans {
+  entity Plan { plan_id: Int @key, sold: Int }
+
+  on @plan.sold { plan_id, price } {
+    update Plan[plan_id] { sold: .sold + 1 }
+    patch Plan[plan_id] { sold: .sold - 1 }
+  }
+
+  on @plan.deleted { plan_id } {
+    delete Plan[plan_id]
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (projector_declaration
+    (type_identifier)
+    (entity_declaration
+      (type_identifier)
+      (entity_field
+        (identifier)
+        (type
+          (primitive_type))
+        (annotation
+          (annotation_name)))
+      (entity_field
+        (identifier)
+        (type
+          (primitive_type))))
+    (event_handler
+      (event_path)
+      (destructure
+        (identifier)
+        (identifier))
+      (block
+        (patch_statement
+          (identifier)
+          (identifier)
+          (field_initializer_list
+            (field_initializer
+              (identifier)
+              (binary_expression
+                (stored_field
+                  (identifier))
+                (integer_literal)))))
+        (patch_statement
+          (identifier)
+          (identifier)
+          (field_initializer_list
+            (field_initializer
+              (identifier)
+              (binary_expression
+                (stored_field
+                  (identifier))
+                (integer_literal)))))))
+    (event_handler
+      (event_path)
+      (destructure
+        (identifier))
+      (block
+        (delete_statement
+          (identifier)
+          (identifier))))))
+
+================================================================================
+a handler with no destructure
+================================================================================
+
+projector Notes {
+  entity Note { order_id: Uuid @key }
+
+  on @order.placed {
+    put Note { order_id: 1 }
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (projector_declaration
+    (type_identifier)
+    (entity_declaration
+      (type_identifier)
+      (entity_field
+        (identifier)
+        (type
+          (primitive_type))
+        (annotation
+          (annotation_name))))
+    (event_handler
+      (event_path)
+      (block
+        (put_statement
+          (identifier)
+          (field_initializer_list
+            (field_initializer
+              (identifier)
+              (integer_literal))))))))

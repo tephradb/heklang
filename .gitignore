@@ -13,3 +13,7 @@ devenv.local.yaml
 # Added by cargo
 
 /target
+
+# tree-sitter; src/ is committed, the built object and node deps are not
+/tree-sitter-hek/hek.so
+/tree-sitter-hek/node_modules

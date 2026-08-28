@@ -152,8 +152,8 @@ value outright.
 
 ## 5. Zero values
 
-Every entity field has a well-defined initial value, so a `patch` against a missing key can always
-materialize the row.
+An entity field that a `patch` might materialize has a well-defined initial value, so a `patch`
+against a missing key can always build the row.
 
 | Type | Zero |
 | --- | --- |
@@ -173,15 +173,52 @@ way to write, so the restriction costs nothing and is additive to lift.
 
 `Uuid` and `Timestamp` have no zero because the nil UUID and epoch zero are real values that get
 mistaken for data. A row that materialized with `00000000-0000-0000-0000-000000000000` looks like a
-row that was written, and a `placed_at` of 1970-01-01 sorts to the top of every query. So a non-key
-field of either type must be optional or carry an explicit default, and anything else is a compile
-error naming the field and both fixes.
+row that was written, and a `placed_at` of 1970-01-01 sorts to the top of every query.
 
 `@key` fields need no default, because the subscript supplies them.
 
-**Rejected: the nil UUID and epoch zero.** They make the zero table total and remove a compile error,
-at the cost of making "absent" and "present but unset" indistinguishable in the data. The compile
-error is the cheaper of the two.
+### A zero is required only where a zero is read
+
+The demand is not on the declaration, it is on the **write**:
+
+> An entity that some `patch` can materialize needs a zero or a default for every column.
+> An entity written only by `put`, `update` and `delete` needs neither.
+
+That follows from where a zero is actually consulted. `materialize` is the only caller of the zero
+table, and a materializing `patch` on an absent key is the only caller of `materialize`. `put`
+requires every field to be written and never reads a zero, so a defaulted column must still appear in
+a `put`. `update` drops the write when the row is absent, so it creates nothing.
+
+So an entity that nothing patches was being asked for a value that provably nothing reads, and the
+usual way to supply one is a sentinel: exactly the thing the table above refuses to make a zero. The
+check that existed to prevent nil UUIDs in the data was the reason a nil UUID got written down.
+
+The error names the `patch` that creates the requirement rather than the column alone, because the
+choice is at the write:
+
+```
+this `patch` materializes a `Warranty`, and `plan_id` is a Uuid with no zero value;
+give it a default, make it `Uuid?`, or make this an `update`
+```
+
+**What this costs.** An entity declaration no longer proves on its own that every column of every row
+is populated. That property still holds, and for the same two reasons as before, but reading it off
+now takes the handlers as well as the declaration. The cost is bounded by scope: an entity is
+declared inside a projector and a projector is one braced block, so every write against it is on the
+same page as it. The second cost is that adding a `patch` can be rejected over a column it does not
+touch, which is why the message names the entity and lists all three fixes.
+
+**Rejected: checking per field rather than per entity.** "A field is safe if every `patch` writes it"
+is the more precise rule and it does not hold. `materialize` fills every non-key field from the zero
+table *before* `Stmt::Patch` runs its `.field` loads and inserts its own values, so a written field is
+still read from its zero on the way through, and a `.field` read of it happens in between. Making it
+true would mean splitting a patch's columns into read-then-written and written-only and threading
+that into `materialize`: two conditions and an interpreter change, to buy an entity that is patched,
+has a column with no zero, and writes that column in every single patch without reading it.
+
+**Rejected: the nil UUID and epoch zero.** They make the zero table total and remove the compile
+error, at the cost of making "absent" and "present but unset" indistinguishable in the data. The
+compile error is the cheaper of the two, and now it is only raised where the distinction can arise.
 
 ### Choosing between `patch` and `update`
 

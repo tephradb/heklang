@@ -1,0 +1,201 @@
+================================================================================
+an arm on several paths, with a fold and a headers argument
+================================================================================
+
+effect AuditCatalog {
+  on @item.listed,
+     @item.delisted,
+     @item.flagged as e { item_id, seller_id } {
+
+    state listed: Int = fold 0
+      on @item.listed(seller_id) => listed + 1
+
+    let response = http.post(
+      "https://audit.example/catalog",
+      { "seller": seller_id, "listed": listed },
+      headers = { "Idempotency-Key": "{audit_id(seller_id, e.position)}" },
+    )
+
+    if response.status >= 400 {
+      fail("audit rejected")
+    }
+
+    log("seller {seller_id} now lists {listed}")
+
+    invoke RecordNotified {
+      order_id: e.order_id,
+      notification_id: Uuid.derive(e.id, "confirmation"),
+    }
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (effect_declaration
+    (type_identifier)
+    (event_handler
+      (event_path)
+      (event_path)
+      (event_path)
+      (identifier)
+      (destructure
+        (identifier)
+        (identifier))
+      (block
+        (state_declaration
+          (identifier)
+          (type
+            (primitive_type))
+          (integer_literal)
+          (fold_arm
+            (slice_reference
+              (event_path)
+              (filter
+                (identifier)))
+            (binary_expression
+              (identifier)
+              (integer_literal))))
+        (let_statement
+          (identifier)
+          (method_call
+            (identifier)
+            (identifier)
+            (arguments
+              (string
+                (string_content))
+              (object_literal
+                (object_entry
+                  (string
+                    (string_content))
+                  (identifier))
+                (object_entry
+                  (string
+                    (string_content))
+                  (identifier)))
+              (named_argument
+                (identifier)
+                (object_literal
+                  (object_entry
+                    (string
+                      (string_content))
+                    (string
+                      (interpolation
+                        (call_expression
+                          (identifier)
+                          (arguments
+                            (identifier)
+                            (field_expression
+                              (identifier)
+                              (identifier))))))))))))
+        (if_statement
+          (binary_expression
+            (field_expression
+              (identifier)
+              (identifier))
+            (integer_literal))
+          (block
+            (expression_statement
+              (call_expression
+                (identifier)
+                (arguments
+                  (string
+                    (string_content)))))))
+        (expression_statement
+          (call_expression
+            (identifier)
+            (arguments
+              (string
+                (string_content)
+                (interpolation
+                  (identifier))
+                (string_content)
+                (interpolation
+                  (identifier))))))
+        (invoke_expression
+          (identifier)
+          (field_initializer_list
+            (field_initializer
+              (identifier)
+              (field_expression
+                (identifier)
+                (identifier)))
+            (field_initializer
+              (identifier)
+              (method_call
+                (identifier)
+                (identifier)
+                (arguments
+                  (field_expression
+                    (identifier)
+                    (identifier))
+                  (string
+                    (string_content)))))))))))
+
+================================================================================
+reveal, now and erase
+================================================================================
+
+effect SyncShop {
+  on @shop.sync.requested as e { shop_id } {
+    state token: String? = fold none
+      on @shop.connected(shop_id) { access_token } => access_token
+
+    let secret = reveal(token)
+    let at = now()
+    if secret.is_none() {
+      erase(e.shop_id)
+      return
+    }
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (effect_declaration
+    (type_identifier)
+    (event_handler
+      (event_path)
+      (identifier)
+      (destructure
+        (identifier))
+      (block
+        (state_declaration
+          (identifier)
+          (type
+            (primitive_type))
+          (none_literal)
+          (fold_arm
+            (slice_reference
+              (event_path)
+              (filter
+                (identifier)))
+            (destructure
+              (identifier))
+            (identifier)))
+        (let_statement
+          (identifier)
+          (call_expression
+            (identifier)
+            (arguments
+              (identifier))))
+        (let_statement
+          (identifier)
+          (call_expression
+            (identifier)
+            (arguments)))
+        (if_statement
+          (method_call
+            (identifier)
+            (identifier)
+            (arguments))
+          (block
+            (expression_statement
+              (call_expression
+                (identifier)
+                (arguments
+                  (field_expression
+                    (identifier)
+                    (identifier)))))
+            (return_statement)))))))

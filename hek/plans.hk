@@ -19,12 +19,23 @@ projector Plans {
     revenue: Money(2),
   }
 
-  on @plan.created { plan_id, title, price } {
+  // Written only by `put` and `delete`, so nothing can materialize it and nothing ever
+  // reads a zero for `owner_id`. That is why a `Uuid` column needs no default here and
+  // could not have one worth writing: the only candidate is the nil uuid, which is the
+  // value the zero table refuses to invent.
+  entity Owner {
+    plan_id: Int @key,
+    owner_id: Uuid,
+  }
+
+  on @plan.created { plan_id, title, price, owner_id } {
     put Plan { plan_id, title, price, status: Active, sold: 0 }
+    put Owner { plan_id, owner_id }
   }
 
   on @plan.deleted { plan_id } {
     delete Plan[plan_id]
+    delete Owner[plan_id]
   }
 
   // A `Plan` is an identity, so an absent one means the plan does not exist and the
@@ -44,6 +55,7 @@ event @plan.created {
   plan_id: Int,
   title: String,
   price: Money(2),
+  owner_id: Uuid,
 }
 
 event @plan.deleted {

@@ -1,0 +1,256 @@
+================================================================================
+operator precedence
+================================================================================
+
+const A: Bool = a || b && c == d + e * f
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (const_declaration
+    (identifier)
+    (type
+      (primitive_type))
+    (binary_expression
+      (identifier)
+      (binary_expression
+        (identifier)
+        (binary_expression
+          (identifier)
+          (binary_expression
+            (identifier)
+            (binary_expression
+              (identifier)
+              (identifier))))))))
+
+================================================================================
+unary operators
+================================================================================
+
+const A: Bool = !x
+const B: Int = -1
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (const_declaration
+    (identifier)
+    (type
+      (primitive_type))
+    (unary_expression
+      (identifier)))
+  (const_declaration
+    (identifier)
+    (type
+      (primitive_type))
+    (unary_expression
+      (integer_literal))))
+
+================================================================================
+lists, comprehensions and the empty list
+================================================================================
+
+const A: List(String) = []
+const B: List(Int) = [1, 2, 3]
+
+fn tagged(items: Map(Uuid, Item), tag: String) -> List(String) {
+  return [item.sku for item_id, item in items if item.tags.contains(tag)]
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (const_declaration
+    (identifier)
+    (type
+      (list_type
+        (type
+          (primitive_type))))
+    (list))
+  (const_declaration
+    (identifier)
+    (type
+      (list_type
+        (type
+          (primitive_type))))
+    (list
+      (integer_literal)
+      (integer_literal)
+      (integer_literal)))
+  (function_declaration
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (type
+          (map_type
+            (type
+              (primitive_type))
+            (type
+              (type_identifier)))))
+      (parameter
+        (identifier)
+        (type
+          (primitive_type))))
+    (type
+      (list_type
+        (type
+          (primitive_type))))
+    (block
+      (return_statement
+        (comprehension
+          (field_expression
+            (identifier)
+            (identifier))
+          (iter_bindings
+            (identifier)
+            (identifier)
+            (identifier))
+          (method_call
+            (field_expression
+              (identifier)
+              (identifier))
+            (identifier)
+            (arguments
+              (identifier))))))))
+
+================================================================================
+a value-position if needs both branches
+================================================================================
+
+command Discount(total: Money(2)) {
+  let cut = if total > 1000.00 { total.mul(0.9, HalfUp) } else { total }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (command_declaration
+    (type_identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (type
+          (scaled_type
+            (integer_literal)))))
+    (block
+      (let_statement
+        (identifier)
+        (if_expression
+          (binary_expression
+            (identifier)
+            (decimal_literal))
+          (method_call
+            (identifier)
+            (identifier)
+            (arguments
+              (decimal_literal)
+              (identifier)))
+          (identifier))))))
+
+================================================================================
+object literals take quoted keys
+================================================================================
+
+effect Ping {
+  on @a.b {
+    http.post("https://example", { "to": 1, "nested": { "k": [1] } })
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (effect_declaration
+    (type_identifier)
+    (event_handler
+      (event_path)
+      (block
+        (expression_statement
+          (method_call
+            (identifier)
+            (identifier)
+            (arguments
+              (string
+                (string_content))
+              (object_literal
+                (object_entry
+                  (string
+                    (string_content))
+                  (integer_literal))
+                (object_entry
+                  (string
+                    (string_content))
+                  (object_literal
+                    (object_entry
+                      (string
+                        (string_content))
+                      (list
+                        (integer_literal)))))))))))))
+
+================================================================================
+type-qualified builtins
+================================================================================
+
+command Build(x: Int) {
+  let a = Map.empty
+  let b = Json.empty
+  let c = Json.encode(x)
+  let d = Timestamp.parse("t")
+  let e = Money.parse("1.00")
+  let f = Uuid.derive(NAMESPACE, "seed")
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (command_declaration
+    (type_identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (type
+          (primitive_type))))
+    (block
+      (let_statement
+        (identifier)
+        (field_expression
+          (identifier)
+          (identifier)))
+      (let_statement
+        (identifier)
+        (field_expression
+          (identifier)
+          (identifier)))
+      (let_statement
+        (identifier)
+        (method_call
+          (identifier)
+          (identifier)
+          (arguments
+            (identifier))))
+      (let_statement
+        (identifier)
+        (method_call
+          (identifier)
+          (identifier)
+          (arguments
+            (string
+              (string_content)))))
+      (let_statement
+        (identifier)
+        (method_call
+          (identifier)
+          (identifier)
+          (arguments
+            (string
+              (string_content)))))
+      (let_statement
+        (identifier)
+        (method_call
+          (identifier)
+          (identifier)
+          (arguments
+            (identifier)
+            (string
+              (string_content))))))))

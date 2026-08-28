@@ -384,6 +384,10 @@ fn plan_created(plan_id: i64, title: &str, price: i64) -> Event {
             ("plan_id", Value::Int(plan_id)),
             ("title", Value::str(title)),
             ("price", Value::money(price, SCALE)),
+            (
+                "owner_id",
+                Value::uuid("0190d1a1-0000-7000-8000-000000000009"),
+            ),
         ],
     )
 }
@@ -421,6 +425,8 @@ fn plans_demo(program: &Program) {
     if let Some(store) = project(&interpreter, "sold once", "Plans") {
         rows(&store, "Plan", &["1"], &["title", "status", "sold"]);
         rows(&store, "Sales", &["1"], &["revenue"]);
+        // Put-only, so its `Uuid` column needs no zero and carries no sentinel.
+        rows(&store, "Owner", &["1"], &["owner_id"]);
     }
 
     for event in then_deleted {

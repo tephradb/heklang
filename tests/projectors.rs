@@ -490,6 +490,8 @@ fn update_outside_a_projector_says_where_it_belongs() {
     );
 }
 
+/// The zero table is read by a materializing `patch` and by nothing else, so this is
+/// where the demand for a zero comes from.
 #[test]
 fn uuid_and_timestamp_have_no_zero() {
     for ty in ["Uuid", "Timestamp"] {
@@ -498,21 +500,94 @@ fn uuid_and_timestamp_have_no_zero() {
   entity Thing {{
     id: Int @key,
     stamp: {ty},
+    seen: Int,
   }}
   on @order.placed {{ order_id }} {{
-    delete Thing[1]
+    patch Thing[1] {{ seen: .seen + 1 }}
   }}
 }}
 "
         );
         let message = parse(&source)
-            .expect_err("a non-optional {ty} field needs a default")
+            .expect_err("a patched entity needs a zero for every column")
             .message;
         assert_eq!(
             message,
-            format!("`stamp` is a {ty} with no zero value; give it a default or make it `{ty}?`")
+            format!(
+                "this `patch` materializes a `Thing`, and `stamp` is a {ty} with no zero value; give it a default, make it `{ty}?`, or make this an `update`"
+            )
         );
     }
+}
+
+/// The same entity, written only by `put`, `update` and `delete`. Nothing can
+/// materialize it, so nothing ever reads a zero for `stamp`, and demanding one would
+/// be demanding a sentinel: exactly what the table refuses to make a zero.
+#[test]
+fn an_unpatched_entity_needs_no_zero() {
+    for ty in ["Uuid", "Timestamp"] {
+        let source = format!(
+            "{EVENTS}projector P {{
+  entity Thing {{
+    id: Int @key,
+    stamp: {ty},
+    seen: Int,
+  }}
+  on @order.placed {{ order_id }} {{
+    update Thing[1] {{ seen: .seen + 1 }}
+    delete Thing[2]
+  }}
+}}
+"
+        );
+        parse(&source).unwrap_or_else(|err| panic!("for {ty}: {err}"));
+    }
+}
+
+/// A `put` requires every field to be written and never consults a zero, so it is the
+/// write itself that proves the column is populated. The runtime check that enforces
+/// that is `src/interp.rs`'s missing-field error, which is why dropping a field here
+/// is still caught.
+#[test]
+fn a_put_only_entity_needs_no_zero() {
+    let source = format!(
+        "{EVENTS}projector P {{
+  entity Thing {{
+    id: Uuid @key,
+    origin: Uuid,
+  }}
+  on @order.placed {{ order_id }} {{
+    put Thing {{ id: order_id, origin: order_id }}
+  }}
+}}
+"
+    );
+    let program = parse(&source).unwrap_or_else(|err| panic!("{err}"));
+    let store = Interpreter::with_log(&program, vec![placed(1, 7, 100)])
+        .project("P")
+        .unwrap_or_else(|err| panic!("{err}"));
+    let row = store
+        .get("Thing", &Key::Uuid("order-1".into()))
+        .expect("the put landed");
+    assert_eq!(row.field("origin"), Some(&Value::uuid("order-1")));
+}
+
+/// The requirement is per entity, not per patch: a second entity in the same projector
+/// is unaffected by the first one being patched.
+#[test]
+fn the_zero_requirement_follows_the_entity_that_is_patched() {
+    let source = format!(
+        "{EVENTS}projector P {{
+  entity Counter {{ id: Int @key, seen: Int }}
+  entity Identity {{ id: Int @key, stamp: Uuid }}
+  on @order.placed {{ order_id }} {{
+    patch Counter[1] {{ seen: .seen + 1 }}
+    update Identity[2] {{ stamp: order_id }}
+  }}
+}}
+"
+    );
+    parse(&source).unwrap_or_else(|err| panic!("{err}"));
 }
 
 #[test]
@@ -626,21 +701,26 @@ fn an_optional_field_takes_a_present_default() {
 
 // Rule 6: enum defaults.
 
+/// An enum with no `@default` has no zero, so the requirement reaches it the same way
+/// it reaches a `Uuid`, and for the same reason: only a `patch` reads one.
 #[test]
 fn an_enum_field_needs_a_default_variant() {
     let source = format!(
         "{EVENTS}projector P {{
   enum Status {{ Placed, Shipped }}
-  entity Order {{ order_id: Uuid @key, status: Status }}
-  on @order.placed {{ order_id }} {{ delete Order[order_id] }}
+  entity Order {{ order_id: Uuid @key, status: Status, seen: Int }}
+  on @order.placed {{ order_id }} {{ patch Order[order_id] {{ seen: .seen + 1 }} }}
 }}
 "
     );
     let message = parse(&source).expect_err("no @default variant").message;
-    assert!(
-        message.contains("needs a `@default` variant"),
-        "got: {message}"
+    assert_eq!(
+        message,
+        "this `patch` materializes a `Order`, and `status` is a `Status` with no `@default` variant; give the enum one, give the field a default, or make this an `update`"
     );
+
+    let unpatched = source.replace("patch Order", "update Order");
+    parse(&unpatched).unwrap_or_else(|err| panic!("nothing materializes an Order: {err}"));
 }
 
 #[test]
