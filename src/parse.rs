@@ -73,8 +73,11 @@ struct Parser {
     /// Set while parsing an `if` or `for` header, where the `{` that follows opens a
     /// block. Without it `if plan { ... }` reads as a record literal.
     no_record_literal: bool,
-    /// The handler being parsed: its event, and the name its `as` clause bound.
+    /// The handler being parsed: its event, and the name its `as` clause bound. For a
+    /// multi-path arm `event` holds the shared fields and `triggers` holds what was
+    /// listed, so a missing field can say whether it is absent or merely not shared.
     event: Option<EventDef>,
+    triggers: Vec<EventPath>,
     envelope: Option<Ident>,
     /// Set only while parsing a `patch` value, which is what makes `.field`
     /// structurally illegal anywhere else.
@@ -147,6 +150,7 @@ impl Parser {
             consts: Vec::new(),
             no_record_literal: false,
             event: None,
+            triggers: Vec::new(),
             envelope: None,
             stored: None,
         })
@@ -1326,6 +1330,17 @@ impl Parser {
         }
 
         let def = self.event.as_ref().expect("only called inside a handler");
+        if def.field(&field).is_none() && self.triggers.len() > 1 {
+            let listed: Vec<String> = self.triggers.iter().map(EventPath::to_string).collect();
+            return Err(self.err(
+                format!(
+                    "`{field}` is not shared by {}, so an arm listing them cannot name it; a binding names only what every listed type has, with the same type and the same `@subject`",
+                    listed.join(", ")
+                ),
+                line,
+                col,
+            ));
+        }
         let Some(declared) = def.field(&field) else {
             return Err(self.err(
                 format!(
@@ -2485,18 +2500,23 @@ impl Parser {
             }
             let start = self.pos;
             let arm = self.arm(&name, events)?;
-            // Rule 1: one event selects exactly one arm, so two arms on a type would
-            // make declaration order decide what a replay does.
-            if let Some(index) = arms.iter().position(|other| other.event == arm.event) {
-                let first = self.location(at[index]);
-                return Err(self.err(
-                    format!(
-                        "`{name}` already has an arm on {} at {first}; one event selects exactly one arm",
-                        arm.event
-                    ),
-                    arm.span.line,
-                    arm.span.col,
-                ));
+            // Rule 1: one event selects exactly one arm, so two arms naming a type
+            // would make declaration order decide what a replay does. Unchanged by an
+            // arm listing several paths; it is checked over the whole set instead.
+            for path in &arm.events {
+                let clash = arms
+                    .iter()
+                    .position(|other| other.events.iter().any(|seen| seen == path));
+                if let Some(index) = clash {
+                    let first = self.location(at[index]);
+                    return Err(self.err(
+                        format!(
+                            "`{name}` already has an arm on {path} at {first}; one event selects exactly one arm"
+                        ),
+                        arm.span.line,
+                        arm.span.col,
+                    ));
+                }
             }
             arms.push(arm);
             at.push(start);
@@ -2512,8 +2532,19 @@ impl Parser {
     fn arm(&mut self, effect: &Ident, events: &[EventDef]) -> Result<Arm, SyntaxError> {
         let span = self.span_here();
         self.expect_word(Keyword::On)?;
-        let path = self.expect_path()?;
-        let def = self.event_def(events, &path)?.clone();
+
+        let mut paths = vec![self.expect_path()?];
+        let mut spans = vec![self.span_here()];
+        while self.eat_sym(Sym::Comma) {
+            spans.push(self.span_here());
+            let path = self.expect_path()?;
+            if paths.contains(&path) {
+                return self.fail(format!("this arm already lists {path}"));
+            }
+            paths.push(path);
+        }
+        let def = self.common_fields(&paths, &spans, events)?;
+        self.triggers = paths.clone();
 
         let mut lower = Lower {
             b: Builder::new(effect),
@@ -2559,7 +2590,8 @@ impl Parser {
         self.envelope = None;
         self.kind = Kind::Command;
 
-        let arm = lower.b.finish_arm(path, span, body);
+        self.triggers.clear();
+        let arm = lower.b.finish_arm(paths, span, body);
         if let Err((erase, reveal)) = erase_last(&arm.exprs, &arm.body) {
             return Err(self.err(
                 format!(
@@ -2592,6 +2624,55 @@ impl Parser {
             Token::Ident(name) => self.starts_effect_statement(name),
             _ => false,
         }
+    }
+
+    /// The fields every listed path shares, as one synthesised definition. A field
+    /// counts only when its type **and** its `@subject` match everywhere, so a
+    /// `reveal` through a multi-path binding stays sound.
+    fn common_fields(
+        &self,
+        paths: &[EventPath],
+        spans: &[Span],
+        events: &[EventDef],
+    ) -> Result<EventDef, SyntaxError> {
+        let first = self.event_def(events, &paths[0])?.clone();
+        if paths.len() == 1 {
+            return Ok(first);
+        }
+
+        let rest: Vec<&EventDef> = paths[1..]
+            .iter()
+            .map(|path| self.event_def(events, path))
+            .collect::<Result<_, _>>()?;
+
+        let mut fields = Vec::new();
+        for field in &first.fields {
+            let mut shared = true;
+            for other in &rest {
+                let matches = other
+                    .field(&field.name)
+                    .is_some_and(|found| found.ty == field.ty && found.subject == field.subject);
+                if !matches {
+                    shared = false;
+                    break;
+                }
+            }
+            if shared {
+                fields.push(field.clone());
+            }
+        }
+        if fields.is_empty() {
+            let at = spans[0];
+            return Err(self.err(
+                format!(
+                    "these event types share no field, so an arm listing them could name nothing; {} is the first that differs",
+                    paths[1]
+                ),
+                at.line,
+                at.col,
+            ));
+        }
+        Ok(EventDef::new(first.path.clone(), fields))
     }
 
     /// Whether a statement begins with one of the soft-named effect builtins. They are
@@ -3365,9 +3446,11 @@ impl Parser {
                     let Some(target) = program.command(&command) else {
                         continue;
                     };
-                    for event in emitted(&target.body) {
+                    for (trigger, event) in arm.events.iter().flat_map(|trigger| {
+                        emitted(&target.body).into_iter().map(move |e| (trigger, e))
+                    }) {
                         edges.push(Edge {
-                            from: arm.event.clone(),
+                            from: trigger.clone(),
                             to: event,
                             effect: effect.name.clone(),
                             command: command.clone(),

@@ -305,9 +305,9 @@ impl Builder {
         }
     }
 
-    pub fn finish_arm(self, event: EventPath, span: Span, body: Vec<Stmt>) -> Arm {
+    pub fn finish_arm(self, events: Vec<EventPath>, span: Span, body: Vec<Stmt>) -> Arm {
         Arm {
-            event,
+            events,
             binds: self.binds,
             envelope: self.envelope,
             frame: self.frame as usize,

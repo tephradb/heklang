@@ -53,16 +53,48 @@ the runtime writes the retry.
 An effect is a set of `on` arms. One event selects **exactly one** arm, and two arms naming the same
 event type is a compile error pointing at the first.
 
+**An arm may list several event types**, which is a change to the shape and not to the invariant:
+
+```
+on @shop.reconnected,
+   @warranty.plan.created,
+   @warranty.plan.updated as e { shop_id } { ... }
+```
+
+Every listed path still selects that one arm, and a path appearing in two arms of one effect is
+still an error naming the first. What is given up is only consequence #2 below, "an arm names one
+concrete type", which was listed as a consequence rather than as the reason.
+
+The evidence is one real effect that dispatches **thirteen** event types onto one body. With
+one arm per type, that effect is thirteen copies of six `state` declarations and a forty-line body,
+and the thirteenth copy is where the drift starts. Five more effects in the same application dispatch
+two to four types each. Writing the same fold thirteen times is not a rule being enforced, it is a
+rule being avoided by copying.
+
+The trigger binding then names **only the fields the listed types share**, checked at compile time. A
+field counts as shared only when its type *and* its `@subject` match on every listed path, so a
+`reveal` through a multi-path binding stays sound: the binding cannot name a field that is
+subject-encrypted on one path and plain on another.
+
 This is a deliberate divergence from hekla, which collects every arm whose clause matches and runs
 them all in one invocation. Three things go wrong with that:
 
 - **Declaration order becomes load-bearing for replay.** Arms run in the order they are written, so
   moving one changes which side effects are journaled before which.
 - **The trigger binding becomes polymorphic.** An arm matched by two event types can only name fields
-  common to both.
+  common to both. This is the one consequence a multi-path arm does accept, and the difference is
+  that the author asks for it by listing the types, so the restriction is visible where it is chosen
+  rather than falling out of which clauses happened to match.
 - **Every cross-arm static rule has to reason about the matched set** rather than one arm. Rule 9 is
   the concrete case: with one arm per event it is an intra-arm reachability analysis, and with
   overlapping arms it becomes a question about every order in which the matched set might run.
+
+The counter-example, for honesty about where this stops helping: an effect posting eight different
+alert shapes cannot use one multi-path arm, because its arms differ in the body and not only in the
+trigger. Those eight arms still repeat the same three folds between them, and that is the case that
+argues for effect-level `state`, which this pass deliberately did not add. Per-arm state solved a
+real ordering problem, and multi-path arms plus records may shrink the duplication that motivates it,
+so the case is worth re-measuring before it is answered.
 
 **Projectors legitimately want the opposite rule, and keep it.** Fanning one event out to several
 read models is a real pattern, and a projector has no journal, so nothing about ordering is

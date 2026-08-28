@@ -399,17 +399,21 @@ pub struct Effect {
 
 impl Effect {
     /// The arm one event selects. Rule 1 makes this at most one, so it is a lookup
-    /// rather than a filter.
+    /// rather than a filter, even though an arm may now list several paths.
     pub fn arm(&self, event: &EventPath) -> Option<&Arm> {
-        self.arms.iter().find(|arm| &arm.event == event)
+        self.arms
+            .iter()
+            .find(|arm| arm.events.iter().any(|path| path == event))
     }
 }
 
-/// One `on @path [as name] [{ destructure }] { body }` of an effect. A command minus
-/// its params, plus a trigger binding: the same prologue, slices and arena.
+/// One `on @path[, @path]* [as name] [{ destructure }] { body }` of an effect. A
+/// command minus its params, plus a trigger binding: the same prologue, slices and
+/// arena. Several paths may share one arm; the binding then names only what they have
+/// in common.
 #[derive(Debug, Clone)]
 pub struct Arm {
-    pub event: EventPath,
+    pub events: Vec<EventPath>,
     pub binds: Vec<Bind>,
     pub envelope: Vec<EnvBind>,
     pub frame: usize,

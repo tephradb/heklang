@@ -59,6 +59,19 @@ fn placed(seq: u32, customer_id: i64, total: i64) -> Event {
     )
 }
 
+fn cancelled(seq: u32, customer_id: i64) -> Event {
+    Event::new(
+        EventPath::new(["order", "cancelled"]),
+        [
+            (
+                "order_id",
+                Value::uuid(format!("0190d1a1-0000-7000-8000-{seq:012}")),
+            ),
+            ("customer_id", Value::Int(customer_id)),
+        ],
+    )
+}
+
 /// One delivery of position 0, with `replies` scripted for the one URL these effects
 /// call. Returns the interpreter so a test can read the journal, the log or the lines.
 fn deliver<'a>(
@@ -1112,4 +1125,116 @@ fn an_erase_in_a_loop_poisons_the_whole_body() {
   }
 }",
     );
+}
+
+// ---------------------------------------------------------------------------------
+// Rule 1, second half: an arm may list several event types.
+
+#[test]
+fn an_arm_may_list_several_event_types() {
+    let program = program(
+        "effect E {
+  on @order.placed, @order.cancelled as e { order_id } {
+    log(\"touched {order_id}\")
+  }
+}",
+    );
+    let effect = program.effect("E").expect("declared");
+    assert_eq!(effect.arms.len(), 1, "one arm, not two");
+    assert_eq!(effect.arms[0].events.len(), 2);
+
+    // Either type selects that one arm, which is rule 1's invariant unchanged.
+    for (position, log) in [(0, vec![placed(1, 7, 100)]), (0, vec![cancelled(1, 7)])] {
+        let mut journal = Journal::default();
+        let mut interpreter = Interpreter::with_log(&program, log);
+        interpreter
+            .deliver("E", position, &mut journal)
+            .expect("delivered");
+        assert_eq!(interpreter.lines().len(), 1);
+    }
+}
+
+/// The invariant is unchanged: listing a path in two arms is still an error naming the
+/// first, whether it was listed alone or beside others.
+#[test]
+fn a_path_in_two_arms_is_still_rejected() {
+    let message = err("effect E {
+  on @order.placed, @order.cancelled as e { order_id } {
+    log(\"one\")
+  }
+
+  on @order.cancelled as e {
+    log(\"two\")
+  }
+}");
+    assert!(
+        message.contains("already has an arm on @order.cancelled"),
+        "got: {message}"
+    );
+
+    // And a path listed twice within one arm is caught at the arm.
+    let message = err("effect E {
+  on @order.placed, @order.placed as e {
+    log(\"x\")
+  }
+}");
+    assert_eq!(message, "this arm already lists @order.placed");
+}
+
+/// Only what every listed type shares, checked on name, type and `@subject`, so a
+/// `reveal` through a multi-path binding cannot reach a field that is encrypted on one
+/// path and plain on another.
+#[test]
+fn a_multi_path_binding_names_only_shared_fields() {
+    // `email` is on @order.placed and not on @order.cancelled.
+    let message = err("effect E {
+  on @order.placed, @order.cancelled as e {
+    log(reveal(e.email))
+  }
+}");
+    assert_eq!(
+        message,
+        "`email` is not shared by @order.placed, @order.cancelled, so an arm listing them cannot name it; a binding names only what every listed type has, with the same type and the same `@subject`"
+    );
+
+    // `customer_id` is on both, with the same type, so it is nameable.
+    program(
+        "effect E {
+  on @order.placed, @order.cancelled as e {
+    log(\"{e.customer_id}\")
+  }
+}",
+    );
+}
+
+/// The cycle check walks `trigger -> emitted` per arm, so one arm invoking a command
+/// whose event a *different* arm triggers on is not a cycle. That distinction only
+/// holds if the graph is built per arm rather than per effect.
+#[test]
+fn two_arms_of_one_effect_are_two_nodes() {
+    program(
+        "effect E {
+  on @order.placed as e {
+    invoke RecordNotified {
+      order_id: e.order_id,
+      notification_id: e.order_id,
+    }
+  }
+
+  on @order.notified as e {
+    log(\"noticed\")
+  }
+}",
+    );
+
+    // The same arm doing both is the cycle, and it is still caught.
+    let message = err("effect E {
+  on @order.notified as e {
+    invoke RecordNotified {
+      order_id: e.order_id,
+      notification_id: e.order_id,
+    }
+  }
+}");
+    assert!(message.contains("can trigger itself"), "got: {message}");
 }
