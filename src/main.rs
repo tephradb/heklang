@@ -15,6 +15,7 @@ const PROJECTORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/orders.hk");
 const EFFECTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/notify.hk");
 const CATALOG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/catalog.hk");
 const SHOP: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/shop.hk");
+const PLANS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/plans.hk");
 const AUDIT: &str = "https://audit.example/catalog";
 const SYNC: &str = "https://one.example/admin/api/sync";
 const CONFIRM: &str = "https://mail.example/confirm";
@@ -163,6 +164,13 @@ fn load_catalog() -> Result<Program, String> {
 fn load_shop() -> Result<Program, String> {
     let shop = read(SHOP)?;
     parse_files([("shop/shop.hk", shop.as_str())]).map_err(|err| err.to_string())
+}
+
+/// The plans module, its own program too. Rule 5's two answers need a log where the
+/// same key is written before and after a `delete`.
+fn load_plans() -> Result<Program, String> {
+    let plans = read(PLANS)?;
+    parse_files([("plans/plans.hk", plans.as_str())]).map_err(|err| err.to_string())
 }
 
 fn main() -> ExitCode {
@@ -351,7 +359,97 @@ fn main() -> ExitCode {
         }
     }
 
+    match load_plans() {
+        Ok(plans) => plans_demo(&plans),
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::FAILURE;
+        }
+    }
+
     ExitCode::SUCCESS
+}
+
+fn plan_created(plan_id: i64, title: &str, price: i64) -> Event {
+    Event::new(
+        EventPath::new(["plan", "created"]),
+        [
+            ("plan_id", Value::Int(plan_id)),
+            ("title", Value::str(title)),
+            ("price", Value::money(price, SCALE)),
+        ],
+    )
+}
+
+fn plan_deleted(plan_id: i64) -> Event {
+    Event::new(
+        EventPath::new(["plan", "deleted"]),
+        [("plan_id", Value::Int(plan_id))],
+    )
+}
+
+fn plan_sold(plan_id: i64, price: i64) -> Event {
+    Event::new(
+        EventPath::new(["plan", "sold"]),
+        [
+            ("plan_id", Value::Int(plan_id)),
+            ("price", Value::money(price, SCALE)),
+        ],
+    )
+}
+
+/// One absent key, two entities, two answers. The sale after the delete is the whole
+/// point: the `update` drops it and the `patch` counts it, and neither is a mistake.
+fn plans_demo(program: &Program) {
+    println!("\nmodule plans.hk");
+
+    let sold_once = vec![
+        plan_created(1, "Two-year cover", 9_900),
+        plan_sold(1, 9_900),
+    ];
+    let then_deleted = [plan_deleted(1), plan_sold(1, 9_900)];
+
+    println!("  after @plan.created and one @plan.sold");
+    let mut interpreter = Interpreter::with_log(program, sold_once.clone());
+    if let Some(store) = project(&interpreter, "sold once", "Plans") {
+        rows(&store, "Plan", &["1"], &["title", "status", "sold"]);
+        rows(&store, "Sales", &["1"], &["revenue"]);
+    }
+
+    for event in then_deleted {
+        interpreter.append(event);
+    }
+    println!("\n  after @plan.deleted then a second @plan.sold on the same plan");
+    if let Some(store) = project(&interpreter, "sold after delete", "Plans") {
+        match store.len("Plan") {
+            0 => {
+                println!("  Plan[1] absent: `update` dropped the write, so a gone plan stays gone")
+            }
+            _ => rows(&store, "Plan", &["1"], &["title", "status", "sold"]),
+        }
+        rows(&store, "Sales", &["1"], &["revenue"]);
+    }
+
+    // The same handler written the other way, so the row it manufactures is visible
+    // beside the one that was not.
+    let hollow = program_with_patch();
+    if let Some(program) = hollow.as_ref() {
+        println!("\n  the same log with `patch Plan[plan_id]` instead of `update`");
+        let mut interpreter = Interpreter::with_log(program, sold_once);
+        interpreter.append(plan_deleted(1));
+        interpreter.append(plan_sold(1, 9_900));
+        if let Some(store) = project(&interpreter, "hollow", "Plans") {
+            rows(&store, "Plan", &["1"], &["title", "status", "sold"]);
+        }
+    }
+}
+
+/// `hek/plans.hk` with the one word swapped, parsed on the fly. The hollow row is the
+/// argument for the statement, so the demo shows it rather than describing it.
+fn program_with_patch() -> Option<Program> {
+    let source = read(PLANS).ok()?;
+    let swapped = source.replace("update Plan[plan_id]", "patch Plan[plan_id]");
+    parse_files([("plans/plans.hk", swapped.as_str())]).ok()
 }
 
 fn connected(shop_id: i64, domain: &str, token: &str) -> Event {

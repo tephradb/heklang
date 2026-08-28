@@ -1,0 +1,56 @@
+// The absent-row question, both answers side by side. A merchant-facing plan
+// catalogue keeps two kinds of row, and what "no row here" means differs between
+// them: a plan that is gone is gone, and a revenue total that has never been touched
+// is zero.
+
+projector Plans {
+  enum Status { @default Draft, Active }
+
+  entity Plan {
+    plan_id: Int @key,
+    title: String,
+    price: Money(2),
+    status: Status,
+    sold: Int,
+  }
+
+  entity Sales {
+    plan_id: Int @key,
+    revenue: Money(2),
+  }
+
+  on @plan.created { plan_id, title, price } {
+    put Plan { plan_id, title, price, status: Active, sold: 0 }
+  }
+
+  on @plan.deleted { plan_id } {
+    delete Plan[plan_id]
+  }
+
+  // A `Plan` is an identity, so an absent one means the plan does not exist and the
+  // sale has nothing to count against. A `patch` here would manufacture a plan with a
+  // real id, a real sold count and an empty title.
+  //
+  // `Sales` is a counter, so an absent row means no revenue yet, which is exactly
+  // what its zero says. The two statements sit in one handler because the choice is
+  // about the entity rather than about the event.
+  on @plan.sold { plan_id, price } {
+    update Plan[plan_id] { sold: .sold + 1 }
+    patch Sales[plan_id] { revenue: .revenue + price }
+  }
+}
+
+event @plan.created {
+  plan_id: Int,
+  title: String,
+  price: Money(2),
+}
+
+event @plan.deleted {
+  plan_id: Int,
+}
+
+event @plan.sold {
+  plan_id: Int,
+  price: Money(2),
+}
