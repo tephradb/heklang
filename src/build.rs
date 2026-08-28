@@ -285,6 +285,12 @@ impl Builder {
         }
     }
 
+    /// A test has values and no statements, so it keeps the arena and the frame width
+    /// and nothing else.
+    pub fn finish_test(self) -> (usize, Exprs) {
+        (self.frame as usize, self.exprs)
+    }
+
     pub fn finish(self, body: Vec<Stmt>) -> Command {
         Command {
             name: self.name,

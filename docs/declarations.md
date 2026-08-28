@@ -144,9 +144,13 @@ Without this a namespace constant was unspellable, and so was a nil uuid. It is 
 literal-inference rule `docs/literal-inference.md` already applies to numbers, applied to one more
 literal shape: one token, typed by where it lands.
 
+The rule holds at **every** position with a target type, not only in a `const` or an entity default,
+which is where it used to stop. A `test` is what found that: a suite is mostly ids, and
+`run Ship { order_id: "0190d1a1-..." }` had no way to be written.
+
 ## Four passes
 
-Declaration order does not matter anywhere, which now takes four passes over the token stream rather
+Declaration order does not matter anywhere, which now takes five passes over the token stream rather
 than two. Each does only what the pass before it made possible:
 
 | Pass | Reads | Because |
@@ -155,6 +159,11 @@ than two. Each does only what the pass before it made possible:
 | B | `record` fields | every type they might name now has a name |
 | C | `event`, `projector` shells, `command` signatures, `const` | these name enums and records |
 | D | `command` bodies, `projector` handlers, `effect` arms | these name everything |
+| E | `test` bodies | a test names commands, projectors and effects rather than declaring any |
 
-Skipping an item is cheap, so four passes cost little, and each boundary has one reason rather than
+Pass E is the one boundary that is about a whole declaration rather than about types. A `test` states
+what a command does, which projector to fold and which effect to drive, so it needs all three
+collected before it can resolve one, and pass D is still collecting them while it runs.
+
+Skipping an item is cheap, so five passes cost little, and each boundary has one reason rather than
 being where the code happened to stop. `docs/modules.md` covers what this means across files.

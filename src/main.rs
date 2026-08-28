@@ -2,8 +2,8 @@ use std::fs;
 use std::process::ExitCode;
 
 use heklang::{
-    Event, EventPath, Interpreter, Invocation, Journal, Key, Outcome, Program, Reply, Store, Value,
-    parse_files,
+    Event, EventPath, Interpreter, Invocation, Journal, Key, Outcome, Program, Reply, Store,
+    TestOutcome, Value, parse_files, run_tests,
 };
 
 /// The demo's money scale. A storage precision floor, not a claim about a currency: a
@@ -13,6 +13,7 @@ const SCALE: u8 = 2;
 const COMMANDS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/place_order.hk");
 const PROJECTORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/orders.hk");
 const EFFECTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/notify.hk");
+const TESTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/tests.hk");
 const CATALOG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/catalog.hk");
 const SHOP: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/shop.hk");
 const PLANS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/plans.hk");
@@ -144,10 +145,14 @@ fn load() -> Result<Program, String> {
     let commands = read(COMMANDS)?;
     let projectors = read(PROJECTORS)?;
     let effects = read(EFFECTS)?;
+    // A fourth module that declares only tests, so the counts above it do not move and
+    // the tests run against the acceptance sources rather than against a copy.
+    let tests = read(TESTS)?;
     parse_files([
         ("commands/place_order.hk", commands.as_str()),
         ("projectors/orders.hk", projectors.as_str()),
         ("effects/notify.hk", effects.as_str()),
+        ("tests/orders.hk", tests.as_str()),
     ])
     .map_err(|err| err.to_string())
 }
@@ -366,6 +371,8 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+
+    suite(&program);
 
     ExitCode::SUCCESS
 }
@@ -833,4 +840,21 @@ fn purged(seq: u32) -> Event {
         EventPath::new(["order", "purged"]),
         [("order_id", Value::uuid(uuid(seq)))],
     )
+}
+
+/// `hek/tests.hk` run against the same program the sections above drove by hand. The
+/// point of the construct is that these are the application author's tests, written in
+/// heklang, rather than a harness in Rust.
+fn suite(program: &Program) {
+    println!("\nmodule tests.hk");
+    let results = run_tests(program);
+    let passed = results.iter().filter(|result| result.passed()).count();
+    println!("  {passed}/{} passing", results.len());
+    for result in &results {
+        match &result.outcome {
+            TestOutcome::Passed => println!("  pass  {}", result.name),
+            TestOutcome::Failed(why) => println!("  FAIL  {}: {why}", result.name),
+            TestOutcome::Errored(why) => println!("  ERROR {}: {why}", result.name),
+        }
+    }
 }

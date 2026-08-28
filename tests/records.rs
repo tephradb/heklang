@@ -320,7 +320,7 @@ fn a_const_takes_literals_and_literal_aggregates_only() {
         .message;
     assert_eq!(
         message,
-        "expected `enum`, `record`, `const`, `fn`, `event`, `command`, `projector` or `effect`, found `+`",
+        "expected `enum`, `record`, `const`, `fn`, `event`, `command`, `projector`, `effect` or `test`, found `+`",
         "the literal ends the declaration, so what follows is read as the next item"
     );
 

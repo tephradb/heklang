@@ -1,0 +1,258 @@
+// tests/orders.hk
+//
+// The three handler kinds, tested the way an application author would: a log written
+// out as events, one thing done to it, and what should come out.
+
+const ADA: Uuid = "0190d1a1-0000-7000-8000-000000000001"
+const GRACE: Uuid = "0190d1a1-0000-7000-8000-000000000002"
+
+fn address(n: Int) -> String {
+  return "{n} Reykjavik St"
+}
+
+test "a first order for a fresh customer is appended as written" {
+  run PlaceOrder {
+    order_id: ADA,
+    customer_id: 1,
+    email: "ada@example.com",
+    address: address(12),
+    total: 25.99,
+    tax_rate: 0.2000,
+    notes: "leave at the door",
+  }
+
+  expect @order.placed {
+    order_id: ADA,
+    customer_id: 1,
+    email: "ada@example.com",
+    address: "12 Reykjavik St",
+    total: 25.99,
+    tax_rate: 0.2000,
+    notes: "leave at the door",
+  }
+}
+
+test "an absent note becomes the empty string rather than staying absent" {
+  run PlaceOrder {
+    order_id: ADA,
+    customer_id: 1,
+    email: "ada@example.com",
+    address: address(12),
+    total: 25.99,
+    tax_rate: 0.2000,
+  }
+
+  expect @order.placed {
+    order_id: ADA,
+    customer_id: 1,
+    email: "ada@example.com",
+    address: "12 Reykjavik St",
+    total: 25.99,
+    tax_rate: 0.2000,
+    notes: "",
+  }
+}
+
+test "a blank address is the caller's mistake" {
+  run PlaceOrder {
+    order_id: ADA,
+    customer_id: 1,
+    email: "ada@example.com",
+    address: "   ",
+    total: 25.99,
+    tax_rate: 0.2000,
+  }
+
+  expect invalid("address must not be blank")
+}
+
+test "an email that already placed an order is refused" {
+  given @order.placed {
+    order_id: ADA,
+    customer_id: 1,
+    email: "ada@example.com",
+    address: "12 Reykjavik St",
+    total: 25.99,
+    tax_rate: 0.2000,
+    notes: "",
+  }
+
+  run PlaceOrder {
+    order_id: GRACE,
+    customer_id: 2,
+    email: "ada@example.com",
+    address: address(4),
+    total: 10.00,
+    tax_rate: 0.2000,
+  }
+
+  expect reject("email_taken", "that email has already placed an order")
+}
+
+test "a blocked customer is refused before anything else is checked" {
+  given @customer.blocked { customer_id: 1, reason: "chargebacks" }
+
+  run PlaceOrder {
+    order_id: ADA,
+    customer_id: 1,
+    email: "ada@example.com",
+    address: address(12),
+    total: 25.99,
+    tax_rate: 0.2000,
+  }
+
+  expect reject("customer_blocked", "this customer cannot place orders")
+}
+
+test "a customer past a thousand gets a tenth off" {
+  given @order.placed {
+    order_id: GRACE,
+    customer_id: 1,
+    email: "first@example.com",
+    address: "12 Reykjavik St",
+    total: 1500.00,
+    tax_rate: 0.2000,
+    notes: "",
+  }
+
+  run PlaceOrder {
+    order_id: ADA,
+    customer_id: 1,
+    email: "ada@example.com",
+    address: address(12),
+    total: 100.00,
+    tax_rate: 0.2000,
+  }
+
+  expect @order.placed {
+    order_id: ADA,
+    customer_id: 1,
+    email: "ada@example.com",
+    address: "12 Reykjavik St",
+    total: 90.00,
+    tax_rate: 0.2000,
+    notes: "",
+  }
+}
+
+test "a placed order writes the row and counts the customer" {
+  given @order.placed {
+    order_id: ADA,
+    customer_id: 1,
+    email: "ada@example.com",
+    address: "12 Reykjavik St",
+    total: 25.99,
+    tax_rate: 0.2000,
+    notes: "",
+  }
+
+  project Orders
+
+  expect Order[ADA] { customer_id: 1, total: 25.99, status: Placed, tracking: none }
+  expect Customer[1] { order_count: 1, lifetime_spend: 25.99, name: "unknown" }
+}
+
+test "a purged order does not come back on a late shipment" {
+  given @order.placed {
+    order_id: ADA,
+    customer_id: 1,
+    email: "ada@example.com",
+    address: "12 Reykjavik St",
+    total: 25.99,
+    tax_rate: 0.2000,
+    notes: "",
+  }
+  given @order.purged { order_id: ADA }
+  given @order.shipped { order_id: ADA, tracking: "TRK-1" }
+
+  project Orders
+
+  expect Order[ADA] { total: 0.00, status: Shipped, tracking: "TRK-1" }
+}
+
+test "confirming an order reveals the address and records the notification" {
+  given @order.placed {
+    order_id: ADA,
+    customer_id: 1,
+    email: "ada@example.com",
+    address: "12 Reykjavik St",
+    total: 25.99,
+    tax_rate: 0.2000,
+    notes: "",
+  }
+
+  respond "https://mail.example/confirm" 200
+
+  deliver NotifyCustomer
+
+  expect http.post("https://mail.example/confirm", {
+    "to": "ada@example.com",
+    "first_order": true,
+  })
+  expect log("confirmed an order")
+  expect invoke RecordNotified {
+    order_id: ADA,
+    notification_id: Uuid.derive("0190d1a1-0000-7000-9000-000000000000", "confirmation"),
+  }
+}
+
+test "an absorbed retry never reaches the arm" {
+  given @order.placed {
+    order_id: ADA,
+    customer_id: 1,
+    email: "ada@example.com",
+    address: "12 Reykjavik St",
+    total: 25.99,
+    tax_rate: 0.2000,
+    notes: "",
+  }
+
+  respond "https://mail.example/confirm" 503
+  respond "https://mail.example/confirm" 200
+
+  deliver NotifyCustomer
+
+  expect http.post("https://mail.example/confirm")
+  expect log("confirmed an order")
+  expect invoke RecordNotified {
+    order_id: ADA,
+    notification_id: Uuid.derive("0190d1a1-0000-7000-9000-000000000000", "confirmation"),
+  }
+}
+
+test "a 4xx is a decision the arm makes, and it fails terminally" {
+  given @order.placed {
+    order_id: ADA,
+    customer_id: 1,
+    email: "ada@example.com",
+    address: "12 Reykjavik St",
+    total: 25.99,
+    tax_rate: 0.2000,
+    notes: "",
+  }
+
+  respond "https://mail.example/confirm" 422
+
+  deliver NotifyCustomer
+
+  expect http.post("https://mail.example/confirm")
+  expect fail("confirmation rejected")
+}
+
+test "an erased customer skips rather than sending plaintext" {
+  given @order.placed {
+    order_id: ADA,
+    customer_id: 1,
+    email: "ada@example.com",
+    address: "12 Reykjavik St",
+    total: 25.99,
+    tax_rate: 0.2000,
+    notes: "",
+  }
+
+  erased customer_id "1"
+
+  deliver NotifyCustomer
+
+  expect skipped
+}

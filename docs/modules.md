@@ -30,9 +30,9 @@ There is no import syntax and no dependency order to get right, because there is
 
 ## 2. A module is not a namespace
 
-Event paths, command names, projector names and effect names are global. Two modules cannot both
-declare `@order.placed` or a command named `Place`; that is the same "declared twice" error as within
-one file, and it names the module of the first declaration.
+Event paths, command names, projector names, effect names and test names are global. Two modules
+cannot both declare `@order.placed` or a command named `Place`; that is the same "declared twice"
+error as within one file, and it names the module of the first declaration.
 
 An effect may invoke a command declared in another module, and a command's signature is collected in
 the same pass that collects events, so there is nothing to order there either. Enums, records and
@@ -47,6 +47,11 @@ scoping). Nothing else nests.
 A module declares things, and that is all it does. There is nothing a file must open with and nothing
 one module has to declare on behalf of the others, so a file of plain declarations is already a whole
 program.
+
+A file of tests is an ordinary module for the same reason. `docs/testing.md` states it as a rejected
+alternative rather than a feature: a suite has no header, no import list and nothing that marks it as
+tests, because every declaration it names is already global. That is why `test` is a declaration and
+not a file kind.
 
 heklang briefly had a `currency USD` item here, on the theory that currency was deployment
 configuration. It is gone, and `docs/money.md` records why: a multi-tenant deployment serving stores

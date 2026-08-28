@@ -34,6 +34,7 @@ pub enum Keyword {
     Reject,
     Return,
     State,
+    Test,
     True,
     Update,
 }
@@ -70,6 +71,7 @@ impl Keyword {
             "reject" => Keyword::Reject,
             "return" => Keyword::Return,
             "state" => Keyword::State,
+            "test" => Keyword::Test,
             "true" => Keyword::True,
             "update" => Keyword::Update,
             _ => return None,
@@ -107,6 +109,7 @@ impl Keyword {
             Keyword::Reject => "reject",
             Keyword::Return => "return",
             Keyword::State => "state",
+            Keyword::Test => "test",
             Keyword::True => "true",
             Keyword::Update => "update",
         }

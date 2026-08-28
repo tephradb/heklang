@@ -30,6 +30,7 @@ and it holds at **every** position that declares a type:
 | a `state` seed and every fold arm | `state token: String? = fold none` with a `String`-valued arm |
 | a record literal field | `Facts { note }` where `note` is declared `String?` |
 | a list or map element | `xs.push(name)` where `xs` is a `List(String?)` |
+| a test's `given` field and expected value | `expect Order[id] { tracking: "TRK-1" }` against a `String?` column |
 
 It wraps an **exact** inner-type match and nothing more, so a `Uuid` still does not fill a `String?`
 and a `List(String)` still does not fill a `List(String?)`: the wrap is one level at the outside of
@@ -42,6 +43,11 @@ the record and container positions did the same until the sweep that produced th
 is silent, because nothing type-checks a frame slot: the wrong shape sits there until an
 `.is_none()` reaches it and reports that a `String` has no such method, naming a symptom several
 statements away from the write.
+
+A test's expected value is on the list for a different reason. Nothing there is silent: the
+comparison fails loudly. But it fails as `expected "TRK-1", got "TRK-1"`, because an optional prints
+as the value it holds, and a report that shows the same text on both sides is worse than no report.
+See `docs/testing.md`.
 
 ## Narrowing
 

@@ -374,6 +374,9 @@ pub struct Interpreter<'a> {
     erased: BTreeSet<(Ident, String)>,
     http: Http,
     lines: Vec<String>,
+    /// What the effects did to the world, in order. `docs/testing.md` rule 7 asserts
+    /// against this, and it is the whole of what an effect produces.
+    trace: Vec<Effectful>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -384,6 +387,7 @@ impl<'a> Interpreter<'a> {
             erased: BTreeSet::new(),
             http: Http::default(),
             lines: Vec::new(),
+            trace: Vec::new(),
         }
     }
 
@@ -434,6 +438,12 @@ impl<'a> Interpreter<'a> {
     /// `log` output. Not journaled (rule 10), so a replay adds to it again.
     pub fn lines(&self) -> &[String] {
         &self.lines
+    }
+
+    /// Everything the effects did to the world, in the order they did it. Ordered and
+    /// complete, which is what lets a test say "and nothing else".
+    pub fn trace(&self) -> &[Effectful] {
+        &self.trace
     }
 
     /// Delivers one position to one effect. A journal carried across two calls is what
@@ -503,6 +513,7 @@ impl<'a> Interpreter<'a> {
             http: &mut self.http,
             erased: &mut self.erased,
             lines: &mut self.lines,
+            trace: &mut self.trace,
             used: BTreeMap::new(),
         };
         if let Some(slot) = arm.now {
@@ -513,12 +524,17 @@ impl<'a> Interpreter<'a> {
         let mut sink = Sink::Effect(ctx);
         let flow = exec_block(&arm.exprs, &arm.body, &mut frame, self.program, &mut sink);
         match flow {
-            Ok(Flow::Return(Ret::Fail(message))) => Ok(Invocation::Failed(message)),
+            Ok(Flow::Return(Ret::Fail(message))) => {
+                self.trace.push(Effectful::Failed(message.clone()));
+                Ok(Invocation::Failed(message))
+            }
             Ok(_) => Ok(Invocation::Done),
             // Rule 12: terminal, so the cursor advances and this is counted apart from
             // a wedge, which does not advance.
             Err(err) if matches!(err.kind, ErrorKind::Erased { .. }) => {
-                Ok(Invocation::Skipped(err.kind.to_string()))
+                let message = err.kind.to_string();
+                self.trace.push(Effectful::Skipped(message.clone()));
+                Ok(Invocation::Skipped(message))
             }
             Err(err) => Err(err),
         }
@@ -1040,7 +1056,10 @@ fn exec_stmt(
         Stmt::Log { message } => {
             let message = eval_string(program, exprs, frame, *message, effects(sink))?;
             match sink {
-                Sink::Effect(ctx) => ctx.lines.push(message),
+                Sink::Effect(ctx) => {
+                    ctx.lines.push(message.clone());
+                    ctx.trace.push(Effectful::Log(message));
+                }
                 _ => return Err(ErrorKind::MalformedIr.into()),
             }
             Ok(Flow::Next)
@@ -1153,8 +1172,10 @@ fn eval_field(
 /// decides what an over-length value means, which is the one place commands and
 /// projectors differ.
 /// A bare `T` written into a `T?` field wraps, the same coercion `bind_params`
-/// already applies to command arguments.
-fn coerce(value: Value, ty: &Type) -> Value {
+/// already applies to command arguments. `docs/optionals.md` lists every position
+/// this holds at, and public so a test's expected value is held to the same rule
+/// rather than to a second copy of it.
+pub fn coerce(value: Value, ty: &Type) -> Value {
     match ty {
         Type::Opt(inner) if value.has_type(inner) => Value::some(value),
         _ => value,
@@ -1334,9 +1355,10 @@ fn eval(
         Expr::Object(fields) => {
             // Rule 8's table. Sorted keys, so the same object built twice serialises
             // the same, which is one cause removed from verify's list (rule 14).
-            if ctx.is_none() {
-                return Err(at(ErrorKind::MalformedIr));
-            }
+            //
+            // Where an object literal may be written is the parser's `in_body`, not a
+            // sink check here: `docs/testing.md` rule 7 writes an expected body with no
+            // effect running behind it, and that is a body position too.
             let mut object = BTreeMap::new();
             for (name, value) in fields {
                 let value = eval(program, exprs, frame, *value, ctx.as_deref_mut())?;
@@ -2477,6 +2499,7 @@ struct Effects<'a> {
     http: &'a mut Http,
     erased: &'a mut BTreeSet<(Ident, String)>,
     lines: &'a mut Vec<String>,
+    trace: &'a mut Vec<Effectful>,
     /// How many times each call has been made so far in this invocation, so a repeated
     /// identical call lines up with its own recording rather than the first one's.
     used: BTreeMap<String, u32>,
@@ -2532,9 +2555,17 @@ impl Effects<'_> {
             return Ok(Value::Response { status, body });
         }
 
+        let sent = body.clone();
         let Some((status, body)) = self.http.call(builtin, url, body.clone(), headers) else {
             return Err(ErrorKind::Unreachable(url.to_string()));
         };
+        // One entry per logical call, so the retries rule 5 absorbed do not show up as
+        // calls a test has to expect.
+        self.trace.push(Effectful::Http {
+            verb: builtin.name(),
+            url: url.to_string(),
+            body: sent,
+        });
         self.record(
             &call,
             ordinal,
@@ -2564,6 +2595,10 @@ impl Effects<'_> {
             .program
             .command(command)
             .ok_or_else(|| Error::new(ErrorKind::UnknownCommand(command.clone())))?;
+        self.trace.push(Effectful::Invoke {
+            command: command.clone(),
+            args: args.clone(),
+        });
         let execution = execute(self.program, self.log, target, args)?;
         // The cut: `Conflict` and `Unavailable` are the runtime's, and
         // `AlreadyCommitted` is indistinguishable from `Ok` from here, as it should be.
@@ -2603,6 +2638,53 @@ impl Effects<'_> {
             return;
         }
         self.erased.insert((subject.clone(), id.to_string()));
+        self.trace.push(Effectful::Erase {
+            subject: subject.clone(),
+            id: id.to_string(),
+        });
         self.record(&call, ordinal, Recorded::Erased);
     }
+}
+
+/// One thing an effect did to the world. `docs/testing.md` rule 7: an effect's output
+/// is this list and nothing else, which is what makes an expectation checkable rather
+/// than approximate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Effectful {
+    Http {
+        verb: &'static str,
+        url: String,
+        body: Option<Json>,
+    },
+    Invoke {
+        command: Ident,
+        args: BTreeMap<Ident, Value>,
+    },
+    Erase {
+        subject: Ident,
+        id: String,
+    },
+    Log(String),
+    /// Rule 4 of `docs/effects.md`: the author's terminal outcome.
+    Failed(String),
+    /// Rule 12: a shredded key, terminal and counted apart from a wedge.
+    Skipped(String),
+}
+
+/// One value out of a declaration that has values and no statements, evaluated against
+/// an empty frame with no sink. `docs/testing.md` rule 8: a test reaches nothing a
+/// program could not, and having no sink is what makes that structural.
+pub fn eval_pure(
+    program: &Program,
+    exprs: &Exprs,
+    frame: usize,
+    id: ExprId,
+) -> Result<Value, Error> {
+    let mut frame = Frame::new(frame);
+    eval(program, exprs, &mut frame, id, None)
+}
+
+/// A key as a value, for a report that names the row it could not find.
+pub fn key_as_value(key: &Key) -> Value {
+    key_value(key)
 }

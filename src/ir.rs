@@ -131,6 +131,8 @@ pub struct Program {
     pub records: Vec<RecordDef>,
     pub consts: Vec<ConstDef>,
     pub functions: Vec<Function>,
+    /// Application tests, in declaration order. See `docs/testing.md`.
+    pub tests: Vec<Test>,
 }
 
 impl Program {
@@ -949,4 +951,132 @@ impl fmt::Display for BinOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.symbol())
     }
+}
+
+/// One application test: a log, one thing to do to it, and what should come out.
+/// `docs/testing.md` is the contract. Values live in `exprs` and are evaluated against
+/// an empty frame, so a test carries its own arena like every other declaration.
+#[derive(Debug, Clone)]
+pub struct Test {
+    pub name: String,
+    pub module: Option<Ident>,
+    pub frame: usize,
+    pub exprs: Exprs,
+    pub given: Vec<Given>,
+    pub setup: Vec<Setup>,
+    pub action: Action,
+    pub expect: Vec<Expect>,
+    pub span: Span,
+}
+
+/// Rule 2: one appended event, with every field written out.
+#[derive(Debug, Clone)]
+pub struct Given {
+    pub event: EventPath,
+    pub fields: Vec<(Ident, ExprId)>,
+    pub span: Span,
+}
+
+/// Rule 3: what the world already is before the action runs.
+#[derive(Debug, Clone)]
+pub enum Setup {
+    Respond {
+        url: ExprId,
+        reply: ReplySpec,
+        span: Span,
+    },
+    Erased {
+        subject: Ident,
+        id: ExprId,
+        span: Span,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum ReplySpec {
+    Status(u16),
+    Body(u16, ExprId),
+    /// A transport failure, which rule 5 of `docs/effects.md` absorbs and retries.
+    Timeout,
+}
+
+/// Rule 4: exactly one per test, and it decides which expectations are legal.
+#[derive(Debug, Clone)]
+pub enum Action {
+    Run {
+        command: Ident,
+        args: Vec<(Ident, ExprId)>,
+        span: Span,
+    },
+    Project {
+        projector: Ident,
+        span: Span,
+    },
+    Deliver {
+        effect: Ident,
+        span: Span,
+    },
+}
+
+/// Rules 5 to 7. Which variants may appear is decided by the action, at parse time.
+#[derive(Debug, Clone)]
+pub enum Expect {
+    Event {
+        path: EventPath,
+        fields: Vec<(Ident, ExprId)>,
+        span: Span,
+    },
+    /// Shared by `run` and `deliver`: no events appended, or nothing done.
+    Nothing {
+        span: Span,
+    },
+    Invalid {
+        message: ExprId,
+        span: Span,
+    },
+    Reject {
+        code: ExprId,
+        message: ExprId,
+        span: Span,
+    },
+    /// Rule 6: the listed columns only, because a row is wide and most of it is
+    /// carried through untouched by the handler under test.
+    Row {
+        entity: Ident,
+        key: ExprId,
+        fields: Vec<(Ident, ExprId)>,
+        span: Span,
+    },
+    NoRow {
+        entity: Ident,
+        key: ExprId,
+        span: Span,
+    },
+    Http {
+        verb: Builtin,
+        url: ExprId,
+        body: Option<ExprId>,
+        span: Span,
+    },
+    Invoke {
+        command: Ident,
+        args: Vec<(Ident, ExprId)>,
+        span: Span,
+    },
+    Erase {
+        subject: Ident,
+        id: ExprId,
+        span: Span,
+    },
+    Log {
+        message: ExprId,
+        span: Span,
+    },
+    Failed {
+        message: ExprId,
+        span: Span,
+    },
+    Skipped {
+        span: Span,
+    },
 }
