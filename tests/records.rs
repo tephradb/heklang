@@ -1,7 +1,9 @@
 //! `docs/declarations.md` as executable tests, for the three module-scope declarations
 //! this pass added: `record`, `enum` and `const`.
 
-use heklang::{Event, Interpreter, Key, Outcome, Store, Type, Value, parse};
+use heklang::{
+    Event, EventPath, Interpreter, Key, Outcome, Store, Type, Value, parse, parse_files,
+};
 
 const PRELUDE: &str = "enum Applicability { @default AllProducts, SpecificProducts }
 
@@ -328,6 +330,151 @@ fn a_const_takes_literals_and_literal_aggregates_only() {
         .expect_err("expected a rejection")
         .message;
     assert_eq!(message, "a Int const cannot be a String");
+}
+
+/// Pass C0 exists for this: order is irrelevant for a const the way it is for every
+/// other declaration, and a value naming a sibling is what made a second pass necessary.
+#[test]
+fn a_const_may_name_a_const_declared_below_it() {
+    let source = "const NO_PLAN: Uuid = NAMESPACE
+const NAMESPACE: Uuid = \"6ba7b810-9dad-11d1-80b4-00c04fd430c8\"
+event @a.b { x: Int }
+";
+    let program = parse(source).expect("order is irrelevant for a const too");
+    let def = program.constant("NO_PLAN").expect("declared");
+    assert_eq!(
+        heklang::value::literal(&def.value),
+        Value::uuid("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+    );
+    assert_eq!(
+        program.consts[0].name, "NO_PLAN",
+        "declaration order survives resolution order"
+    );
+}
+
+/// Sorted file order is what the port hit: the file naming a constant sorted well
+/// ahead of the one declaring it, and nothing in either file said so.
+#[test]
+fn a_const_may_name_a_const_in_another_file() {
+    let user = "const NO_PLAN: Uuid = NAMESPACE\n";
+    let declarer = "const NAMESPACE: Uuid = \"6ba7b810-9dad-11d1-80b4-00c04fd430c8\"\n";
+    let events = "event @a.b { x: Int }\n";
+
+    for order in [
+        [("effects/a.hk", user), ("lib/z.hk", declarer)],
+        [("lib/z.hk", declarer), ("effects/a.hk", user)],
+    ] {
+        let files = [order[0], order[1], ("events/e.hk", events)];
+        let program =
+            parse_files(files).unwrap_or_else(|err| panic!("for {:?}: {err}", files.map(|f| f.0)));
+        assert_eq!(
+            heklang::value::literal(&program.constant("NO_PLAN").expect("declared").value),
+            Value::uuid("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+        );
+    }
+}
+
+#[test]
+fn a_const_cycle_names_the_whole_chain() {
+    let message =
+        parse("const A: Int = B\nconst B: Int = C\nconst C: Int = A\nevent @a.b { x: Int }\n")
+            .expect_err("expected a rejection")
+            .message;
+    assert_eq!(
+        message,
+        "`A` names `B` names `C` names `A`: a `const` cannot name itself, directly or through another, so that every const has a value"
+    );
+
+    let alone = parse("const A: Int = A\nevent @a.b { x: Int }\n")
+        .expect_err("expected a rejection")
+        .message;
+    assert_eq!(
+        alone,
+        "`A` names `A`: a `const` cannot name itself, directly or through another, so that every const has a value"
+    );
+}
+
+/// From the shell rather than the resolved value, so the message names the const the
+/// author wrote instead of whatever that const turned out to hold.
+#[test]
+fn a_const_of_the_wrong_type_names_the_const() {
+    let message = parse("const A: Int = B\nconst B: String = \"x\"\nevent @a.b { x: Int }\n")
+        .expect_err("expected a rejection")
+        .message;
+    assert_eq!(message, "a Int const cannot be `B`, which is a String");
+}
+
+/// Resolution seeks to the value and seeks back, so nothing else is left looking at
+/// the tokens after it. Without a check at the end of the value, `1 + 1` would quietly
+/// become `1`.
+#[test]
+fn a_const_still_ends_at_its_literal_when_another_const_names_it() {
+    let message = parse("const A: Int = B\nconst B: Int = 1 + 1\nevent @a.b { x: Int }\n")
+        .expect_err("expected a rejection")
+        .message;
+    assert_eq!(
+        message,
+        "expected `enum`, `record`, `const`, `fn`, `event`, `command`, `projector`, `effect` or `test`, found `+`"
+    );
+}
+
+/// A const is inlined at every use, so naming one costs a parse once however many
+/// places name it.
+#[test]
+fn a_const_may_name_a_const_inside_an_aggregate() {
+    let source = "record Pair { left: Int, right: Int }
+const ONE: Int = 1
+const BOTH: Pair = Pair { left: ONE, right: ONE }
+const LIST: List(Int) = [ONE, ONE]
+event @a.b { x: Int }
+";
+    let program = parse(source).expect("an aggregate resolves each part against its own type");
+    let both = heklang::value::literal(&program.constant("BOTH").expect("declared").value);
+    let Value::Record { fields, .. } = &both else {
+        panic!("expected a record, got {both:?}");
+    };
+    assert_eq!(fields.get("left"), Some(&Value::Int(1)));
+    assert_eq!(fields.get("right"), Some(&Value::Int(1)));
+    assert_eq!(
+        heklang::value::literal(&program.constant("LIST").expect("declared").value),
+        Value::list(Type::Int, [Value::Int(1), Value::Int(1)])
+    );
+}
+
+/// An entity default goes through the same function a const value does, so it gets
+/// this for free. `patch` on an absent row is where a default reaches a stored value.
+#[test]
+fn an_entity_default_may_name_a_const() {
+    let source = "const FREE_LIMIT: Int = 2
+event @a.b { x: Int }
+projector P {
+  entity Row {
+    id: Int @key,
+    limit: Int = FREE_LIMIT,
+    seen: Int,
+  }
+
+  on @a.b { x } {
+    patch Row[x] { seen: .seen + 1 }
+  }
+}
+";
+    let program = parse(source).expect("a default is a literal position like any other");
+    let entity = &program.projectors[0].entities[0];
+    assert_eq!(entity.fields[1].default, Some(heklang::Literal::Int(2)));
+
+    let log = vec![Event::new(
+        EventPath::new(["a", "b"]),
+        [("x", Value::Int(7))],
+    )];
+    let store = Interpreter::with_log(&program, log)
+        .project("P")
+        .unwrap_or_else(|err| panic!("{err}"));
+    let row = store
+        .get("Row", &Key::Int(7))
+        .expect("the patch materialized");
+    assert_eq!(row.field("limit"), Some(&Value::Int(2)));
+    assert_eq!(row.field("seen"), Some(&Value::Int(1)));
 }
 
 // ---------------------------------------------------------------------------------

@@ -185,22 +185,59 @@ The rule holds at **every** position with a target type, not only in a `const` o
 which is where it used to stop. A `test` is what found that: a suite is mostly ids, and
 `run Ship { order_id: "0190d1a1-..." }` had no way to be written.
 
-## Four passes
+### A const may name another const
 
-Declaration order does not matter anywhere, which now takes five passes over the token stream rather
+```
+const NAMESPACE: Uuid = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+const NO_PLAN: Uuid   = NAMESPACE
+```
+
+Order is irrelevant, in the sense it is irrelevant for every other declaration: the second may be
+written above the first, or in another file entirely. What is inlined at the use site is still a
+`Literal`, so nothing about "no expression arena hangs off a declaration" changes. A name here
+resolves to a value at parse time rather than standing for a lookup at run time.
+
+That takes one pass more than a const used to need. **C0** reads every const's name, its type and
+the position of its value, and nothing else. The values are then resolved on demand, so parsing one
+const's value may pause to parse another's and come back, and memoising on the way out is what makes
+a const named ten times cost one parse.
+
+A const that names itself, directly or through any chain, is rejected by naming the chain:
+
+```
+`A` names `B` names `A`: a `const` cannot name itself, directly or through another,
+so that every const has a value
+```
+
+**Rejected: resolving in declaration order.** The smaller change, and the one that does not work. A
+const's dependencies are only visible once its value has been parsed, so there is no order to sort
+into before reading, and reading is the thing that needs the order. A port of a real application is
+where this showed: the file naming a constant sorted twenty-two files ahead of the one declaring it,
+and nothing in either file said so.
+
+**Rejected: an expression arena for constants.** It would make `const B: Int = A + 1` legal along
+with the plain reference, and it gives up both properties the literal restriction buys. A reference
+is the part authors reach for; arithmetic over constants is not.
+
+## Six passes
+
+Declaration order does not matter anywhere, which now takes six passes over the token stream rather
 than two. Each does only what the pass before it made possible:
 
 | Pass | Reads | Because |
 | --- | --- | --- |
 | A | `enum` bodies, `record` names | a record field may name an enum, and a record may name a record |
 | B | `record` fields | every type they might name now has a name |
-| C | `event`, `projector` shells, `command` signatures, `const` | these name enums and records |
+| C0 | `const` names and types, and where each value starts | a const value may name a const declared later |
+| C | `event`, `projector` shells, `command` signatures | these name enums, records and consts |
 | D | `command` bodies, `projector` handlers, `effect` arms | these name everything |
 | E | `test` bodies | a test names commands, projectors and effects rather than declaring any |
 
-Pass E is the one boundary that is about a whole declaration rather than about types. A `test` states
-what a command does, which projector to fold and which effect to drive, so it needs all three
-collected before it can resolve one, and pass D is still collecting them while it runs.
+Two boundaries are about something other than types. **C0** is about a declaration whose value can
+name a sibling, so every name has to exist before any value is read, and the values are then
+resolved on demand rather than in order. **E** is about a whole declaration: a `test` states what a
+command does, which projector to fold and which effect to drive, so it needs all three collected
+before it can resolve one, and pass D is still collecting them while it runs.
 
-Skipping an item is cheap, so five passes cost little, and each boundary has one reason rather than
+Skipping an item is cheap, so six passes cost little, and each boundary has one reason rather than
 being where the code happened to stop. `docs/modules.md` covers what this means across files.

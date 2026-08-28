@@ -70,7 +70,14 @@ struct Parser {
     /// enum shadows one of these, which is why they are two lists rather than one.
     module_enums: Vec<EnumDef>,
     records: Vec<RecordDef>,
+    /// Every const, resolved. Filled on demand by `resolve_const` rather than in
+    /// declaration order, because a const may name one declared later.
     consts: Vec<ConstDef>,
+    /// Every const before its value has been read: pass C0's output.
+    shells: Vec<ConstShell>,
+    /// The consts whose values are being parsed right now, outermost first, so a
+    /// const that names itself is caught with the chain that reached it.
+    resolving: Vec<Ident>,
     /// Set while parsing an `if` or `for` header, where the `{` that follows opens a
     /// block. Without it `if plan { ... }` reads as a record literal.
     no_record_literal: bool,
@@ -86,6 +93,17 @@ struct Parser {
     /// Set only while parsing a `patch` value, which is what makes `.field`
     /// structurally illegal anywhere else.
     stored: Option<Stored>,
+}
+
+/// A const with its value still unread: enough to say what type it is and where to
+/// find the tokens, which is all pass C0 can know before any value has been parsed.
+#[derive(Debug, Clone)]
+struct ConstShell {
+    name: Ident,
+    module: Option<Ident>,
+    ty: Type,
+    /// The first token of the value, so resolution can seek back to it.
+    at: usize,
 }
 
 struct Stored {
@@ -164,6 +182,8 @@ impl Parser {
             module_enums: Vec::new(),
             records: Vec::new(),
             consts: Vec::new(),
+            shells: Vec::new(),
+            resolving: Vec::new(),
             no_record_literal: false,
             narrowings: Vec::new(),
             event: None,
@@ -366,9 +386,10 @@ impl Parser {
         }
     }
 
-    /// Four passes over the same token stream, each doing only what the one before it
-    /// made possible. A record field may name an enum, an event field may name a
-    /// record, and a body may name anything, so the boundaries are not arbitrary.
+    /// Six passes over the same token stream, each doing only what the one before it
+    /// made possible. A record field may name an enum, a const value may name another
+    /// const, an event field may name a record, and a body may name anything, so the
+    /// boundaries are not arbitrary. See `docs/declarations.md`.
     fn program(&mut self) -> Result<Program, SyntaxError> {
         // A: enums, and the names of records, so a record field may name a record.
         self.pos = 0;
@@ -421,6 +442,36 @@ impl Parser {
             }
         }
 
+        // C0: every const's name and type, and where its value starts. Values are not
+        // read here, because one may name a const declared below it or in another file.
+        self.pos = items;
+        loop {
+            match self.peek() {
+                Token::End => break,
+                Token::Word(Keyword::Const) => {
+                    let shell = self.const_shell()?;
+                    if self.shell_of(&shell.name).is_some() {
+                        return self.fail(format!("const `{}` is declared twice", shell.name));
+                    }
+                    self.shells.push(shell);
+                }
+                _ => self.skip_item()?,
+            }
+        }
+        for index in 0..self.shells.len() {
+            let name = self.shells[index].name.clone();
+            self.resolve_const(&name)?;
+        }
+        // Resolution order follows the reference graph, so put them back in the order
+        // they were written: nothing depends on it, and a stable order is one less
+        // thing for a reader of `Program` to wonder about.
+        self.consts.sort_by_key(|def| {
+            self.shells
+                .iter()
+                .position(|shell| shell.name == def.name)
+                .unwrap_or(usize::MAX)
+        });
+
         // C: everything whose declaration is a signature rather than a body.
         self.pos = items;
         let mut events: Vec<EventDef> = Vec::new();
@@ -429,13 +480,7 @@ impl Parser {
             match self.peek() {
                 Token::End => break,
                 Token::Word(Keyword::Enum) | Token::Word(Keyword::Record) => self.skip_item()?,
-                Token::Word(Keyword::Const) => {
-                    let def = self.const_decl()?;
-                    if self.consts.iter().any(|other| other.name == def.name) {
-                        return self.fail(format!("const `{}` is declared twice", def.name));
-                    }
-                    self.consts.push(def);
-                }
+                Token::Word(Keyword::Const) => self.skip_item()?,
                 Token::Word(Keyword::Event) => {
                     let event = self.event_decl()?;
                     if events.iter().any(|def| def.path == event.path) {
@@ -768,22 +813,71 @@ impl Parser {
         Ok(fields)
     }
 
-    /// `const NAME: Type = <literal>`. Literals and literal aggregates only, for the
-    /// reason an entity default is: no expression arena hangs off a declaration.
-    fn const_decl(&mut self) -> Result<ConstDef, SyntaxError> {
+    /// `const NAME: Type =`, and where the value begins. The value is left unread,
+    /// because it may name a const declared below this one or in another file, and
+    /// pass C0 has not seen those yet.
+    fn const_shell(&mut self) -> Result<ConstShell, SyntaxError> {
         let module = self.module_at(self.pos).map(str::to_string);
         self.expect_word(Keyword::Const)?;
         let name = self.expect_ident()?;
         self.expect_sym(Sym::Colon)?;
         let ty = self.type_ref()?;
         self.expect_sym(Sym::Assign)?;
-        let value = self.default_literal("const", &ty)?;
-        Ok(ConstDef {
+        let at = self.pos;
+        self.skip_value();
+        Ok(ConstShell {
             name,
             module,
             ty,
-            value,
+            at,
         })
+    }
+
+    /// One const's value, parsed on demand and memoised, which is what lets a value
+    /// name a const the reader has not reached yet. Literals and literal aggregates
+    /// only, for the reason an entity default is: no expression arena hangs off a
+    /// declaration.
+    fn resolve_const(&mut self, name: &str) -> Result<Literal, SyntaxError> {
+        if let Some(def) = self.const_def(name) {
+            return Ok(def.value.clone());
+        }
+        let Some(shell) = self.shell_of(name).cloned() else {
+            return self.fail(format!("no const `{name}`"));
+        };
+        if let Some(from) = self.resolving.iter().position(|held| held == name) {
+            let mut chain: Vec<String> = self.resolving[from..]
+                .iter()
+                .map(|held| format!("`{held}`"))
+                .collect();
+            chain.push(format!("`{name}`"));
+            return self.fail(format!(
+                "{}: a `const` cannot name itself, directly or through another, so that every const has a value",
+                chain.join(" names ")
+            ));
+        }
+
+        let saved = self.pos;
+        self.pos = shell.at;
+        self.resolving.push(shell.name.clone());
+        let value = self.default_literal("const", &shell.ty)?;
+        // A literal ends the declaration, so the next token belongs to the next item.
+        // Checked here rather than by the caller, because the caller has seeked away
+        // and would never see a trailing `+ 1`.
+        if !matches!(self.peek(), Token::End)
+            && !matches!(self.peek(), Token::Word(word) if starts_item(*word))
+        {
+            return self.fail(Self::expected_item(self.peek()));
+        }
+        self.resolving.pop();
+        self.pos = saved;
+
+        self.consts.push(ConstDef {
+            name: shell.name,
+            module: shell.module,
+            ty: shell.ty,
+            value: value.clone(),
+        });
+        Ok(value)
     }
 
     /// The declarations a zero value consults, with the projector's enums shadowing
@@ -802,6 +896,10 @@ impl Parser {
 
     fn const_def(&self, name: &str) -> Option<&ConstDef> {
         self.consts.iter().find(|def| def.name == name)
+    }
+
+    fn shell_of(&self, name: &str) -> Option<&ConstShell> {
+        self.shells.iter().find(|shell| shell.name == name)
     }
 
     /// Collects a projector's `enum` and `entity` declarations, leaving its handlers
@@ -945,18 +1043,25 @@ impl Parser {
         self.skip_braced()
     }
 
-    /// A `const` ends where its literal does, and a literal has no closing token of its
-    /// own. So this runs to the next thing that can start an item, tracking depth so a
-    /// list or a record value does not end it early.
+    /// A `const` ends where its literal does, and a literal has no closing token of
+    /// its own.
     fn skip_const(&mut self) -> Result<(), SyntaxError> {
         self.expect_word(Keyword::Const)?;
+        self.skip_value();
+        Ok(())
+    }
+
+    /// Runs to the next thing that can start an item, tracking depth so a list or a
+    /// record value does not end it early. Pass C0 skips a value it comes back for
+    /// later; `skip_item` skips one it never reads.
+    fn skip_value(&mut self) {
         let mut depth = 0i32;
         loop {
             match self.peek() {
-                Token::End => return Ok(()),
+                Token::End => return,
                 Token::Sym(Sym::LBrace | Sym::LBracket | Sym::LParen) => depth += 1,
                 Token::Sym(Sym::RBrace | Sym::RBracket | Sym::RParen) => depth -= 1,
-                Token::Word(word) if depth == 0 && starts_item(*word) => return Ok(()),
+                Token::Word(word) if depth == 0 && starts_item(*word) => return,
                 _ => {}
             }
             self.bump();
@@ -1268,6 +1373,21 @@ impl Parser {
             }
             Token::Word(Keyword::True) => Literal::Bool(true),
             Token::Word(Keyword::False) => Literal::Bool(false),
+            // Ahead of the enum-variant arm below, which is the precedence `primary`
+            // already uses for a bare name: record, then const, then variant.
+            Token::Ident(name) if self.shell_of(&name).is_some() => {
+                let declared = self.shell_of(&name).expect("checked just above").ty.clone();
+                // Checked from the shell rather than from the resolved value, so a
+                // mismatch names the const, and reports even inside a reference cycle.
+                if &declared != ty {
+                    return Err(self.err(
+                        format!("a {ty} {what} cannot be `{name}`, which is a {declared}"),
+                        line,
+                        col,
+                    ));
+                }
+                self.resolve_const(&name)?
+            }
             Token::Ident(variant) => {
                 let Type::Enum(enum_name) = ty else {
                     return Err(self.err(bad(&format!("`{variant}`")), line, col));

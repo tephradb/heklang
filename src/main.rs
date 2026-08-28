@@ -585,6 +585,9 @@ fn catalog_demo(program: &Program) {
         program.consts.len(),
         program.enums.len(),
     );
+    if let Some(def) = program.constant("HOUSE_ITEM") {
+        println!("  HOUSE_ITEM = {}", heklang::value::literal(&def.value));
+    }
 
     let mut interpreter = Interpreter::new(program);
     list_item(
