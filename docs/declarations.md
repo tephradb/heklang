@@ -27,6 +27,10 @@ purely to avoid a collision it assumed existed. Both renames were unnecessary. T
 leaving a rule implicit even when the implementation already has it right, which is why there is now
 a test that fails if the spaces are ever merged.
 
+A `fn` is in a fourth space, and it is the only one with a scope narrower than the program: a `fn`
+declared inside an `effect` is visible in that effect and nowhere else, and may not take the name of
+a module `fn`, which is in scope inside every effect. See `docs/functions.md`.
+
 **Rejected: one flat space for all three.** The argument for it is that a reader seeing `Same` should
 not have to ask which kind it is. But a reader never sees a bare `Same`: they see `invoke Same`, or a
 `command Same` declaration, or an `effect Same` declaration. The kind is at every use site already.
@@ -254,7 +258,7 @@ than two. Each does only what the pass before it made possible:
 | B | `record` fields | every type they might name now has a name |
 | C0 | `const` names and types, and where each value starts | a const value may name a const declared later |
 | C | `event`, `projector` shells, `command` signatures | these name enums, records and consts |
-| D | `command` bodies, `projector` handlers, `effect` arms | these name everything |
+| D | `command` bodies, `projector` handlers, `effect` helpers and arms | these name everything |
 | E | `test` bodies | a test names commands, projectors and effects rather than declaring any |
 
 Two boundaries are about something other than types. **C0** is about a declaration whose value can
@@ -262,6 +266,11 @@ name a sibling, so every name has to exist before any value is read, and the val
 resolved on demand rather than in order. **E** is about a whole declaration: a `test` states what a
 command does, which projector to fold and which effect to drive, so it needs all three collected
 before it can resolve one, and pass D is still collecting them while it runs.
+
+An `effect` is the one item that sweeps its own body twice inside pass D: once for its helpers'
+signatures and once for their bodies and its arms, so a helper may be declared below the arm that
+calls it. A `projector` does the same for its own enums in pass C. Both are the local form of the
+same rule: order does not matter, so nothing may need to have been read yet.
 
 Skipping an item is cheap, so six passes cost little, and each boundary has one reason rather than
 being where the code happened to stop. `docs/modules.md` covers what this means across files.

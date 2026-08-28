@@ -58,6 +58,13 @@ struct Parser {
     commands: Vec<Signature>,
     /// The same, for `fn`, so a helper may call one declared below it.
     functions: Vec<Signature>,
+    /// The enclosing effect's own `fn` signatures; empty outside one. Two lists
+    /// rather than one for the reason `enums` and `module_enums` are two: a name here
+    /// resolves first, and is invisible once the effect closes.
+    local_fns: Vec<Signature>,
+    /// The effect whose braces the parser is inside, which is the scope stamped onto
+    /// a call to one of `local_fns`.
+    in_effect: Option<Ident>,
     /// The declared result of the `fn` being parsed, so `return` has a target type.
     returns: Option<Type>,
     /// Set only while parsing an `http.*` body argument, which is what makes an object
@@ -118,6 +125,10 @@ enum Kind {
     Projector,
     Effect,
     Function,
+    /// A `fn` declared inside an `effect`. It may call out and `invoke`, so it is not
+    /// `Function`; it may not `reveal` or `erase`, so it is not `Effect` either.
+    /// See `docs/functions.md`.
+    EffectFn,
     /// A test's value position. Pure like a `fn`, but for a different reason: a test
     /// states inputs and expectations, so nothing in one may reach the world.
     Test,
@@ -175,6 +186,8 @@ impl Parser {
             kind: Kind::Command,
             commands: Vec::new(),
             functions: Vec::new(),
+            local_fns: Vec::new(),
+            in_effect: None,
             returns: None,
             in_body: false,
             enums: Vec::new(),
@@ -542,7 +555,7 @@ impl Parser {
                     let command = self.command_decl(&events)?;
                     commands.push(command);
                 }
-                Token::Word(Keyword::Fn) => functions.push(self.fn_decl(&events)?),
+                Token::Word(Keyword::Fn) => functions.push(self.fn_decl(&events, Kind::Function)?),
                 Token::Word(Keyword::Projector) => {
                     let (handlers, entities) =
                         self.projector_handlers(&projectors[seen], &events)?;
@@ -681,7 +694,7 @@ impl Parser {
 
     /// Pass D. A `fn` has a command's frame and arena and none of its prologue, since
     /// `state`, `guard` and a hoisted clock are all things a pure helper cannot have.
-    fn fn_decl(&mut self, events: &[EventDef]) -> Result<Function, SyntaxError> {
+    fn fn_decl(&mut self, events: &[EventDef], kind: Kind) -> Result<Function, SyntaxError> {
         let module = self.module_at(self.pos).map(str::to_string);
         self.expect_word(Keyword::Fn)?;
         let name = self.expect_ident()?;
@@ -698,7 +711,7 @@ impl Parser {
         let ret = self.fn_type()?;
         self.expect_sym(Sym::LBrace)?;
 
-        self.kind = Kind::Function;
+        self.kind = kind;
         self.returns = Some(ret.clone());
         let body = self.statements(&mut lower, events)?;
         self.returns = None;
@@ -715,8 +728,22 @@ impl Parser {
         Ok(lower.b.finish_fn(ret, body))
     }
 
+    /// A `fn` in scope here: the enclosing effect's own before module scope. The two
+    /// can never collide, because a local one that shadows a module `fn` is rejected
+    /// where it is declared, which is what makes this order the only rule needed.
     fn fn_sig(&self, name: &str) -> Option<&Signature> {
-        self.functions.iter().find(|sig| sig.name == name)
+        self.local_fns
+            .iter()
+            .chain(&self.functions)
+            .find(|sig| sig.name == name)
+    }
+
+    /// The scope a call to `name` resolves in, which is what the IR node carries.
+    fn fn_scope(&self, name: &str) -> Option<Ident> {
+        if self.local_fns.iter().any(|sig| sig.name == name) {
+            return self.in_effect.clone();
+        }
+        None
     }
 
     /// A call, with each argument checked against its declared parameter so literal
@@ -727,6 +754,12 @@ impl Parser {
         name: Ident,
         span: Span,
     ) -> Result<ExprId, SyntaxError> {
+        // Rule 3: a fold has to reproduce without a journal, and an effect-local `fn`
+        // is the one helper that may call out. A module `fn` is pure by construction,
+        // so a fold may still call one of those.
+        if self.local_fns.iter().any(|sig| sig.name == name) {
+            self.not_in_fold(&format!("call `{name}`, which may call out"), span)?;
+        }
         let params = self
             .fn_sig(&name)
             .expect("checked by caller")
@@ -757,8 +790,10 @@ impl Parser {
             return Err(self.err(format!("`{name}` needs `{name_of}`"), span.line, span.col));
         }
         lower.b.at(span);
+        let scope = self.fn_scope(&name);
         Ok(lower.b.expr(Expr::CallFn {
             function: name,
+            scope,
             args,
         }))
     }
@@ -2729,7 +2764,7 @@ impl Parser {
                         "reject"
                     };
                     return self.fail(match self.kind {
-                        Kind::Effect => format!(
+                        Kind::Effect | Kind::EffectFn => format!(
                             "`{outcome}` is a command's outcome; an effect's terminal outcome is `fail(...)`"
                         ),
                         Kind::Function => format!(
@@ -2742,7 +2777,7 @@ impl Parser {
                 }
                 if let Some(want) = self.returns.clone() {
                     let (line, col) = self.here();
-                    if self.at_sym(Sym::RBrace) || self.starts_statement() {
+                    if self.ends_return() {
                         return Err(self.err(
                             format!("this `fn` returns {want}, so `return` needs a value"),
                             line,
@@ -2776,7 +2811,7 @@ impl Parser {
                         return self
                             .fail("`emit` appends an event, so it can only appear in a command");
                     }
-                    Kind::Effect => {
+                    Kind::Effect | Kind::EffectFn => {
                         return self.fail(
                             "an effect never appends events; call a command with `invoke`, which appends under its own guard",
                         );
@@ -2927,6 +2962,11 @@ impl Parser {
                 if self.kind == Kind::Function {
                     return self
                         .fail("a `fn` has no `state`; it is a pure function of its arguments");
+                }
+                if self.kind == Kind::EffectFn {
+                    return self.fail(
+                        "an effect-local `fn` has no `state`; the fold belongs to the arm, so pass what it decided in as a parameter",
+                    );
                 }
                 self.fail("`state` and `guard` must come before the first statement")
             }
@@ -3595,12 +3635,31 @@ impl Parser {
         self.expect_word(Keyword::Effect)?;
         let name = self.expect_ident()?;
         self.expect_sym(Sym::LBrace)?;
+        let body = self.pos;
 
+        // Sweep one: the helpers' signatures, so an arm may call one declared below it
+        // and a helper may call a sibling. The same two-sweep shape `projector_shell`
+        // uses for a projector's own enums, and for the same reason: declaration order
+        // is irrelevant everywhere else in heklang.
+        while !self.at_sym(Sym::RBrace) && !matches!(self.peek(), Token::End) {
+            match self.peek() {
+                Token::Word(Keyword::Fn) => self.local_fn_signature(&name)?,
+                Token::Word(Keyword::On) => self.skip_handler()?,
+                other => {
+                    return self.fail(format!("expected `on` or `fn`, found {other}"));
+                }
+            }
+        }
+
+        self.pos = body;
+        self.in_effect = Some(name.clone());
+        let mut functions: Vec<Function> = Vec::new();
         let mut arms: Vec<Arm> = Vec::new();
         let mut at: Vec<usize> = Vec::new();
         while !self.at_sym(Sym::RBrace) && !matches!(self.peek(), Token::End) {
-            if !self.at_word(Keyword::On) {
-                return self.fail(format!("expected `on`, found {}", self.peek()));
+            if self.at_word(Keyword::Fn) {
+                functions.push(self.fn_decl(events, Kind::EffectFn)?);
+                continue;
             }
             let start = self.pos;
             let arm = self.arm(&name, events)?;
@@ -3626,11 +3685,53 @@ impl Parser {
             at.push(start);
         }
         self.expect_sym(Sym::RBrace)?;
+        self.in_effect = None;
+        self.local_fns.clear();
 
         if arms.is_empty() {
             return self.fail(format!("effect `{name}` declares no arms"));
         }
-        Ok(Effect { name, module, arms })
+        Ok(Effect {
+            name,
+            module,
+            functions,
+            arms,
+        })
+    }
+
+    /// Sweep one's half of an effect-local `fn`: the signature, and nothing else.
+    fn local_fn_signature(&mut self, effect: &Ident) -> Result<(), SyntaxError> {
+        self.expect_word(Keyword::Fn)?;
+        let (line, col) = self.here();
+        let name = self.expect_ident()?;
+        if self.local_fns.iter().any(|other| other.name == name) {
+            return Err(self.err(
+                format!("`{effect}` already declares a `fn` named `{name}`"),
+                line,
+                col,
+            ));
+        }
+        // A module `fn` is in scope inside every effect, so a local one of the same
+        // name would silently change which code runs at a call site that reads the
+        // same in two files. Two different effects may each declare the name.
+        if self.functions.iter().any(|other| other.name == name) {
+            return Err(self.err(
+                format!(
+                    "`{name}` is already a `fn` at module scope, and one is in scope inside every effect; an effect-local `fn` cannot shadow it"
+                ),
+                line,
+                col,
+            ));
+        }
+        let params = self.param_list(true)?;
+        self.expect_sym(Sym::To)?;
+        let ret = self.fn_type()?;
+        self.local_fns.push(Signature {
+            name,
+            params,
+            ret: Some(ret),
+        });
+        self.skip_braced()
     }
 
     fn arm(&mut self, effect: &Ident, events: &[EventDef]) -> Result<Arm, SyntaxError> {
@@ -3706,6 +3807,16 @@ impl Parser {
             ));
         }
         Ok(arm)
+    }
+
+    /// Whether a `return` in a `fn` ends without a value. `http.*` is deliberately not
+    /// counted even though it can begin a statement: its statement form is a value
+    /// being discarded, so after `return` it is the value being returned.
+    fn ends_return(&self) -> bool {
+        if matches!(self.peek(), Token::Ident(name) if name == "http") {
+            return false;
+        }
+        self.at_sym(Sym::RBrace) || self.starts_statement()
     }
 
     /// Whether the next token could begin a statement. Used by `return` to tell a bare
@@ -3835,6 +3946,11 @@ impl Parser {
                     "erase a subject key",
                     span,
                 )?;
+                self.arm_only(
+                    "erase a subject key",
+                    "write the `erase` in the arm that calls it",
+                    span,
+                )?;
                 self.bump();
                 self.expect_sym(Sym::LParen)?;
                 let (line, col) = self.here();
@@ -3908,6 +4024,22 @@ impl Parser {
         )
     }
 
+    /// `reveal` and `erase` stay in the arm. Not for purity, since an effect-local
+    /// `fn` may call out, but because rule 9 checks that no reveal is reachable from
+    /// an erase over one arm's statement tree. See `docs/functions.md`.
+    fn arm_only(&self, what: &str, fix: &str, span: Span) -> Result<(), SyntaxError> {
+        if self.kind != Kind::EffectFn {
+            return Ok(());
+        }
+        Err(self.err(
+            format!(
+                "an effect-local `fn` cannot {what}; it stays in the arm, which is what keeps rule 9's erase-last check inside one statement tree, so {fix}"
+            ),
+            span.line,
+            span.col,
+        ))
+    }
+
     fn not_in_fn(&self, what: &str, span: Span) -> Result<(), SyntaxError> {
         if self.kind == Kind::Function {
             return Err(self.purity_error(what, span));
@@ -3923,7 +4055,7 @@ impl Parser {
         span: Span,
     ) -> Result<(), SyntaxError> {
         match self.kind {
-            Kind::Effect => Ok(()),
+            Kind::Effect | Kind::EffectFn => Ok(()),
             Kind::Command => Err(self.err(command, span.line, span.col)),
             Kind::Projector => Err(self.err(projector, span.line, span.col)),
             Kind::Function => Err(self.purity_error(what, span)),
@@ -3967,6 +4099,16 @@ impl Parser {
                 if self.kind == Kind::Test {
                     return Err(self.err(
                         "a test states inputs and expectations, so it cannot read a clock",
+                        span.line,
+                        span.col,
+                    ));
+                }
+                // Rule 11 pins the clock once per invocation, into a slot the arm
+                // fills before its body runs. A helper has no such slot, and giving it
+                // one would make `now()` mean something different inside a call.
+                if self.kind == Kind::EffectFn {
+                    return Err(self.err(
+                        "an effect-local `fn` cannot read a clock; `now()` is pinned once per invocation, so read it in the arm and pass it in",
                         span.line,
                         span.col,
                     ));
@@ -4103,6 +4245,7 @@ impl Parser {
             "decrypt",
             span,
         )?;
+        self.arm_only("decrypt", "pass the revealed value in as a parameter", span)?;
         self.not_in_fold("decrypt", span)?;
         self.expect_sym(Sym::LParen)?;
         let (line, col) = self.here();
@@ -5029,14 +5172,22 @@ fn always_returns(stmts: &[Stmt]) -> bool {
     })
 }
 
+/// A `fn` in the call graph: the scope it resolves in, then its name. An effect-local
+/// one is reachable only from its own effect, so a cycle never spans two scopes and
+/// the path can still be printed as bare names.
+type Callee = (Option<Ident>, Ident);
+
 /// Every `fn` a body calls, at any depth in its expressions.
-fn calls(exprs: &Exprs, body: &[Stmt]) -> Vec<Ident> {
+fn calls(exprs: &Exprs, body: &[Stmt]) -> Vec<Callee> {
     let mut found = Vec::new();
     walk_stmts(body, &mut |stmt| {
         for root in roots(stmt) {
             collect(exprs, root, &mut found, &|_, expr, out| {
-                if let Expr::CallFn { function, .. } = expr {
-                    out.push(function.clone());
+                if let Expr::CallFn {
+                    function, scope, ..
+                } = expr
+                {
+                    out.push((scope.clone(), function.clone()));
                 }
             });
         }
@@ -5046,11 +5197,18 @@ fn calls(exprs: &Exprs, body: &[Stmt]) -> Vec<Ident> {
 
 /// A cycle in the call graph, as the path that closes it.
 fn fn_cycle(program: &Program) -> Option<Vec<Ident>> {
-    let mut done: BTreeSet<Ident> = BTreeSet::new();
-    for function in &program.functions {
+    let mut done: BTreeSet<Callee> = BTreeSet::new();
+    let module = program.functions.iter().map(|def| (None, def.name.clone()));
+    let local = program.effects.iter().flat_map(|effect| {
+        effect
+            .functions
+            .iter()
+            .map(|def| (Some(effect.name.clone()), def.name.clone()))
+    });
+    for callee in module.chain(local) {
         let mut stack = Vec::new();
-        if reaches_itself(program, &function.name, &mut stack, &mut done) {
-            return Some(stack);
+        if reaches_itself(program, &callee, &mut stack, &mut done) {
+            return Some(stack.into_iter().map(|(_, name)| name).collect());
         }
     }
     None
@@ -5058,29 +5216,29 @@ fn fn_cycle(program: &Program) -> Option<Vec<Ident>> {
 
 fn reaches_itself(
     program: &Program,
-    name: &Ident,
-    stack: &mut Vec<Ident>,
-    done: &mut BTreeSet<Ident>,
+    callee: &Callee,
+    stack: &mut Vec<Callee>,
+    done: &mut BTreeSet<Callee>,
 ) -> bool {
-    if let Some(at) = stack.iter().position(|seen| seen == name) {
+    if let Some(at) = stack.iter().position(|seen| seen == callee) {
         stack.drain(..at);
-        stack.push(name.clone());
+        stack.push(callee.clone());
         return true;
     }
-    if done.contains(name) {
+    if done.contains(callee) {
         return false;
     }
-    let Some(def) = program.function(name) else {
+    let Some(def) = program.function_in(callee.0.as_deref(), &callee.1) else {
         return false;
     };
-    stack.push(name.clone());
-    for callee in calls(&def.exprs, &def.body) {
-        if reaches_itself(program, &callee, stack, done) {
+    stack.push(callee.clone());
+    for next in calls(&def.exprs, &def.body) {
+        if reaches_itself(program, &next, stack, done) {
             return true;
         }
     }
     stack.pop();
-    done.insert(name.clone());
+    done.insert(callee.clone());
     false
 }
 

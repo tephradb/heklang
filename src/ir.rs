@@ -165,6 +165,14 @@ impl Program {
     pub fn function(&self, name: &str) -> Option<&Function> {
         self.functions.iter().find(|def| def.name == name)
     }
+
+    /// A `fn` in the scope the IR named: an effect's own table, or module scope.
+    pub fn function_in(&self, scope: Option<&str>, name: &str) -> Option<&Function> {
+        match scope {
+            Some(effect) => self.effect(effect)?.function(name),
+            None => self.function(name),
+        }
+    }
 }
 
 /// A pure helper. It has a command's frame and arena and none of its machinery: no
@@ -399,10 +407,18 @@ pub struct EnvBind {
 pub struct Effect {
     pub name: Ident,
     pub module: Option<Ident>,
+    /// Helpers scoped to this effect. Unlike a module `fn` one may call out and
+    /// `invoke`, and unlike a module `fn` it is invisible outside these braces.
+    /// See `docs/functions.md`.
+    pub functions: Vec<Function>,
     pub arms: Vec<Arm>,
 }
 
 impl Effect {
+    pub fn function(&self, name: &str) -> Option<&Function> {
+        self.functions.iter().find(|def| def.name == name)
+    }
+
     /// The arm one event selects. Rule 1 makes this at most one, so it is a lookup
     /// rather than a filter, even though an arm may now list several paths.
     pub fn arm(&self, event: &EventPath) -> Option<&Arm> {
@@ -595,6 +611,10 @@ pub enum Expr {
     },
     CallFn {
         function: Ident,
+        /// The effect that declares it, when it is effect-local; `None` at module scope.
+        /// The IR names the table rather than leaving it to the running context, so a
+        /// helper and a module `fn` of the same name could never be confused here.
+        scope: Option<Ident>,
         args: Vec<ExprId>,
     },
     /// `[yields for bindings in over if cond]`. The bindings are ordinary frame slots,

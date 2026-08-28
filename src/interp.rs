@@ -50,6 +50,10 @@ pub enum ErrorKind {
         subject: Ident,
         id: String,
     },
+    /// Rule 4's terminal outcome, raised inside an effect-local `fn`. A call is an
+    /// expression, so a `Flow` cannot carry it out; `run_arm` catches this exactly
+    /// where it catches the direct `fail`, and reports the same thing.
+    Failed(String),
     Unreachable(String),
     BadSubject(Type),
     BadUuid(String),
@@ -141,6 +145,7 @@ impl fmt::Display for ErrorKind {
                  can erase a subject between the original run and a replay, and nothing static \
                  catches that"
             ),
+            ErrorKind::Failed(message) => write!(f, "{message}"),
             ErrorKind::Unreachable(url) => {
                 write!(f, "{url} did not answer; every attempt was retryable")
             }
@@ -506,6 +511,7 @@ impl<'a> Interpreter<'a> {
             &mut frame,
         )?;
 
+        let mut used = BTreeMap::new();
         let mut ctx = Effects {
             program: self.program,
             log: &mut self.log,
@@ -514,7 +520,7 @@ impl<'a> Interpreter<'a> {
             erased: &mut self.erased,
             lines: &mut self.lines,
             trace: &mut self.trace,
-            used: BTreeMap::new(),
+            used: &mut used,
         };
         if let Some(slot) = arm.now {
             let at = ctx.now();
@@ -524,7 +530,14 @@ impl<'a> Interpreter<'a> {
         let mut sink = Sink::Effect(ctx);
         let flow = exec_block(&arm.exprs, &arm.body, &mut frame, self.program, &mut sink);
         match flow {
-            Ok(Flow::Return(Ret::Fail(message))) => {
+            // Rule 4's terminal outcome, whether the `fail` was written in the arm or
+            // in an effect-local `fn` it called. A call is an expression, so a helper's
+            // has to arrive as an error; the outcome and the trace entry are the same.
+            Ok(Flow::Return(Ret::Fail(message)))
+            | Err(Error {
+                kind: ErrorKind::Failed(message),
+                ..
+            }) => {
                 self.trace.push(Effectful::Failed(message.clone()));
                 Ok(Invocation::Failed(message))
             }
@@ -1457,15 +1470,19 @@ fn eval(
                 items,
             })
         }
-        Expr::CallFn { function, args } => {
+        Expr::CallFn {
+            function,
+            scope,
+            args,
+        } => {
             let mut values = Vec::new();
             for arg in args {
                 values.push(eval(program, exprs, frame, *arg, ctx.as_deref_mut())?);
             }
             let def = program
-                .function(function)
+                .function_in(scope.as_deref(), function)
                 .ok_or_else(|| at(ErrorKind::UnknownFunction(function.clone())))?;
-            call_function(program, def, values, span)
+            call_function(program, def, values, span, ctx)
         }
         Expr::Record { ty, fields } => {
             // The parser resolved the record and filled every field, so a name that
@@ -1592,7 +1609,12 @@ fn eval(
     }
 }
 
-/// A pure call: a fresh frame, the parameters filled, and no sink to write through.
+/// A call: a fresh frame with the parameters filled, and the caller's own context. A
+/// module `fn` is pure and writes nowhere, so `Sink::Pure` costs it nothing; an
+/// effect-local one needs `log` and `fail`, which only `Sink::Effect` carries. Handing
+/// a pure helper an effect sink is safe because purity is a parse-time rule, which is
+/// the same reason `Sink::Pure` enforces nothing.
+///
 /// The parser proved every path returns, so falling out of the body is malformed IR
 /// rather than a case with a value.
 fn call_function(
@@ -1600,6 +1622,7 @@ fn call_function(
     def: &Function,
     args: Vec<Value>,
     span: Span,
+    ctx: Option<&mut Effects<'_>>,
 ) -> Result<Value, Error> {
     let mut frame = Frame::new(def.frame);
     if args.len() != def.params.len() {
@@ -1611,9 +1634,15 @@ fn call_function(
             .set(param.slot, coerce(value, &param.ty))
             .map_err(|kind| Error::at(kind, span))?;
     }
-    let mut sink = Sink::Pure;
+    let mut sink = match ctx {
+        Some(ctx) => Sink::Effect(ctx.reborrow()),
+        None => Sink::Pure,
+    };
     match exec_block(&def.exprs, &def.body, &mut frame, program, &mut sink)? {
         Flow::Return(Ret::Value(value)) => Ok(coerce(value, &def.ret)),
+        // Rule 4, on the error channel because a call is an expression. `run_arm`
+        // catches it where it catches the arm's own `fail`.
+        Flow::Return(Ret::Fail(message)) => Err(Error::at(ErrorKind::Failed(message), span)),
         _ => Err(Error::at(ErrorKind::MalformedIr, span)),
     }
 }
@@ -2545,7 +2574,29 @@ struct Effects<'a> {
     trace: &'a mut Vec<Effectful>,
     /// How many times each call has been made so far in this invocation, so a repeated
     /// identical call lines up with its own recording rather than the first one's.
-    used: BTreeMap<String, u32>,
+    /// Borrowed rather than owned because `reborrow` hands it to a called effect-local
+    /// `fn`: a fresh map there would give the helper's first `http.post` ordinal 0,
+    /// and a replay would answer it with whatever the arm's own first call recorded.
+    used: &'a mut BTreeMap<String, u32>,
+}
+
+impl<'a> Effects<'a> {
+    /// A shorter-lived view of the same context, so a call can be handed a `Sink`
+    /// without moving the borrows its caller still needs. Every field is a borrow,
+    /// including `used`, so the journal keeps one ordinal counter per invocation
+    /// rather than one per frame.
+    fn reborrow(&mut self) -> Effects<'_> {
+        Effects {
+            program: self.program,
+            log: self.log,
+            journal: self.journal,
+            http: self.http,
+            erased: self.erased,
+            lines: self.lines,
+            trace: self.trace,
+            used: self.used,
+        }
+    }
 }
 
 impl Effects<'_> {

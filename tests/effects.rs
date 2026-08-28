@@ -1,8 +1,8 @@
 //! `docs/effects.md` as executable tests, one test per numbered rule.
 
 use heklang::{
-    Event, EventPath, Interpreter, Invocation, Invoked, Journal, Json, Program, Recorded, Reply,
-    Type, Value, parse,
+    Effectful, Event, EventPath, Interpreter, Invocation, Invoked, Journal, Json, Program,
+    Recorded, Reply, Type, Value, parse,
 };
 
 const URL: &str = "https://mail.example/confirm";
@@ -2039,5 +2039,364 @@ fn a_trailing_comma_closes_an_effect_builtin() {
     assert_eq!(
         third,
         "`http.post` takes 2 arguments; a timeout is configuration rather than a call argument"
+    );
+}
+
+// ---------------------------------------------------------------------------------
+// Effect-local `fn`: a helper that may call out and `invoke`, and may not `reveal` or
+// `erase`. See `docs/functions.md`.
+
+#[test]
+fn an_effect_local_fn_may_call_out() {
+    let program = program(
+        "effect E {
+  fn confirm(to: String) -> Int {
+    let response = http.post(\"https://mail.example/confirm\", { \"to\": to })
+    return response.status
+  }
+
+  on @order.placed as e {
+    log(\"status {confirm(reveal(e.email))}\")
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let (interpreter, outcome) = deliver(
+        &program,
+        vec![placed(1, 7, 2_599)],
+        vec![Reply::Status(202)],
+        &mut journal,
+    );
+    assert_eq!(outcome.expect("delivered"), Invocation::Done);
+    assert_eq!(interpreter.lines(), ["status 202"]);
+    // The call was journaled from inside the helper, so a replay finds it.
+    assert!(
+        posted(&journal).contains("ada@example.com"),
+        "got: {}",
+        posted(&journal)
+    );
+}
+
+#[test]
+fn an_effect_local_fn_may_invoke() {
+    let program = program(
+        "effect E {
+  fn notify(order_id: Uuid, notification_id: Uuid) -> String {
+    let result = invoke RecordNotified { order_id, notification_id }
+    return result.code().unwrap_or(\"ok\")
+  }
+
+  on @order.placed as e {
+    log(notify(e.order_id, Uuid.derive(e.id, \"confirmation\")))
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let (interpreter, outcome) = deliver(&program, vec![placed(1, 7, 100)], vec![], &mut journal);
+    assert_eq!(outcome.expect("delivered"), Invocation::Done);
+    assert_eq!(interpreter.lines(), ["ok"]);
+    // The command really ran from inside the helper, so its event is in the log.
+    assert_eq!(interpreter.log().len(), 2);
+}
+
+#[test]
+fn a_fail_inside_an_effect_local_fn_ends_the_invocation() {
+    let program = program(
+        "effect E {
+  fn confirm(to: String) -> Int {
+    let response = http.post(\"https://mail.example/confirm\", { \"to\": to })
+    if response.status >= 400 {
+      fail(\"mail rejected {response.status}\")
+    }
+    return response.status
+  }
+
+  on @order.placed as e {
+    log(\"status {confirm(reveal(e.email))}\")
+    log(\"unreachable\")
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let (interpreter, outcome) = deliver(
+        &program,
+        vec![placed(1, 7, 2_599)],
+        vec![Reply::Status(422)],
+        &mut journal,
+    );
+    // The same outcome and the same trace entry a `fail` in the arm produces: only the
+    // channel it travelled on differs, because a call is an expression.
+    assert_eq!(
+        outcome.expect("delivered"),
+        Invocation::Failed("mail rejected 422".to_string())
+    );
+    assert!(
+        interpreter
+            .trace()
+            .contains(&Effectful::Failed("mail rejected 422".to_string())),
+        "got: {:?}",
+        interpreter.trace()
+    );
+    assert!(
+        interpreter.lines().is_empty(),
+        "the arm stopped at the call"
+    );
+}
+
+/// The journal counts calls per invocation, not per frame. Two identical requests, one
+/// in the arm and one in the helper, are two entries and replay to their own answers.
+#[test]
+fn the_journal_counts_a_call_across_a_fn_boundary() {
+    let program = program(
+        "effect E {
+  fn ping() -> Int {
+    return http.post(\"https://mail.example/confirm\", { \"to\": \"ada\" }).status
+  }
+
+  on @order.placed as e {
+    let first = http.post(\"https://mail.example/confirm\", { \"to\": \"ada\" }).status
+    log(\"{first} then {ping()}\")
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let (interpreter, outcome) = deliver(
+        &program,
+        vec![placed(1, 7, 100)],
+        vec![Reply::Status(201), Reply::Status(202)],
+        &mut journal,
+    );
+    outcome.expect("delivered");
+    assert_eq!(interpreter.lines(), ["201 then 202"]);
+
+    // A replay reads the same two entries back in the same order. Sharing one ordinal
+    // counter is what makes that true; a fresh one per call would answer the helper
+    // with the arm's own recording.
+    let replayed = Interpreter::with_log(&program, vec![placed(1, 7, 100)])
+        .deliver("E", 0, &mut journal)
+        .expect("replayed");
+    assert_eq!(replayed, Invocation::Done);
+}
+
+#[test]
+fn an_effect_local_fn_may_be_declared_after_its_use() {
+    let program = program(
+        "effect E {
+  on @order.placed as e { log(greeting(e.customer_id)) }
+
+  fn greeting(customer_id: Int) -> String {
+    return \"hello {customer_id}\"
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let (interpreter, outcome) = deliver(&program, vec![placed(1, 7, 100)], vec![], &mut journal);
+    outcome.expect("delivered");
+    assert_eq!(interpreter.lines(), ["hello 7"]);
+}
+
+#[test]
+fn an_effect_local_fn_may_call_another() {
+    let program = program(
+        "effect E {
+  fn outer(customer_id: Int) -> String { return \"[{inner(customer_id)}]\" }
+  fn inner(customer_id: Int) -> String { return \"c{customer_id}\" }
+
+  on @order.placed as e { log(outer(e.customer_id)) }
+}",
+    );
+    let mut journal = Journal::default();
+    let (interpreter, outcome) = deliver(&program, vec![placed(1, 7, 100)], vec![], &mut journal);
+    outcome.expect("delivered");
+    assert_eq!(interpreter.lines(), ["[c7]"]);
+}
+
+#[test]
+fn a_cycle_between_effect_local_fns_is_rejected() {
+    let message = err("effect E {
+  fn a(n: Int) -> Int { return b(n) }
+  fn b(n: Int) -> Int { return a(n) }
+
+  on @order.placed as e { log(\"{a(1)}\") }
+}");
+    assert!(
+        message.contains("`a` calls `b` calls `a`"),
+        "expected the cycle as a path, got: {message}"
+    );
+    assert!(
+        message.contains("so that every call ends"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn an_effect_local_fn_may_not_reveal() {
+    let message = err("effect E {
+  fn confirm(email: String) -> Int {
+    return http.post(\"https://mail.example/confirm\", { \"to\": reveal(email) }).status
+  }
+
+  on @order.placed as e { log(\"{confirm(e.email)}\") }
+}");
+    assert!(
+        message.contains("an effect-local `fn` cannot decrypt"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("pass the revealed value in as a parameter"),
+        "expected the fix the port already writes, got: {message}"
+    );
+    assert!(
+        message.contains("erase-last check inside one statement tree"),
+        "expected the rule it keeps, got: {message}"
+    );
+}
+
+#[test]
+fn an_effect_local_fn_may_not_erase() {
+    let message = err("effect E {
+  fn forget(customer_id: Int) -> Bool {
+    erase(customer_id)
+    return true
+  }
+
+  on @order.placed as e { log(\"{forget(e.customer_id)}\") }
+}");
+    assert!(
+        message.contains("an effect-local `fn` cannot erase a subject key"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("erase-last check inside one statement tree"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn an_effect_local_fn_is_not_visible_from_another_effect() {
+    let message = err("effect E {
+  fn shared(n: Int) -> Int { return n }
+  on @order.placed as e { log(\"{shared(1)}\") }
+}
+effect F {
+  on @order.cancelled as e { log(\"{shared(1)}\") }
+}");
+    assert_eq!(message, "`shared` is not in scope");
+}
+
+#[test]
+fn two_effects_may_each_declare_the_same_helper() {
+    let program = program(
+        "effect E {
+  fn label(n: Int) -> String { return \"E{n}\" }
+  on @order.placed as e { log(label(e.customer_id)) }
+}
+effect F {
+  fn label(n: Int) -> String { return \"F{n}\" }
+  on @order.cancelled as e { log(label(e.customer_id)) }
+}",
+    );
+    let mut journal = Journal::default();
+    let mut interpreter = Interpreter::with_log(&program, vec![placed(1, 7, 100), cancelled(2, 9)]);
+    interpreter.deliver("E", 0, &mut journal).expect("E");
+    interpreter.deliver("F", 1, &mut journal).expect("F");
+    assert_eq!(interpreter.lines(), ["E7", "F9"]);
+}
+
+#[test]
+fn an_effect_local_fn_may_not_shadow_a_module_fn() {
+    let message = err("fn label(n: Int) -> String { return \"{n}\" }
+effect E {
+  fn label(n: Int) -> String { return \"{n}\" }
+  on @order.placed as e { log(label(1)) }
+}");
+    assert!(
+        message.contains("`label` is already a `fn` at module scope"),
+        "got: {message}"
+    );
+    assert!(message.contains("cannot shadow it"), "got: {message}");
+}
+
+#[test]
+fn one_effect_may_not_declare_a_helper_twice() {
+    let message = err("effect E {
+  fn label(n: Int) -> String { return \"a{n}\" }
+  fn label(n: Int) -> String { return \"b{n}\" }
+  on @order.placed as e { log(label(1)) }
+}");
+    assert_eq!(message, "`E` already declares a `fn` named `label`");
+}
+
+/// Rule 3: a fold reproduces without a journal, and this is the one helper that could
+/// call out. A module `fn` is pure by construction, so a fold may still call one.
+#[test]
+fn a_fold_arm_may_not_call_an_effect_local_fn() {
+    let message = err("effect E {
+  fn bump(n: Int) -> Int { return n + 1 }
+
+  on @order.placed as e {
+    state seen: Int = fold 0
+      on @order.placed(customer_id: e.customer_id) => bump(seen)
+    log(\"{seen}\")
+  }
+}");
+    assert_eq!(
+        message,
+        "`state` folds the log, so it cannot call `bump`, which may call out"
+    );
+}
+
+#[test]
+fn an_effect_local_fn_has_no_state() {
+    let message = err("effect E {
+  fn count(customer_id: Int) -> Int {
+    state seen: Int = fold 0
+      on @order.placed(customer_id) => seen + 1
+    return seen
+  }
+
+  on @order.placed as e { log(\"{count(e.customer_id)}\") }
+}");
+    assert!(
+        message.contains("an effect-local `fn` has no `state`"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("pass what it decided in as a parameter"),
+        "got: {message}"
+    );
+}
+
+/// Rule 11 pins the clock once per invocation, into a slot the arm fills before its
+/// body runs. A helper has no such slot.
+#[test]
+fn an_effect_local_fn_may_not_read_the_clock() {
+    let message = err("effect E {
+  fn stamp() -> Timestamp { return now() }
+  on @order.placed as e { log(\"{stamp()}\") }
+}");
+    assert!(
+        message.contains("an effect-local `fn` cannot read a clock"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("read it in the arm and pass it in"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn an_effect_local_fn_cannot_emit() {
+    let message = err("effect E {
+  fn append(order_id: Uuid) -> Bool {
+    emit @order.notified { order_id, notification_id: order_id }
+    return true
+  }
+
+  on @order.placed as e { log(\"{append(e.order_id)}\") }
+}");
+    assert!(
+        message.contains("an effect never appends events"),
+        "got: {message}"
     );
 }

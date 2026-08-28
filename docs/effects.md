@@ -337,6 +337,11 @@ including statements lexically above it. That is exactly the case a lexical chec
 wrong, which is why the analysis is written as reachability now, while the control flow is still a
 tree.
 
+**It stays one arm wide, and that is a decision now rather than a happy accident.** An effect may
+declare its own helpers, and one of those may call out. It may not `reveal` or `erase`: those stay in
+the arm, so this analysis never has to follow a call, never needs a summary per function, and never
+has to explain a path through code the author was not looking at. See `docs/functions.md`.
+
 **Known gap: the second rule is not implemented.** hekla also says do not erase a subject whose id
 you learned by revealing, because a repeat request for an already-erased subject then cannot be read
 at all. Enforcing it needs data flow that round-trips through an HTTP response, which is more than
@@ -411,6 +416,43 @@ two calls in one body are two reads of the same value. In a command that value i
 request would append at, computed on entry, so it is well defined even for a command that appends
 nothing: one returning `invalid` or `reject` still read a real instant, it was simply never stamped
 on anything. A command emitting two events reads the first one's append time.
+
+## An effect-local `fn`
+
+An `effect` may declare its own helpers, and unlike a module `fn` one of these may call out:
+
+```
+effect SyncShop {
+  fn sync(shop_id: Int, domain: String, secret: String) -> Bool {
+    let response = http.post("https://{domain}/admin/api/sync", { "shop": shop_id },
+      headers = { "X-Access-Token": secret })
+    if response.status >= 400 {
+      fail("sync rejected with status {response.status}")
+    }
+    return true
+  }
+
+  on @shop.sync.requested as e { shop_id } { ... sync(shop_id, domain, reveal(token)) }
+  on @shop.reconnected as e { shop_id } { ... sync(shop_id, domain, reveal(token)) }
+}
+```
+
+`docs/functions.md` has the rule and the evidence. What matters here is the three things it does not
+disturb:
+
+- **Rule 9 is unchanged.** A helper may not `reveal` or `erase`, so the erase-last analysis still runs
+  over one arm's statement tree. That is the restriction the whole design is built around, and it is
+  free: no helper in the port that motivated this contains either.
+- **Rule 3 is unchanged.** A `state` fold may not call one, because a fold has to reproduce without a
+  journal and this is the first helper that could call out.
+- **Rule 11 is unchanged.** `now()` stays pinned once per invocation, into a slot the arm fills, so a
+  helper may not read the clock: read it in the arm and pass it in.
+
+Rules 4, 6, 8 and 10 carry into a helper as they are. A `fail` there is the arm's terminal outcome
+and produces the same trace entry, an `invoke` there appends under the command's own guard, and both
+the journal's ordering and its ordinals are per invocation rather than per call frame, so two
+identical requests, one in the arm and one in a helper it calls, are two entries and replay to their
+own answers.
 
 ## The global namespace is closed to constructors
 

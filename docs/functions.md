@@ -13,6 +13,9 @@ fn effective_sku(sku: String?, plan_id: Uuid) -> String {
 Module scope, a required return type, and `return <expr>`. Callable from a command, a projector, an
 effect and a `state` fold arm.
 
+A `fn` declared inside an `effect` is the one exception to everything in the next section: it may
+call out, and it is scoped to that effect. It has its own section below.
+
 ## This overturns "no user-defined functions"
 
 heklang had no function declaration of any kind, and that was a decision rather than an omission: a
@@ -27,7 +30,7 @@ helpers are in the same position.
 That is the shape of evidence worth reversing a decision on: not "this would be nicer", but "this
 rule cannot be expressed once, and it is a rule that must hold in six places".
 
-## A `fn` is pure
+## A module `fn` is pure
 
 No clock, no HTTP, no `invoke`, no `reveal`, no `erase`, no `emit`, no `put` / `patch` / `delete`. All
 of it is a compile error inside a `fn`, and the message says which rule is being kept.
@@ -43,18 +46,101 @@ Purity buys three more things, each of which would otherwise be its own rule:
 
 - **A fold arm may call one.** `docs/effects.md` rule 3 requires a `state` fold to reproduce without a
   journal, which is why a fold cannot read a clock or call out. A pure `fn` cannot do either by
-  construction, so "may a fold call a helper" needs no answer of its own.
+  construction, so "may a fold call a module helper" needs no answer of its own. An effect-local one
+  is the first that cannot make that promise, and is the first a fold may not call.
 - **A projector may call one.** A projector is a pure fold over the log, and a pure helper cannot
   break that.
 - **Nothing needs journaling.** A `fn` produces no journal entry, so replay does not have to know it
   exists.
 
-**Effect-local `fn` is deliberately not in this pass.** A helper declared inside an `effect`, allowed
-to call out and `invoke`, is what a real port wanted for two effects that otherwise inline a 60-line
-HTTP sequence into each of two arms. It is exactly the thing that makes erase-last interprocedural,
-so it needs that analysis designed first. Worth knowing before that work starts: of the ten
-effect-local helpers in that port, **four are already pure** and become module-scope `fn`s here, so
-the case is six, not ten, and multi-path arms may shrink it further.
+## An effect-local `fn` may call out
+
+A `fn` declared inside an `effect` is the one helper that is not pure. It may `http.*`, `invoke`,
+`log` and `fail`, and it is visible only inside those braces.
+
+```
+effect CreateMasterProduct {
+  fn create(shop_id: Int, shop_domain: String, access_token: String) -> Bool {
+    let response = http.post(admin_url(shop_domain), { ... }, headers = admin_headers(access_token))
+    if response.status == 401 {
+      log("productCreate got 401, retrying on next reconnect")
+      return false
+    }
+    if graphql_error(response, "productCreate").is_some() {
+      fail("productCreate failed")
+    }
+    invoke RecordMasterProductCreated { shop_id, product_id, default_variant_id }
+    return true
+  }
+
+  on @shop.onboarding.completed, @shop.reconnected as e { shop_id } {
+    state token: String = fold "" on @shop.connected(shop_id) { access_token } => access_token
+    ...
+    create(shop_id, domain, reveal(token))
+  }
+}
+```
+
+The evidence is the same shape as the one that added `fn` at all. A 3,186-line port declares
+**thirteen** of these, and one of them, a 60-line HTTP sequence, is called by two arms of the same
+effect. Six of the thirteen are pure and lift to module scope with no language change; the other
+seven are the case, and they are not separable, because the first file that stops the checker holds
+two pure helpers and one impure one.
+
+### It may not `reveal` or `erase`
+
+That is the whole restriction, and it is what keeps rule 9's erase-last analysis where the section
+above says it lives: over one arm's statement tree, exact, naming two spans in one body. A helper
+that could hold either would make the analysis interprocedural.
+
+The restriction costs nothing, which is why it is the right one. **None of the port's thirteen
+helpers contains a `reveal` or an `erase`**, while its arms use them 35 times across 11 files. Every
+helper takes the already-decrypted value as a parameter, and the port's own comment says why:
+
+```
+  // Effect-local, so it may call out and invoke; it takes the revealed token
+  // rather than the handle, which keeps every decrypt at the arm's own level.
+```
+
+The error says the same thing, and names the fix rather than the rule alone:
+
+```
+an effect-local `fn` cannot decrypt; it stays in the arm, which is what keeps rule 9's
+erase-last check inside one statement tree, so pass the revealed value in as a parameter
+```
+
+### What else it may not do
+
+- **`state`.** A fold belongs to the arm (`docs/effects.md` rule 2), so pass what it decided in.
+- **`now()`.** Rule 11 pins the clock once per invocation, into a slot the arm fills before its body
+  runs. A helper has no such slot, and giving it one would make `now()` mean something different
+  inside a call than outside it. Read it in the arm and pass it in. The port reads a clock in zero
+  effect files, so there is nothing to weigh against the machinery.
+- **`emit` and read-model writes**, for the reasons an arm cannot do them either.
+
+### A fold arm may not call one
+
+`docs/effects.md` rule 3 requires a `state` fold to reproduce without a journal. A module `fn` is
+pure by construction, so the section above can say a fold may call one and stop there. This is the
+first helper that cannot make that promise, so it is the first that a fold may not call.
+
+**Rejected: a purity marker per helper**, so that a fold could call an effect-local one that happens
+not to call out. It is a second rule, it puts a keyword on a declaration to describe what its body
+already shows, and no fold arm in the port calls a local helper at all.
+
+### Scope
+
+Visible inside its own effect: that effect's arms and its sibling helpers. Order is irrelevant, as
+everywhere else, because signatures are collected in a sweep before any body is read. `docs/effects.md`
+has the shape.
+
+Two different effects may each declare a `fn post`, the way two projectors may each declare an
+`enum Status`. Shadowing a **module** `fn` is rejected, and that is not symmetry: a module `fn` is in
+scope inside every effect, so a local one of the same name silently changes which code runs at a call
+site that reads identically in two files. The port has no collision of either kind.
+
+One consequence is worth keeping: within any one call graph the names stay unambiguous, so the
+recursion path below still prints bare names, and no error had to learn a qualified spelling.
 
 ## Recursion is rejected
 
@@ -120,10 +206,9 @@ ordinary data. The read model has the same problem one step later.
 
 **This was a gap, not a decision.** `Type::Response` and `Value::Response { status, body }` were both
 already in the IR, and `.status` / `.body` were already checked; only the spelling was missing, so a
-pure helper over a response could be written everywhere except in its own signature. The section
-above counts four of a port's ten effect-local helpers as "already pure, and therefore module-scope
-`fn`s here". Two of those four take a `Response`, so the count that argued effect-local `fn` down
-from ten to six was assuming this worked.
+pure helper over a response could be written everywhere except in its own signature. Two of the six
+effect-local helpers that the section above counts as "already pure, and therefore liftable to module
+scope" take a `Response`, so that count was assuming this worked.
 
 **Rejected: teaching the general type parser.** One arm on `type_ref` reaches every position at once,
 including the event field, and an accidental rejection elsewhere (an entity column has no zero value
