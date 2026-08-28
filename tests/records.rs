@@ -439,3 +439,30 @@ fn there_is_no_record_update() {
     let message = err("", &body);
     assert_eq!(message, "expected `}`, found `with`");
 }
+
+/// A `const` is the one item with no braced body, so skipping one in an earlier pass
+/// cannot look for a brace: it would run past the const into the next declaration and
+/// swallow it whole.
+#[test]
+fn a_const_does_not_swallow_the_declaration_after_it() {
+    let source = "const LIMIT: Int = 2
+const TAGS: List(String) = [\"a\", \"b\"]
+
+fn doubled(n: Int) -> Int {
+  return n * 2
+}
+
+event @a.b { x: Int }
+
+command C(x: Int) {
+  emit @a.b { x: doubled(x) + LIMIT }
+}
+";
+    let program = parse(source).expect("a const ends at its literal");
+    assert_eq!(
+        program.functions.len(),
+        1,
+        "the fn after the consts survived"
+    );
+    assert_eq!(program.consts.len(), 2);
+}

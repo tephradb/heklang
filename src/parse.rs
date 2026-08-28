@@ -837,8 +837,31 @@ impl Parser {
     }
 
     fn skip_item(&mut self) -> Result<(), SyntaxError> {
+        // Every item but `const` has a braced body, and skipping a `const` by looking
+        // for one runs past it into whatever declaration comes next.
+        if self.at_word(Keyword::Const) {
+            return self.skip_const();
+        }
         self.bump();
         self.skip_braced()
+    }
+
+    /// A `const` ends where its literal does, and a literal has no closing token of its
+    /// own. So this runs to the next thing that can start an item, tracking depth so a
+    /// list or a record value does not end it early.
+    fn skip_const(&mut self) -> Result<(), SyntaxError> {
+        self.expect_word(Keyword::Const)?;
+        let mut depth = 0i32;
+        loop {
+            match self.peek() {
+                Token::End => return Ok(()),
+                Token::Sym(Sym::LBrace | Sym::LBracket | Sym::LParen) => depth += 1,
+                Token::Sym(Sym::RBrace | Sym::RBracket | Sym::RParen) => depth -= 1,
+                Token::Word(word) if depth == 0 && starts_item(*word) => return Ok(()),
+                _ => {}
+            }
+            self.bump();
+        }
     }
 
     fn enum_decl(&mut self) -> Result<EnumDef, SyntaxError> {
@@ -3785,6 +3808,21 @@ fn children(expr: &Expr) -> Vec<ExprId> {
 /// Whether every path out of a body returns. An `if` counts only when it has an
 /// `else` and both branches return; a `for` body never counts, because the container
 /// it walks can be empty and the loop can run zero times.
+/// The keywords a top-level declaration begins with.
+fn starts_item(word: Keyword) -> bool {
+    matches!(
+        word,
+        Keyword::Enum
+            | Keyword::Record
+            | Keyword::Const
+            | Keyword::Fn
+            | Keyword::Event
+            | Keyword::Command
+            | Keyword::Projector
+            | Keyword::Effect
+    )
+}
+
 fn always_returns(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|stmt| match stmt {
         Stmt::Return(_) | Stmt::Fail { .. } => true,

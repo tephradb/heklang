@@ -1,0 +1,173 @@
+// catalog/catalog.hk
+//
+// A fourth module, and a tour of what the port's first tranche added. Everything here
+// is declared at module scope and used from a command, a projector and an effect, which
+// is the point: before this pass an enum could not reach an event, a helper could not be
+// spelled once, and there was no way to hold more than one of anything.
+
+enum Tier { @default Free, Paid }
+
+record Item {
+  sku: String,
+  price: Money(2),
+  tags: List(String),
+}
+
+const HOUSE_TAG: String = "house"
+const FREE_LIMIT: Int = 2
+
+// The RFC 4122 DNS namespace, as a stable arbitrary constant. Unspellable before a
+// string literal could resolve against a `Uuid` target.
+const NAMESPACE: Uuid = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+
+// lib/catalog.hk
+//
+// The helper that overturned "no user-defined functions": one rule about SKUs, needed
+// by a command, a projector and an effect, and wrong the moment it is copied.
+fn effective_sku(sku: String?, item_id: Uuid) -> String {
+  let given = sku.unwrap_or("").trim()
+  if given.is_empty() {
+    return "CATALOG:{item_id}"
+  }
+  return given
+}
+
+fn tagged(items: Map(Uuid, Item), tag: String) -> List(String) {
+  return [item.sku for item_id, item in items if item.tags.contains(tag)]
+}
+
+fn audit_id(seller_id: Int, at: Int) -> Uuid {
+  return Uuid.derive(NAMESPACE, "{seller_id}/{at}")
+}
+
+// events/catalog.hk
+
+event @item.listed {
+  item_id: Uuid,
+  seller_id: Int,
+  item: Item @no_index,
+  tier: Tier,
+}
+
+event @item.delisted {
+  item_id: Uuid,
+  seller_id: Int,
+}
+
+event @item.flagged {
+  item_id: Uuid,
+  seller_id: Int,
+  reason: String @max(60),
+}
+
+// commands/list_item.hk
+
+command ListItem(
+  item_id: Uuid,
+  seller_id: Int,
+  sku: String?,
+  price: Money(2),
+  tags: List(String),
+  tier: Tier,
+) {
+  // The seller's live catalogue, keyed by item. Uniqueness is a rule about all of it,
+  // so the boundary is every listing this seller has.
+  state items: Map(Uuid, Item) = fold Map.empty
+    on @item.listed(seller_id) { item_id, item } => items.set(item_id, item)
+    on @item.delisted(seller_id) { item_id } => items.remove(item_id)
+
+  let wanted = effective_sku(sku, item_id)
+
+  for other_id, other in items {
+    if other_id != item_id && other.sku == wanted {
+      return reject("sku_taken", "sku {wanted} already belongs to item {other_id}")
+    }
+  }
+
+  if tier == Free && items.len() >= FREE_LIMIT {
+    return reject("free_limit", "the free tier lists {FREE_LIMIT} items")
+  }
+
+  emit @item.listed {
+    item_id,
+    seller_id,
+    item: Item { sku: wanted, price, tags },
+    tier,
+  }
+}
+
+// projectors/catalog.hk
+
+projector Catalog {
+  entity Listing {
+    item_id: Uuid @key,
+    seller_id: Int @index,
+    sku: String @max(60),
+    price: Money(2),
+    // The same enum as on the event, so a variant that is not in the set cannot reach
+    // the column at all.
+    tier: Tier,
+    tags: List(String),
+    flags: Int,
+  }
+
+  on @item.listed { item_id, seller_id, item, tier } {
+    put Listing {
+      item_id,
+      seller_id,
+      sku: item.sku,
+      price: item.price,
+      tier,
+      tags: item.tags,
+      flags: 0,
+    }
+  }
+
+  on @item.flagged { item_id } {
+    patch Listing[item_id] { flags: .flags + 1 }
+  }
+
+  on @item.delisted { item_id } {
+    delete Listing[item_id]
+  }
+}
+
+// effects/audit_catalog.hk
+
+effect AuditCatalog {
+  // Three event types onto one body. They share `item_id` and `seller_id` and nothing
+  // else, and that is exactly what the binding may name: `reason` is on the flag alone
+  // and `item` on the listing alone, so neither is reachable here.
+  on @item.listed,
+     @item.delisted,
+     @item.flagged as e { item_id, seller_id } {
+
+    state listed: Int = fold 0
+      on @item.listed(seller_id) => listed + 1
+      on @item.delisted(seller_id) => listed - 1
+
+    state house: Map(Uuid, Item) = fold Map.empty
+      on @item.listed(seller_id) { item_id, item } => house.set(item_id, item)
+      on @item.delisted(seller_id) { item_id } => house.remove(item_id)
+
+    let response = http.post(
+      "https://audit.example/catalog",
+      {
+        "seller": seller_id,
+        "listed": listed,
+        "house": tagged(house, HOUSE_TAG),
+      },
+      // What stops a second audit across a replay, and the reason the journal key
+      // leaves headers out.
+      headers = { "Idempotency-Key": "{audit_id(seller_id, e.position)}" },
+    )
+
+    // A string literal inside the braces of another string literal. Before the lexer
+    // nested, this needed a helper whose only job was to move the `""` out.
+    if response.status >= 400 {
+      fail("audit rejected: {response.body.string("error").unwrap_or("no reason")}")
+    }
+
+    log("seller {seller_id} now lists {listed}, house: {tagged(house, HOUSE_TAG)}")
+  }
+}

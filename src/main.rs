@@ -13,6 +13,8 @@ const SCALE: u8 = 2;
 const COMMANDS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/place_order.hk");
 const PROJECTORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/orders.hk");
 const EFFECTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/notify.hk");
+const CATALOG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hek/catalog.hk");
+const AUDIT: &str = "https://audit.example/catalog";
 const CONFIRM: &str = "https://mail.example/confirm";
 
 fn order_placed() -> EventPath {
@@ -145,6 +147,13 @@ fn load() -> Result<Program, String> {
         ("effects/notify.hk", effects.as_str()),
     ])
     .map_err(|err| err.to_string())
+}
+
+/// The catalog module is its own program, so the orders demo above stays exactly what
+/// it was and this section is purely additive.
+fn load_catalog() -> Result<Program, String> {
+    let catalog = read(CATALOG)?;
+    parse_files([("catalog/catalog.hk", catalog.as_str())]).map_err(|err| err.to_string())
 }
 
 fn main() -> ExitCode {
@@ -317,7 +326,165 @@ fn main() -> ExitCode {
     rejected("bad invoke", BAD_INVOKE);
     rejected("triggers itself", SELF_TRIGGER);
 
+    match load_catalog() {
+        Ok(catalog) => catalog_demo(&catalog),
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::FAILURE;
+        }
+    }
+
     ExitCode::SUCCESS
+}
+
+fn tier(name: &str) -> Value {
+    Value::Enum {
+        ty: "Tier".to_string(),
+        variant: name.to_string(),
+    }
+}
+
+fn tags(names: &[&str]) -> Value {
+    Value::list(
+        heklang::Type::String,
+        names.iter().map(|name| Value::str(*name)),
+    )
+}
+
+fn list_item(
+    interpreter: &mut Interpreter<'_>,
+    label: &str,
+    seq: u32,
+    sku: Option<&str>,
+    price: i64,
+    names: &[&str],
+    which: &str,
+) {
+    let sku = match sku {
+        Some(text) => Value::some(Value::str(text)),
+        None => Value::none(heklang::Type::String),
+    };
+    let args = vec![
+        ("item_id", Value::uuid(uuid(seq))),
+        ("seller_id", Value::Int(1)),
+        ("sku", sku),
+        ("price", Value::money(price, SCALE)),
+        ("tags", tags(names)),
+        ("tier", tier(which)),
+    ];
+    match interpreter.run("ListItem", args) {
+        Ok(execution) => match execution.outcome {
+            Outcome::Ok(events) => println!("{label:16} {:8} {}", "ok", events[0]),
+            Outcome::Invalid(message) => println!("{label:16} {:8} {message}", "invalid"),
+            Outcome::Reject { code, message } => {
+                println!("{label:16} {:8} {code}: {message}", "reject");
+            }
+        },
+        Err(err) => println!("{label:16} {:8} {err}", "error"),
+    }
+}
+
+/// Everything the port's first tranche added, in one module: a module-scope enum and
+/// record, constants, two pure helpers, both containers, a `for`, a comprehension,
+/// interpolation, and one arm on three event types.
+fn catalog_demo(program: &Program) {
+    println!("\nmodule catalog.hk");
+    println!(
+        "  {} events, {} commands, {} projectors, {} effects, {} fns, {} records, {} consts, {} enums",
+        program.events.len(),
+        program.commands.len(),
+        program.projectors.len(),
+        program.effects.len(),
+        program.functions.len(),
+        program.records.len(),
+        program.consts.len(),
+        program.enums.len(),
+    );
+
+    let mut interpreter = Interpreter::new(program);
+    list_item(
+        &mut interpreter,
+        "derived sku",
+        1,
+        None,
+        1_999,
+        &["house", "new"],
+        "Paid",
+    );
+    list_item(
+        &mut interpreter,
+        "given sku",
+        2,
+        Some("  MINE-1  "),
+        2_500,
+        &["new"],
+        "Paid",
+    );
+    list_item(
+        &mut interpreter,
+        "sku taken",
+        3,
+        Some("MINE-1"),
+        3_000,
+        &[],
+        "Paid",
+    );
+    list_item(
+        &mut interpreter,
+        "free tier full",
+        4,
+        Some("MINE-2"),
+        1_000,
+        &[],
+        "Free",
+    );
+
+    interpreter.append(Event::new(
+        EventPath::new(["item", "flagged"]),
+        [
+            ("item_id", Value::uuid(uuid(1))),
+            ("seller_id", Value::Int(1)),
+            ("reason", Value::str("counterfeit")),
+        ],
+    ));
+
+    if let Some(store) = project(&interpreter, "catalog", "Catalog") {
+        println!("\n  read model");
+        rows(
+            &store,
+            "Listing",
+            &[],
+            &["sku", "price", "tier", "tags", "flags"],
+        );
+    }
+
+    // One arm on three event types, so the flag above lands in the same body the two
+    // listings did.
+    println!("\n  effect AuditCatalog");
+    interpreter.script(
+        AUDIT,
+        [Reply::Status(200), Reply::Status(200), Reply::Status(200)],
+    );
+    // One journal per invocation, which is what `drive` does: an invocation replays its
+    // own calls and never another's.
+    let mut seen = 0usize;
+    for position in [0u64, 1, 2] {
+        let mut journal = Journal::default();
+        if let Err(err) = interpreter.deliver("AuditCatalog", position, &mut journal) {
+            println!("  position {position}: {err}");
+            continue;
+        }
+        for line in &interpreter.lines()[seen..] {
+            println!("  {line}");
+        }
+        seen = interpreter.lines().len();
+        for (call, _) in journal.calls() {
+            println!("  journaled {call}");
+        }
+    }
+    if let Some(sent) = interpreter.requests().first() {
+        println!("  headers {}", sent.headers);
+    }
 }
 
 /// Rule 4's counters, on their own small log so the three stay legible. An effect
