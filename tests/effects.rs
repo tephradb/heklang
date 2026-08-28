@@ -14,6 +14,11 @@ const PRELUDE: &str = "event @order.placed {
   total: Money(2),
 }
 event @order.cancelled { order_id: Uuid, customer_id: Int }
+event @order.reviewed {
+  order_id: Uuid,
+  customer_id: Int,
+  comment: String? @subject(customer_id),
+}
 event @order.notified { order_id: Uuid, notification_id: Uuid }
 
 command RecordNotified(order_id: Uuid, notification_id: Uuid) {
@@ -68,6 +73,28 @@ fn cancelled(seq: u32, customer_id: i64) -> Event {
                 Value::uuid(format!("0190d1a1-0000-7000-8000-{seq:012}")),
             ),
             ("customer_id", Value::Int(customer_id)),
+        ],
+    )
+}
+
+/// An event whose subject-bound field is optional, which is the shape rule 12's
+/// "an optional in, an optional out" turns on.
+fn reviewed(seq: u32, customer_id: i64, comment: Option<&str>) -> Event {
+    Event::new(
+        EventPath::new(["order", "reviewed"]),
+        [
+            (
+                "order_id",
+                Value::uuid(format!("0190d1a1-0000-7000-8000-{seq:012}")),
+            ),
+            ("customer_id", Value::Int(customer_id)),
+            (
+                "comment",
+                match comment {
+                    Some(text) => Value::some(Value::str(text)),
+                    None => Value::none(Type::String),
+                },
+            ),
         ],
     )
 }
@@ -870,6 +897,148 @@ fn the_skip_message_says_the_erase_may_be_non_local() {
         "{message}"
     );
     assert!(message.contains("concurrent invocation"), "{message}");
+}
+
+// Rule 12: an optional in, an optional out. These two are the pair the rule exists for:
+// the same program, the same fold, one subject that never had a comment and one whose
+// key is gone. Collapsing them either way is the failure this is here to prevent.
+
+const REVIEWING: &str = "effect E {
+  on @order.reviewed as e {
+    if reveal(e.comment).is_none() {
+      log(\"nothing to moderate\")
+      return
+    }
+    http.post(\"https://mail.example/confirm\", { \"comment\": reveal(e.comment) })
+    log(\"moderated\")
+  }
+}";
+
+#[test]
+fn reveal_on_an_optional_is_none_when_the_field_was_never_set() {
+    let program = program(REVIEWING);
+    let mut interpreter = Interpreter::with_log(&program, vec![reviewed(1, 7, None)]);
+    // The key store is never consulted, so an erased subject changes nothing here: an
+    // absent value was never encrypted.
+    interpreter.erase_subject("customer_id", "7");
+
+    let outcome = interpreter
+        .deliver("E", 0, &mut Journal::default())
+        .expect("an absent field is an ordinary condition, not a failure");
+    assert!(matches!(outcome, Invocation::Done), "got {outcome:?}");
+    assert_eq!(interpreter.lines(), ["nothing to moderate"]);
+}
+
+#[test]
+fn reveal_on_an_optional_still_skips_terminally_on_a_shredded_key() {
+    let program = program(REVIEWING);
+    let mut interpreter = Interpreter::with_log(&program, vec![reviewed(1, 7, Some("rude"))]);
+    interpreter.script(URL, [Reply::Status(200)]);
+    interpreter.erase_subject("customer_id", "7");
+
+    let outcome = interpreter
+        .deliver("E", 0, &mut Journal::default())
+        .expect("terminal, not a wedge");
+    let Invocation::Skipped(message) = outcome else {
+        panic!("expected a terminal skip, got {outcome:?}");
+    };
+    assert!(
+        message.starts_with("reveal cannot decrypt `comment`"),
+        "{message}"
+    );
+}
+
+#[test]
+fn reveal_on_a_present_optional_hands_back_the_plaintext() {
+    let program = program(REVIEWING);
+    let mut journal = Journal::default();
+    let (interpreter, outcome) = deliver(
+        &program,
+        vec![reviewed(1, 7, Some("rude"))],
+        vec![Reply::Status(200)],
+        &mut journal,
+    );
+    assert!(matches!(outcome, Ok(Invocation::Done)), "got {outcome:?}");
+    assert!(
+        posted(&journal).contains("\"comment\":\"rude\""),
+        "{}",
+        posted(&journal)
+    );
+    assert_eq!(interpreter.lines(), ["moderated"]);
+}
+
+/// A subject id is the name a key is filed under, so it has to be a value that is
+/// always there and that does not itself need a key.
+#[test]
+fn a_subject_id_is_a_plain_field_that_always_has_a_value() {
+    let message = parse(
+        "event @e.happened { id: Int?, text: String @subject(id) }
+effect E { on @e.happened as e { log(\"x\") } }
+",
+    )
+    .expect_err("an optional subject id")
+    .message;
+    assert!(
+        message.contains("names an optional field"),
+        "got: {message}"
+    );
+
+    let message = parse(
+        "event @e.happened { owner: Int, id: Int @subject(owner), text: String @subject(id) }
+effect E { on @e.happened as e { log(\"x\") } }
+",
+    )
+    .expect_err("an encrypted subject id")
+    .message;
+    assert!(
+        message.contains("names a subject-encrypted field"),
+        "got: {message}"
+    );
+
+    let message = parse(
+        "event @e.happened { text: String @subject(nope) }
+effect E { on @e.happened as e { log(\"x\") } }
+",
+    )
+    .expect_err("a subject id that is not a field")
+    .message;
+    assert!(
+        message.contains("names no field of @e.happened"),
+        "got: {message}"
+    );
+}
+
+/// A fold arm producing a `T` lands in a `T?` state as `some(T)`. Without that,
+/// `.is_none()` on a folded optional is a method call on a bare `Int`.
+#[test]
+fn a_fold_into_an_optional_state_holds_an_optional() {
+    let program = program(
+        "effect E {
+  on @order.reviewed as e { order_id } {
+    state customer: Int? = fold none
+      on @order.placed(order_id) { customer_id } => customer_id
+
+    if customer.is_none() {
+      log(\"no order\")
+    } else {
+      log(\"customer {customer.unwrap_or(0)}\")
+    }
+  }
+}",
+    );
+
+    let mut interpreter = Interpreter::with_log(&program, vec![reviewed(1, 7, None)]);
+    interpreter
+        .deliver("E", 0, &mut Journal::default())
+        .expect("the seed alone");
+    assert_eq!(interpreter.lines(), ["no order"]);
+
+    let mut interpreter =
+        Interpreter::with_log(&program, vec![placed(1, 7, 100), reviewed(1, 7, None)]);
+    interpreter
+        .deliver("E", 1, &mut Journal::default())
+        .expect("one matching event");
+    assert_eq!(interpreter.lines(), ["customer 7"]);
 }
 
 // ---------------------------------------------------------------------------------

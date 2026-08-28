@@ -492,6 +492,10 @@ pub struct Bind {
 pub struct Update {
     pub slot: Slot,
     pub value: ExprId,
+    /// The slot's declared type. A fold arm producing a `T` lands in a `T?` state as
+    /// `some(T)` rather than as a bare `T`, which is what makes `.is_none()` on a
+    /// folded optional mean what it reads as.
+    pub ty: Type,
 }
 
 #[derive(Debug, Clone)]

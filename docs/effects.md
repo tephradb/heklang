@@ -431,13 +431,51 @@ where it is unambiguous, which is immediately before a `.`, so a local binding n
 shadows it and an enum variant called `Uuid` still resolves. Nothing about this makes `Uuid` a value:
 there is no bare `Uuid` expression, only the qualified call.
 
-## 12. `reveal` fails terminally
+## 12. `reveal`
 
-`reveal` of an erased subject fails terminally. It does **not** return an optional.
+`reveal` takes a subject-bound value and hands back the plaintext. It decides nothing about it;
+everything below is about the two ways it can hand back something else.
 
-An optional would force a branch at every call site whose only sane arm is to give up, which is what
-terminal already does, one level up and once. No retry can recover erased data, so wedging would be
-wrong too: the invocation is skipped, counted apart from wedges (rule 4), and the cursor advances.
+### `@subject(...)` names a field that always has a value
+
+`@subject(x)` must name a field of the same event, `x` may not itself be subject-bound, and **`x` may
+not be optional**. A subject id is the name a key is filed under, so a missing id is not "no key", it
+is no question at all: there is nothing to look up and nothing for `erase` to remove. Checked where
+the annotation is written, which is where the mistake is, and it costs one check to keep absence from
+having to mean two things.
+
+### An optional in, an optional out
+
+`reveal(x: T?)` is `T?`, and `reveal(x: T)` is `T`. Three states are distinguishable and two of them
+must not collapse:
+
+| Held value | Key | Result |
+| --- | --- | --- |
+| absent | irrelevant | `none` |
+| present | exists | the plaintext |
+| present | shredded | terminal, below |
+
+The first row **does not consult the key store at all**, and that is the rule rather than an
+optimisation: a value that is absent was never encrypted, so no key can be missing for it.
+
+`none` there is an ordinary condition an author branches on, not a failure. **"Never set" and "key
+destroyed" are different facts**: one is recoverable by supplying the value and one is not, and an
+author does different things about them. Collapsing them is wrong in a specific direction either way.
+Returning `none` for both turns a shredded key into a quiet success and gives up the whole of this
+rule; failing terminally for both wedges every subject that simply has no value yet.
+
+**Rejected: `reveal` unwraps with a zero.** That is a sentinel, which the zero-value table in
+`docs/projectors.md` exists to argue against, and it is the workaround a real port had to write
+before this rule existed: `state token: String = fold ""` and then `token.is_empty()`, where an
+absent credential and an empty one are the same string.
+
+### Failing is terminal
+
+`reveal` of an **erased** subject fails terminally. It does not become a `none`, which is the one
+case where returning an optional would be the wrong shape: it would force a branch at every call site
+whose only sane arm is to give up, which is what terminal already does, one level up and once. No
+retry can recover erased data, so wedging would be wrong too: the invocation is skipped, counted
+apart from wedges (rule 4), and the cursor advances.
 
 The message must say the erase may be **non-local**:
 

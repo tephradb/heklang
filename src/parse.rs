@@ -1424,7 +1424,39 @@ impl Parser {
         }
 
         self.expect_sym(Sym::RBrace)?;
-        Ok(EventDef::new(path, fields))
+
+        let def = EventDef::new(path, fields);
+        self.check_subjects(&def)?;
+        Ok(def)
+    }
+
+    /// Rule 12: a subject id is the name a key is filed under, so it has to be a value
+    /// that is always there and that does not itself need a key. Checked where the
+    /// annotation is written rather than where a `reveal` finds it.
+    fn check_subjects(&self, def: &EventDef) -> Result<(), SyntaxError> {
+        for field in &def.fields {
+            let Some(subject) = &field.subject else {
+                continue;
+            };
+            let name = &field.name;
+            let Some(id) = def.field(subject) else {
+                return self.fail(format!(
+                    "`@subject({subject})` on `{name}` names no field of {}",
+                    def.path
+                ));
+            };
+            if id.subject.is_some() {
+                return self.fail(format!(
+                    "`@subject({subject})` on `{name}` names a subject-encrypted field; a subject id is the name a key is filed under, so it cannot need a key itself"
+                ));
+            }
+            if matches!(id.ty, Type::Opt(_)) {
+                return self.fail(format!(
+                    "`@subject({subject})` on `{name}` names an optional field; a subject id is the name a key is filed under, so a missing one is not `no key`, it is no question at all"
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// The `(n)` a `Decimal` or a `Money` carries. Both are scaled integers and both
@@ -1581,9 +1613,16 @@ impl Parser {
             let value = self.expr(lower, Some(ty.clone()))?;
             self.folding = false;
             lower.b.pop_scope();
-            lower
-                .b
-                .slice(path, filters, binds, vec![Update { slot, value }]);
+            lower.b.slice(
+                path,
+                filters,
+                binds,
+                vec![Update {
+                    slot,
+                    value,
+                    ty: ty.clone(),
+                }],
+            );
         }
 
         Ok(())
@@ -2449,7 +2488,9 @@ impl Parser {
             Expr::Invoke { .. } => Some(Type::Outcome),
             Expr::Record { ty, .. } => Some(Type::Record(ty.clone())),
             Expr::CallFn { function, .. } => self.fn_sig(function)?.ret.clone(),
-            Expr::Reveal { .. } => Some(Type::String),
+            // Rule 12: an optional in, an optional out, so a `reveal` of a field that may
+            // not be there still reads as one.
+            Expr::Reveal { value, .. } => self.type_of(lower, *value),
         }
     }
 }

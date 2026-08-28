@@ -482,7 +482,7 @@ impl<'a> Interpreter<'a> {
         let filters = resolve_filters(program, &arm.exprs, &arm.slices, &mut frame)?;
         for state in &arm.states {
             let value = eval(program, &arm.exprs, &mut frame, state.init, None)?;
-            frame.set(state.slot, value)?;
+            frame.set(state.slot, coerce(value, &state.ty))?;
         }
         // Rule 3: the fold stops at the trigger's own position, inclusive, so state is
         // a pure function of the log prefix and that position, and counts the trigger.
@@ -661,7 +661,7 @@ fn execute(
     let filters = resolve_filters(program, &command.exprs, &command.slices, &mut frame)?;
     for state in &command.states {
         let value = eval(program, &command.exprs, &mut frame, state.init, None)?;
-        frame.set(state.slot, value)?;
+        frame.set(state.slot, coerce(value, &state.ty))?;
     }
 
     let after = log.len() as u64;
@@ -796,7 +796,7 @@ fn fold(
             }
             for update in &slice.updates {
                 let value = eval(program, exprs, frame, update.value, None)?;
-                frame.set(update.slot, value)?;
+                frame.set(update.slot, coerce(value, &update.ty))?;
             }
         }
     }
@@ -1463,6 +1463,11 @@ fn eval(
             subject_value,
         } => {
             let plaintext = eval(program, exprs, frame, *value, ctx.as_deref_mut())?;
+            // Rule 12: an absent value was never encrypted, so no key can be missing
+            // for it. This is the row that must not collapse into the erased one.
+            if matches!(plaintext, Value::Opt { value: None, .. }) {
+                return Ok(plaintext);
+            }
             let id = eval(program, exprs, frame, *subject_value, ctx.as_deref_mut())?;
             let id = subject_id(&id, span)?;
             let Some(ctx) = ctx else {
