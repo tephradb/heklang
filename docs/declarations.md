@@ -68,9 +68,10 @@ type, an event field, a command or `fn` parameter, a return type, and the elemen
 request body.
 
 The literal is `Name { field: value }`, with the same bare-name shorthand `emit` and `put` already
-use, and a field is read with `.field`. **Every field must be given.** A record with a hole would need
-a zero for the missing one, and filling in part of a record is what record update exists for, which
-is out.
+use, and a field is read with `.field`. A field declared `T?` takes a bare `T` and wraps it, the same
+rule that applies at every other declared position (`docs/optionals.md`). **Every field must be
+given.** A record with a hole would need a zero for the missing one, and filling in part of a record
+is what record update exists for, which is out.
 
 Entities were the only product type before this, and they are the wrong shape for the job: an entity
 is scoped to a projector and reachable only through `put` and `patch`, so a `Map(Uuid, Plan)` had

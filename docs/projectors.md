@@ -84,8 +84,8 @@ see "`delete` is not a tombstone" under rule 5.
 
 A bare `T` written into a `T?` field wraps, so `tracking` destructured as a `String` satisfies a
 `String?` column and `e.at` satisfies a `Timestamp?` one. This is not a new rule: it is the coercion
-already applied to command arguments, applied at the other end of the same pipe. It only wraps an
-exact inner-type match, so a `Uuid` still does not satisfy a `String?`.
+every declared position applies, and `docs/optionals.md` lists them all. It only wraps an exact
+inner-type match, so a `Uuid` still does not satisfy a `String?`.
 
 ## 3. Stored-value reference
 

@@ -384,3 +384,62 @@ fn there_is_no_break_or_continue() {
         );
     }
 }
+
+/// A declared element type coerces, the same rule every other declared position
+/// applies. All four ways an element is produced, because each is its own site and one
+/// holding the rule says nothing about the others.
+///
+/// The probe is `.first().unwrap_or(none)`, which is what a `List(T?)` reads back
+/// through: two levels, so a bare element collapses them into one and `.is_some()`
+/// arrives at a `String` that has no such method. That is the shape of the bug, several
+/// statements from the write that caused it.
+#[test]
+fn a_bare_value_fills_an_optional_element() {
+    let source = "event @a.b { listed: Bool, built: Bool, pushed: Bool, mapped: Bool }
+
+fn listed(tag: String) -> List(String?) {
+  return [tag]
+}
+
+fn built(tag: String, seed: List(String?)) -> List(String?) {
+  return [tag for x in seed]
+}
+
+command C(tag: String, seed: List(String?), spare: List(String?), table: Map(Int, String?)) {
+  emit @a.b {
+    listed: listed(tag).first().unwrap_or(none).is_some(),
+    built: built(tag, seed).first().unwrap_or(none).is_some(),
+    pushed: spare.push(tag).first().unwrap_or(none).is_some(),
+    mapped: table.set(1, tag).get(1).unwrap_or(none).is_some(),
+  }
+}
+";
+    let program = parse(source).expect("a bare String fills a String? element");
+    let mut interpreter = Interpreter::new(&program);
+    let execution = interpreter
+        .run(
+            "C",
+            vec![
+                ("tag", Value::str("a")),
+                (
+                    "seed",
+                    Value::list(Type::opt(Type::String), [Value::none(Type::String)]),
+                ),
+                ("spare", Value::list(Type::opt(Type::String), [])),
+                ("table", Value::map(Type::Int, Type::opt(Type::String), [])),
+            ],
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+    let event = match execution.outcome {
+        Outcome::Ok(events) => events.into_iter().next().expect("one event"),
+        other => panic!("expected an append, got {other:?}"),
+    };
+    for field in ["listed", "built", "pushed", "mapped"] {
+        assert_eq!(
+            event.fields.get(field),
+            Some(&Value::Bool(true)),
+            "`{field}` held a bare element rather than a wrapped one"
+        );
+    }
+}

@@ -466,3 +466,31 @@ command C(x: Int) {
     );
     assert_eq!(program.consts.len(), 2);
 }
+
+/// A declared field coerces, the same rule `emit` and `put` apply. Before this it
+/// stored a bare `String` in a `String?` field, and the first `.is_none()` reported
+/// that a `String` has no such method, several statements from the write.
+#[test]
+fn a_bare_value_fills_an_optional_record_field() {
+    let source = "record Facts { note: String?, tag: String? }
+
+event @a.b { present: Bool, absent: Bool }
+
+command C(note: String) {
+  let facts = Facts { note, tag: none }
+  emit @a.b { present: facts.note.is_some(), absent: facts.tag.is_none() }
+}
+";
+    let program = parse(source).expect("a bare String fills a String? field");
+    let mut interpreter = Interpreter::new(&program);
+    let execution = interpreter
+        .run("C", vec![("note", Value::str("hello"))])
+        .unwrap_or_else(|err| panic!("{err}"));
+
+    let event = match execution.outcome {
+        Outcome::Ok(events) => events.into_iter().next().expect("one event"),
+        other => panic!("expected an append, got {other:?}"),
+    };
+    assert_eq!(event.fields.get("present"), Some(&Value::Bool(true)));
+    assert_eq!(event.fields.get("absent"), Some(&Value::Bool(true)));
+}

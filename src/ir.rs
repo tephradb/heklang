@@ -578,7 +578,12 @@ pub enum Expr {
     /// An interpolated string. The literal chunks are ordinary `Lit(Str)` parts, so
     /// this is a join over one uniform list rather than two interleaved ones.
     Interp(Vec<ExprId>),
-    List(Vec<ExprId>),
+    /// `inner` is the element type when the target declared one, so a bare `T` written
+    /// into a `List(T?)` coerces. Absent for `let xs = [a, b]`, where nothing did.
+    List {
+        items: Vec<ExprId>,
+        inner: Option<Type>,
+    },
     Record {
         ty: Ident,
         fields: Vec<(Ident, ExprId)>,

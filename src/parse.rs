@@ -2679,9 +2679,10 @@ impl Parser {
             },
             Expr::Object(_) => Some(Type::Json),
             Expr::Interp(_) => Some(Type::String),
-            Expr::List(items) => Some(Type::list(
-                items.first().and_then(|id| self.type_of(lower, *id))?,
-            )),
+            Expr::List { items, inner } => Some(Type::list(match inner {
+                Some(declared) => declared.clone(),
+                None => items.first().and_then(|id| self.type_of(lower, *id))?,
+            })),
             Expr::Comp { yields, .. } => Some(Type::list(self.type_of(lower, *yields)?)),
             Expr::Call { builtin, .. } => Some(match builtin {
                 Builtin::UuidDerive => Type::Uuid,
@@ -3507,7 +3508,7 @@ impl Parser {
         }
         self.expect_sym(Sym::RBracket)?;
         lower.b.at(span);
-        Ok(lower.b.expr(Expr::List(items)))
+        Ok(lower.b.expr(Expr::List { items, inner }))
     }
 
     /// Where the comprehension's `for` is, or `None` when this is a list literal.
@@ -4124,7 +4125,7 @@ fn children(expr: &Expr) -> Vec<ExprId> {
         Expr::Field { receiver, .. } => vec![*receiver],
         Expr::Object(fields) => fields.iter().map(|(_, id)| *id).collect(),
         Expr::Interp(parts) => parts.clone(),
-        Expr::List(items) => items.clone(),
+        Expr::List { items, .. } => items.clone(),
         Expr::Record { fields, .. } => fields.iter().map(|(_, id)| *id).collect(),
         Expr::CallFn { args, .. } => args.clone(),
         Expr::Comp {

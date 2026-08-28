@@ -1344,14 +1344,23 @@ fn eval(
             }
             Ok(Value::Json(Json::Obj(object)))
         }
-        Expr::List(items) => {
+        Expr::List { items, inner } => {
             let mut values = Vec::new();
             for item in items {
-                values.push(eval(program, exprs, frame, *item, ctx.as_deref_mut())?);
+                let value = eval(program, exprs, frame, *item, ctx.as_deref_mut())?;
+                values.push(match inner {
+                    Some(declared) => coerce(value, declared),
+                    None => value,
+                });
             }
-            let inner = values.first().map_or(Type::Json, Value::ty);
+            // Untyped only when nothing declared one, which is the `let xs = [a, b]`
+            // shape; a declared element type is what a bare `T` coerces against.
+            let ty = inner
+                .clone()
+                .or_else(|| values.first().map(Value::ty))
+                .unwrap_or(Type::Json);
             Ok(Value::List {
-                inner,
+                inner: ty,
                 items: values,
             })
         }
@@ -1371,6 +1380,10 @@ fn eval(
                     continue;
                 }
                 let value = eval(program, exprs, frame, *yields, ctx.as_deref_mut())?;
+                let value = match declared {
+                    Some(declared) => coerce(value, declared),
+                    None => value,
+                };
                 inner.get_or_insert_with(|| value.ty());
                 items.push(value);
             }
@@ -1390,9 +1403,20 @@ fn eval(
             call_function(program, def, values, span)
         }
         Expr::Record { ty, fields } => {
+            // The parser resolved the record and filled every field, so a name that
+            // does not resolve here is malformed IR rather than a program error.
+            let def = program
+                .record(ty)
+                .ok_or_else(|| at(ErrorKind::MalformedIr))?;
             let mut values = BTreeMap::new();
             for (name, value) in fields {
                 let value = eval(program, exprs, frame, *value, ctx.as_deref_mut())?;
+                // A declared field coerces, exactly as an entity column and an event
+                // field do.
+                let value = match def.field(name) {
+                    Some(declared) => coerce(value, &declared.ty),
+                    None => return Err(at(ErrorKind::MalformedIr)),
+                };
                 values.insert(name.clone(), value);
             }
             Ok(Value::Record {
@@ -1933,7 +1957,10 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
         (Value::List { inner, items }, "push") => {
             expect_arity(method, 1, &args)?;
             let mut items = items.clone();
-            items.push(args.into_iter().next().ok_or(ErrorKind::MalformedIr)?);
+            // The element type is declared, so a bare `T` into a `List(T?)` wraps here
+            // the way it would into any other declared position.
+            let pushed = args.into_iter().next().ok_or(ErrorKind::MalformedIr)?;
+            items.push(coerce(pushed, inner));
             Ok(Value::List {
                 inner: inner.clone(),
                 items,
@@ -1984,7 +2011,8 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
             let mut entries = entries.clone();
             let mut args = args.into_iter();
             let at = map_key(&args.next().ok_or(ErrorKind::MalformedIr)?)?;
-            entries.insert(at, args.next().ok_or(ErrorKind::MalformedIr)?);
+            let stored = args.next().ok_or(ErrorKind::MalformedIr)?;
+            entries.insert(at, coerce(stored, value));
             Ok(Value::Map {
                 key: key.clone(),
                 value: value.clone(),

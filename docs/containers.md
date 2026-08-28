@@ -23,6 +23,11 @@ let ids = [first_id, second_id]
 | `.push(x)` | `List(T)` |
 | `.remove(x)` | `List(T)` |
 
+An element written into a `List(T?)` or a `Map(K, V?)` wraps if it is a bare `T`, the same rule that
+applies at every other declared position (`docs/optionals.md`). So `xs.push(name)` on a
+`List(String?)` stores `some(name)`, and `.first()` on it reads back a `String??` that is `some` twice
+over rather than a shape nothing can branch on.
+
 **`push` and `remove` return a new list.** Nothing mutates, so a `state` fold arm still returns new
 state and a value that was handed to something else cannot change underneath it. That is the same
 property the fold already relied on for scalars, extended rather than excepted.
