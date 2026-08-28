@@ -1,7 +1,8 @@
 # Declarations
 
 What a module may declare, and the name spaces those declarations live in. The rules about *loading*
-several modules are in `docs/modules.md`; this file is about what a single declaration means.
+several modules are in `docs/modules.md`; this file is about what a single declaration means. What
+each handler kind then *does* is in `docs/commands.md`, `docs/projectors.md` and `docs/effects.md`.
 
 ## The three handler kinds have separate name spaces
 

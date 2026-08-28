@@ -119,7 +119,7 @@ each having a slightly different one.
 An arm's prologue is **`state` alone**. A command hoists a leading `let` so that a filter can name
 it; an arm's filters have the trigger binding instead, so a `let` in an arm is an ordinary body
 statement and may call out. There is no `guard` either, because an effect has no append condition to
-build.
+build: `docs/commands.md` has what one is and why a `state` declares it.
 
 ## 3. The fold stops at the trigger's own position, inclusive
 
@@ -788,7 +788,8 @@ The goal is that verify keeps covering only causes not yet nameable. It should k
 ## The three kinds are deliberately not unified
 
 Commands, projectors and effects all destructure an event and run a body, and it is tempting to make
-`on` mean one thing. Three places where they must differ:
+`on` mean one thing. `docs/commands.md` and `docs/projectors.md` cover the other two in full; three
+places where they must differ:
 
 | | command | projector | effect |
 | --- | --- | --- | --- |
