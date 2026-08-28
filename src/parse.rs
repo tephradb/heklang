@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::mem;
 
 use crate::build::Builder;
 use crate::currency::Currency;
@@ -447,7 +448,7 @@ impl Parser {
         }
         self.expect_sym(Sym::RBrace)?;
 
-        let enums = std::mem::take(&mut self.enums);
+        let enums = mem::take(&mut self.enums);
         if entities.is_empty() {
             return self.fail(format!("projector `{name}` declares no entities"));
         }
@@ -493,7 +494,7 @@ impl Parser {
         self.expect_sym(Sym::RBrace)?;
 
         self.enums.clear();
-        Ok((handlers, std::mem::take(&mut self.entities)))
+        Ok((handlers, mem::take(&mut self.entities)))
     }
 
     /// Scans to the next `{` and skips the balanced block.
@@ -1053,6 +1054,11 @@ impl Parser {
         self.expect_sym(Sym::Colon)?;
         let ty = self.type_ref()?;
         self.expect_sym(Sym::Assign)?;
+        if !self.eat_word(Keyword::Fold) {
+            return self.fail(format!(
+                "`{name}` is a fold over the log, so `=` introduces a seed rather than a value; write `= fold <seed>`"
+            ));
+        }
         let init = self.expr(lower, Some(ty.clone()))?;
         let slot = lower.b.state(&name, ty.clone(), init);
 

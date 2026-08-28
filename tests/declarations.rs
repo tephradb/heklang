@@ -6,7 +6,7 @@ fn a_command_may_precede_the_events_it_uses() {
 command PlaceOrder(order_id: Uuid, customer_id: Int) {
   guard @order.placed(order_id)
 
-  state open: Int = 0
+  state open: Int = fold 0
     on @order.placed(customer_id) => open + 1
 
   emit @order.placed { order_id, customer_id }
@@ -51,7 +51,7 @@ fn a_filter_naming_a_later_let_points_at_the_definition() {
     let source = "currency USD
 event @customer.blocked { customer_id: Int }
 command C(customer_id: Int) {
-  state blocked: Bool = false
+  state blocked: Bool = fold false
     on @customer.blocked(customer_id: customer) => true
 
   let customer = customer_id
@@ -123,5 +123,24 @@ command C(y: Int) { return }
     assert_eq!(
         parse(commands).expect_err("duplicate command").message,
         "command `C` is declared twice"
+    );
+}
+
+#[test]
+fn a_state_without_fold_is_rejected() {
+    let source = "currency USD
+event @a.b { x: Int }
+command C(y: Int) {
+  state seen: Bool = false
+    on @a.b(x: y) => true
+
+  return
+}
+";
+    let err = parse(source).expect_err("`state` needs `fold` before its seed");
+    assert_eq!(
+        err.message,
+        "`seen` is a fold over the log, so `=` introduces a seed rather than a value; \
+         write `= fold <seed>`"
     );
 }

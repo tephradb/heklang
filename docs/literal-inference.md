@@ -30,7 +30,8 @@ compiler's to paper over.
 In order of priority:
 
 1. **An annotation.** A parameter type, a `state` type, an event field type in a filter or an `emit`,
-   or the declared type a `state` fold must produce. `state total: Money = 0` resolves `0` as money.
+   or the declared type a `state` fold must produce. `state total: Money = fold 0` resolves `0` as
+   money.
 2. **The other operand of `+`, `-` or a comparison.** `lifetime_spend > 1000.00` resolves the literal
    as `Money` because the left side is money. This works in both directions: for `1000.00 < spend`
    the literal is resolved once the right side's type is known, and the already-emitted IR node is
@@ -61,9 +62,9 @@ Assume `currency USD` and a command with `total: Money`, `spend: Money`, `count:
 
 | Source | Resolves to |
 | --- | --- |
-| `state open: Int = 0` | `Int(0)` |
-| `state spent: Money = 0` | `Money(0)` |
-| `state rate: Decimal(4) = 0.0825` | `Decimal(825, scale 4)` |
+| `state open: Int = fold 0` | `Int(0)` |
+| `state spent: Money = fold 0` | `Money(0)` |
+| `state rate: Decimal(4) = fold 0.0825` | `Decimal(825, scale 4)` |
 | `count + 1` | `Int(1)` |
 | `spend + 1` | `Money(100)` |
 | `spend > 1000.00` | `Money(100000)` |

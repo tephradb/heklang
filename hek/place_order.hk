@@ -36,18 +36,18 @@ command PlaceOrder(
 ) {
   guard @order.placed(order_id), @order.cancelled(order_id)
 
-  state email_taken: Bool = false
+  state email_taken: Bool = fold false
     on @order.placed(email) => true
 
-  state open_orders: Int = 0
+  state open_orders: Int = fold 0
     on @order.placed(customer_id) => open_orders + 1
     on @order.cancelled(customer_id) => open_orders - 1
 
-  state lifetime_spend: Money = 0
+  state lifetime_spend: Money = fold 0
     on @order.placed(customer_id) { total } => lifetime_spend + total
 
   let customer = customer_id
-  state blocked: Bool = false
+  state blocked: Bool = fold false
     on @customer.blocked(customer_id: customer) => true
 
   if address.trim() == "" {

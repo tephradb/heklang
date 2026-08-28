@@ -53,10 +53,10 @@ fn check_error(body: &str, expected: &str) {
 
 #[test]
 fn annotations_drive_resolution() {
-    check("state open: Int = 0\nreturn", &["Int(0)"]);
-    check("state spent: Money = 0\nreturn", &["Money(0)"]);
+    check("state open: Int = fold 0\nreturn", &["Int(0)"]);
+    check("state spent: Money = fold 0\nreturn", &["Money(0)"]);
     check(
-        "state fee: Decimal(4) = 0.0825\nreturn",
+        "state fee: Decimal(4) = fold 0.0825\nreturn",
         &["Decimal(825, scale 4)"],
     );
 }
@@ -101,11 +101,11 @@ fn multiplication_and_division_never_cross_hint() {
 #[test]
 fn over_precision_is_an_error_not_a_round() {
     check_error(
-        "state fee: Decimal(2) = 0.0825\nreturn",
+        "state fee: Decimal(2) = fold 0.0825\nreturn",
         "4 decimal places is too precise for Decimal(2)",
     );
     check_error(
-        "state open: Int = 10.5\nreturn",
+        "state open: Int = fold 10.5\nreturn",
         "1 decimal place is too precise for Int",
     );
     check_error(
