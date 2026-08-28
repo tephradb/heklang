@@ -30,6 +30,17 @@ pub enum Value {
         body: Json,
     },
     Invoked(Invoked),
+    List {
+        inner: Type,
+        items: Vec<Value>,
+    },
+    /// Keyed by [`Key`] rather than by `Value`, which is what makes iteration sorted
+    /// and therefore what makes verify mode's determinism hold.
+    Map {
+        key: Type,
+        value: Type,
+        entries: BTreeMap<Key, Value>,
+    },
     Opt {
         inner: Type,
         value: Option<Box<Value>>,
@@ -64,6 +75,21 @@ impl Value {
         Value::Opt { inner, value: None }
     }
 
+    pub fn list(inner: Type, items: impl IntoIterator<Item = Value>) -> Self {
+        Value::List {
+            inner,
+            items: items.into_iter().collect(),
+        }
+    }
+
+    pub fn map(key: Type, value: Type, entries: impl IntoIterator<Item = (Key, Value)>) -> Self {
+        Value::Map {
+            key,
+            value,
+            entries: entries.into_iter().collect(),
+        }
+    }
+
     pub fn ty(&self) -> Type {
         match self {
             Value::Bool(_) => Type::Bool,
@@ -78,6 +104,8 @@ impl Value {
             Value::Json(_) => Type::Json,
             Value::Response { .. } => Type::Response,
             Value::Invoked(_) => Type::Outcome,
+            Value::List { inner, .. } => Type::list(inner.clone()),
+            Value::Map { key, value, .. } => Type::map(key.clone(), value.clone()),
             Value::Opt { inner, .. } => Type::opt(inner.clone()),
         }
     }
@@ -104,6 +132,7 @@ impl fmt::Display for Value {
             Value::Json(json) => write!(f, "{json}"),
             Value::Response { status, .. } => write!(f, "<{status}>"),
             Value::Invoked(outcome) => write!(f, "{outcome}"),
+            Value::List { .. } | Value::Map { .. } => write!(f, "{}", Json::from_value(self)),
             Value::Opt { value, .. } => match value {
                 Some(value) => write!(f, "{value}"),
                 None => f.write_str("none"),
@@ -190,6 +219,8 @@ pub fn zero(ty: &Type, enums: &[EnumDef]) -> Option<Value> {
             }
         }
         Type::Opt(inner) => Value::none(inner.as_ref().clone()),
+        Type::List(inner) => Value::list(inner.as_ref().clone(), []),
+        Type::Map(key, value) => Value::map(key.as_ref().clone(), value.as_ref().clone(), []),
         Type::Uuid | Type::Timestamp | Type::Rounding => return None,
         // Never reachable from a declaration: there is no syntax that writes one of
         // these as an entity field type.
@@ -224,6 +255,8 @@ pub fn literal(lit: &Literal) -> Value {
         },
         Literal::None(inner) => Value::none(inner.clone()),
         Literal::Rounding(mode) => Value::Rounding(*mode),
+        Literal::EmptyList(inner) => Value::list(inner.clone(), []),
+        Literal::EmptyMap(key, value) => Value::map(key.clone(), value.clone(), []),
     }
 }
 
@@ -264,6 +297,24 @@ impl Key {
             Key::Enum { ty, .. } => Type::Enum(ty.clone()),
         }
     }
+}
+
+/// A key as a value, for a `for` binding and for a map's `keys()`.
+pub fn from_key(key: &Key) -> Value {
+    match key {
+        Key::Int(value) => Value::Int(*value),
+        Key::Str(value) => Value::Str(value.clone()),
+        Key::Uuid(value) => Value::Uuid(value.clone()),
+        Key::Timestamp(micros) => Value::Timestamp(*micros),
+        Key::Enum { ty, variant } => Value::Enum {
+            ty: ty.clone(),
+            variant: variant.clone(),
+        },
+    }
+}
+
+fn key_text(key: &Key) -> String {
+    text(&from_key(key))
 }
 
 /// Whether a type may be an entity key. Matches the runtime's requirement that a
@@ -333,6 +384,15 @@ impl Json {
                 ("code", outcome.code().map_or(Json::Null, Json::str)),
                 ("message", outcome.message().map_or(Json::Null, Json::str)),
             ]),
+            Value::List { items, .. } => Json::Arr(items.iter().map(Json::from_value).collect()),
+            // A map's keys become strings, which is what a JSON object can hold. The
+            // ordering is already the map's, so this is a copy rather than a decision.
+            Value::Map { entries, .. } => Json::Obj(
+                entries
+                    .iter()
+                    .map(|(key, value)| (key_text(key), Json::from_value(value)))
+                    .collect(),
+            ),
             Value::Opt { value, .. } => match value {
                 Some(value) => Json::from_value(value),
                 None => Json::Null,

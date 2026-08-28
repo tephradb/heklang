@@ -33,6 +33,8 @@ fn describe(lit: &Literal) -> String {
         Literal::Money { units, scale } => format!("Money({units}, scale {scale})"),
         Literal::Enum { ty, variant } => format!("{ty}.{variant}"),
         Literal::Rounding(mode) => format!("Rounding({mode})"),
+        Literal::EmptyList(inner) => format!("EmptyList({inner})"),
+        Literal::EmptyMap(key, value) => format!("EmptyMap({key}, {value})"),
     }
 }
 

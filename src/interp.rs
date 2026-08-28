@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::ir::{
     Assign, BinOp, Builtin, Command, Effect, EntityDef, EnvField, EventPath, Expr, ExprId, Exprs,
-    Ident, Program, Projector, Return, Slice, SliceId, Slot, Span, Stmt, Type, UnOp,
+    Ident, Iter, Program, Projector, Return, Slice, SliceId, Slot, Span, Stmt, Type, UnOp,
 };
 use crate::scaled::{self, Rounding};
 use crate::value::{self, Event, Invoked, Json, Key, Record, Value};
@@ -119,6 +119,7 @@ pub enum ErrorKind {
         field: Ident,
     },
     BadKey(Type),
+    NotIterable(Type),
     DivisionByZero,
     Overflow,
     Inexact,
@@ -194,6 +195,7 @@ impl fmt::Display for ErrorKind {
                 write!(f, "entity `{entity}` is missing field `{field}`")
             }
             ErrorKind::BadKey(ty) => write!(f, "{ty} cannot be an entity key"),
+            ErrorKind::NotIterable(ty) => write!(f, "{ty} is not a list or a map"),
             ErrorKind::DivisionByZero => f.write_str("division by zero"),
             ErrorKind::Overflow => f.write_str("arithmetic overflow"),
             ErrorKind::Inexact => f.write_str("result is not exact"),
@@ -465,9 +467,9 @@ impl<'a> Interpreter<'a> {
         }
 
         run_assigns(&arm.exprs, &arm.prologue, &mut frame)?;
-        let filters = resolve_filters(&arm.exprs, &arm.slices, &frame)?;
+        let filters = resolve_filters(&arm.exprs, &arm.slices, &mut frame)?;
         for state in &arm.states {
-            let value = eval(&arm.exprs, &frame, state.init, None)?;
+            let value = eval(&arm.exprs, &mut frame, state.init, None)?;
             frame.set(state.slot, value)?;
         }
         // Rule 3: the fold stops at the trigger's own position, inclusive, so state is
@@ -637,9 +639,9 @@ fn execute(
     bind_params(command, &mut args, &mut frame)?;
     run_assigns(&command.exprs, &command.prologue, &mut frame)?;
 
-    let filters = resolve_filters(&command.exprs, &command.slices, &frame)?;
+    let filters = resolve_filters(&command.exprs, &command.slices, &mut frame)?;
     for state in &command.states {
-        let value = eval(&command.exprs, &frame, state.init, None)?;
+        let value = eval(&command.exprs, &mut frame, state.init, None)?;
         frame.set(state.slot, value)?;
     }
 
@@ -726,7 +728,7 @@ fn run_assigns(exprs: &Exprs, assigns: &[Assign], frame: &mut Frame) -> Result<(
 fn resolve_filters(
     exprs: &Exprs,
     slices: &[Slice],
-    frame: &Frame,
+    frame: &mut Frame,
 ) -> Result<Vec<Vec<Value>>, Error> {
     slices
         .iter()
@@ -844,6 +846,18 @@ fn exec_stmt(
                 otherwise
             };
             exec_block(exprs, branch, frame, program, sink)
+        }
+        Stmt::For { iter, body } => {
+            for (index, item) in elements(exprs, frame, iter, effects(sink))? {
+                bind_iter(iter, index, item, frame)?;
+                let flow = exec_block(exprs, body, frame, program, sink)?;
+                // A `return` inside a `for` leaves the loop and the body both, which
+                // is what makes "a search is a pure fn with an early return" work.
+                if matches!(flow, Flow::Return(_)) {
+                    return Ok(flow);
+                }
+            }
+            Ok(Flow::Next)
         }
         Stmt::Emit {
             event,
@@ -1059,7 +1073,7 @@ fn entity_def<'a>(
 /// outcome an author could catch it with.
 fn eval_field(
     exprs: &Exprs,
-    frame: &Frame,
+    frame: &mut Frame,
     def: &EntityDef,
     entity: &Ident,
     name: &Ident,
@@ -1182,7 +1196,7 @@ fn key_value(key: &Key) -> Value {
 
 fn eval(
     exprs: &Exprs,
-    frame: &Frame,
+    frame: &mut Frame,
     id: ExprId,
     mut ctx: Option<&mut Effects<'_>>,
 ) -> Result<Value, Error> {
@@ -1261,6 +1275,41 @@ fn eval(
             }
             Ok(Value::Json(Json::Obj(object)))
         }
+        Expr::List(items) => {
+            let mut values = Vec::new();
+            for item in items {
+                values.push(eval(exprs, frame, *item, ctx.as_deref_mut())?);
+            }
+            let inner = values.first().map_or(Type::Json, Value::ty);
+            Ok(Value::List {
+                inner,
+                items: values,
+            })
+        }
+        Expr::Comp {
+            iter,
+            cond,
+            yields,
+            inner: declared,
+        } => {
+            let mut items = Vec::new();
+            let mut inner = declared.clone();
+            for (index, item) in elements(exprs, frame, iter, ctx.as_deref_mut())? {
+                bind_iter(iter, index, item, frame)?;
+                if let Some(cond) = cond
+                    && !eval_bool(exprs, frame, *cond, ctx.as_deref_mut())?
+                {
+                    continue;
+                }
+                let value = eval(exprs, frame, *yields, ctx.as_deref_mut())?;
+                inner.get_or_insert_with(|| value.ty());
+                items.push(value);
+            }
+            Ok(Value::List {
+                inner: inner.unwrap_or(Type::Json),
+                items,
+            })
+        }
         Expr::Interp(parts) => {
             let mut text = String::new();
             for part in parts {
@@ -1314,9 +1363,41 @@ fn eval(
     }
 }
 
+/// The (index, item) pairs a `for` or a comprehension walks. A map yields its key
+/// beside its value; a list yields its position. Collected up front, because the body
+/// may write frame slots the container was read from.
+fn elements(
+    exprs: &Exprs,
+    frame: &mut Frame,
+    iter: &Iter,
+    ctx: Option<&mut Effects<'_>>,
+) -> Result<Vec<(Value, Value)>, Error> {
+    let span = exprs.span(iter.over);
+    match eval(exprs, frame, iter.over, ctx)? {
+        Value::List { items, .. } => Ok(items
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| (Value::Int(index as i64), item))
+            .collect()),
+        Value::Map { entries, .. } => Ok(entries
+            .into_iter()
+            .map(|(key, value)| (value::from_key(&key), value))
+            .collect()),
+        other => Err(Error::at(ErrorKind::NotIterable(other.ty()), span)),
+    }
+}
+
+fn bind_iter(iter: &Iter, index: Value, item: Value, frame: &mut Frame) -> Result<(), Error> {
+    if let Some(slot) = iter.index {
+        frame.set(slot, index)?;
+    }
+    frame.set(iter.item, item)?;
+    Ok(())
+}
+
 fn eval_bool(
     exprs: &Exprs,
-    frame: &Frame,
+    frame: &mut Frame,
     id: ExprId,
     ctx: Option<&mut Effects<'_>>,
 ) -> Result<bool, Error> {
@@ -1334,7 +1415,7 @@ fn eval_bool(
 
 fn eval_string(
     exprs: &Exprs,
-    frame: &Frame,
+    frame: &mut Frame,
     id: ExprId,
     ctx: Option<&mut Effects<'_>>,
 ) -> Result<String, Error> {
@@ -1604,6 +1685,116 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
                 *scale,
             ))
         }
+        (Value::List { items, .. }, "len") => {
+            expect_arity(method, 0, &args)?;
+            Ok(Value::Int(items.len() as i64))
+        }
+        (Value::List { items, .. }, "is_empty") => {
+            expect_arity(method, 0, &args)?;
+            Ok(Value::Bool(items.is_empty()))
+        }
+        (Value::List { items, .. }, "contains") => {
+            expect_arity(method, 1, &args)?;
+            Ok(Value::Bool(items.contains(&args[0])))
+        }
+        (Value::List { inner, items }, "first") => {
+            expect_arity(method, 0, &args)?;
+            Ok(match items.first() {
+                Some(first) => Value::some(first.clone()),
+                None => Value::none(inner.clone()),
+            })
+        }
+        // `push` and `remove` build a new list, so a fold arm still returns new state
+        // and nothing a value was handed to can change it.
+        (Value::List { inner, items }, "push") => {
+            expect_arity(method, 1, &args)?;
+            let mut items = items.clone();
+            items.push(args.into_iter().next().ok_or(ErrorKind::MalformedIr)?);
+            Ok(Value::List {
+                inner: inner.clone(),
+                items,
+            })
+        }
+        (Value::List { inner, items }, "remove") => {
+            expect_arity(method, 1, &args)?;
+            // Every equal element, not the first, which makes it idempotent the way
+            // a map's `remove` is.
+            let items = items
+                .iter()
+                .filter(|item| *item != &args[0])
+                .cloned()
+                .collect();
+            Ok(Value::List {
+                inner: inner.clone(),
+                items,
+            })
+        }
+        (Value::Map { entries, .. }, "len") => {
+            expect_arity(method, 0, &args)?;
+            Ok(Value::Int(entries.len() as i64))
+        }
+        (Value::Map { entries, .. }, "is_empty") => {
+            expect_arity(method, 0, &args)?;
+            Ok(Value::Bool(entries.is_empty()))
+        }
+        (Value::Map { entries, .. }, "contains") => {
+            expect_arity(method, 1, &args)?;
+            Ok(Value::Bool(entries.contains_key(&map_key(&args[0])?)))
+        }
+        (Value::Map { value, entries, .. }, "get") => {
+            expect_arity(method, 1, &args)?;
+            Ok(match entries.get(&map_key(&args[0])?) {
+                Some(found) => Value::some(found.clone()),
+                None => Value::none(value.clone()),
+            })
+        }
+        (
+            Value::Map {
+                key,
+                value,
+                entries,
+            },
+            "set",
+        ) => {
+            expect_arity(method, 2, &args)?;
+            let mut entries = entries.clone();
+            let mut args = args.into_iter();
+            let at = map_key(&args.next().ok_or(ErrorKind::MalformedIr)?)?;
+            entries.insert(at, args.next().ok_or(ErrorKind::MalformedIr)?);
+            Ok(Value::Map {
+                key: key.clone(),
+                value: value.clone(),
+                entries,
+            })
+        }
+        (
+            Value::Map {
+                key,
+                value,
+                entries,
+            },
+            "remove",
+        ) => {
+            expect_arity(method, 1, &args)?;
+            let mut entries = entries.clone();
+            entries.remove(&map_key(&args[0])?);
+            Ok(Value::Map {
+                key: key.clone(),
+                value: value.clone(),
+                entries,
+            })
+        }
+        (Value::Map { key, entries, .. }, "keys") => {
+            expect_arity(method, 0, &args)?;
+            Ok(Value::list(
+                key.clone(),
+                entries.keys().map(value::from_key),
+            ))
+        }
+        (Value::Map { value, entries, .. }, "values") => {
+            expect_arity(method, 0, &args)?;
+            Ok(Value::list(value.clone(), entries.values().cloned()))
+        }
         (Value::Opt { value, .. }, "is_some") => {
             expect_arity(method, 0, &args)?;
             Ok(Value::Bool(value.is_some()))
@@ -1648,6 +1839,12 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
             method: method.to_string(),
         }),
     }
+}
+
+/// A map subscript. The restriction to orderable types is checked at parse time, so
+/// reaching this with anything else is a malformed program rather than bad input.
+fn map_key(value: &Value) -> Result<Key, ErrorKind> {
+    Key::from_value(value).ok_or_else(|| ErrorKind::BadKey(value.ty()))
 }
 
 fn rounding_arg(method: &str, value: &Value) -> Result<Rounding, ErrorKind> {

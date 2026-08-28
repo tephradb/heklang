@@ -4,8 +4,8 @@ use std::mem;
 use crate::build::Builder;
 use crate::ir::{
     Arm, BinOp, Bind, Builtin, Command, Effect, EntityDef, EntityField, EnumDef, EnvField,
-    EventDef, EventPath, Expr, ExprId, Exprs, FieldDef, Filter, Handler, Ident, Index, Literal,
-    Number, Program, Projector, Return, Slot, Span, Stmt, Type, UnOp, Update,
+    EventDef, EventPath, Expr, ExprId, Exprs, FieldDef, Filter, Handler, Ident, Index, Iter,
+    Literal, Number, Program, Projector, Return, Slot, Span, Stmt, Type, UnOp, Update,
 };
 use crate::lex::{Keyword, Spanned, Sym, SyntaxError, Token, lex};
 use crate::scaled::Rounding;
@@ -1063,6 +1063,30 @@ impl Parser {
             "Timestamp" => Type::Timestamp,
             "Decimal" => Type::Decimal(self.scale_arg("Decimal")?),
             "Money" => Type::Money(self.scale_arg("Money")?),
+            "List" => {
+                self.expect_sym(Sym::LParen)?;
+                let inner = self.type_ref()?;
+                self.expect_sym(Sym::RParen)?;
+                Type::list(inner)
+            }
+            "Map" => {
+                self.expect_sym(Sym::LParen)?;
+                let (line, col) = self.here();
+                let key = self.type_ref()?;
+                // The same set an entity key is restricted to, for the same reason:
+                // a key that cannot order cannot give a defined iteration order.
+                if !value::can_key(&key) {
+                    return Err(self.err(
+                        format!("a {key} cannot be a map key, for the reason it cannot be an entity key: it does not order"),
+                        line,
+                        col,
+                    ));
+                }
+                self.expect_sym(Sym::Comma)?;
+                let value = self.type_ref()?;
+                self.expect_sym(Sym::RParen)?;
+                Type::map(key, value)
+            }
             other => match self.enum_def(other) {
                 Some(def) => Type::Enum(def.name.clone()),
                 None => return self.fail(format!("unknown type `{other}`")),
@@ -1513,6 +1537,14 @@ impl Parser {
                 let value = self.invoke_expr(lower, span)?;
                 Ok(Stmt::Discard(value))
             }
+            Token::Word(Keyword::For) => {
+                self.bump();
+                lower.b.push_scope();
+                let iter = self.iter_bindings(lower)?;
+                let body = self.block(lower, events)?;
+                lower.b.pop_scope();
+                Ok(Stmt::For { iter, body })
+            }
             Token::Word(Keyword::State) | Token::Word(Keyword::Guard) => {
                 self.fail("`state` and `guard` must come before the first statement")
             }
@@ -1625,9 +1657,13 @@ impl Parser {
             let name = self.expect_ident()?;
 
             if self.eat_sym(Sym::LParen) {
+                let receiver = type_of(lower, value);
                 let mut args = Vec::new();
                 while !self.at_sym(Sym::RParen) {
-                    args.push(self.expr(lower, None)?);
+                    let hint = receiver
+                        .as_ref()
+                        .and_then(|ty| arg_hint(ty, &name, args.len()));
+                    args.push(self.expr(lower, hint)?);
                     if !self.eat_sym(Sym::Comma) {
                         break;
                     }
@@ -1709,6 +1745,7 @@ impl Parser {
             },
             Token::Word(Keyword::Invoke) => self.invoke_expr(lower, span),
             Token::Sym(Sym::LBrace) => self.object_literal(lower, span),
+            Token::Sym(Sym::LBracket) => self.bracketed(lower, expect, span),
             Token::TextOpen(head) => self.interpolation(lower, head, span),
             Token::Sym(Sym::Dot) => {
                 let (line, col) = self.here();
@@ -1758,7 +1795,7 @@ impl Parser {
                 if lower.b.lookup(&name).is_some() {
                     return Ok(lower.b.load(&name));
                 }
-                if let Some(value) = self.builtin(lower, &name, span)? {
+                if let Some(value) = self.builtin(lower, &name, expect.as_ref(), span)? {
                     return Ok(value);
                 }
                 if let Some(Type::Enum(enum_name)) = expect.as_ref().map(inner_of)
@@ -1942,11 +1979,17 @@ fn type_of(lower: &Lower, id: ExprId) -> Option<Type> {
             | BinOp::Or => Some(Type::Bool),
             _ => type_of(lower, *lhs).or_else(|| type_of(lower, *rhs)),
         },
-        Expr::Method { .. } => None,
+        Expr::Method {
+            receiver, method, ..
+        } => method_type(&type_of(lower, *receiver)?, method),
         Expr::If { then, .. } => type_of(lower, *then),
         Expr::Field { name, .. } => response_field(name),
         Expr::Object(_) => Some(Type::Json),
         Expr::Interp(_) => Some(Type::String),
+        Expr::List(items) => Some(Type::list(
+            items.first().and_then(|id| type_of(lower, *id))?,
+        )),
+        Expr::Comp { yields, .. } => Some(Type::list(type_of(lower, *yields)?)),
         Expr::Call { builtin, .. } => Some(match builtin {
             Builtin::UuidDerive => Type::Uuid,
             _ => Type::Response,
@@ -1965,6 +2008,35 @@ fn uuid_member(member: &str) -> String {
         ),
         _ => format!("`Uuid` has no `{member}`; it has `derive(seed, name)`"),
     }
+}
+
+/// A method's result type, for the places a binding's type has to be known before the
+/// program runs: a `for` variable and, once records exist, a field access.
+fn method_type(receiver: &Type, method: &str) -> Option<Type> {
+    Some(match (receiver, method) {
+        (Type::Opt(inner), "unwrap_or") => inner.as_ref().clone(),
+        (Type::Opt(_), "is_some" | "is_none") => Type::Bool,
+        (Type::List(inner), "first") => Type::opt(inner.as_ref().clone()),
+        (Type::List(_) | Type::Map(..), "push" | "set" | "remove") => receiver.clone(),
+        (Type::List(_) | Type::Map(..), "len") => Type::Int,
+        (Type::List(_) | Type::Map(..), "is_empty" | "contains") => Type::Bool,
+        (Type::Map(_, value), "get") => Type::opt(value.as_ref().clone()),
+        (Type::Map(key, _), "keys") => Type::list(key.as_ref().clone()),
+        (Type::Map(_, value), "values") => Type::list(value.as_ref().clone()),
+        _ => return None,
+    })
+}
+
+/// The hint one argument of a method call gets. Without it `xs.push([])` and
+/// `m.get(id).unwrap_or(0)` have no target to resolve against.
+fn arg_hint(receiver: &Type, method: &str, index: usize) -> Option<Type> {
+    Some(match (receiver, method, index) {
+        (Type::Opt(inner), "unwrap_or", 0) => inner.as_ref().clone(),
+        (Type::List(item), "push" | "remove" | "contains", 0) => item.as_ref().clone(),
+        (Type::Map(key, _), "get" | "remove" | "contains" | "set", 0) => key.as_ref().clone(),
+        (Type::Map(_, value), "set", 1) => value.as_ref().clone(),
+        _ => return None,
+    })
 }
 
 /// The two fields a `Response` carries. Parenless field access exists for these and
@@ -2203,12 +2275,14 @@ impl Parser {
         &mut self,
         lower: &mut Lower,
         name: &str,
+        expect: Option<&Type>,
         span: Span,
     ) -> Result<Option<ExprId>, SyntaxError> {
         let called = self.at_sym(Sym::LParen);
         match name {
             "http" if self.at_sym(Sym::Dot) => self.http_call(lower, span).map(Some),
             "Uuid" if self.at_sym(Sym::Dot) => self.uuid_call(lower, span).map(Some),
+            "Map" if self.at_sym(Sym::Dot) => self.map_empty(lower, expect, span).map(Some),
             "reveal" if called => self.reveal_call(lower, span).map(Some),
             "now" if called => {
                 // Rule 11's clock rule: a clock exists where its result is pinned or
@@ -2423,6 +2497,184 @@ impl Parser {
                 }
             }
         }
+    }
+
+    /// `[a, b]`, `[]` or a comprehension. Which one is decided by a scan for a `for`
+    /// at bracket depth zero, before anything is parsed, so neither form needs to be
+    /// speculatively parsed and undone.
+    fn bracketed(
+        &mut self,
+        lower: &mut Lower,
+        expect: Option<Type>,
+        span: Span,
+    ) -> Result<ExprId, SyntaxError> {
+        let inner = match expect.as_ref().map(inner_of) {
+            Some(Type::List(item)) => Some(item.as_ref().clone()),
+            _ => None,
+        };
+
+        if let Some(at) = self.comprehension_for() {
+            return self.comprehension(lower, inner, at, span);
+        }
+
+        if self.eat_sym(Sym::RBracket) {
+            let Some(inner) = inner else {
+                return Err(self.err(
+                    "an empty list needs a target type to know what it holds; that comes from the `state`, parameter or field it fills",
+                    span.line,
+                    span.col,
+                ));
+            };
+            lower.b.at(span);
+            return Ok(lower.b.lit(Literal::EmptyList(inner)));
+        }
+
+        let mut items = Vec::new();
+        loop {
+            items.push(self.expr(lower, inner.clone())?);
+            if !self.eat_sym(Sym::Comma) || self.at_sym(Sym::RBracket) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RBracket)?;
+        lower.b.at(span);
+        Ok(lower.b.expr(Expr::List(items)))
+    }
+
+    /// Where the comprehension's `for` is, or `None` when this is a list literal.
+    fn comprehension_for(&self) -> Option<usize> {
+        let mut depth = 0i32;
+        for (index, spanned) in self.tokens.iter().enumerate().skip(self.pos) {
+            match &spanned.token {
+                Token::Sym(Sym::LBracket | Sym::LParen | Sym::LBrace) => depth += 1,
+                Token::Sym(Sym::RBracket) if depth == 0 => return None,
+                Token::Sym(Sym::RBracket | Sym::RParen | Sym::RBrace) => depth -= 1,
+                Token::Word(Keyword::For) if depth == 0 => return Some(index),
+                Token::End => return None,
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The produced expression is written first but uses bindings introduced later, so
+    /// the loop is parsed first and the position rewound. One scan buys the reading
+    /// order every language with comprehensions already uses.
+    fn comprehension(
+        &mut self,
+        lower: &mut Lower,
+        inner: Option<Type>,
+        at: usize,
+        span: Span,
+    ) -> Result<ExprId, SyntaxError> {
+        let start = self.pos;
+        self.pos = at;
+        self.expect_word(Keyword::For)?;
+        lower.b.push_scope();
+        let iter = self.iter_bindings(lower)?;
+        let cond = if self.eat_word(Keyword::If) {
+            Some(self.expr(lower, Some(Type::Bool))?)
+        } else {
+            None
+        };
+        self.expect_sym(Sym::RBracket)?;
+        let end = self.pos;
+
+        self.pos = start;
+        let yields = self.expr(lower, inner.clone())?;
+        if self.pos != at {
+            return self.fail("expected `for` after a comprehension's expression");
+        }
+        self.pos = end;
+        lower.b.pop_scope();
+        lower.b.at(span);
+        Ok(lower.b.expr(Expr::Comp {
+            iter,
+            cond,
+            yields,
+            inner,
+        }))
+    }
+
+    /// `name [, name] in <container>`, shared by `for` and comprehensions so there is
+    /// one rule rather than two. The caller has already pushed the scope.
+    fn iter_bindings(&mut self, lower: &mut Lower) -> Result<Iter, SyntaxError> {
+        let (line, col) = self.here();
+        let first = self.expect_ident()?;
+        let second = if self.eat_sym(Sym::Comma) {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+        self.expect_word(Keyword::In)?;
+        let (over_line, over_col) = self.here();
+        let over = self.expr(lower, None)?;
+
+        let (index_ty, item_ty) = match type_of(lower, over) {
+            Some(Type::List(item)) => (second.as_ref().map(|_| Type::Int), item.as_ref().clone()),
+            Some(Type::Map(key, value)) => {
+                if second.is_none() {
+                    return Err(self.err(
+                        "a map yields a key beside its value, so `for` over one binds two names; write `for key, value in ...`",
+                        line,
+                        col,
+                    ));
+                }
+                (Some(key.as_ref().clone()), value.as_ref().clone())
+            }
+            Some(other) => {
+                return Err(self.err(
+                    format!("`for` walks a List or a Map, and this is a {other}"),
+                    over_line,
+                    over_col,
+                ));
+            }
+            None => {
+                return Err(self.err(
+                    "cannot tell what this holds; `for` needs the container's element type, which comes from a declaration",
+                    over_line,
+                    over_col,
+                ));
+            }
+        };
+
+        let (index_name, item_name) = match second {
+            Some(second) => (Some(first), second),
+            None => (None, first),
+        };
+        let index = index_name.map(|name| lower.b.alloc(name, index_ty));
+        let item = lower.b.alloc(item_name, Some(item_ty));
+        Ok(Iter { index, item, over })
+    }
+
+    /// `Map.empty`, on the type for the reason `Uuid.derive` is: the global namespace
+    /// is closed to constructors.
+    fn map_empty(
+        &mut self,
+        lower: &mut Lower,
+        expect: Option<&Type>,
+        span: Span,
+    ) -> Result<ExprId, SyntaxError> {
+        self.expect_sym(Sym::Dot)?;
+        let (line, col) = self.here();
+        let member = self.expect_ident()?;
+        if member != "empty" {
+            return Err(self.err(
+                format!("`Map` has no `{member}`; it has `empty`, and everything else is a method on a map value"),
+                line,
+                col,
+            ));
+        }
+        let Some(Type::Map(key, value)) = expect.map(inner_of) else {
+            return Err(self.err(
+                "`Map.empty` needs a target type to know what it holds; that comes from the `state`, parameter or field it fills",
+                span.line,
+                span.col,
+            ));
+        };
+        let lit = Literal::EmptyMap(key.as_ref().clone(), value.as_ref().clone());
+        lower.b.at(span);
+        Ok(lower.b.lit(lit))
     }
 
     fn object_literal(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, SyntaxError> {
@@ -2658,12 +2910,15 @@ fn invoked(exprs: &Exprs, body: &[Stmt]) -> Vec<Ident> {
 fn walk_stmts<'a>(stmts: &'a [Stmt], visit: &mut impl FnMut(&'a Stmt)) {
     for stmt in stmts {
         visit(stmt);
-        if let Stmt::If {
-            then, otherwise, ..
-        } = stmt
-        {
-            walk_stmts(then, visit);
-            walk_stmts(otherwise, visit);
+        match stmt {
+            Stmt::If {
+                then, otherwise, ..
+            } => {
+                walk_stmts(then, visit);
+                walk_stmts(otherwise, visit);
+            }
+            Stmt::For { body, .. } => walk_stmts(body, visit),
+            _ => {}
         }
     }
 }
@@ -2689,6 +2944,7 @@ fn roots(stmt: &Stmt) -> Vec<ExprId> {
     match stmt {
         Stmt::Assign { value, .. } => vec![*value],
         Stmt::If { cond, .. } => vec![*cond],
+        Stmt::For { iter, .. } => vec![iter.over],
         Stmt::Emit { fields, .. } | Stmt::Put { fields, .. } => {
             fields.iter().map(|(_, id)| *id).collect()
         }
@@ -2724,6 +2980,14 @@ fn children(expr: &Expr) -> Vec<ExprId> {
         Expr::Field { receiver, .. } => vec![*receiver],
         Expr::Object(fields) => fields.iter().map(|(_, id)| *id).collect(),
         Expr::Interp(parts) => parts.clone(),
+        Expr::List(items) => items.clone(),
+        Expr::Comp {
+            iter, cond, yields, ..
+        } => {
+            let mut ids = vec![iter.over, *yields];
+            ids.extend(cond.iter().copied());
+            ids
+        }
         Expr::Call { args, .. } => args.clone(),
         Expr::Invoke { args, .. } => args.iter().map(|(_, id)| *id).collect(),
         Expr::Reveal {
@@ -2764,6 +3028,14 @@ fn scan(exprs: &Exprs, stmts: &[Stmt], incoming: Option<Span>) -> Result<Reach, 
                     erased,
                     falls_through: false,
                 });
+            }
+            // A loop body may run again, so an `erase` anywhere in it is reachable
+            // from every reveal in it, including one lexically above. Two passes reach
+            // the fixed point, because the lattice has two elements.
+            Stmt::For { body, .. } => {
+                let once = scan(exprs, body, erased)?;
+                let twice = scan(exprs, body, once.erased)?;
+                erased = twice.erased;
             }
             Stmt::If {
                 then, otherwise, ..

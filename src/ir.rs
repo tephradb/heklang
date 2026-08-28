@@ -50,12 +50,24 @@ pub enum Type {
     Json,
     Response,
     Outcome,
+    List(Box<Type>),
+    /// The key is restricted to the types that order and hash, the same set an entity
+    /// key is restricted to, which is where sorted iteration comes from.
+    Map(Box<Type>, Box<Type>),
     Opt(Box<Type>),
 }
 
 impl Type {
     pub fn opt(inner: Type) -> Self {
         Type::Opt(Box::new(inner))
+    }
+
+    pub fn list(inner: Type) -> Self {
+        Type::List(Box::new(inner))
+    }
+
+    pub fn map(key: Type, value: Type) -> Self {
+        Type::Map(Box::new(key), Box::new(value))
     }
 }
 
@@ -74,6 +86,8 @@ impl fmt::Display for Type {
             Type::Json => f.write_str("Json"),
             Type::Response => f.write_str("Response"),
             Type::Outcome => f.write_str("Outcome"),
+            Type::List(inner) => write!(f, "List({inner})"),
+            Type::Map(key, value) => write!(f, "Map({key}, {value})"),
             Type::Opt(inner) => write!(f, "{inner}?"),
         }
     }
@@ -482,6 +496,17 @@ pub enum Expr {
     /// An interpolated string. The literal chunks are ordinary `Lit(Str)` parts, so
     /// this is a join over one uniform list rather than two interleaved ones.
     Interp(Vec<ExprId>),
+    List(Vec<ExprId>),
+    /// `[yields for bindings in over if cond]`. The bindings are ordinary frame slots,
+    /// filled once per element, so nothing about a comprehension is a new scope kind.
+    Comp {
+        iter: Iter,
+        cond: Option<ExprId>,
+        yields: ExprId,
+        /// The element type when the target declared one, so an empty result still
+        /// has the type it was written for rather than a guess from its first item.
+        inner: Option<Type>,
+    },
     Call {
         builtin: Builtin,
         args: Vec<ExprId>,
@@ -498,6 +523,15 @@ pub enum Expr {
         subject: Ident,
         subject_value: ExprId,
     },
+}
+
+/// What a `for` or a comprehension binds. `index` is the key over a map and the
+/// position over a list, and is absent when only one name was given.
+#[derive(Debug, Clone)]
+pub struct Iter {
+    pub index: Option<Slot>,
+    pub item: Slot,
+    pub over: ExprId,
 }
 
 /// The builtins that are ordinary calls. `now()` is not among them: it lowers to a
@@ -550,14 +584,27 @@ impl Builtin {
 pub enum Literal {
     Bool(bool),
     Int(i64),
-    Decimal { units: i64, scale: u8 },
+    Decimal {
+        units: i64,
+        scale: u8,
+    },
     Str(String),
     Uuid(String),
     Timestamp(i64),
     None(Type),
-    Money { units: i64, scale: u8 },
-    Enum { ty: Ident, variant: Ident },
+    Money {
+        units: i64,
+        scale: u8,
+    },
+    Enum {
+        ty: Ident,
+        variant: Ident,
+    },
     Rounding(Rounding),
+    /// An empty container is a constant, so it is a literal: usable as a seed, a
+    /// default and a const, not only as an expression.
+    EmptyList(Type),
+    EmptyMap(Type, Type),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -674,6 +721,10 @@ pub enum Stmt {
         subject: Ident,
         value: ExprId,
         span: Span,
+    },
+    For {
+        iter: Iter,
+        body: Vec<Stmt>,
     },
     /// A bare `invoke` or `http.*` whose result is unused. A closed rule, not general
     /// expression statements.

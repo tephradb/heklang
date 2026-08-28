@@ -1083,3 +1083,33 @@ fn a_parenless_field_on_a_non_response_still_suggests_the_method() {
 }");
     assert_eq!(message, "no field `trim` on String; did you mean `trim()`?");
 }
+
+/// Rule 9 with a loop, which `docs/effects.md` predicted before there was one: an
+/// `erase` anywhere in a loop body is reachable from every reveal in that body,
+/// including one lexically above it, because the body runs again.
+#[test]
+fn an_erase_in_a_loop_poisons_the_whole_body() {
+    let message = err("effect E {
+  on @order.placed as e {
+    for x in [1, 2] {
+      log(reveal(e.email))
+      erase(e.customer_id)
+    }
+  }
+}");
+    assert!(
+        message.contains("can run after the `erase`"),
+        "the reveal is lexically first and still rejected, got: {message}"
+    );
+
+    // The same two statements outside a loop are fine in that order, which is what
+    // makes the loop rule a real rule rather than a restatement of the lexical one.
+    program(
+        "effect E {
+  on @order.placed as e {
+    log(reveal(e.email))
+    erase(e.customer_id)
+  }
+}",
+    );
+}
