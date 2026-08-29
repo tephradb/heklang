@@ -1,6 +1,6 @@
-use std::error;
 use std::fmt;
 
+use crate::diagnostic::{Code, Diagnostic};
 use crate::ir::{Number, Pos, Span};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,44 +224,7 @@ pub struct Spanned {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SyntaxError {
-    pub message: String,
-    pub span: Span,
-    /// The module the error is in. `None` when the source had no name, which is what
-    /// `parse` of a single string gives.
-    pub file: Option<String>,
-}
-
-impl SyntaxError {
-    pub fn new(message: impl Into<String>, span: Span) -> Self {
-        Self {
-            message: message.into(),
-            span,
-            file: None,
-        }
-    }
-
-    pub fn in_file(mut self, file: impl Into<String>) -> Self {
-        self.file = Some(file.into());
-        self
-    }
-}
-
-/// The start alone, through `Span`'s own `Display`. The extent is for a reader that can
-/// draw it; `docs/cli.md` has what `hek` does with it.
-impl fmt::Display for SyntaxError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.file {
-            Some(file) => write!(f, "{file}:{}: {}", self.span, self.message),
-            None => write!(f, "{}: {}", self.span, self.message),
-        }
-    }
-}
-
-impl error::Error for SyntaxError {}
-
-pub fn lex(source: &str) -> Result<Vec<Spanned>, SyntaxError> {
+pub fn lex(source: &str) -> Result<Vec<Spanned>, Diagnostic> {
     Lexer::new(source).run()
 }
 
@@ -320,8 +283,12 @@ impl Lexer {
 
     /// From the start of the token to wherever the scanner gave up. `unterminated string`
     /// is about the quote that opened it rather than the end of the file it ran to.
-    fn error<T>(&self, message: impl Into<String>) -> Result<T, SyntaxError> {
-        Err(SyntaxError::new(message, Span::new(self.start, self.at())))
+    fn error<T>(&self, code: Code, message: impl Into<String>) -> Result<T, Diagnostic> {
+        Err(Diagnostic::new(
+            code,
+            message,
+            Span::new(self.start, self.at()),
+        ))
     }
 
     fn skip_trivia(&mut self) {
@@ -343,7 +310,7 @@ impl Lexer {
         }
     }
 
-    fn run(mut self) -> Result<Vec<Spanned>, SyntaxError> {
+    fn run(mut self) -> Result<Vec<Spanned>, Diagnostic> {
         let mut tokens = Vec::new();
         loop {
             self.skip_trivia();
@@ -391,7 +358,7 @@ impl Lexer {
         }
     }
 
-    fn number(&mut self) -> Result<Token, SyntaxError> {
+    fn number(&mut self) -> Result<Token, Diagnostic> {
         let mut digits = String::new();
         while let Some(c) = self.peek() {
             if !c.is_ascii_digit() {
@@ -412,18 +379,18 @@ impl Lexer {
                 self.bump();
                 scale = match scale.checked_add(1) {
                     Some(scale) => scale,
-                    None => return self.error("too many decimal places"),
+                    None => return self.error(Code::BadNumber, "too many decimal places"),
                 };
             }
         }
 
         match digits.parse::<i128>() {
             Ok(value) => Ok(Token::Number(Number::new(value, scale))),
-            Err(_) => self.error("number is too large"),
+            Err(_) => self.error(Code::BadNumber, "number is too large"),
         }
     }
 
-    fn text(&mut self) -> Result<Token, SyntaxError> {
+    fn text(&mut self) -> Result<Token, Diagnostic> {
         self.bump();
         let (value, open) = self.scan_text()?;
         if open {
@@ -435,7 +402,7 @@ impl Lexer {
 
     /// Resumes a string after the `}` that closed a hole. Pops the interpolation when
     /// the string ends, so the stack holds exactly the holes still open.
-    fn resume_text(&mut self) -> Result<Token, SyntaxError> {
+    fn resume_text(&mut self) -> Result<Token, Diagnostic> {
         let (value, open) = self.scan_text()?;
         if open {
             return Ok(Token::TextPart(value));
@@ -446,11 +413,11 @@ impl Lexer {
 
     /// String content up to the closing quote or the next `{`. The flag says which of
     /// the two stopped it.
-    fn scan_text(&mut self) -> Result<(String, bool), SyntaxError> {
+    fn scan_text(&mut self) -> Result<(String, bool), Diagnostic> {
         let mut value = String::new();
         loop {
             let Some(next) = self.bump() else {
-                return self.error("unterminated string");
+                return self.error(Code::UnterminatedString, "unterminated string");
             };
             match next {
                 '"' => return Ok((value, false)),
@@ -465,8 +432,11 @@ impl Lexer {
                     // delimiter. Accepted because an author who learns the open one
                     // will reach for its pair.
                     Some('}') => value.push('}'),
-                    Some(other) => return self.error(format!("unknown escape `\\{other}`")),
-                    None => return self.error("unterminated string"),
+                    Some(other) => {
+                        return self
+                            .error(Code::UnknownEscape, format!("unknown escape `\\{other}`"));
+                    }
+                    None => return self.error(Code::UnterminatedString, "unterminated string"),
                 },
                 c => value.push(c),
             }
@@ -475,14 +445,14 @@ impl Lexer {
 
     /// `"""..."""`: everything between the delimiters, verbatim. No escapes and no
     /// interpolation, because the documents this form exists for are brace-dense.
-    fn raw_text(&mut self) -> Result<Token, SyntaxError> {
+    fn raw_text(&mut self) -> Result<Token, Diagnostic> {
         for _ in 0..3 {
             self.bump();
         }
         let mut value = String::new();
         loop {
             let Some(next) = self.peek() else {
-                return self.error("unterminated multi-line string");
+                return self.error(Code::UnterminatedString, "unterminated multi-line string");
             };
             if next == '"' && self.peek_at(1) == Some('"') && self.peek_at(2) == Some('"') {
                 for _ in 0..3 {
@@ -495,15 +465,15 @@ impl Lexer {
         }
     }
 
-    fn path(&mut self) -> Result<Token, SyntaxError> {
+    fn path(&mut self) -> Result<Token, Diagnostic> {
         self.bump();
         let mut segments = Vec::new();
         loop {
             let Some(next) = self.peek() else {
-                return self.error("expected a name after `@`");
+                return self.error(Code::BadPath, "expected a name after `@`");
             };
             if !is_ident_start(next) {
-                return self.error("expected a name after `@`");
+                return self.error(Code::BadPath, "expected a name after `@`");
             }
 
             let mut segment = String::new();
@@ -524,7 +494,7 @@ impl Lexer {
         }
     }
 
-    fn symbol(&mut self) -> Result<Token, SyntaxError> {
+    fn symbol(&mut self) -> Result<Token, Diagnostic> {
         let first = self.bump().expect("symbol starts with a character");
 
         // Inside a hole, braces are counted, so a nested block or object literal is
@@ -576,7 +546,12 @@ impl Lexer {
             '%' => Sym::Percent,
             '!' => Sym::Bang,
             '.' => Sym::Dot,
-            other => return self.error(format!("unexpected character `{other}`")),
+            other => {
+                return self.error(
+                    Code::UnexpectedCharacter,
+                    format!("unexpected character `{other}`"),
+                );
+            }
         };
         Ok(Token::Sym(single))
     }

@@ -1,14 +1,16 @@
 //! `docs/diagnostics.md` as executable tests: where a diagnostic says it is, and how
 //! wide. One test per numbered rule.
 
-use heklang::{Pos, Span, SyntaxError, parse};
+use std::collections::BTreeSet;
+
+use heklang::{Code, Diagnostic, Pos, Span, parse};
 
 const EVENTS: &str = "event @thing.happened { id: Int, name: String }
 ";
 
 /// The one thing every test here needs: the error a source raises, with its span. The
 /// events go in front, so every line number below is one more than it reads.
-fn error(source: &str) -> SyntaxError {
+fn error(source: &str) -> Diagnostic {
     parse(&format!("{EVENTS}{source}")).expect_err("this source is meant to fail")
 }
 
@@ -41,7 +43,7 @@ fn the_rendered_form_is_the_start_alone() {
     assert_ne!(err.span.end, err.span.start, "it has an extent");
     assert_eq!(
         err.to_string(),
-        "3:36: `missing` is not in scope",
+        "3:36 [not-in-scope] `missing` is not in scope",
         "and none of it reaches the text"
     );
 }
@@ -281,4 +283,199 @@ fn a_dotted_annotation_name_covers_the_whole_path() {
         .expect_err("an annotation name is one segment");
     assert_eq!(err.message, "an annotation name cannot contain `.`");
     assert_eq!(err.span, at(1, 36, 1, 40));
+}
+
+// ---------------------------------------------------------------------------------
+// Rule 7: the code table. A diagnostic says what kind of thing is wrong, and the set of
+// kinds is closed.
+
+/// Enough of a program for a subject-bound field and an effect to have something to
+/// trigger on, since half the codes below need one.
+const PRELUDE: &str = "event @order.placed {
+  order_id: Int,
+  customer_id: Int,
+  email: String @subject(customer_id),
+  total: Money(2),
+}
+";
+
+/// One source per code, so a decorative variant is visible: a category the checker
+/// claims to have and never produces is worse than no category.
+fn cases() -> Vec<(Code, String)> {
+    let plain: Vec<(Code, &str)> = vec![
+        (
+            Code::BadNumber,
+            "const A: Int = 9999999999999999999999999999999999999999999\n",
+        ),
+        (Code::UnterminatedString, "const A: String = \"abc\n"),
+        (Code::UnknownEscape, "const A: String = \"a\\zb\"\n"),
+        (Code::BadPath, "event @ { id: Int }\n"),
+        (
+            Code::UnexpectedCharacter,
+            "command C(id: Int) { let x = # }\n",
+        ),
+        (Code::ExpectedToken, "nope Foo { }\n"),
+        (
+            Code::DeclaredTwice,
+            "event @a.b { id: Int }\nevent @a.b { id: Int }\n",
+        ),
+        (
+            Code::NotDeclared,
+            "command C(id: Int) { emit @no.such { id } }\n",
+        ),
+        (
+            Code::NotInScope,
+            "event @a.b { id: Int }\ncommand C(id: Int) { emit @a.b { id: missing } }\n",
+        ),
+        (
+            Code::UnknownMember,
+            "event @a.b { id: Int }\ncommand C(text: String) { emit @a.b { id: text.nope() } }\n",
+        ),
+        (Code::UnknownType, "command C(x: Nope) { return }\n"),
+        (Code::BadType, "command C(x: Money(999)) { return }\n"),
+        (
+            Code::TypeMismatch,
+            "event @a.b { id: Int }\ncommand C(text: String) { emit @a.b { id: text } }\n",
+        ),
+        (
+            Code::BadOperands,
+            "command C(a: Money(2), b: Money(3)) { if a > b { return } return }\n",
+        ),
+        (Code::BadLiteral, "const A: Uuid = \"nope\"\n"),
+        (Code::NeedsTargetType, "command C(id: Int) { let x = [] }\n"),
+        (
+            Code::NotAValue,
+            "command C(id: Int) { let x = log(\"hi\") }\n",
+        ),
+        (
+            Code::Arity,
+            "fn f(a: Int) -> Int { return a }\ncommand C(id: Int) { let x = f(1, 2) }\n",
+        ),
+        (
+            Code::MissingField,
+            "record R { a: Int, b: Int }\ncommand C(id: Int) { let r = R { a: 1 } }\n",
+        ),
+        (
+            Code::DuplicateField,
+            "record R { a: Int }\ncommand C(id: Int) { let r = R { a: 1, a: 2 } }\n",
+        ),
+        (
+            Code::UnknownAnnotation,
+            "event @a.b { id: Int, note: String @nope }\n",
+        ),
+        (
+            Code::BadAnnotation,
+            "event @a.b { id: Int, note: String @a.b }\n",
+        ),
+        (Code::EmptyDeclaration, "record R { }\n"),
+        (
+            Code::EntityShape,
+            "event @a.b { id: Int }\nprojector P {\n  entity Row { id: Int }\n  on @a.b { id } { put Row { id } }\n}\n",
+        ),
+        (
+            Code::EventShape,
+            "event @a.b { id: Int }\nevent @c.d { other: String }\neffect E {\n  on @a.b, @c.d { log(\"x\") }\n}\n",
+        ),
+        (
+            Code::StateShape,
+            "event @a.b { id: Int }\ncommand C(id: Int) {\n  state n: Int = 0\n  emit @a.b { id }\n}\n",
+        ),
+        (
+            Code::NoZeroValue,
+            "event @a.b { id: Int }\nprojector P {\n  entity Row { id: Int @key, ref: Uuid }\n  on @a.b { id } { patch Row[id] { id: id } }\n}\n",
+        ),
+        (
+            Code::WrongContext,
+            "event @a.b { id: Int }\ncommand C(id: Int) { put Row { id } }\n",
+        ),
+        (
+            Code::ImpureFn,
+            "fn f(a: Int) -> Int { log(\"x\") return a }\n",
+        ),
+        (Code::ReturnShape, "fn f(a: Int) -> Int { return }\n"),
+        (Code::TestShape, "test \"x\" { }\n"),
+        (Code::RecursiveFn, "fn f(a: Int) -> Int { return f(a) }\n"),
+        (Code::ConstCycle, "const A: Int = B\nconst B: Int = A\n"),
+    ];
+
+    let with_prelude: Vec<(Code, &str)> = vec![
+        (
+            Code::FoldRestriction,
+            "command C(id: Int) {
+  state t: Timestamp = fold now()
+    on @order.placed(order_id: id) => t
+  emit @order.placed { order_id: id, customer_id: id, email: \"x\", total: 1.00 }
+}",
+        ),
+        (
+            Code::ArmOnly,
+            "effect E {
+  fn helper(e: Int) -> String { return reveal(e) }
+  on @order.placed as e { log(helper(e.customer_id)) }
+}",
+        ),
+        (
+            Code::SealBoundary,
+            "effect E {
+  on @order.placed as e { log(\"to {e.email}\") }
+}",
+        ),
+        (
+            Code::EraseSubject,
+            "effect E {
+  on @order.placed as e { erase(order_id, \"1\") }
+}",
+        ),
+        (
+            Code::EraseOrder,
+            "effect E {
+  on @order.placed as e {
+    erase(e.customer_id)
+    log(reveal(e.email))
+  }
+}",
+        ),
+        (
+            Code::SelfTrigger,
+            "command Again(order_id: Int, customer_id: Int) {
+  emit @order.placed { order_id, customer_id, email: \"x\", total: 1.00 }
+}
+effect E {
+  on @order.placed as e { invoke Again { order_id: e.order_id, customer_id: e.customer_id } }
+}",
+        ),
+    ];
+
+    plain
+        .into_iter()
+        .map(|(code, source)| (code, source.to_string()))
+        .chain(
+            with_prelude
+                .into_iter()
+                .map(|(code, source)| (code, format!("{PRELUDE}{source}\n"))),
+        )
+        .collect()
+}
+
+#[test]
+fn every_code_is_reachable() {
+    let mut seen = BTreeSet::new();
+    let mut wrong: Vec<String> = Vec::new();
+    for (want, source) in cases() {
+        let err = match parse(&source) {
+            Ok(_) => panic!("this source should not have parsed:\n{source}"),
+            Err(err) => err,
+        };
+        if err.code != want {
+            wrong.push(format!("want {}, got {err} for:\n{source}", want.slug()));
+        }
+        seen.insert(err.code);
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n\n"));
+    let missing: Vec<&str> = Code::ALL
+        .iter()
+        .filter(|code| !seen.contains(code))
+        .map(|code| code.slug())
+        .collect();
+    assert!(missing.is_empty(), "codes no case produces: {missing:?}");
 }

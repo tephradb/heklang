@@ -1,4 +1,5 @@
 pub mod build;
+pub mod diagnostic;
 pub mod interp;
 pub mod ir;
 pub mod lex;
@@ -9,6 +10,7 @@ pub mod types;
 pub mod value;
 
 pub use build::Builder;
+pub use diagnostic::{Code, Diagnostic, Related, Severity};
 pub use interp::{
     AppendCondition, Counts, Effectful, Error, ErrorKind, Execution, Http, Interpreter, Invocation,
     Journal, Outcome, Recorded, Reply, Request, Row, Store,
@@ -20,7 +22,6 @@ pub use ir::{
     Program, Projector, RecordDef, RecordField, Return, Slice, SliceId, Slot, Span, StateVar, Stmt,
     Type, UnOp, Update,
 };
-pub use lex::SyntaxError;
 pub use parse::{check_files, parse, parse_files};
 pub use testing::{TestOutcome, TestResult, run_tests};
 pub use value::{Event, Invoked, Json, Key, Record, Value};

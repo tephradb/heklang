@@ -5,7 +5,7 @@ What heklang says when something is wrong, and where it says it is.
 This document is the contract. `tests/diagnostics.rs` is the same rules as executable tests. Change
 the doc, the tests and the code together.
 
-Until now a position was a point. `Span` was `{ line, col }`, `SyntaxError` was
+Until now a position was a point. `Span` was `{ line, col }`, the diagnostic was
 `{ message, line, col, file }`, and that was the whole of it. It is enough to jump a cursor to and
 not enough to draw anything: an editor underlines a range, a code action needs to know what text it
 is replacing, and a hover needs to know what it is hovering. So a span is now an extent.
@@ -44,7 +44,7 @@ span expressible without a special case, and makes the width of a span its colum
 single line rather than that plus one.
 
 **`Span`'s `Display` prints the start, and only the start.** Every rendered position goes through it:
-a `SyntaxError`, a runtime error, and the messages that name a second declaration. Text has one place
+a `Diagnostic`, a runtime error, and the messages that name a second declaration. Text has one place
 to point at and a reader who can draw has the extent, so the two do not have to agree on a format.
 
 ## 3. Where an end comes from
@@ -129,9 +129,90 @@ knowing before reading a span in an editor.
   scanner has no rule against a literal newline inside one. So `start.line` and `end.line` differ
   more often than the shape of the language suggests, and anything drawing a span has to handle it.
 
-## 7. What this is not, yet
+## 7. A diagnostic is a struct
 
-A diagnostic is still a formatted `String`. There is no code, no severity, no separate hint and no
-secondary span, so a reader can render the text and nothing else, and the fix that several messages
-plainly describe cannot be offered as one. That is the next piece of work, and this document is where
-it lands. A warning severity, and the lints that need one, come after it.
+```rust
+pub struct Diagnostic {
+    pub code: Code,
+    pub severity: Severity,
+    pub span: Span,
+    pub file: Option<String>,
+    pub message: String,
+    pub hint: Option<String>,
+    pub related: Vec<Related>,
+}
+```
+
+`src/diagnostic.rs`, a module of its own with no parser state in it, so a reader that is
+not the parser can use it. It was `SyntaxError { message, span, file }`, one `String`
+holding everything a reader might want to treat separately; the name also stops being
+right the moment a warning can wear it.
+
+**A code is a readable slug**, `type-mismatch` rather than `E0031`, so it says something
+without a registry to look it up in. It is an enum rather than a `&'static str` so the
+compiler checks that every diagnostic is in the taxonomy, which is what lets this table
+be the whole of it:
+
+| Code | Covers |
+| --- | --- |
+| `bad-number` | a numeric literal the scanner could not finish |
+| `unterminated-string` | a string, raw or plain, that ran to the end of the file |
+| `unknown-escape` | `\z` |
+| `bad-path` | an `@` with no name after it |
+| `unexpected-character` | a character with no token in the language |
+| `expected-token` | a token the grammar cannot take here |
+| `declared-twice` | a name, field, variant, arm or annotation given twice |
+| `not-declared` | a name that is spelled fine and declared nowhere |
+| `not-in-scope` | a name declared somewhere, and not here |
+| `unknown-member` | a field, method, parameter, variant or verb the receiver has not got |
+| `unknown-type` | a type name that names no type |
+| `bad-type` | a type that is spelled wrong: a scale that is not a small whole number, a map key that does not order |
+| `type-mismatch` | a value that does not fill a declared type |
+| `bad-operands` | an operator applied to a pair it does not take |
+| `bad-literal` | a literal that cannot be the type its position declares |
+| `needs-target-type` | a value whose type nothing in the program decides |
+| `not-a-value` | a statement written where a value was wanted |
+| `arity` | a call with the wrong number of arguments |
+| `missing-field` | a field, parameter or argument that has to be given and was not |
+| `duplicate-field` | one given twice |
+| `unknown-annotation` | `@nope` |
+| `bad-annotation` | a known annotation in a place or shape it does not take |
+| `empty-declaration` | a declaration whose body would be empty |
+| `entity-shape` | an entity with no `@key`, or an index on a field it has not got |
+| `event-shape` | an arm over event types with nothing in common |
+| `state-shape` | a `state` or `guard` written where or how it does not go |
+| `no-zero-value` | a `patch` that would materialise a row it cannot fill |
+| `wrong-context` | a statement in a declaration kind that does not have it |
+| `impure-fn` | a `fn` doing something a pure function cannot |
+| `fold-restriction` | a `state` fold calling out or decrypting |
+| `arm-only` | an effect-local `fn` doing what stays in the arm |
+| `return-shape` | a `return` that does not match the signature it is in |
+| `seal-boundary` | rule 12: sealed content leaving without `reveal` |
+| `erase-subject` | an `erase` whose subject or id is not one |
+| `erase-order` | rule 9: a `reveal` reachable from an `erase` |
+| `test-shape` | a test body out of order, or an expectation its action cannot produce |
+| `recursive-fn` | a `fn` that calls itself |
+| `self-trigger` | an effect that can trigger itself |
+| `const-cycle` | a `const` that names itself |
+
+**The context codes are what keeps the table this short.** About thirty sites are the
+same handful of defects reported differently per declaration kind, because each context
+gets a message about that context: `emit` in a projector, in an effect and in a test read
+as three sentences and are one defect. The code carries the defect and the prose carries
+the context, so those thirty sites are six codes and no message changed.
+
+**`is_syntax` is the cut that matters to the reader.** The lexical codes and
+`expected-token` mean the token stream stopped making sense, so there is nothing left to
+read in that declaration. Everything else parsed and then failed a check.
+
+**Severity is a channel with no producer.** Nothing is a warning yet. It is a field
+rather than a later addition because the lints that need it plug into this shape instead
+of changing it again, and because a warning never travels in `Err`: it does not stop a
+parse, so it belongs beside the errors rather than instead of a result.
+
+## 8. What this is not, yet
+
+`hint` and `related` are fields that nothing fills. Twenty-two messages still carry their
+advice inside the message after a `;`, and the eight that name a second place still
+interpolate it into their own text. Those are the next two pieces of work, and this
+document is where they land.

@@ -68,7 +68,7 @@ third file reports its own line 2, not line 340 of a concatenation.
 Errors carry the module they are in and render as `module:line:col: message`. The position is
 the start of the extent the diagnostic covers; `docs/diagnostics.md` has the extent.
 
-- **Syntax and lex errors** carry it directly (`SyntaxError::file`).
+- **Syntax and lex errors** carry it directly (`Diagnostic::file`).
 - **Runtime errors** carry it too (`interp::Error::module`), stamped at the `run` / `project`
   boundary rather than at each raise site. That is the innermost place that knows which declaration
   is executing, and a command or projector is always wholly within one module, so one stamp is

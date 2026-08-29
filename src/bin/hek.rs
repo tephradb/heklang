@@ -15,7 +15,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use heklang::{Program, SyntaxError, TestOutcome, check_files, run_tests};
+use heklang::{Diagnostic, Program, TestOutcome, check_files, run_tests};
 
 const USAGE: &str = "\
 hek: check heklang sources and run their tests
@@ -213,7 +213,7 @@ fn walk(dir: &Path, found: &mut Vec<PathBuf>) -> Result<(), String> {
 /// `None` where there is nothing to draw: an error with no module, one whose span is the
 /// end-of-file sentinel, or a line that is not in the file. `docs/diagnostics.md` rule 5
 /// has why each of those has no extent.
-fn underline(sources: &[(String, String)], err: &SyntaxError) -> Option<String> {
+fn underline(sources: &[(String, String)], err: &Diagnostic) -> Option<String> {
     let file = err.file.as_deref()?;
     let body = sources
         .iter()

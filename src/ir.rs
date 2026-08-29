@@ -58,7 +58,7 @@ impl Span {
 }
 
 /// The start, and only the start. Every rendered position in heklang goes through here:
-/// a `SyntaxError`, a runtime `interp::Error`, and the messages that name a second
+/// a `Diagnostic`, a runtime `interp::Error`, and the messages that name a second
 /// declaration. The extent is for a reader that can draw; text says where to look.
 impl fmt::Display for Span {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -87,7 +87,7 @@ fn a_syntax_error_names_its_module() {
     assert_eq!(err.span.start.line, 2, "line numbers stay module-relative");
     assert_eq!(
         err.to_string(),
-        "commands/broken.hk:2:11: `nope` is not in scope"
+        "commands/broken.hk:2:11 [not-in-scope] `nope` is not in scope"
     );
 }
 
@@ -183,7 +183,10 @@ fn a_single_source_still_parses_without_a_module_name() {
     let err = parse("command C(x: Int) {\n  let y = nope\n  return\n}\n")
         .expect_err("`nope` is not in scope");
     assert_eq!(err.file, None, "an unnamed source has no module to name");
-    assert_eq!(err.to_string(), "2:11: `nope` is not in scope");
+    assert_eq!(
+        err.to_string(),
+        "2:11 [not-in-scope] `nope` is not in scope"
+    );
 }
 
 #[test]

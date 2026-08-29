@@ -175,15 +175,15 @@ command Two(order_id: Int, total: Money(2), text: String) {
     assert!(!output.status.success());
     let text = stdout(&output);
     assert!(
-        text.contains("a.hk:2:41: expected Money(2), found String"),
+        text.contains("a.hk:2:41 [type-mismatch] expected Money(2), found String"),
         "the first declaration: {text}"
     );
     assert!(
-        text.contains("a.hk:6:6: expected Bool, found String"),
+        text.contains("a.hk:6:6 [type-mismatch] expected Bool, found String"),
         "and the next one in the same file: {text}"
     );
     assert!(
-        text.contains("b.hk:2:6: cannot apply `>` to Money(2) and Money(3)"),
+        text.contains("b.hk:2:6 [bad-operands] cannot apply `>` to Money(2) and Money(3)"),
         "and the next file: {text}"
     );
     assert!(text.contains("\n3 errors"), "{text}");
@@ -310,7 +310,7 @@ fn an_error_is_drawn_under_the_source_it_is_about() {
     let text = stdout(&run(&root, &["check"]));
 
     assert!(
-        text.contains("a.hk:2:41: expected Money(2), found String"),
+        text.contains("a.hk:2:41 [type-mismatch] expected Money(2), found String"),
         "the header is unchanged: {text}"
     );
     assert!(
@@ -345,7 +345,10 @@ fn an_error_with_no_extent_draws_nothing() {
     );
     let text = stdout(&run(&root, &["check"]));
 
-    assert!(text.contains(":0:0: unclosed `{`"), "{text}");
+    assert!(
+        text.contains(":0:0 [expected-token] unclosed `{`"),
+        "{text}"
+    );
     assert!(
         !text.contains('^'),
         "there is no line 0 to draw under: {text}"
@@ -369,7 +372,7 @@ fn a_span_over_several_lines_is_drawn_to_the_end_of_the_first() {
     let text = stdout(&run(&root, &["check"]));
 
     assert!(
-        text.contains("a.hk:2:34: expected Int, found String"),
+        text.contains("a.hk:2:34 [type-mismatch] expected Int, found String"),
         "{text}"
     );
     let carets = caret_line(&text);
