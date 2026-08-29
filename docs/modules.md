@@ -65,7 +65,8 @@ order awkward turned out to be the wrong feature rather than one needing a bette
 Each module is lexed on its own, so **line and column stay module-relative**: a diagnostic in the
 third file reports its own line 2, not line 340 of a concatenation.
 
-Errors carry the module they are in and render as `module:line:col: message`.
+Errors carry the module they are in and render as `module:line:col: message`. The position is
+the start of the extent the diagnostic covers; `docs/diagnostics.md` has the extent.
 
 - **Syntax and lex errors** carry it directly (`SyntaxError::file`).
 - **Runtime errors** carry it too (`interp::Error::module`), stamped at the `run` / `project`

@@ -14,21 +14,55 @@ pub struct ExprId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SliceId(pub u32);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Span {
+/// A point in a module. The line and the column are both 1-based, and the column counts
+/// `char`s, which is what the lexer counts (`src/lex.rs`). Not a byte offset: the lexer
+/// holds the source as a `Vec<char>` and never sees byte positions. `docs/diagnostics.md`
+/// has the argument, which is that an editor's position is a line and a character too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct Pos {
     pub line: u32,
     pub col: u32,
 }
 
-impl Span {
+impl Pos {
     pub fn new(line: u32, col: u32) -> Self {
         Self { line, col }
     }
 }
 
-impl fmt::Display for Span {
+impl fmt::Display for Pos {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}", self.line, self.col)
+    }
+}
+
+/// The extent a diagnostic is about. Half-open: `end` is one past the last character, so
+/// a span with nothing in it has `start == end`. That is the shape an editor's range has,
+/// which is the whole reason this is not a point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Span {
+    pub start: Pos,
+    pub end: Pos,
+}
+
+impl Span {
+    pub fn new(start: Pos, end: Pos) -> Self {
+        Self { start, end }
+    }
+
+    /// Nothing between the two ends. What a diagnostic gets where the parser knows a
+    /// position and no extent, which after this change is only the end of the file.
+    pub fn point(at: Pos) -> Self {
+        Self { start: at, end: at }
+    }
+}
+
+/// The start, and only the start. Every rendered position in heklang goes through here:
+/// a `SyntaxError`, a runtime `interp::Error`, and the messages that name a second
+/// declaration. The extent is for a reader that can draw; text says where to look.
+impl fmt::Display for Span {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.start)
     }
 }
 
@@ -581,6 +615,15 @@ impl Exprs {
 
     pub fn span(&self, id: ExprId) -> Span {
         self.spans.get(id.0 as usize).copied().unwrap_or_default()
+    }
+
+    /// Both ends, not only the end: the span a node was pushed with came from the
+    /// builder's cursor, which is set from a token the parser had in hand before it knew
+    /// what it was building. Only the production that finishes knows the whole extent.
+    pub fn respan(&mut self, id: ExprId, span: Span) {
+        if let Some(found) = self.spans.get_mut(id.0 as usize) {
+            *found = span;
+        }
     }
 
     pub fn patch(&mut self, id: ExprId, expr: Expr) {

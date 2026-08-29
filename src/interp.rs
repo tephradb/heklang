@@ -216,7 +216,9 @@ impl error::Error for ErrorKind {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
     pub kind: ErrorKind,
-    pub span: Option<Span>,
+    /// Where it happened. `Span::default()` is the one that means nowhere: an error
+    /// raised outside any expression, which renders without a position at all.
+    pub span: Span,
     /// Stamped at the `run` / `project` boundary, which is the innermost place that
     /// knows which module the running declaration came from.
     pub module: Option<String>,
@@ -226,7 +228,7 @@ impl Error {
     pub fn new(kind: ErrorKind) -> Self {
         Self {
             kind,
-            span: None,
+            span: Span::default(),
             module: None,
         }
     }
@@ -234,7 +236,7 @@ impl Error {
     pub fn at(kind: ErrorKind, span: Span) -> Self {
         Self {
             kind,
-            span: Some(span),
+            span,
             module: None,
         }
     }
@@ -249,9 +251,10 @@ impl Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (&self.module, self.span) {
-            (Some(module), Some(span)) => write!(f, "{module}:{span}: {}", self.kind),
-            (None, Some(span)) => write!(f, "{span}: {}", self.kind),
+        let nowhere = self.span == Span::default();
+        match (&self.module, nowhere) {
+            (Some(module), false) => write!(f, "{module}:{}: {}", self.span, self.kind),
+            (None, false) => write!(f, "{}: {}", self.span, self.kind),
             _ => write!(f, "{}", self.kind),
         }
     }

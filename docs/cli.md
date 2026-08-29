@@ -74,6 +74,9 @@ the command that grows rather than a new one.
 A syntax error prints as `file:line:col: message`, with the file relative to the path the
 run was pointed at, so an editor jumps to it.
 
+The position printed is the start. A diagnostic also carries the extent it is about, which
+`docs/diagnostics.md` is the contract for, and which a reader that can draw a range uses.
+
 ## Every declaration that failed, not only the first
 
 ```

@@ -16,9 +16,9 @@ pub use interp::{
 pub use ir::{
     Absent, Action, Arm, Assign, BinOp, Bind, Builtin, Command, ConstDef, Effect, EntityDef,
     EntityField, EnumDef, EnvBind, EnvField, EventDef, EventPath, Expr, ExprId, Exprs, FieldDef,
-    Filter, Function, Handler, Ident, Index, Iter, Literal, Number, NumberError, Param, Program,
-    Projector, RecordDef, RecordField, Return, Slice, SliceId, Slot, Span, StateVar, Stmt, Type,
-    UnOp, Update,
+    Filter, Function, Handler, Ident, Index, Iter, Literal, Number, NumberError, Param, Pos,
+    Program, Projector, RecordDef, RecordField, Return, Slice, SliceId, Slot, Span, StateVar, Stmt,
+    Type, UnOp, Update,
 };
 pub use lex::SyntaxError;
 pub use parse::{check_files, parse, parse_files};

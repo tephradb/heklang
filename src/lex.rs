@@ -1,7 +1,7 @@
 use std::error;
 use std::fmt;
 
-use crate::ir::Number;
+use crate::ir::{Number, Pos, Span};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Keyword {
@@ -215,29 +215,29 @@ impl fmt::Display for Token {
     }
 }
 
+/// A token and the extent it covers. The extent is free here: `run` captures the start
+/// before the scanner and pushes after it, and the cursor at that moment is already one
+/// past the token's last character.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Spanned {
     pub token: Token,
-    pub line: u32,
-    pub col: u32,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyntaxError {
     pub message: String,
-    pub line: u32,
-    pub col: u32,
+    pub span: Span,
     /// The module the error is in. `None` when the source had no name, which is what
     /// `parse` of a single string gives.
     pub file: Option<String>,
 }
 
 impl SyntaxError {
-    pub fn new(message: impl Into<String>, line: u32, col: u32) -> Self {
+    pub fn new(message: impl Into<String>, span: Span) -> Self {
         Self {
             message: message.into(),
-            line,
-            col,
+            span,
             file: None,
         }
     }
@@ -248,11 +248,13 @@ impl SyntaxError {
     }
 }
 
+/// The start alone, through `Span`'s own `Display`. The extent is for a reader that can
+/// draw it; `docs/cli.md` has what `hek` does with it.
 impl fmt::Display for SyntaxError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.file {
-            Some(file) => write!(f, "{file}:{}:{}: {}", self.line, self.col, self.message),
-            None => write!(f, "{}:{}: {}", self.line, self.col, self.message),
+            Some(file) => write!(f, "{file}:{}: {}", self.span, self.message),
+            None => write!(f, "{}: {}", self.span, self.message),
         }
     }
 }
@@ -305,8 +307,14 @@ impl Lexer {
         Some(next)
     }
 
+    /// Where the cursor is now, which after a scanner has run is one past the last
+    /// character it consumed: the exclusive end of the token being built.
+    fn at(&self) -> Pos {
+        Pos::new(self.line, self.col)
+    }
+
     fn error<T>(&self, message: impl Into<String>) -> Result<T, SyntaxError> {
-        Err(SyntaxError::new(message, self.line, self.col))
+        Err(SyntaxError::new(message, Span::point(self.at())))
     }
 
     fn skip_trivia(&mut self) {
@@ -332,13 +340,11 @@ impl Lexer {
         let mut tokens = Vec::new();
         loop {
             self.skip_trivia();
-            let line = self.line;
-            let col = self.col;
+            let start = self.at();
             let Some(next) = self.peek() else {
                 tokens.push(Spanned {
                     token: Token::End,
-                    line,
-                    col,
+                    span: Span::point(start),
                 });
                 return Ok(tokens);
             };
@@ -353,7 +359,12 @@ impl Lexer {
                 '@' => self.path()?,
                 _ => self.symbol()?,
             };
-            tokens.push(Spanned { token, line, col });
+            // The cursor has not moved past the token yet: trivia is skipped at the top of
+            // the next turn, so this is the token's own end and nothing else's.
+            tokens.push(Spanned {
+                token,
+                span: Span::new(start, self.at()),
+            });
         }
     }
 

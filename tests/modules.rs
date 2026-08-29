@@ -84,7 +84,7 @@ fn a_syntax_error_names_its_module() {
     .expect_err("`nope` is not in scope");
 
     assert_eq!(err.file.as_deref(), Some("commands/broken.hk"));
-    assert_eq!(err.line, 2, "line numbers stay module-relative");
+    assert_eq!(err.span.start.line, 2, "line numbers stay module-relative");
     assert_eq!(
         err.to_string(),
         "commands/broken.hk:2:11: `nope` is not in scope"

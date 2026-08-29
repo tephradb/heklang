@@ -5,7 +5,7 @@ use crate::build::Builder;
 use crate::ir::{
     Absent, Action, Arm, BinOp, Bind, Builtin, Command, ConstDef, Effect, EntityDef, EntityField,
     EnumDef, EnvField, EventDef, EventPath, Expect, Expr, ExprId, Exprs, FieldDef, Filter,
-    Function, Given, Handler, Ident, Index, Iter, Literal, Number, Param, Program, Projector,
+    Function, Given, Handler, Ident, Index, Iter, Literal, Number, Param, Pos, Program, Projector,
     RecordDef, RecordField, ReplySpec, Return, Setup, Slot, Span, Stmt, Test, Type, UnOp, Update,
 };
 use crate::lex::{Keyword, Spanned, Sym, SyntaxError, Token, lex};
@@ -204,8 +204,7 @@ impl Parser {
         }
         tokens.push(Spanned {
             token: Token::End,
-            line: 0,
-            col: 0,
+            span: Span::default(),
         });
 
         Ok(Parser {
@@ -248,8 +247,8 @@ impl Parser {
             .and_then(|(_, name)| name.as_deref())
     }
 
-    fn err(&self, message: impl Into<String>, line: u32, col: u32) -> SyntaxError {
-        let error = SyntaxError::new(message, line, col);
+    fn err(&self, message: impl Into<String>, span: Span) -> SyntaxError {
+        let error = SyntaxError::new(message, span);
         match self.module_at(self.pos) {
             Some(module) => error.in_file(module),
             None => error,
@@ -259,14 +258,14 @@ impl Parser {
     /// A `file:line:col` for a token elsewhere in the stream, for messages that point
     /// at a first declaration from the site of a second.
     fn location(&self, pos: usize) -> String {
-        let (line, col) = self
+        let at = self
             .tokens
             .get(pos)
-            .map(|spanned| (spanned.line, spanned.col))
-            .unwrap_or((0, 0));
+            .map(|spanned| spanned.span.start)
+            .unwrap_or_default();
         match self.module_at(pos) {
-            Some(module) => format!("{module}:{line}:{col}"),
-            None => format!("{line}:{col}"),
+            Some(module) => format!("{module}:{at}"),
+            None => format!("{at}"),
         }
     }
 
@@ -277,16 +276,40 @@ impl Parser {
             .unwrap_or(&Token::End)
     }
 
-    fn here(&self) -> (u32, u32) {
+    /// Where the next token starts.
+    fn here(&self) -> Pos {
         self.tokens
             .get(self.pos)
-            .map(|spanned| (spanned.line, spanned.col))
-            .unwrap_or((0, 0))
+            .map(|spanned| spanned.span.start)
+            .unwrap_or_default()
     }
 
+    /// The next token, whole. What a diagnostic about the token in front of the cursor
+    /// covers, which is most of them.
     fn span_here(&self) -> Span {
-        let (line, col) = self.here();
-        Span::new(line, col)
+        self.tokens
+            .get(self.pos)
+            .map(|spanned| spanned.span)
+            .unwrap_or_default()
+    }
+
+    /// The end of the token just consumed. No bookkeeping: the tokens are a slice and
+    /// the cursor is an index into it, so the one behind is always there to be read.
+    fn prev_end(&self) -> Pos {
+        match self.pos.checked_sub(1) {
+            Some(prev) => self
+                .tokens
+                .get(prev)
+                .map(|s| s.span.end)
+                .unwrap_or_default(),
+            None => self.here(),
+        }
+    }
+
+    /// Everything consumed since `start`. The idiom for a diagnostic about a whole
+    /// production: capture `here()` before it, call this after it.
+    fn span_from(&self, start: Pos) -> Span {
+        Span::new(start, self.prev_end())
     }
 
     fn command_end(&self) -> usize {
@@ -318,18 +341,17 @@ impl Parser {
             if let Token::Word(Keyword::Let) = &spanned.token
                 && let Some(Spanned {
                     token: Token::Ident(found),
-                    line,
-                    col,
+                    span,
                 }) = self.tokens.get(index + 1)
                 && found == name
             {
-                return Some(Span::new(*line, *col));
+                return Some(*span);
             }
         }
         None
     }
 
-    fn not_in_scope(&self, name: &str, line: u32, col: u32) -> SyntaxError {
+    fn not_in_scope(&self, name: &str, span: Span) -> SyntaxError {
         let message = match (self.later_let(name), self.prologue) {
             (Some(span), true) => format!(
                 "`{name}` is defined at {span}, below the declarations; \
@@ -341,14 +363,13 @@ impl Parser {
             }
             (None, _) => format!("`{name}` is not in scope"),
         };
-        self.err(message, line, col)
+        self.err(message, span)
     }
 
     fn bump(&mut self) -> Spanned {
         let spanned = self.tokens.get(self.pos).cloned().unwrap_or(Spanned {
             token: Token::End,
-            line: 0,
-            col: 0,
+            span: Span::default(),
         });
         if self.pos < self.tokens.len() {
             self.pos += 1;
@@ -356,9 +377,9 @@ impl Parser {
         spanned
     }
 
+    /// A diagnostic about the token in front of the cursor, covering that token.
     fn fail<T>(&self, message: impl Into<String>) -> Result<T, SyntaxError> {
-        let (line, col) = self.here();
-        Err(self.err(message, line, col))
+        Err(self.err(message, self.span_here()))
     }
 
     fn at_sym(&self, sym: Sym) -> bool {
@@ -543,11 +564,9 @@ impl Parser {
             let recovered = self.recovering(at, |parser| {
                 let test = parser.test_decl(&program)?;
                 if program.tests.iter().any(|other| other.name == test.name) {
-                    return Err(parser.err(
-                        format!("test {:?} is declared twice", test.name),
-                        test.span.line,
-                        test.span.col,
-                    ));
+                    return Err(
+                        parser.err(format!("test {:?} is declared twice", test.name), test.span)
+                    );
                 }
                 Ok(test)
             })?;
@@ -619,10 +638,10 @@ impl Parser {
             Token::Word(Keyword::Record) => {
                 let module = self.module_at(self.pos).map(str::to_string);
                 self.bump();
-                let (line, col) = self.here();
+                let at = self.span_here();
                 let name = self.expect_ident()?;
                 if self.records.iter().any(|other| other.name == name) {
-                    return Err(self.err(format!("record `{name}` is declared twice"), line, col));
+                    return Err(self.err(format!("record `{name}` is declared twice"), at));
                 }
                 self.records.push(RecordDef {
                     name,
@@ -744,10 +763,10 @@ impl Parser {
     /// consults the event table. That is what keeps it a pass-1 job.
     fn command_signature(&mut self) -> Result<(), SyntaxError> {
         self.expect_word(Keyword::Command)?;
-        let (line, col) = self.here();
+        let at = self.span_here();
         let name = self.expect_ident()?;
         if self.commands.iter().any(|other| other.name == name) {
-            return Err(self.err(format!("command `{name}` is declared twice"), line, col));
+            return Err(self.err(format!("command `{name}` is declared twice"), at));
         }
 
         let params = self.param_list(false)?;
@@ -778,10 +797,10 @@ impl Parser {
 
     fn fn_signature(&mut self) -> Result<(), SyntaxError> {
         self.expect_word(Keyword::Fn)?;
-        let (line, col) = self.here();
+        let at = self.span_here();
         let name = self.expect_ident()?;
         if self.functions.iter().any(|other| other.name == name) {
-            return Err(self.err(format!("fn `{name}` is declared twice"), line, col));
+            return Err(self.err(format!("fn `{name}` is declared twice"), at));
         }
         let params = self.param_list(true)?;
         self.expect_sym(Sym::To)?;
@@ -947,13 +966,9 @@ impl Parser {
         let mut args = Vec::new();
         while !self.at_sym(Sym::RParen) {
             let expected = params.get(args.len()).map(|(_, ty)| ty.clone());
-            let (line, col) = self.here();
+            let at = self.span_here();
             if expected.is_none() {
-                return Err(self.err(
-                    format!("`{name}` takes {} arguments", params.len()),
-                    line,
-                    col,
-                ));
+                return Err(self.err(format!("`{name}` takes {} arguments", params.len()), at));
             }
             args.push(self.expr(lower, expected)?);
             if !self.eat_sym(Sym::Comma) {
@@ -964,7 +979,7 @@ impl Parser {
         self.no_record_literal = outer;
         if args.len() != params.len() {
             let (name_of, _) = &params[args.len()];
-            return Err(self.err(format!("`{name}` needs `{name_of}`"), span.line, span.col));
+            return Err(self.err(format!("`{name}` needs `{name_of}`"), span));
         }
         Ok(args)
     }
@@ -981,7 +996,7 @@ impl Parser {
     fn length_annotations(&mut self, ty: &Type, field: &str) -> Result<Option<usize>, SyntaxError> {
         let mut max_len = None;
         while let Token::Path(segments) = self.peek().clone() {
-            let (line, col) = self.here();
+            let at = self.span_here();
             self.bump();
             let [annotation] = segments.as_slice() else {
                 return self.fail("an annotation name cannot contain `.`");
@@ -993,12 +1008,11 @@ impl Parser {
                         format!(
                             "a record field cannot be `@subject`, so `{field}` cannot carry personal data; a subject-bound value is recovered from the schema path, and a record reached through a container has no path to recover it from"
                         ),
-                        line,
-                        col,
+                        at,
                     ));
                 }
                 other => {
-                    return Err(self.err(format!("unknown annotation `@{other}`"), line, col));
+                    return Err(self.err(format!("unknown annotation `@{other}`"), at));
                 }
             }
         }
@@ -1008,12 +1022,11 @@ impl Parser {
     /// `@max(n)`, and the check that there is something to bound. A length on anything
     /// but a string used to parse and then quietly do nothing.
     fn max_annotation(&mut self, ty: &Type, field: &str) -> Result<usize, SyntaxError> {
-        let (line, col) = self.here();
+        let at = self.span_here();
         if !matches!(inner_of(ty), Type::String) {
             return Err(self.err(
                 format!("`@max` bounds a length, so it applies to a String; `{field}` is a {ty}"),
-                line,
-                col,
+                at,
             ));
         }
         self.expect_sym(Sym::LParen)?;
@@ -1035,14 +1048,10 @@ impl Parser {
 
         let mut fields: Vec<RecordField> = Vec::new();
         while !self.at_sym(Sym::RBrace) {
-            let (line, col) = self.here();
+            let at = self.span_here();
             let field = self.expect_ident()?;
             if fields.iter().any(|other| other.name == field) {
-                return Err(self.err(
-                    format!("record `{name}` declares `{field}` twice"),
-                    line,
-                    col,
-                ));
+                return Err(self.err(format!("record `{name}` declares `{field}` twice"), at));
             }
             self.expect_sym(Sym::Colon)?;
             let ty = self.type_ref()?;
@@ -1328,18 +1337,16 @@ impl Parser {
                 marked = true;
             }
 
-            let (line, col) = self.here();
+            let at = self.span_here();
             let variant = self.expect_ident()?;
             if variants.contains(&variant) {
-                return Err(self.err(format!("`{name}` declares `{variant}` twice"), line, col));
+                return Err(self.err(format!("`{name}` declares `{variant}` twice"), at));
             }
             if marked {
                 if default.is_some() {
-                    return Err(self.err(
-                        format!("`{name}` has more than one `@default` variant"),
-                        line,
-                        col,
-                    ));
+                    return Err(
+                        self.err(format!("`{name}` has more than one `@default` variant"), at)
+                    );
                 }
                 default = Some(variants.len());
             }
@@ -1378,14 +1385,10 @@ impl Parser {
                 continue;
             }
 
-            let (line, col) = self.here();
+            let at = self.span_here();
             let field_name = self.expect_ident()?;
             if fields.iter().any(|field| field.name == field_name) {
-                return Err(self.err(
-                    format!("entity `{name}` declares `{field_name}` twice"),
-                    line,
-                    col,
-                ));
+                return Err(self.err(format!("entity `{name}` declares `{field_name}` twice"), at));
             }
             self.expect_sym(Sym::Colon)?;
             let ty = self.type_ref()?;
@@ -1424,17 +1427,12 @@ impl Parser {
 
             if is_key {
                 if key.is_some() {
-                    return Err(self.err(
-                        format!("entity `{name}` has more than one `@key`"),
-                        line,
-                        col,
-                    ));
+                    return Err(self.err(format!("entity `{name}` has more than one `@key`"), at));
                 }
                 if !value::can_key(&ty) {
                     return Err(self.err(
                         format!("`{field_name}` is a {ty}, which cannot be an entity key"),
-                        line,
-                        col,
+                        at,
                     ));
                 }
                 key = Some(fields.len());
@@ -1499,7 +1497,7 @@ impl Parser {
     fn default_literal(&mut self, what: &str, ty: &Type) -> Result<Literal, SyntaxError> {
         let negated = self.eat_sym(Sym::Minus);
         let spanned = self.bump();
-        let (line, col) = (spanned.line, spanned.col);
+        let at = spanned.span;
         let bad = |found: &str| format!("a {ty} {what} cannot be {found}");
         // Every shape below resolves against the inner type, so a bare literal in an
         // optional position reads exactly as it does anywhere else. The wrap happens
@@ -1515,15 +1513,15 @@ impl Parser {
                 };
                 Number::new(digits, number.scale)
                     .resolve(target)
-                    .map_err(|err| self.err(err.to_string(), line, col))?
+                    .map_err(|err| self.err(err.to_string(), at))?
             }
-            _ if negated => return Err(self.err(bad("a negated value"), line, col)),
+            _ if negated => return Err(self.err(bad("a negated value"), at)),
             // The only way to write a `Uuid` down. There is no Uuid literal token,
             // because a bare hex-and-dashes word is not one, so the target type is
             // what decides that this string is one.
             Token::Text(text) if matches!(target, Type::Uuid) => {
                 if uuid::Uuid::parse_str(&text).is_err() {
-                    return Err(self.err(format!("`{text}` is not a Uuid"), line, col));
+                    return Err(self.err(format!("`{text}` is not a Uuid"), at));
                 }
                 Literal::Uuid(text)
             }
@@ -1533,14 +1531,14 @@ impl Parser {
             // the advice `check_zeros` gives about one could not be followed.
             Token::Text(text) if matches!(target, Type::Timestamp) => {
                 let Some(micros) = value::timestamp(&text) else {
-                    return Err(self.err(not_a_timestamp(&text), line, col));
+                    return Err(self.err(not_a_timestamp(&text), at));
                 };
                 Literal::Timestamp(micros)
             }
             Token::Text(text) => Literal::Str(text),
             Token::Sym(Sym::LBracket) => {
                 let Type::List(inner) = target else {
-                    return Err(self.err(bad("a list"), line, col));
+                    return Err(self.err(bad("a list"), at));
                 };
                 let mut items = Vec::new();
                 while !self.at_sym(Sym::RBracket) {
@@ -1557,23 +1555,23 @@ impl Parser {
             }
             Token::Ident(name) if name == "Json" && self.at_sym(Sym::Dot) => {
                 if !matches!(target, Type::Json) {
-                    return Err(self.err(bad("a Json value"), line, col));
+                    return Err(self.err(bad("a Json value"), at));
                 }
                 self.expect_sym(Sym::Dot)?;
                 let member = self.expect_ident()?;
                 if member != "empty" {
-                    return Err(self.err(bad(&format!("`Json.{member}`")), line, col));
+                    return Err(self.err(bad(&format!("`Json.{member}`")), at));
                 }
                 Literal::EmptyJson
             }
             Token::Ident(name) if name == "Map" && self.at_sym(Sym::Dot) => {
                 let Type::Map(key, value) = target else {
-                    return Err(self.err(bad("a map"), line, col));
+                    return Err(self.err(bad("a map"), at));
                 };
                 self.expect_sym(Sym::Dot)?;
                 let member = self.expect_ident()?;
                 if member != "empty" {
-                    return Err(self.err(bad(&format!("`Map.{member}`")), line, col));
+                    return Err(self.err(bad(&format!("`Map.{member}`")), at));
                 }
                 Literal::EmptyMap(key.as_ref().clone(), value.as_ref().clone())
             }
@@ -1582,14 +1580,10 @@ impl Parser {
                 self.expect_sym(Sym::LBrace)?;
                 let mut fields: Vec<(Ident, Literal)> = Vec::new();
                 while !self.at_sym(Sym::RBrace) {
-                    let (line, col) = self.here();
+                    let at = self.span_here();
                     let field = self.expect_ident()?;
                     let Some(declared) = def.field(&field) else {
-                        return Err(self.err(
-                            format!("record `{name}` has no field `{field}`"),
-                            line,
-                            col,
-                        ));
+                        return Err(self.err(format!("record `{name}` has no field `{field}`"), at));
                     };
                     let declared = declared.ty.clone();
                     self.expect_sym(Sym::Colon)?;
@@ -1610,7 +1604,7 @@ impl Parser {
             // absent from, and the wrap at the end has nothing to wrap.
             Token::Word(Keyword::None) => {
                 let Type::Opt(inner) = ty else {
-                    return Err(self.err(bad("`none`"), line, col));
+                    return Err(self.err(bad("`none`"), at));
                 };
                 Literal::None(inner.as_ref().clone())
             }
@@ -1625,37 +1619,32 @@ impl Parser {
                 if !fills(&declared, ty) {
                     return Err(self.err(
                         format!("a {ty} {what} cannot be `{name}`, which is a {declared}"),
-                        line,
-                        col,
+                        at,
                     ));
                 }
                 self.resolve_const(&name)?
             }
             Token::Ident(variant) => {
                 let Type::Enum(enum_name) = target else {
-                    return Err(self.err(bad(&format!("`{variant}`")), line, col));
+                    return Err(self.err(bad(&format!("`{variant}`")), at));
                 };
                 let Some(def) = self.enum_def(enum_name) else {
-                    return Err(self.err(bad(&format!("`{variant}`")), line, col));
+                    return Err(self.err(bad(&format!("`{variant}`")), at));
                 };
                 if !def.has(&variant) {
-                    return Err(self.err(
-                        format!("`{enum_name}` has no variant `{variant}`"),
-                        line,
-                        col,
-                    ));
+                    return Err(self.err(format!("`{enum_name}` has no variant `{variant}`"), at));
                 }
                 Literal::Enum {
                     ty: enum_name.clone(),
                     variant,
                 }
             }
-            other => return Err(self.err(bad(&other.to_string()), line, col)),
+            other => return Err(self.err(bad(&other.to_string()), at)),
         };
 
         let found = value::literal(&lit).ty();
         if !fills(&found, ty) {
-            return Err(self.err(format!("a {ty} {what} cannot be a {found}"), line, col));
+            return Err(self.err(format!("a {ty} {what} cannot be a {found}"), at));
         }
         Ok(wrap(lit, &found, ty))
     }
@@ -1791,12 +1780,11 @@ impl Parser {
         if !self.eat_sym(Sym::Dot) {
             return Err(self.err(
                 format!("`{name}` is the event envelope; read a field from it, like `{name}.at`"),
-                span.line,
-                span.col,
+                span,
             ));
         }
 
-        let (line, col) = self.here();
+        let at = self.span_here();
         let field = self.expect_ident()?;
         lower.b.at(span);
 
@@ -1813,8 +1801,7 @@ impl Parser {
                     "`{field}` is not shared by {}, so an arm listing them cannot name it; a binding names only what every listed type has, with the same type and the same `@subject`",
                     listed.join(", ")
                 ),
-                line,
-                col,
+                at,
             ));
         }
         let Some(declared) = def.field(&field) else {
@@ -1823,8 +1810,7 @@ impl Parser {
                     "{} has no field `{field}`, and the envelope carries only `at`, `id` and `position`",
                     def.path
                 ),
-                line,
-                col,
+                at,
             ));
         };
         let slot = lower.b.payload(&field, Some(declared.ty.clone()));
@@ -1941,15 +1927,14 @@ impl Parser {
             }
             "Map" => {
                 self.expect_sym(Sym::LParen)?;
-                let (line, col) = self.here();
+                let at = self.span_here();
                 let key = self.type_ref()?;
                 // The same set an entity key is restricted to, for the same reason:
                 // a key that cannot order cannot give a defined iteration order.
                 if !value::can_key(&key) {
                     return Err(self.err(
                         format!("a {key} cannot be a map key, for the reason it cannot be an entity key: it does not order"),
-                        line,
-                        col,
+                        at,
                     ));
                 }
                 self.expect_sym(Sym::Comma)?;
@@ -2098,23 +2083,18 @@ impl Parser {
                             format!(
                                 "`{name}` folds under two subjects, `{have}` from {first} and `{field}` from {path}; one variable holds one subject, because `reveal` names the key by it"
                             ),
-                            arm.line,
-                            arm.col,
+                            arm,
                         ));
                     }
                     if let Some((first, at)) = &plain {
-                        return Err(self.err(
-                            self.mixed_fold(&name, &field, first),
-                            at.line,
-                            at.col,
-                        ));
+                        return Err(self.err(self.mixed_fold(&name, &field, first), *at));
                     }
                     bound.get_or_insert((field, path.clone()));
                 }
                 None => {
                     if let Some((have, _)) = &bound {
                         let message = self.mixed_fold(&name, have, &path);
-                        return Err(self.err(message, arm.line, arm.col));
+                        return Err(self.err(message, arm));
                     }
                     plain.get_or_insert((path.clone(), arm));
                 }
@@ -2161,7 +2141,7 @@ impl Parser {
 
         let mut filters = Vec::new();
         while !self.at_sym(Sym::RParen) {
-            let (line, col) = self.here();
+            let at = self.span_here();
             let field = self.expect_ident()?;
             let Some(declared) = def.field(&field) else {
                 return self.fail(format!("{path} has no field `{field}`"));
@@ -2175,9 +2155,9 @@ impl Parser {
             } else {
                 if lower.b.lookup(&field).is_none() {
                     self.folding = false;
-                    return Err(self.not_in_scope(&field, line, col));
+                    return Err(self.not_in_scope(&field, at));
                 }
-                lower.b.at(Span::new(line, col));
+                lower.b.at(at);
                 lower.b.load(&field)
             };
             self.folding = false;
@@ -2262,8 +2242,7 @@ impl Parser {
         entity: &str,
         field: &str,
         value: ExprId,
-        line: u32,
-        col: u32,
+        at: Span,
     ) -> Result<(), SyntaxError> {
         let Some(subject) = self
             .type_of(lower, value)
@@ -2291,7 +2270,7 @@ impl Parser {
             let message = format!(
                 "`{entity}.{field}` already holds content sealed under `{seen}`, so it cannot also hold content sealed under `{subject}`; one column holds one subject, because `erase` files a key under exactly one"
             );
-            return Err(self.err(message, line, col));
+            return Err(self.err(message, at));
         }
         if target.subject.is_none() {
             target.ty = seal(target.ty.clone(), subject.clone());
@@ -2300,11 +2279,11 @@ impl Parser {
         Ok(())
     }
     fn entity_ref(&mut self) -> Result<(Ident, EntityDef), SyntaxError> {
-        let (line, col) = self.here();
+        let at = self.span_here();
         let name = self.expect_ident()?;
         match self.entity_def(&name) {
             Some(def) => Ok((name, def.clone())),
-            None => Err(self.err(format!("entity `{name}` is not declared"), line, col)),
+            None => Err(self.err(format!("entity `{name}` is not declared"), at)),
         }
     }
 
@@ -2415,13 +2394,13 @@ impl Parser {
     ) -> Result<Vec<(Ident, ExprId)>, SyntaxError> {
         let mut fields: Vec<(Ident, ExprId)> = Vec::new();
         while !self.at_sym(Sym::RBrace) {
-            let (line, col) = self.here();
+            let at = self.span_here();
             let name = self.expect_ident()?;
             let Some(declared) = def.field(&name) else {
-                return Err(self.err(format!("{} has no field `{name}`", def.path), line, col));
+                return Err(self.err(format!("{} has no field `{name}`", def.path), at));
             };
             if fields.iter().any(|(seen, _)| seen == &name) {
-                return Err(self.err(format!("`{name}` is given twice"), line, col));
+                return Err(self.err(format!("`{name}` is given twice"), at));
             }
             self.expect_sym(Sym::Colon)?;
             let value = self.expr(lower, Some(declared.ty.clone()))?;
@@ -2455,13 +2434,13 @@ impl Parser {
                 span,
             });
         }
-        let (line, col) = self.here();
+        let at = self.span_here();
         let number = self.expect_number()?;
         let status = u16::try_from(number.digits)
             .ok()
             .filter(|status| number.scale == 0 && (100..=599).contains(status));
         let Some(status) = status else {
-            return Err(self.err("a status is a whole number from 100 to 599", line, col));
+            return Err(self.err("a status is a whole number from 100 to 599", at));
         };
         let reply = if self.at_sym(Sym::LBrace) {
             ReplySpec::Body(status, self.json_body(lower)?)
@@ -2494,10 +2473,10 @@ impl Parser {
     fn action_decl(&mut self, lower: &mut Lower, program: &Program) -> Result<Action, SyntaxError> {
         let span = self.span_here();
         if self.eat_soft("run") {
-            let (line, col) = self.here();
+            let at = self.span_here();
             let command = self.expect_ident()?;
             let Some(def) = program.command(&command) else {
-                return Err(self.err(format!("command `{command}` is not declared"), line, col));
+                return Err(self.err(format!("command `{command}` is not declared"), at));
             };
             let params = def.params.clone();
             let args = self.named_args(lower, &params, &command)?;
@@ -2508,22 +2487,18 @@ impl Parser {
             });
         }
         if self.eat_soft("project") {
-            let (line, col) = self.here();
+            let at = self.span_here();
             let projector = self.expect_ident()?;
             if program.projector(&projector).is_none() {
-                return Err(self.err(
-                    format!("projector `{projector}` is not declared"),
-                    line,
-                    col,
-                ));
+                return Err(self.err(format!("projector `{projector}` is not declared"), at));
             }
             return Ok(Action::Project { projector, span });
         }
         if self.eat_soft("deliver") {
-            let (line, col) = self.here();
+            let at = self.span_here();
             let effect = self.expect_ident()?;
             if program.effect(&effect).is_none() {
-                return Err(self.err(format!("effect `{effect}` is not declared"), line, col));
+                return Err(self.err(format!("effect `{effect}` is not declared"), at));
             }
             return Ok(Action::Deliver { effect, span });
         }
@@ -2549,13 +2524,13 @@ impl Parser {
         self.expect_sym(Sym::LBrace)?;
         let mut args: Vec<(Ident, ExprId)> = Vec::new();
         while !self.at_sym(Sym::RBrace) {
-            let (line, col) = self.here();
+            let at = self.span_here();
             let name = self.expect_ident()?;
             let Some(param) = params.iter().find(|param| param.name == name) else {
-                return Err(self.err(format!("`{what}` has no parameter `{name}`"), line, col));
+                return Err(self.err(format!("`{what}` has no parameter `{name}`"), at));
             };
             if args.iter().any(|(seen, _)| seen == &name) {
-                return Err(self.err(format!("`{name}` is given twice"), line, col));
+                return Err(self.err(format!("`{name}` is given twice"), at));
             }
             self.expect_sym(Sym::Colon)?;
             let value = self.expr(lower, Some(param.ty.clone()))?;
@@ -2690,13 +2665,12 @@ impl Parser {
         span: Span,
     ) -> Result<Expect, SyntaxError> {
         let absent = self.eat_soft("no");
-        let (line, col) = self.here();
+        let at = self.span_here();
         let entity = self.expect_ident()?;
         let Some(def) = projector.entity(&entity).cloned() else {
             return Err(self.err(
                 format!("projector `{}` has no entity `{entity}`", projector.name),
-                line,
-                col,
+                at,
             ));
         };
         self.expect_sym(Sym::LBracket)?;
@@ -2709,17 +2683,13 @@ impl Parser {
         self.expect_sym(Sym::LBrace)?;
         let mut fields: Vec<(Ident, ExprId)> = Vec::new();
         while !self.at_sym(Sym::RBrace) {
-            let (line, col) = self.here();
+            let at = self.span_here();
             let name = self.expect_ident()?;
             let Some(declared) = def.field(&name) else {
-                return Err(self.err(
-                    format!("entity `{entity}` has no field `{name}`"),
-                    line,
-                    col,
-                ));
+                return Err(self.err(format!("entity `{entity}` has no field `{name}`"), at));
             };
             if fields.iter().any(|(seen, _)| seen == &name) {
-                return Err(self.err(format!("`{name}` is given twice"), line, col));
+                return Err(self.err(format!("`{name}` is given twice"), at));
             }
             self.expect_sym(Sym::Colon)?;
             let value = self.expr(lower, Some(declared.ty.clone()))?;
@@ -2747,13 +2717,12 @@ impl Parser {
         if self.at_soft("http") {
             self.bump();
             self.expect_sym(Sym::Dot)?;
-            let (line, col) = self.here();
+            let at = self.span_here();
             let name = self.expect_verb()?;
             let Some(verb) = Builtin::verb(&name) else {
                 return Err(self.err(
                     format!("`http` has no verb `{name}`; it has get, post, put, patch and delete"),
-                    line,
-                    col,
+                    at,
                 ));
             };
             self.expect_sym(Sym::LParen)?;
@@ -2773,10 +2742,10 @@ impl Parser {
         }
         if self.at_word(Keyword::Invoke) {
             self.bump();
-            let (line, col) = self.here();
+            let at = self.span_here();
             let command = self.expect_ident()?;
             let Some(def) = program.command(&command) else {
-                return Err(self.err(format!("command `{command}` is not declared"), line, col));
+                return Err(self.err(format!("command `{command}` is not declared"), at));
             };
             let params = def.params.clone();
             let args = self.named_args(lower, &params, &command)?;
@@ -2840,14 +2809,10 @@ impl Parser {
     ) -> Result<Vec<(Ident, ExprId)>, SyntaxError> {
         let mut fields = Vec::new();
         while !self.at_sym(Sym::RBrace) {
-            let (line, col) = self.here();
+            let at = self.span_here();
             let name = self.expect_ident()?;
             let Some(declared) = def.field(&name) else {
-                return Err(self.err(
-                    format!("entity `{}` has no field `{name}`", def.name),
-                    line,
-                    col,
-                ));
+                return Err(self.err(format!("entity `{}` has no field `{name}`", def.name), at));
             };
             let expected = declared.ty.clone();
             let outer = mem::replace(&mut self.propagating, true);
@@ -2855,13 +2820,13 @@ impl Parser {
                 self.expr(lower, Some(expected))?
             } else {
                 if lower.b.lookup(&name).is_none() {
-                    return Err(self.not_in_scope(&name, line, col));
+                    return Err(self.not_in_scope(&name, at));
                 }
-                lower.b.at(Span::new(line, col));
+                lower.b.at(at);
                 lower.b.load(&name)
             };
             self.propagating = outer;
-            self.propagate_subject(lower, &def.name, &name, value, line, col)?;
+            self.propagate_subject(lower, &def.name, &name, value, at)?;
             fields.push((name, value));
             if !self.eat_sym(Sym::Comma) {
                 break;
@@ -2941,12 +2906,11 @@ impl Parser {
                     });
                 }
                 if let Some(want) = self.returns.clone() {
-                    let (line, col) = self.here();
+                    let at = self.span_here();
                     if self.ends_return() {
                         return Err(self.err(
                             format!("this `fn` returns {want}, so `return` needs a value"),
-                            line,
-                            col,
+                            at,
                         ));
                     }
                     let value = self.expr(lower, Some(want))?;
@@ -2956,12 +2920,11 @@ impl Parser {
                 // declares no result. Without it a `return 5` here would silently be a
                 // bare `return` and the `5` would fail as the next statement.
                 if self.kind == Kind::EffectFn {
-                    let (line, col) = self.here();
+                    let at = self.span_here();
                     if !self.ends_return() {
                         return Err(self.err(
                             "this `fn` returns nothing, so `return` takes no value".to_string(),
-                            line,
-                            col,
+                            at,
                         ));
                     }
                     return Ok(Stmt::Return(Return::Ok));
@@ -3012,7 +2975,7 @@ impl Parser {
 
                 let mut fields = Vec::new();
                 while !self.at_sym(Sym::RBrace) {
-                    let (line, col) = self.here();
+                    let at = self.span_here();
                     let name = self.expect_ident()?;
                     let Some(declared) = def.field(&name) else {
                         return self.fail(format!("{path} has no field `{name}`"));
@@ -3022,9 +2985,9 @@ impl Parser {
                         self.expr(lower, Some(expected))?
                     } else {
                         if lower.b.lookup(&name).is_none() {
-                            return Err(self.not_in_scope(&name, line, col));
+                            return Err(self.not_in_scope(&name, at));
                         }
-                        lower.b.at(Span::new(line, col));
+                        lower.b.at(at);
                         lower.b.load(&name)
                     };
                     fields.push((name, value));
@@ -3158,15 +3121,15 @@ impl Parser {
     }
 
     fn expr(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
-        let (line, col) = self.here();
+        let at = self.span_here();
         let value = self.or_expr(lower, expect.clone())?;
         // Rule 12, and the type, at the one place every declared position funnels
         // through. The seal check runs first because its message is the specific one:
         // sealed content in a plain position is a `reveal` that is missing, not a type
         // that is wrong.
         if let Some(want) = &expect {
-            self.check_seal(lower, value, want, line, col)?;
-            self.check_type(lower, value, want, line, col)?;
+            self.check_seal(lower, value, want, at)?;
+            self.check_type(lower, value, want, at)?;
         }
         Ok(value)
     }
@@ -3209,13 +3172,13 @@ impl Parser {
         };
 
         let hint = self.hint_from(lower, lhs);
-        let (line, col) = self.here();
+        let at = self.span_here();
         let rhs = self.add_expr(lower, hint)?;
         // Rule 12: an equality on sealed content leaks whether two ciphertexts hold the
         // same thing, and under a real cipher it would not even answer. `reveal` both
         // sides, or compare something plaintext.
-        self.no_seal(lower, lhs, "be compared", span.line, span.col)?;
-        self.no_seal(lower, rhs, "be compared", line, col)?;
+        self.no_seal(lower, lhs, "be compared", span)?;
+        self.no_seal(lower, rhs, "be compared", at)?;
         self.settle(lower, lhs, rhs);
         self.check_compare(lower, op, lhs, rhs, span)?;
         lower.b.at(span);
@@ -3266,15 +3229,15 @@ impl Parser {
         // Rule 12: arithmetic reads its operands, and a sum of sealed content is
         // plaintext derived from it. The seal message is the useful one here, so it
         // gets to run first.
-        self.no_seal(lower, lhs, "be used in arithmetic", span.line, span.col)?;
-        self.no_seal(lower, rhs, "be used in arithmetic", span.line, span.col)?;
+        self.no_seal(lower, lhs, "be used in arithmetic", span)?;
+        self.no_seal(lower, rhs, "be used in arithmetic", span)?;
         let (Some(left), Some(right)) = (self.type_of(lower, lhs), self.type_of(lower, rhs)) else {
             return Ok(());
         };
         if types::arithmetic(op, &left, &right).is_some() {
             return Ok(());
         }
-        Err(self.err(bad_operands(op, &left, &right), span.line, span.col))
+        Err(self.err(bad_operands(op, &left, &right), span))
     }
 
     /// The same rule for a comparison, which the runtime holds to the same table: two
@@ -3293,7 +3256,7 @@ impl Parser {
         if types::comparable(op, &left, &right) {
             return Ok(());
         }
-        Err(self.err(bad_operands(op, &left, &right), span.line, span.col))
+        Err(self.err(bad_operands(op, &left, &right), span))
     }
 
     fn unary_expr(
@@ -3322,7 +3285,7 @@ impl Parser {
         let mut value = self.primary(lower, expect)?;
         while self.eat_sym(Sym::Dot) {
             let span = self.span_here();
-            let (line, col) = self.here();
+            let at = self.span_here();
             let name = self.expect_ident()?;
 
             if self.eat_sym(Sym::LParen) {
@@ -3345,8 +3308,7 @@ impl Parser {
                         format!(
                             "{why}; `reveal` it first. `.is_some()` and `.is_none()` are the exception, because presence is not content"
                         ),
-                        line,
-                        col,
+                        at,
                     ));
                 }
                 // Narrowing changes what the optional methods mean, so reading one off
@@ -3360,8 +3322,7 @@ impl Parser {
                         format!(
                             "`{name}` reads an optional, and the branch above already proved this one present, so it is a {ty} here; use it directly"
                         ),
-                        line,
-                        col,
+                        at,
                     ));
                 }
                 // The same table that types the result knows whether there is one to
@@ -3371,7 +3332,7 @@ impl Parser {
                     Some(ty) => match method_sig(ty, &name) {
                         Some(sig) => Some(sig),
                         None => {
-                            return Err(self.err(no_method(ty, &name), line, col));
+                            return Err(self.err(no_method(ty, &name), at));
                         }
                     },
                     None => None,
@@ -3401,8 +3362,7 @@ impl Parser {
                             sig.params.len(),
                             args.len()
                         ),
-                        line,
-                        col,
+                        at,
                     ));
                 }
                 lower.b.at(span);
@@ -3418,8 +3378,7 @@ impl Parser {
                 Some(Type::Response) => {
                     return Err(self.err(
                         format!("a Response carries `status` and `body`, not `{name}`"),
-                        line,
-                        col,
+                        at,
                     ));
                 }
                 Some(Type::Record(record))
@@ -3427,17 +3386,12 @@ impl Parser {
                         .record_def(&record)
                         .is_some_and(|def| def.field(&name).is_some()) => {}
                 Some(Type::Record(record)) => {
-                    return Err(self.err(
-                        format!("record `{record}` has no field `{name}`"),
-                        line,
-                        col,
-                    ));
+                    return Err(self.err(format!("record `{record}` has no field `{name}`"), at));
                 }
                 Some(ty) => {
                     return Err(self.err(
                         format!("no field `{name}` on {ty}; did you mean `{name}()`?"),
-                        line,
-                        col,
+                        at,
                     ));
                 }
                 None => {}
@@ -3453,7 +3407,7 @@ impl Parser {
 
     fn primary(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
         let spanned = self.bump();
-        let span = Span::new(spanned.line, spanned.col);
+        let span = spanned.span;
         lower.b.at(span);
         match spanned.token {
             Token::Number(number) => self.number(lower, number, expect, &spanned),
@@ -3462,14 +3416,14 @@ impl Parser {
             // already followed, which is where it used to stop.
             Token::Text(text) if matches!(expect.as_ref().map(inner_of), Some(Type::Uuid)) => {
                 if uuid::Uuid::parse_str(&text).is_err() {
-                    return Err(self.err(format!("`{text}` is not a Uuid"), span.line, span.col));
+                    return Err(self.err(format!("`{text}` is not a Uuid"), span));
                 }
                 Ok(lower.b.lit(Literal::Uuid(text)))
             }
             // The same rule for a `Timestamp`, in the expression half of it.
             Token::Text(text) if matches!(expect.as_ref().map(inner_of), Some(Type::Timestamp)) => {
                 let Some(micros) = value::timestamp(&text) else {
-                    return Err(self.err(not_a_timestamp(&text), span.line, span.col));
+                    return Err(self.err(not_a_timestamp(&text), span));
                 };
                 Ok(lower.b.lit(Literal::Timestamp(micros)))
             }
@@ -3497,8 +3451,7 @@ impl Parser {
                         format!(
                             "these branches give a {left} and a {right}, so this `if` has no one type; both arms are the value"
                         ),
-                        span.line,
-                        span.col,
+                        span,
                     ));
                 }
                 lower.b.at(span);
@@ -3515,13 +3468,11 @@ impl Parser {
                 Some(Type::Opt(inner)) => Ok(lower.b.none(inner.as_ref().clone())),
                 Some(found) => Err(self.err(
                     format!("`none` needs an optional target, but this position is {found}"),
-                    spanned.line,
-                    spanned.col,
+                    spanned.span,
                 )),
                 None => Err(self.err(
                     "`none` needs an optional target to know what it is none of",
-                    spanned.line,
-                    spanned.col,
+                    spanned.span,
                 )),
             },
             Token::Word(Keyword::Invoke) => self.invoke_expr(lower, span),
@@ -3529,7 +3480,7 @@ impl Parser {
             Token::Sym(Sym::LBracket) => self.bracketed(lower, expect, span),
             Token::TextOpen(head) => self.interpolation(lower, head, span),
             Token::Sym(Sym::Dot) => {
-                let (line, col) = self.here();
+                let at = self.span_here();
                 let field = self.expect_ident()?;
 
                 let ty = match self.stored.as_ref() {
@@ -3538,8 +3489,7 @@ impl Parser {
                             format!(
                                 "`.{field}` reads the stored value, which only a `patch` or `update` value can do"
                             ),
-                            span.line,
-                            span.col,
+                            span,
                         ));
                     }
                     Some(stored) => match stored.entity.field(&field) {
@@ -3547,8 +3497,7 @@ impl Parser {
                         None => {
                             return Err(self.err(
                                 format!("entity `{}` has no field `{field}`", stored.entity.name),
-                                line,
-                                col,
+                                at,
                             ));
                         }
                     },
@@ -3585,8 +3534,7 @@ impl Parser {
                             format!(
                                 "`{name}` returns nothing, so a call to it is a statement rather than a value"
                             ),
-                            span.line,
-                            span.col,
+                            span,
                         ));
                     }
                     return self.call_fn(lower, name, span);
@@ -3607,8 +3555,7 @@ impl Parser {
                     if !def.has(&name) {
                         return Err(self.err(
                             format!("`{enum_name}` has no variant `{name}`"),
-                            spanned.line,
-                            spanned.col,
+                            spanned.span,
                         ));
                     }
                     let ty = enum_name.clone();
@@ -3627,7 +3574,7 @@ impl Parser {
                             .clone();
                         Ok(lower.b.lit(Literal::Enum { ty, variant: name }))
                     }
-                    0 => Err(self.not_in_scope(&name, spanned.line, spanned.col)),
+                    0 => Err(self.not_in_scope(&name, spanned.span)),
                     _ => {
                         let candidates: Vec<&str> = self
                             .visible_enums()
@@ -3639,18 +3586,13 @@ impl Parser {
                                 "`{name}` is a variant of {}, so it is ambiguous here; the target type would decide it",
                                 candidates.join(" and ")
                             ),
-                            spanned.line,
-                            spanned.col,
+                            spanned.span,
                         ))
                     }
                 }
             }
 
-            other => Err(self.err(
-                format!("expected a value, found {other}"),
-                spanned.line,
-                spanned.col,
-            )),
+            other => Err(self.err(format!("expected a value, found {other}"), spanned.span)),
         }
     }
 
@@ -3677,7 +3619,7 @@ impl Parser {
         };
         let lit = number
             .resolve(&ty)
-            .map_err(|err| self.err(err.to_string(), at.line, at.col))?;
+            .map_err(|err| self.err(err.to_string(), at.span))?;
         let id = lower.b.lit(lit);
         if defaulted {
             lower.defaults.insert(id, number);
@@ -4023,8 +3965,7 @@ impl Parser {
                         format!(
                             "`{name}` already has an arm on {path} at {first}; one event selects exactly one arm"
                         ),
-                        arm.span.line,
-                        arm.span.col,
+                        arm.span,
                     ));
                 }
             }
@@ -4049,13 +3990,12 @@ impl Parser {
     /// Sweep one's half of an effect-local `fn`: the signature, and nothing else.
     fn local_fn_signature(&mut self, effect: &Ident) -> Result<(), SyntaxError> {
         self.expect_word(Keyword::Fn)?;
-        let (line, col) = self.here();
+        let at = self.span_here();
         let name = self.expect_ident()?;
         if self.local_fns.iter().any(|other| other.name == name) {
             return Err(self.err(
                 format!("`{effect}` already declares a `fn` named `{name}`"),
-                line,
-                col,
+                at,
             ));
         }
         // A module `fn` is in scope inside every effect, so a local one of the same
@@ -4066,8 +4006,7 @@ impl Parser {
                 format!(
                     "`{name}` is already a `fn` at module scope, and one is in scope inside every effect; an effect-local `fn` cannot shadow it"
                 ),
-                line,
-                col,
+                at,
             ));
         }
         let params = self.param_list(true)?;
@@ -4144,8 +4083,7 @@ impl Parser {
                 format!(
                     "`reveal` at {reveal} can run after the `erase` at {erase}; `erase` is journaled and `reveal` is not, so a replay skips the erase and re-runs the reveal against a key that is gone"
                 ),
-                reveal.line,
-                reveal.col,
+                reveal,
             ));
         }
         Ok(arm)
@@ -4226,8 +4164,7 @@ impl Parser {
                     "these event types share no field, so an arm listing them could name nothing; {} is the first that differs",
                     paths[1]
                 ),
-                at.line,
-                at.col,
+                at,
             ));
         }
         Ok(EventDef::new(first.path.clone(), fields))
@@ -4307,13 +4244,13 @@ impl Parser {
                     None
                 };
 
-                let (line, col) = self.here();
+                let at = self.span_here();
                 let value = self.expr(lower, None)?;
                 self.end_args()?;
 
                 let subject = match named {
                     Some(name) => {
-                        self.check_named_subject(lower, &name, value, line, col)?;
+                        self.check_named_subject(lower, &name, value, at)?;
                         name
                     }
                     // Without a name the subject has to be recovered, and only a
@@ -4324,8 +4261,7 @@ impl Parser {
                             return Err(self.err(
                                 "`erase` takes a field of the triggering event, like `e.customer_id`, or names its subject: `erase(customer_id, id)`"
                                     .to_string(),
-                                line,
-                                col,
+                                at,
                             ));
                         };
                         subject
@@ -4337,8 +4273,7 @@ impl Parser {
                         format!(
                             "nothing is scoped to `{subject}`, so there is no key to erase; `erase` takes the subject id that a field is declared `@subject(...)` of"
                         ),
-                        line,
-                        col,
+                        at,
                     ));
                 };
                 // The declared type of the field the key is filed under. Skipped when
@@ -4351,8 +4286,7 @@ impl Parser {
                         format!(
                             "`{subject}` files its keys under a {field}, so `erase` cannot take a {found}"
                         ),
-                        line,
-                        col,
+                        at,
                     ));
                 }
                 Ok(Stmt::Erase {
@@ -4378,16 +4312,14 @@ impl Parser {
         lower: &Lower,
         subject: &str,
         value: ExprId,
-        line: u32,
-        col: u32,
+        at: Span,
     ) -> Result<(), SyntaxError> {
-        if let Some(at) = reveal_in(lower.b.exprs(), value) {
+        if let Some(reveal) = reveal_in(lower.b.exprs(), value) {
             return Err(self.err(
                 format!(
-                    "the id at {at} was learned by revealing, so `erase({subject}, ...)` would make a repeat request for an erased subject unreadable; take a subject id from a plaintext field"
+                    "the id at {reveal} was learned by revealing, so `erase({subject}, ...)` would make a repeat request for an erased subject unreadable; take a subject id from a plaintext field"
                 ),
-                line,
-                col,
+                at,
             ));
         }
         Ok(())
@@ -4399,11 +4331,7 @@ impl Parser {
     /// gets the same answer. That only holds if the fold cannot call out or decrypt.
     fn not_in_fold(&self, what: &str, span: Span) -> Result<(), SyntaxError> {
         if self.folding {
-            return Err(self.err(
-                format!("`state` folds the log, so it cannot {what}"),
-                span.line,
-                span.col,
-            ));
+            return Err(self.err(format!("`state` folds the log, so it cannot {what}"), span));
         }
         Ok(())
     }
@@ -4416,8 +4344,7 @@ impl Parser {
             format!(
                 "a `fn` is pure, so it cannot {what}; that is what keeps the erase-last check inside one arm instead of following calls"
             ),
-            span.line,
-            span.col,
+            span,
         )
     }
 
@@ -4430,8 +4357,7 @@ impl Parser {
         lower: &Lower,
         value: ExprId,
         want: &Type,
-        line: u32,
-        col: u32,
+        at: Span,
     ) -> Result<(), SyntaxError> {
         if self.folding || self.propagating {
             return Ok(());
@@ -4449,8 +4375,7 @@ impl Parser {
             format!(
                 "this is content sealed under `{subject}` and a {want} is not; `reveal` it first, because writing it here takes it out from behind the decrypt boundary"
             ),
-            line,
-            col,
+            at,
         ))
     }
 
@@ -4470,8 +4395,7 @@ impl Parser {
         lower: &Lower,
         value: ExprId,
         want: &Type,
-        line: u32,
-        col: u32,
+        at: Span,
     ) -> Result<(), SyntaxError> {
         let Some(found) = self.type_of(lower, value) else {
             return Ok(());
@@ -4479,7 +4403,7 @@ impl Parser {
         if fills(&found.unsealed(), &want.unsealed()) {
             return Ok(());
         }
-        Err(self.err(mismatch(&found, want), line, col))
+        Err(self.err(mismatch(&found, want), at))
     }
 
     /// The same rule where nothing declares a type: an interpolation hole, a
@@ -4489,8 +4413,7 @@ impl Parser {
         lower: &Lower,
         value: ExprId,
         what: &str,
-        line: u32,
-        col: u32,
+        at: Span,
     ) -> Result<(), SyntaxError> {
         let Some(subject) = self
             .type_of(lower, value)
@@ -4504,8 +4427,7 @@ impl Parser {
             format!(
                 "this is content sealed under `{subject}`, so it cannot {what} without `reveal`"
             ),
-            line,
-            col,
+            at,
         ))
     }
 
@@ -4520,8 +4442,7 @@ impl Parser {
             format!(
                 "an effect-local `fn` cannot {what}; it stays in the arm, which is what keeps rule 9's erase-last check inside one statement tree, so {fix}"
             ),
-            span.line,
-            span.col,
+            span,
         ))
     }
 
@@ -4541,13 +4462,12 @@ impl Parser {
     ) -> Result<(), SyntaxError> {
         match self.kind {
             Kind::Effect | Kind::EffectFn => Ok(()),
-            Kind::Command => Err(self.err(command, span.line, span.col)),
-            Kind::Projector => Err(self.err(projector, span.line, span.col)),
+            Kind::Command => Err(self.err(command, span)),
+            Kind::Projector => Err(self.err(projector, span)),
             Kind::Function => Err(self.purity_error(what, span)),
             Kind::Test => Err(self.err(
                 format!("a test states inputs and expectations, so it cannot {what}"),
-                span.line,
-                span.col,
+                span,
             )),
         }
     }
@@ -4577,15 +4497,13 @@ impl Parser {
                 if self.kind == Kind::Projector {
                     return Err(self.err(
                         "a projector has no clock, because a rebuild must reproduce every value it writes",
-                        span.line,
-                        span.col,
+                        span,
                     ));
                 }
                 if self.kind == Kind::Test {
                     return Err(self.err(
                         "a test states inputs and expectations, so it cannot read a clock",
-                        span.line,
-                        span.col,
+                        span,
                     ));
                 }
                 // Rule 11 pins the clock once per invocation, into a slot the arm
@@ -4594,8 +4512,7 @@ impl Parser {
                 if self.kind == Kind::EffectFn {
                     return Err(self.err(
                         "an effect-local `fn` cannot read a clock; `now()` is pinned once per invocation, so read it in the arm and pass it in",
-                        span.line,
-                        span.col,
+                        span,
                     ));
                 }
                 self.not_in_fn("read a clock", span)?;
@@ -4608,20 +4525,17 @@ impl Parser {
             }
             "erase" if called => Err(self.err(
                 "`erase` is a statement rather than a value; it returns nothing, because there is nothing an author could do differently on either answer",
-                span.line,
-                span.col,
+                span,
             )),
             "fail" | "log" if called => Err(self.err(
                 format!("`{name}` is a statement rather than a value"),
-                span.line,
-                span.col,
+                span,
             )),
             "uuid4" | "random" | "uuid5" if called => Err(self.err(
                 format!(
                     "there is no `{name}` in heklang: an id has to be derived from its inputs, so that a command retry and an effect replay produce the id they produced the first time; write `Uuid.derive(seed, name)`"
                 ),
-                span.line,
-                span.col,
+                span,
             )),
             _ => Ok(None),
         }
@@ -4632,10 +4546,10 @@ impl Parser {
     /// type instead; `Json.parse` and `Timestamp.from_micros` will take this shape too.
     fn uuid_call(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, SyntaxError> {
         self.expect_sym(Sym::Dot)?;
-        let (line, col) = self.here();
+        let at = self.span_here();
         let member = self.expect_ident()?;
         if member != "derive" {
-            return Err(self.err(uuid_member(&member), line, col));
+            return Err(self.err(uuid_member(&member), at));
         }
         self.expect_sym(Sym::LParen)?;
         let seed = self.expr(lower, Some(Type::Uuid))?;
@@ -4651,13 +4565,12 @@ impl Parser {
 
     fn http_call(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, SyntaxError> {
         self.expect_sym(Sym::Dot)?;
-        let (line, col) = self.here();
+        let at = self.span_here();
         let verb = self.expect_ident()?;
         let Some(builtin) = Builtin::verb(&verb) else {
             return Err(self.err(
                 format!("`http` has no verb `{verb}`; it has get, post, put, patch and delete"),
-                line,
-                col,
+                at,
             ));
         };
         self.gate(
@@ -4699,7 +4612,7 @@ impl Parser {
         }
         if self.at_sym(Sym::Comma) {
             // Rule 13: a timeout belongs to configuration, not to the call site.
-            let (line, col) = self.here();
+            let at = self.span_here();
             let plural = if args.len() == 1 { "" } else { "s" };
             return Err(self.err(
                 format!(
@@ -4707,8 +4620,7 @@ impl Parser {
                     builtin.name(),
                     args.len()
                 ),
-                line,
-                col,
+                at,
             ));
         }
         self.expect_sym(Sym::RParen)?;
@@ -4733,7 +4645,7 @@ impl Parser {
         self.arm_only("decrypt", "pass the revealed value in as a parameter", span)?;
         self.not_in_fold("decrypt", span)?;
         self.expect_sym(Sym::LParen)?;
-        let (line, col) = self.here();
+        let at = self.span_here();
         let value = self.expr(lower, None)?;
         self.end_args()?;
 
@@ -4750,8 +4662,7 @@ impl Parser {
                 format!(
                     "`reveal` takes subject-bound content and {found}; it decrypts a field declared `@subject(...)`, or a `state` folded from one. An arm that transforms what it folds drops the seal, because the key belongs to the field's content rather than to whatever is computed from it"
                 ),
-                line,
-                col,
+                at,
             ));
         }
 
@@ -4788,18 +4699,18 @@ impl Parser {
         lower.b.at(span);
         let mut parts = vec![lower.b.str(&head)];
         loop {
-            let (line, col) = self.here();
+            let at = self.span_here();
             let hole = self.expr(lower, None)?;
-            self.no_seal(lower, hole, "be interpolated into a string", line, col)?;
+            self.no_seal(lower, hole, "be interpolated into a string", at)?;
             parts.push(hole);
             let spanned = self.bump();
             match spanned.token {
                 Token::TextPart(text) => {
-                    lower.b.at(Span::new(spanned.line, spanned.col));
+                    lower.b.at(spanned.span);
                     parts.push(lower.b.str(&text));
                 }
                 Token::TextClose(text) => {
-                    lower.b.at(Span::new(spanned.line, spanned.col));
+                    lower.b.at(spanned.span);
                     parts.push(lower.b.str(&text));
                     lower.b.at(span);
                     return Ok(lower.b.expr(Expr::Interp(parts)));
@@ -4807,8 +4718,7 @@ impl Parser {
                 other => {
                     return Err(self.err(
                         format!("expected the rest of the string, found {other}"),
-                        spanned.line,
-                        spanned.col,
+                        spanned.span,
                     ));
                 }
             }
@@ -4854,8 +4764,7 @@ impl Parser {
             let Some(inner) = inner else {
                 return Err(self.err(
                     "an empty list needs a target type to know what it holds; that comes from the `state`, parameter or field it fills",
-                    span.line,
-                    span.col,
+                    span,
                 ));
             };
             lower.b.at(span);
@@ -4935,7 +4844,7 @@ impl Parser {
     /// `name [, name] in <container>`, shared by `for` and comprehensions so there is
     /// one rule rather than two. The caller has already pushed the scope.
     fn iter_bindings(&mut self, lower: &mut Lower) -> Result<Iter, SyntaxError> {
-        let (line, col) = self.here();
+        let at = self.span_here();
         let first = self.expect_ident()?;
         let second = if self.eat_sym(Sym::Comma) {
             Some(self.expect_ident()?)
@@ -4943,8 +4852,9 @@ impl Parser {
             None
         };
         self.expect_word(Keyword::In)?;
-        let (over_line, over_col) = self.here();
+        let start = self.here();
         let over = self.header_expr(lower, None)?;
+        let over_at = self.span_from(start);
 
         let (index_ty, item_ty) = match self.type_of(lower, over) {
             Some(Type::List(item)) => (second.as_ref().map(|_| Type::Int), item.as_ref().clone()),
@@ -4952,8 +4862,7 @@ impl Parser {
                 if second.is_none() {
                     return Err(self.err(
                         "a map yields a key beside its value, so `for` over one binds two names; write `for key, value in ...`",
-                        line,
-                        col,
+                        at,
                     ));
                 }
                 (Some(key.as_ref().clone()), value.as_ref().clone())
@@ -4961,15 +4870,13 @@ impl Parser {
             Some(other) => {
                 return Err(self.err(
                     format!("`for` walks a List or a Map, and this is a {other}"),
-                    over_line,
-                    over_col,
+                    over_at,
                 ));
             }
             None => {
                 return Err(self.err(
                     "cannot tell what this holds; `for` needs the container's element type, which comes from a declaration",
-                    over_line,
-                    over_col,
+                    over_at,
                 ));
             }
         };
@@ -4994,7 +4901,7 @@ impl Parser {
         span: Span,
     ) -> Result<ExprId, SyntaxError> {
         self.expect_sym(Sym::Dot)?;
-        let (line, col) = self.here();
+        let at = self.span_here();
         let member = self.expect_ident()?;
         // The one calendar constructor. Fallible, because six numbers do not always
         // name a date, and that optional is where an author writing month arithmetic
@@ -5018,8 +4925,7 @@ impl Parser {
         if member != "parse" {
             return Err(self.err(
                 format!("`{ty}` has no `{member}`; it has {}", members_of(ty)),
-                line,
-                col,
+                at,
             ));
         }
         let builtin = if ty == "Timestamp" {
@@ -5030,8 +4936,7 @@ impl Parser {
             let Some(Type::Money(scale)) = expect.map(inner_of) else {
                 return Err(self.err(
                     "`Money.parse` needs a target scale to know what it is parsing into; that comes from the field, parameter or `state` it fills",
-                    span.line,
-                    span.col,
+                    span,
                 ));
             };
             Builtin::MoneyParse(*scale)
@@ -5052,7 +4957,7 @@ impl Parser {
     /// a string instead of a socket, which is why it is not a second serialisation.
     fn json_member(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, SyntaxError> {
         self.expect_sym(Sym::Dot)?;
-        let (line, col) = self.here();
+        let at = self.span_here();
         let member = self.expect_ident()?;
         match member.as_str() {
             "empty" => {
@@ -5081,8 +4986,7 @@ impl Parser {
             }
             other => Err(self.err(
                 format!("`Json` has no `{other}`; it has `empty` and `encode(value)`"),
-                line,
-                col,
+                at,
             )),
         }
     }
@@ -5096,20 +5000,18 @@ impl Parser {
         span: Span,
     ) -> Result<ExprId, SyntaxError> {
         self.expect_sym(Sym::Dot)?;
-        let (line, col) = self.here();
+        let at = self.span_here();
         let member = self.expect_ident()?;
         if member != "empty" {
             return Err(self.err(
                 format!("`Map` has no `{member}`; it has `empty`, and everything else is a method on a map value"),
-                line,
-                col,
+                at,
             ));
         }
         let Some(Type::Map(key, value)) = expect.map(inner_of) else {
             return Err(self.err(
                 "`Map.empty` needs a target type to know what it holds; that comes from the `state`, parameter or field it fills",
-                span.line,
-                span.col,
+                span,
             ));
         };
         let lit = Literal::EmptyMap(key.as_ref().clone(), value.as_ref().clone());
@@ -5132,22 +5034,22 @@ impl Parser {
         let outer = mem::replace(&mut self.no_record_literal, false);
         let mut fields: Vec<(Ident, ExprId)> = Vec::new();
         while !self.at_sym(Sym::RBrace) {
-            let (line, col) = self.here();
+            let at = self.span_here();
             let field = self.expect_ident()?;
             let Some(declared) = def.field(&field) else {
-                return Err(self.err(format!("record `{name}` has no field `{field}`"), line, col));
+                return Err(self.err(format!("record `{name}` has no field `{field}`"), at));
             };
             if fields.iter().any(|(seen, _)| seen == &field) {
-                return Err(self.err(format!("`{field}` is given twice"), line, col));
+                return Err(self.err(format!("`{field}` is given twice"), at));
             }
             let expected = declared.ty.clone();
             let value = if self.eat_sym(Sym::Colon) {
                 self.expr(lower, Some(expected))?
             } else {
                 if lower.b.lookup(&field).is_none() {
-                    return Err(self.not_in_scope(&field, line, col));
+                    return Err(self.not_in_scope(&field, at));
                 }
-                lower.b.at(Span::new(line, col));
+                lower.b.at(at);
                 lower.b.load(&field)
             };
             fields.push((field, value));
@@ -5196,8 +5098,7 @@ impl Parser {
         if !self.in_body && expect.map(inner_of) != Some(&Type::Json) {
             return Err(self.err(
                 "an object literal is an HTTP request body; `invoke` takes a typed struct, checked against the command's parameters",
-                span.line,
-                span.col,
+                span,
             ));
         }
 
@@ -5209,24 +5110,23 @@ impl Parser {
         let body = mem::replace(&mut self.in_body, true);
         let mut fields: Vec<(Ident, ExprId)> = Vec::new();
         while !self.at_sym(Sym::RBrace) {
-            let (line, col) = self.here();
+            let at = self.span_here();
             let key = match self.bump().token {
                 Token::Text(text) => text,
                 other => {
                     return Err(self.err(
                         format!("an object key is a quoted string, found {other}"),
-                        line,
-                        col,
+                        at,
                     ));
                 }
             };
             if fields.iter().any(|(seen, _)| seen == &key) {
-                return Err(self.err(format!("`{key}` is given twice"), line, col));
+                return Err(self.err(format!("`{key}` is given twice"), at));
             }
             self.expect_sym(Sym::Colon)?;
-            let (at_line, at_col) = self.here();
+            let at = self.span_here();
             let value = self.expr(lower, None)?;
-            self.no_seal(lower, value, "be sent in a request body", at_line, at_col)?;
+            self.no_seal(lower, value, "be sent in a request body", at)?;
             fields.push((key, value));
             if !self.eat_sym(Sym::Comma) {
                 break;
@@ -5248,7 +5148,7 @@ impl Parser {
         )?;
         self.not_in_fold("call a command", span)?;
 
-        let (line, col) = self.here();
+        let at = self.span_here();
         let name = self.expect_ident()?;
         let Some(signature) = self
             .commands
@@ -5256,25 +5156,21 @@ impl Parser {
             .find(|other| other.name == name)
             .cloned()
         else {
-            return Err(self.err(format!("command `{name}` is not declared"), line, col));
+            return Err(self.err(format!("command `{name}` is not declared"), at));
         };
 
         // Rule 7: the input is a typed struct, checked against the declared parameters.
         self.expect_sym(Sym::LBrace)?;
         let mut args: Vec<(Ident, ExprId)> = Vec::new();
         while !self.at_sym(Sym::RBrace) {
-            let (line, col) = self.here();
+            let at = self.span_here();
             let field = self.expect_ident()?;
             let Some((_, declared)) = signature.params.iter().find(|(param, _)| param == &field)
             else {
-                return Err(self.err(
-                    format!("command `{name}` has no parameter `{field}`"),
-                    line,
-                    col,
-                ));
+                return Err(self.err(format!("command `{name}` has no parameter `{field}`"), at));
             };
             if args.iter().any(|(seen, _)| seen == &field) {
-                return Err(self.err(format!("`{field}` is given twice"), line, col));
+                return Err(self.err(format!("`{field}` is given twice"), at));
             }
 
             let expected = declared.clone();
@@ -5282,9 +5178,9 @@ impl Parser {
                 self.expr(lower, Some(expected))?
             } else {
                 if lower.b.lookup(&field).is_none() {
-                    return Err(self.not_in_scope(&field, line, col));
+                    return Err(self.not_in_scope(&field, at));
                 }
-                lower.b.at(Span::new(line, col));
+                lower.b.at(at);
                 lower.b.load(&field)
             };
             args.push((field, value));
@@ -5301,11 +5197,7 @@ impl Parser {
                 continue;
             }
             if !args.iter().any(|(given, _)| given == param) {
-                return Err(self.err(
-                    format!("command `{name}` needs `{param}`"),
-                    span.line,
-                    span.col,
-                ));
+                return Err(self.err(format!("command `{name}` needs `{param}`"), span));
             }
         }
 
@@ -5377,8 +5269,7 @@ impl Parser {
                     };
                     let error = SyntaxError::new(
                         format!("this `patch` materializes a `{entity}`, and {complaint}"),
-                        span.line,
-                        span.col,
+                        span,
                     );
                     return Err(match &projector.module {
                         Some(module) => error.in_file(module),
@@ -5405,8 +5296,7 @@ impl Parser {
                 "{}: a `fn` cannot call itself, directly or through another, so that every call ends",
                 names.join(" calls ")
             ),
-            span.line,
-            span.col,
+            span,
         );
         Err(match at.and_then(|def| def.module.as_ref()) {
             Some(module) => error.in_file(module),
@@ -5453,8 +5343,7 @@ impl Parser {
         }
         let error = SyntaxError::new(
             format!("{path}: this effect can trigger itself, so the log would grow without end"),
-            cycle[0].span.line,
-            cycle[0].span.col,
+            cycle[0].span,
         );
         Err(match &cycle[0].module {
             Some(module) => error.in_file(module),
