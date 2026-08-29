@@ -280,3 +280,80 @@ effect RecordWarrantySales {
                 (string_content)
                 (interpolation
                   (identifier))))))))))
+
+================================================================================
+an effect-local fn that declares no result
+================================================================================
+
+effect SyncShop {
+  fn sync(shop_id: Int, domain: String) {
+    let response = http.post("https://{domain}/sync", { "shop": shop_id })
+    if response.status >= 400 {
+      fail("sync failed")
+    }
+  }
+
+  on @shop.connected as e { shop_id, shop_domain } {
+    sync(shop_id, shop_domain)
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (effect_declaration
+    (type_identifier)
+    (function_declaration
+      (identifier)
+      (parameters
+        (parameter
+          (identifier)
+          (type
+            (primitive_type)))
+        (parameter
+          (identifier)
+          (type
+            (primitive_type))))
+      (block
+        (let_statement
+          (identifier)
+          (method_call
+            (identifier)
+            (identifier)
+            (arguments
+              (string
+                (string_content)
+                (interpolation
+                  (identifier))
+                (string_content))
+              (object_literal
+                (object_entry
+                  (string
+                    (string_content))
+                  (identifier))))))
+        (if_statement
+          (binary_expression
+            (field_expression
+              (identifier)
+              (identifier))
+            (integer_literal))
+          (block
+            (expression_statement
+              (call_expression
+                (identifier)
+                (arguments
+                  (string
+                    (string_content)))))))))
+    (event_handler
+      (event_path)
+      (identifier)
+      (destructure
+        (identifier)
+        (identifier))
+      (block
+        (expression_statement
+          (call_expression
+            (identifier)
+            (arguments
+              (identifier)
+              (identifier))))))))

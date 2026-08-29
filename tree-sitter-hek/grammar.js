@@ -107,13 +107,16 @@ module.exports = grammar({
         field('value', $._expression),
       ),
 
+    // The result is optional because an effect-local `fn` may omit it: `fail` is its
+    // only other way out, so there is nothing for a caller to decide from. A module
+    // `fn` must declare one, and that is a rule the parser keeps rather than the
+    // grammar, which has no idea which body it is inside.
     function_declaration: ($) =>
       seq(
         'fn',
         field('name', $.identifier),
         field('parameters', $.parameters),
-        '->',
-        field('return_type', $.type),
+        optional(seq('->', field('return_type', $.type))),
         field('body', $.block),
       ),
 
@@ -416,7 +419,7 @@ module.exports = grammar({
       ),
 
     primitive_type: (_) =>
-      choice('Bool', 'Int', 'String', 'Uuid', 'Timestamp', 'Json'),
+      choice('Bool', 'Int', 'String', 'Uuid', 'Timestamp', 'Json', 'Response'),
 
     scaled_type: ($) =>
       seq(choice('Decimal', 'Money'), '(', $.integer_literal, ')'),
