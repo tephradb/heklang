@@ -51,6 +51,22 @@ The last two rows are also why the rule now lives in one place. Every literal po
 through one function in the parser, so the wrap happens where a declared type meets a found type and
 nowhere else; adding an arm to that function cannot forget it.
 
+**The other direction is now a compile error rather than a runtime one.** A `T?` written where a `T`
+is declared used to reach the interpreter, which reported `expected String, found String?` at the
+write. It is caught before the program runs, and the message names both ways out:
+
+```
+`sku` is a String? here
+emit @plan.created { sku }
+→ expected String, found String?; `unwrap_or` gives it a fallback, or a branch that proves it
+  present makes it a String without one
+```
+
+`docs/types.md` has the general rule this is one row of. It matters most for the methods that return
+an optional because the text came from outside (`docs/parsing.md`): `to_int`, `to_uuid`,
+`Timestamp.parse` and the `Json` accessors are the ones a real port reaches for, and forgetting the
+`unwrap_or` on any of them used to type-check.
+
 A test's expected value is on the list for a different reason. Nothing there is silent: the
 comparison fails loudly. But it fails as `expected "TRK-1", got "TRK-1"`, because an optional prints
 as the value it holds, and a report that shows the same text on both sides is worse than no report.

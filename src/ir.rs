@@ -839,6 +839,12 @@ pub enum NumberError {
 impl fmt::Display for NumberError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            // `Timestamp` gets the spelling and the others do not, because epoch
+            // microseconds is a plausible thing to have written and a number in a
+            // `Uuid` is not: only one of them is an author who knows what they meant.
+            NumberError::NotNumeric(Type::Timestamp) => f.write_str(
+                "a number cannot be a Timestamp; one is written as a string, like \"2026-01-01T00:00:00Z\"",
+            ),
             NumberError::NotNumeric(ty) => write!(f, "a number cannot be a {ty}"),
             NumberError::TooPrecise { written, target } => {
                 let places = if *written == 1 { "place" } else { "places" };

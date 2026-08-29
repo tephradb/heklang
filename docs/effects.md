@@ -880,8 +880,15 @@ optional-out covers the fold, and narrowing covers the guard.
 
 ## Checker obligations
 
-The one recorded in `docs/projectors.md` still stands (the `@max` tightening invariant). Four checks
-are **implemented** and live in the parser only because nothing else exists yet:
+The one recorded in `docs/projectors.md` still stands (the `@max` tightening invariant). Five checks
+are **implemented**, and the first of them has a reason to be where it is rather than only a history:
+
+0. **The type check** (`docs/types.md`). It has to run while the program is lowered, because a
+   numeric literal needs its scale before its IR node exists and a narrowed optional lowers to a
+   different node than a plain one. Its tables live in `src/types.rs` with no parser state in them,
+   so a checker elsewhere can reuse them.
+
+The other four live in the parser only because nothing else exists yet:
 
 1. **Erase-last reachability** (rule 9). Needs one arm's body, so the parser can host it, but it is a
    flow analysis and belongs with the others.

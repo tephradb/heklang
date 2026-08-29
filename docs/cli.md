@@ -53,11 +53,18 @@ order semantically.
 
 ## Checking and parsing are the same pass
 
-Every static check heklang has lives in the parser: rule 9's erase-last reachability, the
-self-trigger cycle check, rule 12's fold subject checks, `@subject` validation, and the
-recursion check. `docs/projectors.md` and `docs/effects.md` both record which checks are
-still deferred to a checker that does not exist yet, and `hek check` does not run those,
-because nothing does.
+Every static check heklang has lives in the parser: the type check (`docs/types.md`),
+rule 9's erase-last reachability, the self-trigger cycle check, rule 12's fold subject
+checks and its decrypt boundary, `@subject` validation, and the recursion check.
+`docs/projectors.md` and `docs/effects.md` both record which checks are still deferred to
+a checker that does not exist yet, and `hek check` does not run those, because nothing
+does.
+
+The type check is the one with a reason to stay rather than only a history. It has to
+run while the program is lowered, because a numeric literal needs its scale to be built
+at all and a narrowed optional lowers to a different node than a plain one. What is
+separable is separated: `src/types.rs` holds the tables and the relations with no parser
+state in them, so a checker outside the parser gets them for free.
 
 When that checker splits out of the parser, this is where it gets called, and `check` is
 the command that grows rather than a new one.

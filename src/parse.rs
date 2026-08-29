@@ -3047,9 +3047,13 @@ impl Parser {
     fn expr(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
         let (line, col) = self.here();
         let value = self.or_expr(lower, expect.clone())?;
-        // Rule 12, at the one place every declared position funnels through.
+        // Rule 12, and the type, at the one place every declared position funnels
+        // through. The seal check runs first because its message is the specific one:
+        // sealed content in a plain position is a `reveal` that is missing, not a type
+        // that is wrong.
         if let Some(want) = &expect {
             self.check_seal(lower, value, want, line, col)?;
+            self.check_type(lower, value, want, line, col)?;
         }
         Ok(value)
     }
@@ -3341,6 +3345,22 @@ impl Parser {
                 self.expect_sym(Sym::LBrace)?;
                 let otherwise = self.expr(lower, expect)?;
                 self.expect_sym(Sym::RBrace)?;
+                // Both arms are the value, so two known types that disagree is a value
+                // with no type at all. Where a target declared one this has already
+                // been said twice, once per arm; where nothing did, this is the only
+                // place it can be said.
+                if let (Some(left), Some(right)) =
+                    (self.type_of(lower, then), self.type_of(lower, otherwise))
+                    && left != right
+                {
+                    return Err(self.err(
+                        format!(
+                            "these branches give a {left} and a {right}, so this `if` has no one type; both arms are the value"
+                        ),
+                        span.line,
+                        span.col,
+                    ));
+                }
                 lower.b.at(span);
                 Ok(lower.b.if_expr(cond, then, otherwise))
             }
@@ -3672,6 +3692,26 @@ impl Parser {
             Expr::Reveal(value) => Some(self.type_of(lower, *value)?.unsealed()),
         }
     }
+}
+
+/// A value that does not fill the position it was written into. The wording is the
+/// runtime's, so the static report and the dynamic one read the same, and two shapes
+/// carry the way out because in both the author knows what they meant and only needs
+/// the spelling.
+fn mismatch(found: &Type, want: &Type) -> String {
+    let fix = match (found, want) {
+        (Type::Opt(inner), _) if fills(inner, want) => format!(
+            "; `unwrap_or` gives it a fallback, or a branch that proves it present makes it a {inner} without one"
+        ),
+        (Type::Int | Type::String, Type::Timestamp) => {
+            ", and a Timestamp is written as a string, like \"2026-01-01T00:00:00Z\"".to_string()
+        }
+        (Type::String, Type::Uuid) => {
+            ", and a Uuid is written as a string, so this one is not one".to_string()
+        }
+        _ => String::new(),
+    };
+    format!("expected {want}, found {found}{fix}")
 }
 
 /// An operator with no row in the table. The three `docs/money.md` names get the reason
@@ -4227,6 +4267,34 @@ impl Parser {
             line,
             col,
         ))
+    }
+
+    /// A value written where a type is declared has to fill it. `docs/types.md` is the
+    /// rule; `fills` is the whole of it, and it is the same relation `interp::coerce`
+    /// applies at the write, so what passes here is what the runtime would have taken.
+    ///
+    /// Silent where synthesis is unknown, because an unknown type is not an accusation.
+    /// This check shrinks as synthesis grows and never guesses, which is what makes it
+    /// safe to run at every declared position at once.
+    ///
+    /// The seal is transparent here, as it is to the runtime: writing plaintext into a
+    /// sealed position is the encrypting direction and needs no ceremony, and the other
+    /// direction is `check_seal`'s, which has already run.
+    fn check_type(
+        &self,
+        lower: &Lower,
+        value: ExprId,
+        want: &Type,
+        line: u32,
+        col: u32,
+    ) -> Result<(), SyntaxError> {
+        let Some(found) = self.type_of(lower, value) else {
+            return Ok(());
+        };
+        if fills(&found.unsealed(), &want.unsealed()) {
+            return Ok(());
+        }
+        Err(self.err(mismatch(&found, want), line, col))
     }
 
     /// The same rule where nothing declares a type: an interpolation hole, a
