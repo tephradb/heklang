@@ -2904,3 +2904,39 @@ fn a_projector_may_store_sealed_content_without_revealing() {
 }",
     );
 }
+
+/// The cascade backstop counts depth, not volume. It used to count how many events one
+/// walk appended, which is a limit on how much work an effect may do rather than on
+/// whether it settles: a port tripped it at seventeen sales, each of which appended one
+/// event that triggered nothing.
+#[test]
+fn a_wide_walk_settles_rather_than_tripping_the_backstop() {
+    let source = "event @tick.happened { id: Int }
+event @tick.done { id: Int }
+
+command RecordDone(id: Int) {
+  emit @tick.done { id }
+}
+
+effect E {
+  on @tick.happened { id } {
+    invoke RecordDone { id }
+  }
+}";
+    let program = parse(source).expect("this parses");
+    let log: Vec<Event> = (0..200)
+        .map(|id| {
+            Event::new(
+                EventPath::new(["tick", "happened"]),
+                [("id", Value::Int(id))],
+            )
+        })
+        .collect();
+
+    let mut interpreter = Interpreter::with_log(&program, log);
+    let counts = interpreter
+        .drive("E")
+        .expect("two hundred is a busy log, not a runaway");
+    assert_eq!(counts.done, 200, "every source event was handled");
+    assert!(counts.wedged.is_none());
+}

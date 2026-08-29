@@ -820,6 +820,14 @@ message names the loop rather than describing a symptom.
 This is heklang's first whole-program check, and it belongs to the checker rather than the parser.
 See "Checker obligations".
 
+**The runtime backstop counts depth, not volume.** A `drive` follows the log as an `invoke` lengthens
+it, and gives up if any chain of triggered events runs more than 32 deep. Depth is the measure
+because it is the one that separates the two cases: an effect handling a thousand events appends a
+thousand, every one of them one step from an event that was already in the log, while a runaway
+appends one at a time forever, each a step further out than the last. It used to count the total,
+which made it a limit on how much work one effect could do, and a port tripped it at seventeen sales.
+Tripping it still means the static check above has a hole, which is the only thing it is for.
+
 ## What `reveal` models
 
 The interpreter models the **key lifecycle**: a subject is erased or it is not, `erase` moves it one

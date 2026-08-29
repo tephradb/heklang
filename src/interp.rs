@@ -152,12 +152,20 @@ impl fmt::Display for ErrorKind {
             ErrorKind::BadSubject(ty) => write!(f, "a {ty} cannot identify a subject"),
             ErrorKind::BadUuid(value) => write!(f, "`{value}` is not a uuid"),
             ErrorKind::NoSuchField { ty, field } => write!(f, "no field `{field}` on {ty}"),
-            ErrorKind::Cascade { effect, events } => write!(
-                f,
-                "effect `{effect}` kept producing events without settling ({}); \
-                 the self-trigger check should have rejected this",
-                events.join(" -> ")
-            ),
+            // The tail rather than the whole slice: a walk deep enough to trip this has
+            // usually appended far more events than are worth printing, and the ones that
+            // say what the cycle is are the last few.
+            ErrorKind::Cascade { effect, events } => {
+                let tail = events.len().saturating_sub(8);
+                let ending = if tail > 0 { "ending " } else { "" };
+                write!(
+                    f,
+                    "effect `{effect}` kept producing events without settling after {} of them, \
+                     {ending}{}; the self-trigger check should have rejected this",
+                    events.len(),
+                    events[tail..].join(" -> ")
+                )
+            }
             ErrorKind::UnknownEvent(path) => write!(f, "undeclared event {path}"),
             ErrorKind::UnknownField { event, field } => {
                 write!(f, "event {event} has no field `{field}`")
@@ -563,25 +571,35 @@ impl<'a> Interpreter<'a> {
     pub fn drive(&mut self, effect: &str) -> Result<Counts, Error> {
         let mut counts = Counts::default();
         let start = self.log.len();
+        // One entry per event the walk visits. Everything already in the log is a step
+        // zero, and an event appended while handling one at step `d` is a `d + 1`.
+        let mut steps = vec![0u32; start];
         let mut position = 0u64;
 
         while (position as usize) < self.log.len() {
-            if self.log.len() > start + CASCADE {
-                let events = self.log[start..]
-                    .iter()
-                    .map(|record| record.event.path.to_string())
-                    .collect();
-                return Err(ErrorKind::Cascade {
-                    effect: effect.to_string(),
-                    events,
-                }
-                .into());
-            }
-
             // One journal per invocation: it is the memory of this position's calls,
             // and nothing carries between positions.
             let mut journal = Journal::default();
-            match self.deliver(effect, position, &mut journal) {
+            let before = self.log.len();
+            let outcome = self.deliver(effect, position, &mut journal);
+
+            if self.log.len() > before {
+                let step = steps[position as usize] + 1;
+                steps.resize(self.log.len(), step);
+                if step > CASCADE {
+                    let events = self.log[start..]
+                        .iter()
+                        .map(|record| record.event.path.to_string())
+                        .collect();
+                    return Err(ErrorKind::Cascade {
+                        effect: effect.to_string(),
+                        events,
+                    }
+                    .into());
+                }
+            }
+
+            match outcome {
                 Ok(Invocation::Done) => counts.done += 1,
                 Ok(Invocation::Ignored) => counts.ignored += 1,
                 Ok(Invocation::Failed(message)) => counts.failures.push(message),
@@ -2438,10 +2456,16 @@ fn uuid_derive(args: &[Value]) -> Result<Value, ErrorKind> {
     ))
 }
 
-/// How many events one `drive` will follow past where it started. A backstop only: the
+/// How far one `drive` will follow a chain of triggered events. A backstop only: the
 /// parser's self-trigger check is what actually makes the walk terminate, so tripping
 /// this reports a hole in that check rather than an expected limit.
-const CASCADE: usize = 16;
+///
+/// Depth, not volume, which is what this used to count and why sixteen sales in one log
+/// tripped it. An effect handling a thousand events appends a thousand, every one of them
+/// one step from an event that was already there; a runaway appends one at a time,
+/// forever, each a step further out than the last. The first is a busy log and the second
+/// is the bug, and depth is what tells them apart. Volume never could.
+const CASCADE: u32 = 32;
 
 /// How many attempts the runtime makes before a call wedges. Retryable statuses and
 /// transport errors are absorbed here, so the handler never sees one (rule 5).
