@@ -108,3 +108,48 @@ fn a_point_is_a_span_with_nothing_in_it() {
         "and it renders as the one position"
     );
 }
+
+/// Rule 4: a value in a declared position is about the whole value, so the span covers
+/// all of it. Reporting at its first token pointed at `text` and said "found Int?",
+/// which is a claim about what the call returns rather than about the name.
+#[test]
+fn a_type_mismatch_covers_the_whole_expression() {
+    let err = error(
+        "command A(id: Int, text: String) {\n  emit @thing.happened { id, name: text.to_int() }\n}\n",
+    );
+    assert_eq!(err.message, "expected String, found Int?");
+    assert_eq!(err.span, at(3, 36, 3, 49), "`text.to_int()` is thirteen");
+}
+
+/// Rule 4: and so is a chain of them. The span runs from the first operand to the last,
+/// which is the extent the operator table read to reject it.
+#[test]
+fn an_arithmetic_mismatch_covers_both_operands() {
+    let err = error(
+        "command A(id: Int, text: String) {\n  emit @thing.happened { id: id + 1 + text, name: \"x\" }\n}\n",
+    );
+    assert_eq!(err.message, "cannot apply `+` to Int and String");
+    assert_eq!(err.span, at(3, 30, 3, 43), "`id + 1 + text`, not the `+`");
+}
+
+/// Rule 4: a comparison covers the pair. The operator alone is where the mistake is
+/// spelled, and the pair is what the mistake is about; an editor can only underline one
+/// of them, and the pair is the one that says which two things did not meet.
+#[test]
+fn a_comparison_covers_the_pair_rather_than_the_operator() {
+    let err = error("command A(a: Money(2), b: Money(3)) {\n  if a > b {\n    return\n  }\n}\n");
+    assert!(
+        err.message
+            .starts_with("cannot apply `>` to Money(2) and Money(3)")
+    );
+    assert_eq!(err.span, at(3, 6, 3, 11), "`a > b`");
+}
+
+/// Rule 4: a field the event does not have covers the field's name. It used to report
+/// at the cursor, which by then had moved past the name onto the `:`.
+#[test]
+fn an_unknown_field_covers_the_field_name() {
+    let err = error("command A(id: Int) {\n  emit @thing.happened { id, nope: \"x\" }\n}\n");
+    assert_eq!(err.message, "@thing.happened has no field `nope`");
+    assert_eq!(err.span, at(3, 30, 3, 34));
+}

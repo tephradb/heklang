@@ -1712,9 +1712,10 @@ impl Parser {
         let path = &def.path;
         self.expect_sym(Sym::LBrace)?;
         while !self.at_sym(Sym::RBrace) {
+            let at = self.span_here();
             let field = self.expect_ident()?;
             let Some(declared) = def.field(&field) else {
-                return self.fail(format!("{path} has no field `{field}`"));
+                return Err(self.err(format!("{path} has no field `{field}`"), at));
             };
             lower.b.destructure(&field, Some(declared.ty.clone()));
             if !self.eat_sym(Sym::Comma) {
@@ -2042,9 +2043,10 @@ impl Parser {
             let mut binds = Vec::new();
             if self.eat_sym(Sym::LBrace) {
                 while !self.at_sym(Sym::RBrace) {
+                    let bind = self.span_here();
                     let field = self.expect_ident()?;
                     let Some(declared) = def.field(&field) else {
-                        return self.fail(format!("{path} has no field `{field}`"));
+                        return Err(self.err(format!("{path} has no field `{field}`"), bind));
                     };
                     binds.push(lower.b.bind(&field, Some(declared.ty.clone())));
                     if !self.eat_sym(Sym::Comma) {
@@ -2144,7 +2146,7 @@ impl Parser {
             let at = self.span_here();
             let field = self.expect_ident()?;
             let Some(declared) = def.field(&field) else {
-                return self.fail(format!("{path} has no field `{field}`"));
+                return Err(self.err(format!("{path} has no field `{field}`"), at));
             };
             let expected = declared.ty.clone();
             // A filter is lowered once per invocation, before the fold, so it is held
@@ -2978,7 +2980,7 @@ impl Parser {
                     let at = self.span_here();
                     let name = self.expect_ident()?;
                     let Some(declared) = def.field(&name) else {
-                        return self.fail(format!("{path} has no field `{name}`"));
+                        return Err(self.err(format!("{path} has no field `{name}`"), at));
                     };
                     let expected = declared.ty.clone();
                     let value = if self.eat_sym(Sym::Colon) {
@@ -3121,8 +3123,11 @@ impl Parser {
     }
 
     fn expr(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
-        let at = self.span_here();
+        let start = self.here();
         let value = self.or_expr(lower, expect.clone())?;
+        // The whole expression, which is only knowable now: `here()` before it gave the
+        // first token, and a mismatch is about all of what was written, not its start.
+        let at = self.span_from(start);
         // Rule 12, and the type, at the one place every declared position funnels
         // through. The seal check runs first because its message is the specific one:
         // sealed content in a plain position is a `reveal` that is missing, not a type
@@ -3159,8 +3164,11 @@ impl Parser {
         // cannot know yet whether one follows. Nothing resolves against `Bool`, so
         // dropping it costs no inference and stops `if 5 > count` from reporting "a
         // number cannot be a Bool" about a literal the other operand would have typed.
+        let start = self.here();
         let lhs = self.add_expr(lower, expect.filter(|ty| ty != &Type::Bool))?;
-        let Some((op, span)) = self.eat_op(&[
+        // Captured before the operator is eaten, so it is the left operand alone.
+        let lhs_at = self.span_from(start);
+        let Some((op, _)) = self.eat_op(&[
             (Sym::Eq, BinOp::Eq),
             (Sym::Ne, BinOp::Ne),
             (Sym::Le, BinOp::Le),
@@ -3172,20 +3180,24 @@ impl Parser {
         };
 
         let hint = self.hint_from(lower, lhs);
-        let at = self.span_here();
+        let rhs_start = self.here();
         let rhs = self.add_expr(lower, hint)?;
+        let rhs_at = self.span_from(rhs_start);
         // Rule 12: an equality on sealed content leaks whether two ciphertexts hold the
         // same thing, and under a real cipher it would not even answer. `reveal` both
         // sides, or compare something plaintext.
-        self.no_seal(lower, lhs, "be compared", span)?;
-        self.no_seal(lower, rhs, "be compared", at)?;
+        self.no_seal(lower, lhs, "be compared", lhs_at)?;
+        self.no_seal(lower, rhs, "be compared", rhs_at)?;
         self.settle(lower, lhs, rhs);
-        self.check_compare(lower, op, lhs, rhs, span)?;
-        lower.b.at(span);
+        // The comparison, not the operator: what is wrong is the pair, and an editor
+        // underlining `>` alone says nothing about which two things did not meet.
+        self.check_compare(lower, op, lhs, rhs, Span::new(start, rhs_at.end))?;
+        lower.b.at(lhs_at);
         Ok(lower.b.binary(op, lhs, rhs))
     }
 
     fn add_expr(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
+        let start = self.here();
         let mut lhs = self.mul_expr(lower, expect.clone())?;
         while let Some((op, span)) =
             self.eat_op(&[(Sym::Plus, BinOp::Add), (Sym::Minus, BinOp::Sub)])
@@ -3193,7 +3205,7 @@ impl Parser {
             let hint = self.hint_from(lower, lhs).or_else(|| expect.clone());
             let rhs = self.mul_expr(lower, hint)?;
             self.settle(lower, lhs, rhs);
-            self.check_arith(lower, op, lhs, rhs, span)?;
+            self.check_arith(lower, op, lhs, rhs, self.span_from(start))?;
             lower.b.at(span);
             lhs = lower.b.binary(op, lhs, rhs);
         }
@@ -3201,6 +3213,7 @@ impl Parser {
     }
 
     fn mul_expr(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
+        let start = self.here();
         let mut lhs = self.unary_expr(lower, expect)?;
         while let Some((op, span)) = self.eat_op(&[
             (Sym::Star, BinOp::Mul),
@@ -3208,7 +3221,7 @@ impl Parser {
             (Sym::Percent, BinOp::Rem),
         ]) {
             let rhs = self.unary_expr(lower, None)?;
-            self.check_arith(lower, op, lhs, rhs, span)?;
+            self.check_arith(lower, op, lhs, rhs, self.span_from(start))?;
             lower.b.at(span);
             lhs = lower.b.binary(op, lhs, rhs);
         }

@@ -76,9 +76,20 @@ worth doing before anything reads the extents rather than after.
 | a name that is not in scope | that name |
 | a declaration declared twice | its name in the second declaration |
 | a field given twice, or one the event does not have | that field's name |
+| a value in a position that declares a type | the whole value |
+| an arithmetic or comparison mistake | both operands and the operator between them |
+| a method the receiver does not have | the method's name |
 
-Every one is at least a token wide. A diagnostic about a whole expression covers the whole
-expression, which is section 4 of this document once the expression checks are widened.
+Every one is at least a token wide, and the rule for the rest is that a diagnostic covers what it
+is about rather than where the parser noticed. Those are different in three ways that matter:
+
+- **A value is about all of itself.** `expected String, found Int?` on `text.to_int()` reported at
+  its first token, which put the underline on `text` while the message described the call.
+- **An operator mistake is about the pair.** `cannot apply `>` to Money(2) and Money(3)` covers
+  `a > b`. The operator is where the mistake is spelled and the pair is what it is about, and an
+  editor can underline only one of them.
+- **A name is about the name.** A field the event does not have used to report at the cursor, which
+  by then had moved past the name onto the `:` after it.
 
 ## 5. Where a diagnostic has no extent
 

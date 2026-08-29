@@ -183,7 +183,7 @@ command Two(order_id: Int, total: Money(2), text: String) {
         "and the next one in the same file: {text}"
     );
     assert!(
-        text.contains("b.hk:2:8: cannot apply `>` to Money(2) and Money(3)"),
+        text.contains("b.hk:2:6: cannot apply `>` to Money(2) and Money(3)"),
         "and the next file: {text}"
     );
     assert!(text.contains("\n3 errors"), "{text}");
