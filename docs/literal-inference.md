@@ -86,10 +86,28 @@ Assume a command with `total: Money(2)`, `spend: Money(2)`, `count: Int`, `rate:
 | `0.0825` as `Decimal(2)` | error: 4 decimal places is too precise for Decimal(2) |
 | `10.5` as `Int` | error: 1 decimal place is too precise for Int |
 
+## Where a hint comes from is where a type comes from
+
+The target in step 1 is a declaration, so it is exact by construction. The one in step 2 is
+**synthesised** from the other operand, and for a long time that was a heuristic: it returned nothing
+for a method call, and it reported `Money(n)` for `Money(n) / Money(n)` where the value is a
+`Decimal(6)`. Both are fixed, and both had to be before anything could check a type rather than only
+hint one, because a hint that is wrong costs a worse error message while a **check** that is wrong
+rejects a correct program.
+
+`docs/types.md` is where synthesis is written down now. Two of its rules are visible from here:
+
+| Source | Resolves to | Because |
+| --- | --- | --- |
+| `spend / total + 1` | `Decimal(1000000, scale 6)` | an amount over an amount is a ratio (`docs/money.md`) |
+| `total.mul(rate, HalfUp) + 1` | `Money(100, scale 2)` | a rate applied to an amount is an amount |
+
 ## Known gaps
 
-`type_of` in the parser is a heuristic, not a typechecker. It returns nothing for a method call, so
-`x.len() + 1` defaults the literal rather than hinting `Int`, and it reports `Money(n)` for
-`Money(n) / Money(n)` where the real type is `Decimal(6)`. A wrong hint can only produce a runtime type
-error, never silently wrong arithmetic, so this fails safe. The typechecker should replace it rather
-than extend it.
+Synthesis still answers "unknown" in places, and a `let` carries that forward: its binding takes the
+type of its value, so an unknown one makes every later use of that name unknown too. Nothing here is
+wrong, it is only absent, and absence costs a defaulted literal rather than a bad one.
+
+Enum literals inherit the same limit, which `docs/projectors.md` records: a variant in a position
+whose type comes back as `None` falls to the unique-across-enums rule rather than being resolved from
+context.

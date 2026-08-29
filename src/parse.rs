@@ -10,7 +10,7 @@ use crate::ir::{
 };
 use crate::lex::{Keyword, Spanned, Sym, SyntaxError, Token, lex};
 use crate::scaled::Rounding;
-use crate::types::{default_type, fills, inner_of, method_sig, response_field, seal, wrap};
+use crate::types::{self, default_type, fills, inner_of, method_sig, response_field, seal, wrap};
 use crate::value;
 
 pub fn parse(source: &str) -> Result<Program, SyntaxError> {
@@ -3100,6 +3100,7 @@ impl Parser {
         self.no_seal(lower, lhs, "be compared", span.line, span.col)?;
         self.no_seal(lower, rhs, "be compared", line, col)?;
         self.settle(lower, lhs, rhs);
+        self.check_compare(lower, op, lhs, rhs, span)?;
         lower.b.at(span);
         Ok(lower.b.binary(op, lhs, rhs))
     }
@@ -3112,6 +3113,7 @@ impl Parser {
             let hint = self.hint_from(lower, lhs).or_else(|| expect.clone());
             let rhs = self.mul_expr(lower, hint)?;
             self.settle(lower, lhs, rhs);
+            self.check_arith(lower, op, lhs, rhs, span)?;
             lower.b.at(span);
             lhs = lower.b.binary(op, lhs, rhs);
         }
@@ -3126,10 +3128,55 @@ impl Parser {
             (Sym::Percent, BinOp::Rem),
         ]) {
             let rhs = self.unary_expr(lower, None)?;
+            self.check_arith(lower, op, lhs, rhs, span)?;
             lower.b.at(span);
             lhs = lower.b.binary(op, lhs, rhs);
         }
         Ok(lhs)
+    }
+
+    /// An operator applied to a pair the table has no row for. Runs after `settle`, so
+    /// a defaulted literal has already taken the type its neighbour gave it, and only
+    /// where both sides are known, so an unknown type is never an accusation.
+    fn check_arith(
+        &self,
+        lower: &Lower,
+        op: BinOp,
+        lhs: ExprId,
+        rhs: ExprId,
+        span: Span,
+    ) -> Result<(), SyntaxError> {
+        // Rule 12: arithmetic reads its operands, and a sum of sealed content is
+        // plaintext derived from it. The seal message is the useful one here, so it
+        // gets to run first.
+        self.no_seal(lower, lhs, "be used in arithmetic", span.line, span.col)?;
+        self.no_seal(lower, rhs, "be used in arithmetic", span.line, span.col)?;
+        let (Some(left), Some(right)) = (self.type_of(lower, lhs), self.type_of(lower, rhs)) else {
+            return Ok(());
+        };
+        if types::arithmetic(op, &left, &right).is_some() {
+            return Ok(());
+        }
+        Err(self.err(bad_operands(op, &left, &right), span.line, span.col))
+    }
+
+    /// The same rule for a comparison, which the runtime holds to the same table: two
+    /// scales do not meet under `>` any more than under `+`.
+    fn check_compare(
+        &self,
+        lower: &Lower,
+        op: BinOp,
+        lhs: ExprId,
+        rhs: ExprId,
+        span: Span,
+    ) -> Result<(), SyntaxError> {
+        let (Some(left), Some(right)) = (self.type_of(lower, lhs), self.type_of(lower, rhs)) else {
+            return Ok(());
+        };
+        if types::comparable(op, &left, &right) {
+            return Ok(());
+        }
+        Err(self.err(bad_operands(op, &left, &right), span.line, span.col))
     }
 
     fn unary_expr(
@@ -3206,7 +3253,7 @@ impl Parser {
                     let hint = receiver
                         .as_ref()
                         .and_then(|ty| method_sig(ty, &name))
-                        .and_then(|sig| sig.params.get(args.len()).cloned());
+                        .and_then(|sig| sig.params.get(args.len()).cloned().flatten());
                     args.push(self.expr(lower, hint)?);
                     if !self.eat_sym(Sym::Comma) {
                         break;
@@ -3564,17 +3611,34 @@ impl Parser {
                 | BinOp::Ge
                 | BinOp::And
                 | BinOp::Or => Some(Type::Bool),
-                _ => self
-                    .type_of(lower, *lhs)
-                    .or_else(|| self.type_of(lower, *rhs)),
+                // The operator table, not the left operand. Taking the left one gave
+                // `Money(n)` for `Money(n) / Money(n)`, whose value is a `Decimal(6)`,
+                // and a synthesised type that is wrong is worse than none: it rejects
+                // a program that is right.
+                _ => types::arithmetic(
+                    *op,
+                    &self.type_of(lower, *lhs)?,
+                    &self.type_of(lower, *rhs)?,
+                ),
             },
             Expr::Method {
                 receiver, method, ..
             } => method_sig(&self.type_of(lower, *receiver)?, method).map(|sig| sig.ret),
-            Expr::If { then, .. } => self.type_of(lower, *then),
+            // Both arms, because both are the value. Reading only the `then` arm
+            // reported a type the `else` arm may not produce.
+            Expr::If {
+                then, otherwise, ..
+            } => {
+                let then = self.type_of(lower, *then)?;
+                (self.type_of(lower, *otherwise)? == then).then_some(then)
+            }
             Expr::Field { receiver, name } => match self.type_of(lower, *receiver)? {
                 Type::Record(ty) => self.record_def(&ty)?.field(name).map(|f| f.ty.clone()),
-                _ => response_field(name),
+                // Only a `Response` has parenless fields, so only a `Response` may
+                // answer for one. Anything else reaching `status` or `body` here was
+                // reading the table for a type that does not have them.
+                Type::Response => response_field(name),
+                _ => None,
             },
             Expr::Object(_) => Some(Type::Json),
             Expr::Interp(_) => Some(Type::String),
@@ -3582,13 +3646,22 @@ impl Parser {
                 Some(declared) => declared.clone(),
                 None => items.first().and_then(|id| self.type_of(lower, *id))?,
             })),
-            Expr::Comp { yields, .. } => Some(Type::list(self.type_of(lower, *yields)?)),
+            // The declared element type when the target gave one, exactly as a list
+            // literal does, so an empty result keeps the type it was written for.
+            Expr::Comp { yields, inner, .. } => Some(Type::list(match inner {
+                Some(declared) => declared.clone(),
+                None => self.type_of(lower, *yields)?,
+            })),
             Expr::Call { builtin, .. } => Some(match builtin {
                 Builtin::UuidDerive => Type::Uuid,
                 Builtin::JsonEncode => Type::String,
                 Builtin::TimestampParse => Type::opt(Type::Timestamp),
                 Builtin::MoneyParse(scale) => Type::opt(Type::Money(*scale)),
-                _ => Type::Response,
+                Builtin::HttpGet
+                | Builtin::HttpPost
+                | Builtin::HttpPut
+                | Builtin::HttpPatch
+                | Builtin::HttpDelete => Type::Response,
             }),
             Expr::Invoke { .. } => Some(Type::Outcome),
             Expr::Record { ty, .. } => Some(Type::Record(ty.clone())),
@@ -3599,6 +3672,29 @@ impl Parser {
             Expr::Reveal(value) => Some(self.type_of(lower, *value)?.unsealed()),
         }
     }
+}
+
+/// An operator with no row in the table. The three `docs/money.md` names get the reason
+/// as well as the fact, because each of them is a mistake with a shape: the operator is
+/// not missing, the expression means something the author did not intend.
+fn bad_operands(op: BinOp, lhs: &Type, rhs: &Type) -> String {
+    let why = match (lhs, op, rhs) {
+        (Type::Money(_), BinOp::Mul, Type::Money(_)) => {
+            "; two amounts multiplied is not an amount. An amount scales by an `Int` or a `Decimal`"
+        }
+        (Type::Money(a), _, Type::Money(b)) if a != b => {
+            "; two amounts meet at one scale, the rule `Decimal` has for the same reason: a silent rescale is how a total loses a cent"
+        }
+        (Type::Money(_), BinOp::Add | BinOp::Sub, Type::Decimal(_))
+        | (Type::Decimal(_), BinOp::Add | BinOp::Sub, Type::Money(_)) => {
+            "; this adds a rate to an amount. To scale one, write `*`, or `mul(rate, HalfUp)` where the result has to round"
+        }
+        (Type::Decimal(a), _, Type::Decimal(b)) if a != b => {
+            "; two decimals meet at one scale, and widening one is the author's call to make"
+        }
+        _ => "",
+    };
+    format!("cannot apply `{op}` to {lhs} and {rhs}{why}")
 }
 
 /// A written `Timestamp` that did not read as one. The offset is the part authors

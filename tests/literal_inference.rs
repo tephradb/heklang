@@ -83,6 +83,37 @@ fn addition_and_comparison_cross_hint() {
     check("let a = count >= 10\nreturn", &["Int(10)"]);
 }
 
+/// A binary result is the operator table's answer, not the left operand's type. The
+/// left operand is what it used to be, and `Money(n) / Money(n)` is the row that made
+/// it wrong: the value is a ratio, so the literal beside it is one too.
+#[test]
+fn an_amount_over_an_amount_hints_a_ratio() {
+    check(
+        "let a = spend / total + 1\nreturn",
+        &["Decimal(1000000, scale 6)"],
+    );
+}
+
+/// A method's result reaches the literal beside it, including for the two `Money`
+/// methods the table used to be missing entirely.
+#[test]
+fn a_money_method_hints_the_literal_beside_it() {
+    check(
+        "let a = total.mul(rate, HalfUp) + 1\nreturn",
+        &["Rounding(HalfUp)", "Money(100, scale 2)"],
+    );
+    check(
+        "let a = total.div(count, Down) - 1\nreturn",
+        &["Rounding(Down)", "Money(100, scale 2)"],
+    );
+    // The rate's own scale is still the author's: this row is `docs/money.md`'s, and
+    // `mul` declares no type for it precisely so that it stays that way.
+    check(
+        "let a = total.mul(0.9, HalfUp)\nreturn",
+        &["Decimal(9, scale 1)", "Rounding(HalfUp)"],
+    );
+}
+
 /// A `Bool` target describes the comparison rather than its operands, so it must not
 /// reach them. It used to, and the row above was unwritable inside an `if`: the literal
 /// hit `Bool` before the other operand could type it, and reported "a number cannot be

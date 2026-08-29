@@ -13,6 +13,14 @@ fn parsed(params: &str, body: &str) -> Program {
     parse(&probe(params, body)).unwrap_or_else(|err| panic!("expected this to parse: {err}"))
 }
 
+/// The probe's parse error. The operator table is checked before the program runs, so
+/// a row that is not in it never reaches an interpreter.
+fn rejected(params: &str, body: &str) -> String {
+    parse(&probe(params, body))
+        .expect_err("expected the operator table to reject this")
+        .message
+}
+
 /// Runs the probe and returns the error, or `None` when the expression was fine.
 fn evaluate(params: &str, body: &str, args: Vec<(&str, Value)>) -> Option<String> {
     let program = parsed(params, body);
@@ -96,50 +104,44 @@ fn an_amount_divided_by_an_amount_is_a_ratio() {
 
 #[test]
 fn two_amounts_multiplied_is_a_type_error() {
-    assert_eq!(
-        evaluate(
-            "a: Money(2), b: Money(2)",
-            "a * b",
-            vec![("a", money(2_599)), ("b", money(100))],
-        )
-        .as_deref(),
-        Some("cannot apply `*` to Money(2) and Money(2)")
+    let message = rejected("a: Money(2), b: Money(2)", "a * b");
+    assert!(
+        message.starts_with("cannot apply `*` to Money(2) and Money(2)"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("two amounts multiplied is not an amount"),
+        "the message names the mistake, not only the missing row: {message}"
     );
 }
 
 #[test]
 fn an_amount_plus_a_bare_decimal_is_a_type_error() {
     // The real-world bug: adding a tax rate to a total.
-    assert_eq!(
-        evaluate(
-            "total: Money(2), rate: Decimal(4)",
-            "total + rate",
-            vec![("total", money(2_599)), ("rate", Value::decimal(825, 4))],
-        )
-        .as_deref(),
-        Some("cannot apply `+` to Money(2) and Decimal(4)")
+    let message = rejected("total: Money(2), rate: Decimal(4)", "total + rate");
+    assert!(
+        message.starts_with("cannot apply `+` to Money(2) and Decimal(4)"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("adds a rate to an amount"),
+        "got: {message}"
     );
 }
 
 #[test]
 fn two_scales_do_not_mix() {
-    assert_eq!(
-        evaluate(
-            "a: Money(2), b: Money(3)",
-            "a + b",
-            vec![("a", money(2_599)), ("b", Value::money(2_599, 3))],
-        )
-        .as_deref(),
-        Some("cannot apply `+` to Money(2) and Money(3)")
-    );
-    assert_eq!(
-        evaluate(
-            "a: Money(2), b: Money(3)",
-            "a > b",
-            vec![("a", money(2_599)), ("b", Value::money(2_599, 3))],
-        )
-        .as_deref(),
-        Some("cannot apply `>` to Money(2) and Money(3)")
+    for (expr, op) in [("a + b", "+"), ("a > b", ">"), ("a == b", "==")] {
+        let message = rejected("a: Money(2), b: Money(3)", expr);
+        assert!(
+            message.starts_with(&format!("cannot apply `{op}` to Money(2) and Money(3)")),
+            "for `{expr}`, got: {message}"
+        );
+    }
+    // A comparison is held to the table the arithmetic is, because rescaling one side
+    // to answer it would be answering a different question.
+    assert!(
+        rejected("a: Money(2), b: Money(3)", "a > b").contains("two amounts meet at one scale"),
     );
 }
 

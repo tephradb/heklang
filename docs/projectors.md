@@ -509,9 +509,9 @@ the write.
 
 ## Known gaps
 
-`type_of` in the parser is still the heuristic described in `docs/literal-inference.md`, and enum
-literals inherit its limits: a variant in a position whose type comes back as `None` falls to the
-unique-across-enums rule rather than being resolved from context.
+Synthesis (`docs/types.md`) still answers "unknown" in places, and enum literals inherit that: a
+variant in a position whose type comes back as `None` falls to the unique-across-enums rule rather
+than being resolved from context.
 
 Key types are restricted to those that can order and hash: `Int`, `String`, `Uuid`, `Timestamp` and
 enums. `Bool`, `Money(n)` and `Decimal(n)` are rejected as keys, matching the runtime's requirement that

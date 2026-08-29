@@ -37,6 +37,13 @@ it, and the table is what refuses them:
 An amount times a rate is an amount; an amount divided by an amount is a rate; an amount plus a rate
 is a mistake. Collapse `Money` into `Decimal(n)` and every one of those becomes legal.
 
+**The table is checked before the program runs.** A row that is not in it is a compile error naming
+both operands, and for the three mistakes with a shape it names the mistake too: two amounts
+multiplied is not an amount, two amounts meet at one scale, and `+` between an amount and a rate is
+adding a tax rate to a total. It used to be a runtime error, which meant a program could be shipped
+with `total + tax_rate` in a branch nobody had taken yet. `docs/types.md` has the rest of the rules
+this one belongs to.
+
 The rounding rule is unchanged: where a result is not exactly representable, the bare operator is an
 error and the author must say `mul(rate, HalfUp)` or `div(parts, Down)`. Money never rounds silently.
 
