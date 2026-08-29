@@ -4587,6 +4587,11 @@ impl Parser {
         }
 
         if self.eat_sym(Sym::RBracket) {
+            // A request body needs no declared element type. An empty array serialises
+            // the same whatever it would have held, so there is nothing here for a
+            // target to decide, and no declaration to take one from: a body's values
+            // are typed by what they are rather than by where they land.
+            let inner = inner.or_else(|| self.in_body.then_some(Type::Json));
             let Some(inner) = inner else {
                 return Err(self.err(
                     "an empty list needs a target type to know what it holds; that comes from the `state`, parameter or field it fills",
@@ -4780,9 +4785,14 @@ impl Parser {
                 self.expect_sym(Sym::LParen)?;
                 let outer = mem::replace(&mut self.no_record_literal, false);
                 // Any value encodes, so there is no hint to give, except that a `{`
-                // here is an object rather than something that needs a target.
+                // here is an object rather than something that needs a target. What
+                // is inside it is a body like any other, so it is read as one: without
+                // that only the outermost brace had a target, and a nested object or
+                // an empty array failed on a rule about declarations it has none of.
+                let body = mem::replace(&mut self.in_body, true);
                 let hint = self.at_sym(Sym::LBrace).then_some(Type::Json);
                 let value = self.expr(lower, hint)?;
+                self.in_body = body;
                 self.no_record_literal = outer;
                 self.end_args()?;
                 lower.b.at(span);
@@ -4905,7 +4915,7 @@ impl Parser {
         // includes a `fn` return and a command parameter, not only an HTTP body. Rule
         // 7 still holds: `invoke` checks its fields against declared parameter types,
         // so an object only reaches one whose parameter is a `Json`.
-        if !self.in_body && expect != Some(&Type::Json) {
+        if !self.in_body && expect.map(inner_of) != Some(&Type::Json) {
             return Err(self.err(
                 "an object literal is an HTTP request body; `invoke` takes a typed struct, checked against the command's parameters",
                 span.line,
@@ -4914,6 +4924,11 @@ impl Parser {
         }
 
         let outer = mem::replace(&mut self.no_record_literal, false);
+        // Everything inside an object literal is JSON, whatever led here: an `http`
+        // body, a `Json.encode`, a `fn` that returns one. So the members are read as a
+        // body rather than only the outermost brace, which is what lets a nested object
+        // and an empty array be written at any depth.
+        let body = mem::replace(&mut self.in_body, true);
         let mut fields: Vec<(Ident, ExprId)> = Vec::new();
         while !self.at_sym(Sym::RBrace) {
             let (line, col) = self.here();
@@ -4940,6 +4955,7 @@ impl Parser {
             }
         }
         self.expect_sym(Sym::RBrace)?;
+        self.in_body = body;
         self.no_record_literal = outer;
         lower.b.at(span);
         Ok(lower.b.expr(Expr::Object(fields)))

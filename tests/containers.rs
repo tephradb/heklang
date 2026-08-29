@@ -234,6 +234,40 @@ fn an_empty_list_needs_a_target_type() {
     );
 }
 
+/// A `fn` returning a `Json`, which is an object literal without needing an effect.
+fn returning_json(value: &str) -> String {
+    format!("{PRELUDE}\nfn payload(item: Int) -> Json {{\n  return {value}\n}}\n")
+}
+
+/// Inside an object literal there is no target and none is needed: a body's values are
+/// typed by what they are rather than by where they land. The rule holds at any depth
+/// and wherever an object literal is legal, so a `Json.encode` argument is on the list
+/// too. Only the outermost brace used to have a target, which made `{ "tags": [] }` an
+/// error about declarations a body has none of.
+#[test]
+fn an_empty_list_in_a_body_needs_no_target_type() {
+    for value in [
+        "{ \"tags\": [] }",
+        "{ \"meta\": { \"tags\": [] }, \"ids\": [item] }",
+        "{ \"encoded\": Json.encode({ \"deep\": { \"tags\": [] } }) }",
+    ] {
+        parse(&returning_json(value)).unwrap_or_else(|err| panic!("for `{value}`: {err}"));
+    }
+}
+
+/// `Map.empty` is not on that list, because a JSON object is written `{ ... }`: a map
+/// never reaches a body without a declared type to have come from.
+#[test]
+fn an_empty_map_in_a_body_still_needs_a_target_type() {
+    let message = parse(&returning_json("{ \"m\": Map.empty }"))
+        .expect_err("a map has no place in a body")
+        .message;
+    assert!(
+        message.starts_with("`Map.empty` needs a target type"),
+        "got: {message}"
+    );
+}
+
 // ---------------------------------------------------------------------------------
 // `for`.
 

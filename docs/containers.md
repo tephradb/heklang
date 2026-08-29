@@ -96,6 +96,21 @@ target: a `state` declaration, a command or `fn` parameter, an event or entity f
 position of a method that already knows (`plans.get(id).unwrap_or(Map.empty)` takes it from `plans`).
 Without one, both are a compile error that names those places.
 
+**Inside an object literal there is no target, and `[]` needs none.** A JSON body's values are typed
+by what they are rather than by where they land, so `{ "tags": [] }` is an empty array and there is
+nothing left to decide: it serialises the same whatever it would have held. Demanding a declaration
+there named three places an author cannot reach from inside a body, which read as a bug and was one.
+It holds at any depth and wherever an object literal is legal, since a `Json.encode` argument and a
+`fn` that returns a `Json` are bodies too:
+
+```
+http.post(url, { "tags": [], "meta": { "ids": [] } })
+Json.encode({ "plans": [] })
+```
+
+`Map.empty` is not on this list. A JSON object is written `{ ... }`, so a map never lands in a body
+without a declared type to have come from.
+
 `let` takes no type annotation, so it is not one of them. That is deliberate: adding annotations to
 `let` would be a second way to write down a type, in a language where every other binding gets its
 type from a declaration that already exists. Across a 3,186-line port, every empty container had a

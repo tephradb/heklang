@@ -564,6 +564,41 @@ fn object_keys_are_sorted() {
     );
 }
 
+/// A body's values are typed by what they are, so an empty array needs no target and
+/// reaches the wire as one. At any depth, because the whole literal is a body rather
+/// than only its outermost brace.
+#[test]
+fn an_empty_array_reaches_the_body_at_any_depth() {
+    let program = program(
+        "effect E {
+  on @order.placed as e { customer_id } {
+    http.post(\"https://mail.example/confirm\", {
+      \"tags\": [],
+      \"ids\": [customer_id],
+      \"meta\": { \"also\": [] },
+      \"encoded\": Json.encode({ \"deep\": [] }),
+    })
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let (_, outcome) = deliver(
+        &program,
+        vec![placed(1, 7, 100)],
+        vec![Reply::Status(200)],
+        &mut journal,
+    );
+    outcome.expect("delivered");
+    let sent = posted(&journal);
+    assert!(sent.contains("\"tags\":[]"), "{sent}");
+    assert!(sent.contains("\"ids\":[7]"), "{sent}");
+    assert!(sent.contains("\"meta\":{\"also\":[]}"), "{sent}");
+    assert!(
+        sent.contains(r#""encoded":"{\"deep\":[]}""#),
+        "a nested object under `Json.encode` is a body too: {sent}"
+    );
+}
+
 // ---------------------------------------------------------------------------------
 // Rule 9: erase last, statically enforced.
 
