@@ -76,19 +76,37 @@ the run was pointed at, so an editor jumps to it. The position is the start of t
 the diagnostic covers, and `docs/diagnostics.md` is the contract for both the extent and
 the closed set of codes.
 
-Under it goes the source line, with the extent drawn:
+Under it goes the source line with the extent drawn, then the hint, then every related
+location:
 
 ```
-a.hk:2:41 [type-mismatch] expected Money(2), found String
+a.hk:2:41 [type-mismatch] expected String, found String?
   |
-2 |   emit @order.placed { order_id, total: text }
-  |                                         ^^^^
+2 |   emit @order.placed { order_id, name: text }
+  |                                        ^^^^
+  = `unwrap_or` gives it a fallback, or a branch that proves it present makes it a
+    String without one
+
+b.hk:3:9 [declared-twice] command `C` is declared twice
+  |
+3 | command C(id: Int) { return }
+  |         ^
+  = a.hk:1:9: first declared here
 ```
 
 **The header is what an editor reads and the drawing is what a person reads.** The code
 sits in the header rather than under the drawing, because grouping and filtering are
-things a reader does to a list of headers. The gutter is as wide as the line number.
-Columns count `char`s, so the carets line up under text that is not ASCII.
+things a reader does to a list of headers. The message alone is in the header, for the
+same reason: it is the one line, and the hint is the paragraph. The gutter is as wide as
+the line number. Columns count `char`s, so the carets line up under text that is not
+ASCII.
+
+**A `= ` line is a note.** The hint is one, and so is each related location, which reads
+`file:line:col: message` because it is somewhere to go too, exactly like the header. A
+note wraps at 84 columns and its continuation lines up under the first word rather than
+under the `=`, so one note reads as one thing. `hek` prints related locations as notes
+rather than drawing each one under its own source line: a second extent is a second block,
+and a list of them stops being a list.
 
 Two cases draw less or nothing. A span with nothing in it (the end of the file, rule 5 of
 `docs/diagnostics.md`) prints the header alone, because there is no line 0 to draw under.

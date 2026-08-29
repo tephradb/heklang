@@ -383,3 +383,104 @@ fn a_span_over_several_lines_is_drawn_to_the_end_of_the_first() {
     );
     assert!(!text.contains("3 | "), "and line 3 is not drawn: {text}");
 }
+
+/// `docs/cli.md`: the hint goes on a `= ` line under the drawing rather than inside the
+/// header, so the header stays the one line an editor reads.
+#[test]
+fn a_hint_is_a_line_of_its_own() {
+    let root = project(
+        "hint-line",
+        &[
+            ("events.hk", "event @a.b { id: Int, name: String }\n"),
+            (
+                "a.hk",
+                "command C(id: Int, text: String?) {\n  emit @a.b { id, name: text }\n}\n",
+            ),
+        ],
+    );
+    let text = stdout(&run(&root, &["check"]));
+
+    assert!(
+        text.contains("a.hk:2:25 [type-mismatch] expected String, found String?\n"),
+        "the header is the message alone: {text}"
+    );
+    assert!(
+        text.contains("  = `unwrap_or` gives it a fallback"),
+        "and the hint is under the drawing: {text}"
+    );
+}
+
+/// A related location reads like the header does, because it is somewhere to go too.
+#[test]
+fn a_related_location_is_a_line_of_its_own() {
+    let root = project(
+        "related-line",
+        &[
+            ("a.hk", "command C(id: Int) { return }\n"),
+            (
+                "b.hk",
+                "event @x.y { id: Int }\ncommand C(id: Int) { return }\n",
+            ),
+        ],
+    );
+    let text = stdout(&run(&root, &["check"]));
+
+    assert!(
+        text.contains("b.hk:2:9 [declared-twice] command `C` is declared twice\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("  = a.hk:1:9: first declared here"),
+        "the first declaration, in the module it is in: {text}"
+    );
+}
+
+/// A cycle gets one `= ` line per link, so the loop can be walked from the report.
+#[test]
+fn a_cycle_draws_every_link() {
+    let root = project(
+        "cycle-links",
+        &[(
+            "a.hk",
+            "fn a(n: Int) -> Int { return b(n) }\nfn b(n: Int) -> Int { return c(n) }\nfn c(n: Int) -> Int { return a(n) }\n",
+        )],
+    );
+    let text = stdout(&run(&root, &["check"]));
+
+    assert!(
+        text.contains("  = a.hk:2:1: `b` is declared here"),
+        "{text}"
+    );
+    assert!(
+        text.contains("  = a.hk:3:1: `c` is declared here"),
+        "{text}"
+    );
+}
+
+/// A long hint wraps rather than running off the screen, and the continuation lines up
+/// under the first word so one note reads as one thing.
+#[test]
+fn a_long_hint_wraps_under_itself() {
+    let root = project(
+        "hint-wrap",
+        &[
+            ("events.hk", "event @a.b { id: Int, name: String }\n"),
+            (
+                "a.hk",
+                "command C(id: Int, text: String?) {\n  emit @a.b { id, name: text }\n}\n",
+            ),
+        ],
+    );
+    let text = stdout(&run(&root, &["check"]));
+
+    let note: Vec<&str> = text
+        .lines()
+        .skip_while(|line| !line.starts_with("  = "))
+        .take(2)
+        .collect();
+    assert_eq!(note.len(), 2, "the hint took two lines: {text}");
+    assert!(
+        note[1].starts_with("    ") && !note[1].starts_with("    ="),
+        "the continuation lines up under the text, not under the `=`: {text}"
+    );
+}

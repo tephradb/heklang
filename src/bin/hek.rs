@@ -12,10 +12,15 @@
 use std::env;
 use std::fs;
 use std::io::{self, Write};
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use heklang::{Diagnostic, Program, TestOutcome, check_files, run_tests};
+use heklang::{Diagnostic, Program, Severity, Span, TestOutcome, check_files, run_tests};
+
+/// Where a `= ` line wraps. Wide enough for a long sentence to stay one or two lines,
+/// narrow enough to read beside the source it is about.
+const WIDTH: usize = 84;
 
 const USAGE: &str = "\
 hek: check heklang sources and run their tests
@@ -100,13 +105,9 @@ fn run() -> Result<bool, String> {
     let program = match check_files(files) {
         Ok(program) => program,
         Err(errors) => {
-            // Each is already `file:line:col: message`, which is what an editor jumps
-            // to. The count goes last so a long list ends by saying how long it was.
+            // The count goes last so a long list ends by saying how long it was.
             for err in &errors {
-                println!("{err}");
-                if let Some(drawn) = underline(&sources, err) {
-                    print!("{drawn}");
-                }
+                print!("{}", report(&sources, err));
             }
             let s = if errors.len() == 1 { "" } else { "s" };
             println!("\n{} error{s}", errors.len());
@@ -204,6 +205,83 @@ fn walk(dir: &Path, found: &mut Vec<PathBuf>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// One diagnostic, whole. The header is what an editor jumps to and everything under it
+/// is for a person: the source line with the extent drawn, then the hint, then every
+/// related location. `docs/cli.md` has the shape.
+fn report(sources: &[(String, String)], err: &Diagnostic) -> String {
+    let mut out = match err.severity {
+        Severity::Error => format!(
+            "{} [{}] {}\n",
+            place(err.file.as_deref(), err.span),
+            err.code,
+            err.message
+        ),
+        Severity::Warning => format!(
+            "{} [warning: {}] {}\n",
+            place(err.file.as_deref(), err.span),
+            err.code,
+            err.message
+        ),
+    };
+    let gutter = " ".repeat(err.span.start.line.to_string().len());
+    if let Some(drawn) = underline(sources, err) {
+        out.push_str(&drawn);
+    }
+    if let Some(hint) = &err.hint {
+        out.push_str(&note(&gutter, hint));
+    }
+    for related in &err.related {
+        let line = format!(
+            "{}: {}",
+            place(related.file.as_deref(), related.span),
+            related.message
+        );
+        out.push_str(&note(&gutter, &line));
+    }
+    out
+}
+
+/// `file:line:col`, or `line:col` for a source with no name. The same text in the header
+/// and in a related location, so both read as somewhere to go.
+fn place(file: Option<&str>, span: Span) -> String {
+    match file {
+        Some(file) => format!("{file}:{span}"),
+        None => format!("{span}"),
+    }
+}
+
+/// A `= ` line under the drawing, wrapped so a long hint does not run off the screen.
+/// Continuations line up under the first word rather than under the `=`, which is what
+/// makes one note read as one thing.
+fn note(gutter: &str, text: &str) -> String {
+    let mut out = String::new();
+    for (index, line) in wrap(text, WIDTH).into_iter().enumerate() {
+        let lead = if index == 0 { "=" } else { " " };
+        out.push_str(&format!("{gutter} {lead} {line}\n"));
+    }
+    out
+}
+
+/// Greedy wrapping on spaces. A word longer than the width is left whole rather than
+/// broken: it is a path or an identifier, and half of one is not readable.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ') {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            lines.push(mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// The source line a diagnostic is about, with its extent drawn underneath. The header
