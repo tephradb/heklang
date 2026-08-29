@@ -153,3 +153,80 @@ fn an_unknown_field_covers_the_field_name() {
     assert_eq!(err.message, "@thing.happened has no field `nope`");
     assert_eq!(err.span, at(3, 30, 3, 34));
 }
+
+/// Rule 3: a node carries the extent it was parsed from, not the token the builder's
+/// cursor happened to hold. A runtime error reads that extent, so it now covers the same
+/// text a static error over the same expression would.
+#[test]
+fn a_runtime_error_covers_its_expression() {
+    let program = parse(
+        "event @thing.happened { id: Int, name: String }\ncommand A(total: Money(2)) {\n  let cut = total * 0.9\n  return\n}\n",
+    )
+    .expect("this parses; the multiplication only fails when it runs");
+
+    let mut interpreter = heklang::Interpreter::new(&program);
+    let err = interpreter
+        .run("A", [("total", heklang::Value::money(2_599, 2))])
+        .expect_err("the multiplication is not exact");
+
+    assert_eq!(
+        err.span,
+        at(3, 13, 3, 24),
+        "`total * 0.9`, not the `*` the builder's cursor was on"
+    );
+}
+
+/// Rule 2, over every expression in the demo programs: a span runs forwards. A production
+/// given the wrong start shows up here and nowhere else, because a backwards span still
+/// renders as a plausible position.
+#[test]
+fn every_span_runs_forwards() {
+    let mut sources = Vec::new();
+    for entry in std::fs::read_dir("hek").expect("the demo programs are in `hek/`") {
+        let path = entry.expect("a readable entry").path();
+        if path.extension().is_some_and(|ext| ext == "hk") {
+            let name = path.to_string_lossy().into_owned();
+            sources.push((name, std::fs::read_to_string(&path).expect("readable")));
+        }
+    }
+    assert!(!sources.is_empty(), "the demo programs are the corpus");
+
+    let program = heklang::parse_files(sources.iter().map(|(n, s)| (n.as_str(), s.as_str())))
+        .expect("the demo programs check clean");
+
+    let arenas = program
+        .commands
+        .iter()
+        .map(|c| &c.exprs)
+        .chain(
+            program
+                .projectors
+                .iter()
+                .flat_map(|p| p.handlers.iter().map(|h| &h.exprs)),
+        )
+        .chain(
+            program
+                .effects
+                .iter()
+                .flat_map(|e| e.arms.iter().map(|a| &a.exprs)),
+        )
+        .chain(program.functions.iter().map(|f| &f.exprs));
+
+    let mut checked = 0;
+    for exprs in arenas {
+        let mut id = 0;
+        while exprs.get(heklang::ExprId(id)).is_some() {
+            let span = exprs.span(heklang::ExprId(id));
+            assert!(
+                span.start <= span.end,
+                "expression {id} runs backwards: {span:?}"
+            );
+            checked += 1;
+            id += 1;
+        }
+    }
+    assert!(
+        checked > 300,
+        "only {checked} expressions; too few to mean much"
+    );
+}

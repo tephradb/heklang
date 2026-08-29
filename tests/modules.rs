@@ -122,8 +122,8 @@ fn a_runtime_error_names_the_module_of_the_declaration_that_raised_it() {
 
     assert_eq!(err.module.as_deref(), Some("commands/discount.hk"));
     assert!(
-        err.to_string().starts_with("commands/discount.hk:2:19:"),
-        "got: {err}"
+        err.to_string().starts_with("commands/discount.hk:2:13:"),
+        "a runtime error covers its expression, as a static one does: {err}"
     );
 }
 

@@ -183,6 +183,14 @@ impl Builder {
         self.span = span;
     }
 
+    /// Give a node the extent it was parsed from. The cursor `expr` stamps comes from a
+    /// token the parser held before it knew what it was building, so only the production
+    /// that finishes can say how far it ran.
+    pub fn respan(&mut self, id: ExprId, span: Span) -> ExprId {
+        self.exprs.respan(id, span);
+        id
+    }
+
     pub fn expr(&mut self, expr: Expr) -> ExprId {
         self.exprs.push(expr, self.span)
     }

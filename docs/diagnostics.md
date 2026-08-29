@@ -68,6 +68,11 @@ fn span_from(&self, start: Pos) -> Span
 parser needs no other bookkeeping to know the extent of what it just read, which is why this was
 worth doing before anything reads the extents rather than after.
 
+**An IR node gets the same treatment.** The builder stamps each node from a cursor the parser set
+from a token it held *before* it knew what it was building, so a node closes with `respan` once its
+production finishes. Without that, `a + b` would carry the span of the `+`. This is what a runtime
+error reads, so a `Money` mismatch at run time now covers the same text the static check would.
+
 ## 4. What a diagnostic covers
 
 | Shape | Covers |

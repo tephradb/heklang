@@ -312,6 +312,13 @@ impl Parser {
         Span::new(start, self.prev_end())
     }
 
+    /// Stamp a node with everything consumed since `start`, and hand it back. Every
+    /// production that builds a node out of more than one token ends with this, which is
+    /// what makes a runtime error and a hover read the same extent a static one does.
+    fn close(&self, lower: &mut Lower, id: ExprId, start: Pos) -> ExprId {
+        lower.b.respan(id, self.span_from(start))
+    }
+
     fn command_end(&self) -> usize {
         let mut depth = 0u32;
         for (index, spanned) in self.tokens.iter().enumerate().skip(self.pos) {
@@ -3140,21 +3147,25 @@ impl Parser {
     }
 
     fn or_expr(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
+        let start = self.here();
         let mut lhs = self.and_expr(lower, expect)?;
         while let Some(span) = self.eat_at(Sym::OrOr) {
             let rhs = self.and_expr(lower, Some(Type::Bool))?;
             lower.b.at(span);
             lhs = lower.b.binary(BinOp::Or, lhs, rhs);
+            lhs = self.close(lower, lhs, start);
         }
         Ok(lhs)
     }
 
     fn and_expr(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
+        let start = self.here();
         let mut lhs = self.cmp_expr(lower, expect)?;
         while let Some(span) = self.eat_at(Sym::AndAnd) {
             let rhs = self.cmp_expr(lower, Some(Type::Bool))?;
             lower.b.at(span);
             lhs = lower.b.binary(BinOp::And, lhs, rhs);
+            lhs = self.close(lower, lhs, start);
         }
         Ok(lhs)
     }
@@ -3193,7 +3204,8 @@ impl Parser {
         // underlining `>` alone says nothing about which two things did not meet.
         self.check_compare(lower, op, lhs, rhs, Span::new(start, rhs_at.end))?;
         lower.b.at(lhs_at);
-        Ok(lower.b.binary(op, lhs, rhs))
+        let value = lower.b.binary(op, lhs, rhs);
+        Ok(self.close(lower, value, start))
     }
 
     fn add_expr(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
@@ -3208,6 +3220,7 @@ impl Parser {
             self.check_arith(lower, op, lhs, rhs, self.span_from(start))?;
             lower.b.at(span);
             lhs = lower.b.binary(op, lhs, rhs);
+            lhs = self.close(lower, lhs, start);
         }
         Ok(lhs)
     }
@@ -3224,6 +3237,7 @@ impl Parser {
             self.check_arith(lower, op, lhs, rhs, self.span_from(start))?;
             lower.b.at(span);
             lhs = lower.b.binary(op, lhs, rhs);
+            lhs = self.close(lower, lhs, start);
         }
         Ok(lhs)
     }
@@ -3277,15 +3291,18 @@ impl Parser {
         lower: &mut Lower,
         expect: Option<Type>,
     ) -> Result<ExprId, SyntaxError> {
+        let start = self.here();
         if let Some(span) = self.eat_at(Sym::Bang) {
             let operand = self.unary_expr(lower, Some(Type::Bool))?;
             lower.b.at(span);
-            return Ok(lower.b.unary(UnOp::Not, operand));
+            let value = lower.b.unary(UnOp::Not, operand);
+            return Ok(self.close(lower, value, start));
         }
         if let Some(span) = self.eat_at(Sym::Minus) {
             let operand = self.unary_expr(lower, expect)?;
             lower.b.at(span);
-            return Ok(lower.b.unary(UnOp::Neg, operand));
+            let value = lower.b.unary(UnOp::Neg, operand);
+            return Ok(self.close(lower, value, start));
         }
         self.postfix_expr(lower, expect)
     }
@@ -3295,6 +3312,7 @@ impl Parser {
         lower: &mut Lower,
         expect: Option<Type>,
     ) -> Result<ExprId, SyntaxError> {
+        let start = self.here();
         let mut value = self.primary(lower, expect)?;
         while self.eat_sym(Sym::Dot) {
             let span = self.span_here();
@@ -3380,6 +3398,7 @@ impl Parser {
                 }
                 lower.b.at(span);
                 value = lower.b.method(value, &name, args);
+                value = self.close(lower, value, start);
                 continue;
             }
 
@@ -3414,11 +3433,25 @@ impl Parser {
                 receiver: value,
                 name,
             });
+            value = self.close(lower, value, start);
         }
         Ok(value)
     }
 
+    /// One wrapper rather than a `close` inside each arm: `primary` builds a literal, a
+    /// load, an `if`, a container, a record, an `invoke` and every builtin call, and all
+    /// of them want the same answer, which is everything the arm consumed.
     fn primary(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
+        let start = self.here();
+        let value = self.primary_inner(lower, expect)?;
+        Ok(self.close(lower, value, start))
+    }
+
+    fn primary_inner(
+        &mut self,
+        lower: &mut Lower,
+        expect: Option<Type>,
+    ) -> Result<ExprId, SyntaxError> {
         let spanned = self.bump();
         let span = spanned.span;
         lower.b.at(span);
