@@ -479,3 +479,75 @@ fn every_code_is_reachable() {
         .collect();
     assert!(missing.is_empty(), "codes no case produces: {missing:?}");
 }
+
+// ---------------------------------------------------------------------------------
+// Rule 9: a diagnostic can point at a second place.
+
+/// The commonest shape in the set, and the one that used to say least: it underlined
+/// the second declaration and never named the first. The first is often in another
+/// module, which is why a related location carries its own file.
+#[test]
+fn a_second_declaration_names_the_first() {
+    let err = heklang::parse_files([
+        ("a.hk", "command C(id: Int) { return }\n"),
+        (
+            "b.hk",
+            "event @x.y { id: Int }\ncommand C(id: Int) { return }\n",
+        ),
+    ])
+    .expect_err("`C` is declared twice");
+
+    assert_eq!(err.message, "command `C` is declared twice");
+    assert_eq!(err.file.as_deref(), Some("b.hk"));
+    let [first] = err.related.as_slice() else {
+        panic!("expected the first declaration, got: {:?}", err.related)
+    };
+    assert_eq!(first.file.as_deref(), Some("a.hk"), "another module");
+    assert_eq!(first.span.start, Pos::new(1, 9));
+}
+
+/// A cycle is a relation over declarations, so every link in it is a place. The chain
+/// stays in the message, because names are what an author reads; the spans are what an
+/// editor can follow, and prose is not one.
+#[test]
+fn a_cycle_names_every_link() {
+    let err = parse(
+        "fn a(n: Int) -> Int { return b(n) }
+fn b(n: Int) -> Int { return c(n) }
+fn c(n: Int) -> Int { return a(n) }
+",
+    )
+    .expect_err("`a` calls itself through `b` and `c`");
+
+    assert!(err.message.contains("`a` calls `b` calls `c`"), "{err}");
+    let lines: Vec<u32> = err
+        .related
+        .iter()
+        .map(|link| link.span.start.line)
+        .collect();
+    assert_eq!(lines, vec![2, 3], "one per link, the primary not repeated");
+}
+
+/// Rule 9's erase-last check is about two statements, and the diagnostic used to name
+/// the second by writing its position into the sentence.
+#[test]
+fn an_erase_order_diagnostic_points_at_the_erase() {
+    let err = parse(
+        "event @order.placed { order_id: Int, customer_id: Int, email: String @subject(customer_id) }
+effect E {
+  on @order.placed as e {
+    erase(e.customer_id)
+    log(reveal(e.email))
+  }
+}
+",
+    )
+    .expect_err("the `reveal` can run after the `erase`");
+
+    assert_eq!(err.message, "this `reveal` can run after the `erase`");
+    assert_eq!(err.span.start.line, 5, "the `reveal`");
+    let [erase] = err.related.as_slice() else {
+        panic!("expected the `erase`, got: {:?}", err.related)
+    };
+    assert_eq!(erase.span.start.line, 4);
+}

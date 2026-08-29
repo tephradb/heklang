@@ -1,4 +1,4 @@
-use heklang::parse;
+use heklang::{Pos, parse};
 
 #[test]
 fn a_command_may_precede_the_events_it_uses() {
@@ -56,8 +56,8 @@ command C(customer_id: Int) {
 ";
     let err = parse(source).expect_err("`customer` is defined below the declarations");
     assert!(
-        err.text().contains("is defined at 6:7"),
-        "expected the definition site, got: {}",
+        err.text().contains("is defined below the declarations"),
+        "expected the rule, got: {}",
         err.text()
     );
     assert!(
@@ -65,6 +65,12 @@ command C(customer_id: Int) {
         "expected the prologue rule to be explained, got: {}",
         err.text()
     );
+    // The definition site is a place rather than a sentence, so it is a related
+    // location an editor can follow rather than a `6:7` inside the message.
+    let [defined] = err.related.as_slice() else {
+        panic!("expected one related location, got: {:?}", err.related)
+    };
+    assert_eq!(defined.span.start, Pos::new(6, 7));
 }
 
 #[test]
@@ -84,7 +90,10 @@ command C(y: Int) {
         "got: {}",
         err.text()
     );
-    assert!(err.text().contains("6:7"), "got: {}", err.text());
+    let [defined] = err.related.as_slice() else {
+        panic!("expected one related location, got: {:?}", err.related)
+    };
+    assert_eq!(defined.span.start, Pos::new(6, 7));
 }
 
 #[test]

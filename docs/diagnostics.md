@@ -242,8 +242,45 @@ not enough on its own: an applicable edit needs a span to replace and the text t
 there, and a hint carries neither. It is the sentence a person reads, and the marker for
 where the edits are.
 
-## 9. What this is not, yet
+## 9. A second place worth looking
 
-`related` is a field that nothing fills. The eight diagnostics that name a second place
-still interpolate it into their own text, so an editor cannot link to any of them. That is
-the next piece of work, and this document is where it lands.
+```rust
+pub struct Related { pub span: Span, pub file: Option<String>, pub message: String }
+```
+
+Some diagnostics are about two places. Until now they said so in prose:
+
+```
+a.hk:3:9: command `C` is declared twice
+```
+
+which underlines the second `C` and never says where the first is. Three shapes, in
+ascending order of how much they were missing:
+
+**A position written into a sentence.** ``the id at 7:12 was learned by revealing`` and
+four others interpolated a `line:col`, four of them without even a file name. A position
+in prose is not somewhere an editor can go, and it is not something a person reads either.
+Those stop naming a position and carry a `Related` instead.
+
+**A chain flattened into a prefix.** ``` `a` calls `b` calls `c` calls `a` ``` and
+`@x -> E -> C -> @x` are relations over declarations written as one line of text. Here the
+prose stays, because names are what an author reads and a list of spans is not a sentence;
+each link also becomes a `Related`, so the loop can be walked. The link that closes the
+cycle is the primary span, so it is not repeated.
+
+**`declared-twice`, which had nothing to give.** The duplicate checks walk lists of
+declarations that carry no position, so there was nothing to name even had the message
+wanted to. What they consult now is one map beside them, `(kind, name) -> Related`, filled
+as each declaration is accepted. A map rather than a span on every IR declaration, because
+the declaration types are read by the interpreter and this is a question only the parser
+asks. The kind is part of the key because `record C` and `command C` are different names,
+and a projector's own `enum` and `entity` are tracked inside the projector rather than in
+that map, because two projectors may each declare a `Status`.
+
+**A related location carries its own file.** A second declaration is often in another
+module, and four of the five messages that named a position never said which.
+
+## 10. What this is not, yet
+
+Severity is a channel with no producer: nothing is a warning. The lints that need one are
+the next piece of work, and this document is where they land.

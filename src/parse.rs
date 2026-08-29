@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::mem;
 
 use crate::build::Builder;
-use crate::diagnostic::{Code, Diagnostic};
+use crate::diagnostic::{Code, Diagnostic, Related};
 use crate::ir::{
     Absent, Action, Arm, BinOp, Bind, Builtin, Command, ConstDef, Effect, EntityDef, EntityField,
     EnumDef, EnvField, EventDef, EventPath, Expect, Expr, ExprId, Exprs, FieldDef, Filter,
@@ -142,6 +142,12 @@ struct Parser {
     /// Set only while parsing a `patch` value, which is what makes `.field`
     /// structurally illegal anywhere else.
     stored: Option<Stored>,
+    /// Where each declared name was first seen, keyed by kind and name because
+    /// `command C` and `record C` are different names. `declared-twice` is the most
+    /// common diagnostic in the set and had the least to say: it underlined the second
+    /// declaration and never named the first, because the lists these checks walk carry
+    /// no position. One map beside them rather than a span on every IR declaration.
+    declared: HashMap<(String, Ident), Related>,
 }
 
 /// A const with its value still unread: enough to say what type it is and where to
@@ -237,6 +243,7 @@ impl Parser {
             triggers: Vec::new(),
             envelope: None,
             stored: None,
+            declared: HashMap::new(),
         })
     }
 
@@ -256,17 +263,58 @@ impl Parser {
         }
     }
 
-    /// A `file:line:col` for a token elsewhere in the stream, for messages that point
-    /// at a first declaration from the site of a second.
-    fn location(&self, pos: usize) -> String {
-        let at = self
+    /// Somewhere else in the stream worth looking, for a diagnostic that is about two
+    /// places. The file is carried rather than assumed: a first declaration is often in
+    /// another module, and a reader that cannot open it has been told nothing.
+    fn elsewhere(&self, message: impl Into<String>, span: Span, pos: usize) -> Related {
+        let related = Related::new(message, span);
+        match self.module_at(pos) {
+            Some(module) => related.in_file(module),
+            None => related,
+        }
+    }
+
+    /// The same for a token named by index, which is how the passes remember where a
+    /// declaration began.
+    fn at_token(&self, message: impl Into<String>, pos: usize) -> Related {
+        let span = self
             .tokens
             .get(pos)
-            .map(|spanned| spanned.span.start)
+            .map(|spanned| spanned.span)
             .unwrap_or_default();
-        match self.module_at(pos) {
-            Some(module) => format!("{module}:{at}"),
-            None => format!("{at}"),
+        self.elsewhere(message, span, pos)
+    }
+
+    /// Records where a name was declared, so the diagnostic for a second one can point
+    /// at the first. The token is the one after the keyword, which is the name in every
+    /// declaration heklang has: `enum E`, `event @a.b`, `test "..."`.
+    fn declare(&mut self, kind: &str, name: &str, pos: usize) {
+        let related = self.at_token("first declared here", pos);
+        self.declared
+            .insert((kind.to_string(), name.to_string()), related);
+    }
+
+    /// Where a name was declared, for a diagnostic that is about a second one but does
+    /// not read as "declared twice".
+    fn first_declared(&self, kind: &str, name: &str) -> Option<Related> {
+        self.declared
+            .get(&(kind.to_string(), name.to_string()))
+            .cloned()
+    }
+
+    /// A second declaration of a name, pointing at the first if the pass that would
+    /// have recorded it has run.
+    fn declared_twice(
+        &self,
+        kind: &str,
+        name: &str,
+        message: impl Into<String>,
+        span: Span,
+    ) -> Diagnostic {
+        let error = self.err(Code::DeclaredTwice, message, span);
+        match self.first_declared(kind, name) {
+            Some(first) => error.with_related(first),
+            None => error,
         }
     }
 
@@ -360,22 +408,27 @@ impl Parser {
     }
 
     fn not_in_scope(&self, name: &str, span: Span) -> Diagnostic {
-        let (message, hint) = match (self.later_let(name), self.prologue) {
-            (Some(at), true) => (
-                format!("`{name}` is defined at {at}, below the declarations"),
+        let later = self.later_let(name);
+        let (message, hint) = match (later, self.prologue) {
+            (Some(_), true) => (
+                format!("`{name}` is defined below the declarations"),
                 Some(
                     "`guard` and `state` run before the body, so they can only use names \
                      bound above them; move that `let` up"
                         .to_string(),
                 ),
             ),
-            (Some(at), false) => (
+            (Some(_), false) => (
                 format!("`{name}` is not in scope yet"),
-                Some(format!("it is defined below at {at}")),
+                Some("it is defined below".to_string()),
             ),
             (None, _) => (format!("`{name}` is not in scope"), None),
         };
-        self.advised(Code::NotInScope, (message, hint), span)
+        let error = self.advised(Code::NotInScope, (message, hint), span);
+        match later {
+            Some(at) => error.with_related(self.elsewhere("defined here", at, self.pos)),
+            None => error,
+        }
     }
 
     fn bump(&mut self) -> Spanned {
@@ -611,11 +664,13 @@ impl Parser {
         // the same reason it is everywhere else: nothing a test names is scoped.
         for at in bodies.tests {
             self.pos = at;
+            let named = at + 1;
             let recovered = self.recovering(at, |parser| {
                 let test = parser.test_decl(&program)?;
                 if program.tests.iter().any(|other| other.name == test.name) {
-                    return Err(parser.err(
-                        Code::DeclaredTwice,
+                    return Err(parser.declared_twice(
+                        "test",
+                        &test.name,
                         format!("test {:?} is declared twice", test.name),
                         test.span,
                     ));
@@ -623,6 +678,7 @@ impl Parser {
                 Ok(test)
             })?;
             if let Some(test) = recovered {
+                self.declare("test", &test.name, named);
                 program.tests.push(test);
             }
         }
@@ -681,27 +737,34 @@ impl Parser {
     fn name_item(&mut self) -> Result<(), Diagnostic> {
         match self.peek() {
             Token::Word(Keyword::Enum) => {
+                let named = self.pos + 1;
                 let def = self.enum_decl()?;
                 if self.module_enums.iter().any(|other| other.name == def.name) {
-                    return self.fail(
-                        Code::DeclaredTwice,
+                    return Err(self.declared_twice(
+                        "enum",
+                        &def.name,
                         format!("enum `{}` is declared twice", def.name),
-                    );
+                        self.span_here(),
+                    ));
                 }
+                self.declare("enum", &def.name, named);
                 self.module_enums.push(def);
             }
             Token::Word(Keyword::Record) => {
                 let module = self.module_at(self.pos).map(str::to_string);
+                let named = self.pos + 1;
                 self.bump();
                 let at = self.span_here();
                 let name = self.expect_ident()?;
                 if self.records.iter().any(|other| other.name == name) {
-                    return Err(self.err(
-                        Code::DeclaredTwice,
+                    return Err(self.declared_twice(
+                        "record",
+                        &name,
                         format!("record `{name}` is declared twice"),
                         at,
                     ));
                 }
+                self.declare("record", &name, named);
                 self.records.push(RecordDef {
                     name,
                     module,
@@ -732,13 +795,17 @@ impl Parser {
     fn const_item(&mut self) -> Result<(), Diagnostic> {
         match self.peek() {
             Token::Word(Keyword::Const) => {
+                let named = self.pos + 1;
                 let shell = self.const_shell()?;
                 if self.shell_of(&shell.name).is_some() {
-                    return self.fail(
-                        Code::DeclaredTwice,
+                    return Err(self.declared_twice(
+                        "const",
+                        &shell.name,
                         format!("const `{}` is declared twice", shell.name),
-                    );
+                        self.span_here(),
+                    ));
                 }
+                self.declare("const", &shell.name, named);
                 self.shells.push(shell);
             }
             _ => self.skip_item()?,
@@ -756,23 +823,32 @@ impl Parser {
             Token::Word(Keyword::Enum) | Token::Word(Keyword::Record) => self.skip_item()?,
             Token::Word(Keyword::Const) => self.skip_item()?,
             Token::Word(Keyword::Event) => {
+                let named = self.pos + 1;
                 let event = self.event_decl()?;
+                let path = event.path.to_string();
                 if events.iter().any(|def| def.path == event.path) {
-                    return self.fail(
-                        Code::DeclaredTwice,
-                        format!("event {} is declared twice", event.path),
-                    );
+                    return Err(self.declared_twice(
+                        "event",
+                        &path,
+                        format!("event {path} is declared twice"),
+                        self.span_here(),
+                    ));
                 }
+                self.declare("event", &path, named);
                 events.push(event);
             }
             Token::Word(Keyword::Projector) => {
+                let named = self.pos + 1;
                 let projector = self.projector_shell()?;
                 if projectors.iter().any(|other| other.name == projector.name) {
-                    return self.fail(
-                        Code::DeclaredTwice,
+                    return Err(self.declared_twice(
+                        "projector",
+                        &projector.name,
                         format!("projector `{}` is declared twice", projector.name),
-                    );
+                        self.span_here(),
+                    ));
                 }
+                self.declare("projector", &projector.name, named);
                 projectors.push(projector);
             }
             Token::Word(Keyword::Command) => self.command_signature()?,
@@ -808,13 +884,17 @@ impl Parser {
                 out.seen += 1;
             }
             Token::Word(Keyword::Effect) => {
+                let named = self.pos + 1;
                 let effect = self.effect_decl(events)?;
                 if out.effects.iter().any(|other| other.name == effect.name) {
-                    return self.fail(
-                        Code::DeclaredTwice,
+                    return Err(self.declared_twice(
+                        "effect",
+                        &effect.name,
                         format!("effect `{}` is declared twice", effect.name),
-                    );
+                        self.span_here(),
+                    ));
                 }
+                self.declare("effect", &effect.name, named);
                 out.effects.push(effect);
             }
             // E: tests, after the program is assembled, because a test names commands,
@@ -834,15 +914,18 @@ impl Parser {
     /// consults the event table. That is what keeps it a pass-1 job.
     fn command_signature(&mut self) -> Result<(), Diagnostic> {
         self.expect_word(Keyword::Command)?;
+        let named = self.pos;
         let at = self.span_here();
         let name = self.expect_ident()?;
         if self.commands.iter().any(|other| other.name == name) {
-            return Err(self.err(
-                Code::DeclaredTwice,
+            return Err(self.declared_twice(
+                "command",
+                &name,
                 format!("command `{name}` is declared twice"),
                 at,
             ));
         }
+        self.declare("command", &name, named);
 
         let params = self.param_list(false)?;
         self.commands.push(Signature {
@@ -872,15 +955,18 @@ impl Parser {
 
     fn fn_signature(&mut self) -> Result<(), Diagnostic> {
         self.expect_word(Keyword::Fn)?;
+        let named = self.pos;
         let at = self.span_here();
         let name = self.expect_ident()?;
         if self.functions.iter().any(|other| other.name == name) {
-            return Err(self.err(
-                Code::DeclaredTwice,
+            return Err(self.declared_twice(
+                "fn",
+                &name,
                 format!("fn `{name}` is declared twice"),
                 at,
             ));
         }
+        self.declare("fn", &name, named);
         let params = self.param_list(true)?;
         self.expect_sym(Sym::To)?;
         let ret = self.fn_type()?;
@@ -1142,16 +1228,24 @@ impl Parser {
         self.expect_sym(Sym::LBrace)?;
 
         let mut fields: Vec<RecordField> = Vec::new();
+        let mut field_at: Vec<Span> = Vec::new();
         while !self.at_sym(Sym::RBrace) {
             let at = self.span_here();
             let field = self.expect_ident()?;
-            if fields.iter().any(|other| other.name == field) {
-                return Err(self.err(
-                    Code::DuplicateField,
-                    format!("record `{name}` declares `{field}` twice"),
-                    at,
-                ));
+            if let Some(index) = fields.iter().position(|other| other.name == field) {
+                return Err(self
+                    .err(
+                        Code::DuplicateField,
+                        format!("record `{name}` declares `{field}` twice"),
+                        at,
+                    )
+                    .with_related(self.elsewhere(
+                        "first declared here",
+                        field_at[index],
+                        self.pos,
+                    )));
             }
+            field_at.push(at);
             self.expect_sym(Sym::Colon)?;
             let ty = self.type_ref()?;
             let max_len = self.length_annotations(&ty, &field)?;
@@ -1206,15 +1300,32 @@ impl Parser {
             return self.fail(Code::NotDeclared, format!("no const `{name}`"));
         };
         if let Some(from) = self.resolving.iter().position(|held| held == name) {
-            let mut chain: Vec<String> = self.resolving[from..]
+            // The chain stays in the message, because names are what an author reads;
+            // each link also becomes a related location, because a name in prose is not
+            // somewhere an editor can go.
+            let links: Vec<Ident> = self.resolving[from..]
                 .iter()
-                .map(|held| format!("`{held}`"))
+                .cloned()
+                .chain([name.to_string()])
                 .collect();
-            chain.push(format!("`{name}`"));
-            return self.fail(Code::ConstCycle, format!(
-                "{}: a `const` cannot name itself, directly or through another, so that every const has a value",
-                chain.join(" names ")
-            ));
+            let chain: Vec<String> = links.iter().map(|held| format!("`{held}`")).collect();
+            let mut error = self.err(
+                Code::ConstCycle,
+                format!(
+                    "{}: a `const` cannot name itself, directly or through another, so that every const has a value",
+                    chain.join(" names ")
+                ),
+                self.span_here(),
+            );
+            for held in &links {
+                if let Some(link) = self.first_declared("const", held) {
+                    error.related.push(Related {
+                        message: format!("`{held}` is declared here"),
+                        ..link
+                    });
+                }
+            }
+            return Err(error);
         }
 
         let saved = self.pos;
@@ -1264,18 +1375,27 @@ impl Parser {
         self.expect_sym(Sym::LBrace)?;
         let body = self.pos;
 
+        // A projector's own declarations are scoped to it, so where each was first seen
+        // is tracked here rather than in the parser-wide table: two projectors may each
+        // declare an `enum Status` and neither is a second declaration of the other.
         let mut enums: Vec<EnumDef> = Vec::new();
+        let mut enum_at: Vec<usize> = Vec::new();
         while !self.at_sym(Sym::RBrace) && !matches!(self.peek(), Token::End) {
             match self.peek() {
                 Token::Word(Keyword::Enum) => {
+                    let named = self.pos + 1;
                     let def = self.enum_decl()?;
-                    if enums.iter().any(|other| other.name == def.name) {
-                        return self.fail(
-                            Code::DeclaredTwice,
-                            format!("enum `{}` is declared twice", def.name),
-                        );
+                    if let Some(index) = enums.iter().position(|other| other.name == def.name) {
+                        return Err(self
+                            .err(
+                                Code::DeclaredTwice,
+                                format!("enum `{}` is declared twice", def.name),
+                                self.span_here(),
+                            )
+                            .with_related(self.at_token("first declared here", enum_at[index])));
                     }
                     enums.push(def);
+                    enum_at.push(named);
                 }
                 Token::Word(Keyword::Entity) => self.skip_braced()?,
                 Token::Word(Keyword::On) => self.skip_handler()?,
@@ -1286,18 +1406,24 @@ impl Parser {
         self.pos = body;
         self.enums = enums;
         let mut entities: Vec<EntityDef> = Vec::new();
+        let mut entity_at: Vec<usize> = Vec::new();
         while !self.at_sym(Sym::RBrace) && !matches!(self.peek(), Token::End) {
             match self.peek() {
                 Token::Word(Keyword::Enum) => self.skip_braced()?,
                 Token::Word(Keyword::Entity) => {
+                    let named = self.pos + 1;
                     let def = self.entity_decl()?;
-                    if entities.iter().any(|other| other.name == def.name) {
-                        return self.fail(
-                            Code::DeclaredTwice,
-                            format!("entity `{}` is declared twice", def.name),
-                        );
+                    if let Some(index) = entities.iter().position(|other| other.name == def.name) {
+                        return Err(self
+                            .err(
+                                Code::DeclaredTwice,
+                                format!("entity `{}` is declared twice", def.name),
+                                self.span_here(),
+                            )
+                            .with_related(self.at_token("first declared here", entity_at[index])));
                     }
                     entities.push(def);
+                    entity_at.push(named);
                 }
                 Token::Word(Keyword::On) => self.skip_handler()?,
                 other => return self.fail(Code::ExpectedToken, Self::expected_member(other)),
@@ -1434,6 +1560,7 @@ impl Parser {
         self.expect_sym(Sym::LBrace)?;
 
         let mut variants: Vec<Ident> = Vec::new();
+        let mut variant_at: Vec<Span> = Vec::new();
         let mut default = None;
         while !self.at_sym(Sym::RBrace) {
             let mut marked = false;
@@ -1453,13 +1580,20 @@ impl Parser {
 
             let at = self.span_here();
             let variant = self.expect_ident()?;
-            if variants.contains(&variant) {
-                return Err(self.err(
-                    Code::DuplicateField,
-                    format!("`{name}` declares `{variant}` twice"),
-                    at,
-                ));
+            if let Some(index) = variants.iter().position(|other| other == &variant) {
+                return Err(self
+                    .err(
+                        Code::DuplicateField,
+                        format!("`{name}` declares `{variant}` twice"),
+                        at,
+                    )
+                    .with_related(self.elsewhere(
+                        "first declared here",
+                        variant_at[index],
+                        self.pos,
+                    )));
             }
+            variant_at.push(at);
             if marked {
                 if default.is_some() {
                     return Err(self.err(
@@ -1496,6 +1630,7 @@ impl Parser {
         self.expect_sym(Sym::LBrace)?;
 
         let mut fields: Vec<EntityField> = Vec::new();
+        let mut field_at: Vec<Span> = Vec::new();
         let mut indexes: Vec<Index> = Vec::new();
         let mut key: Option<usize> = None;
 
@@ -1510,13 +1645,20 @@ impl Parser {
 
             let at = self.span_here();
             let field_name = self.expect_ident()?;
-            if fields.iter().any(|field| field.name == field_name) {
-                return Err(self.err(
-                    Code::DuplicateField,
-                    format!("entity `{name}` declares `{field_name}` twice"),
-                    at,
-                ));
+            if let Some(index) = fields.iter().position(|field| field.name == field_name) {
+                return Err(self
+                    .err(
+                        Code::DuplicateField,
+                        format!("entity `{name}` declares `{field_name}` twice"),
+                        at,
+                    )
+                    .with_related(self.elsewhere(
+                        "first declared here",
+                        field_at[index],
+                        self.pos,
+                    )));
             }
+            field_at.push(at);
             self.expect_sym(Sym::Colon)?;
             let ty = self.type_ref()?;
             let mut field = EntityField::new(&field_name, ty.clone());
@@ -4370,14 +4512,14 @@ impl Parser {
                     .iter()
                     .position(|other| other.events.iter().any(|seen| seen == path));
                 if let Some(index) = clash {
-                    let first = self.location(at[index]);
                     return Err(self
                         .err(
                             Code::DeclaredTwice,
-                            format!("`{name}` already has an arm on {path} at {first}"),
+                            format!("`{name}` already has an arm on {path}"),
                             arm.span,
                         )
-                        .with_hint("one event selects exactly one arm"));
+                        .with_hint("one event selects exactly one arm")
+                        .with_related(self.at_token("the first arm", at[index])));
                 }
             }
             arms.push(arm);
@@ -4404,11 +4546,16 @@ impl Parser {
     /// Sweep one's half of an effect-local `fn`: the signature, and nothing else.
     fn local_fn_signature(&mut self, effect: &Ident) -> Result<(), Diagnostic> {
         self.expect_word(Keyword::Fn)?;
+        let named = self.pos;
         let at = self.span_here();
         let name = self.expect_ident()?;
+        // Keyed by the effect, because two effects may each declare the same helper
+        // name and neither is a second declaration of the other.
+        let scope = format!("fn in {effect}");
         if self.local_fns.iter().any(|other| other.name == name) {
-            return Err(self.err(
-                Code::DeclaredTwice,
+            return Err(self.declared_twice(
+                &scope,
+                &name,
                 format!("`{effect}` already declares a `fn` named `{name}`"),
                 at,
             ));
@@ -4417,8 +4564,21 @@ impl Parser {
         // name would silently change which code runs at a call site that reads the
         // same in two files. Two different effects may each declare the name.
         if self.functions.iter().any(|other| other.name == name) {
-            return Err(self.err(Code::DeclaredTwice, format!("`{name}` is already a `fn` at module scope, and one is in scope inside every effect"), at).with_hint("an effect-local `fn` cannot shadow it"));
+            let error = self
+                .err(
+                    Code::DeclaredTwice,
+                    format!(
+                        "`{name}` is already a `fn` at module scope, and one is in scope inside every effect"
+                    ),
+                    at,
+                )
+                .with_hint("an effect-local `fn` cannot shadow it");
+            return Err(match self.first_declared("fn", &name) {
+                Some(first) => error.with_related(first),
+                None => error,
+            });
         }
+        self.declare(&scope, &name, named);
         let params = self.param_list(true)?;
         let ret = self.fn_result(Kind::EffectFn)?;
         self.local_fns.push(Signature { name, params, ret });
@@ -4434,11 +4594,14 @@ impl Parser {
         while self.eat_sym(Sym::Comma) {
             spans.push(self.span_here());
             let path = self.expect_path()?;
-            if paths.contains(&path) {
-                return self.fail(
-                    Code::DeclaredTwice,
-                    format!("this arm already lists {path}"),
-                );
+            if let Some(index) = paths.iter().position(|other| other == &path) {
+                return Err(self
+                    .err(
+                        Code::DeclaredTwice,
+                        format!("this arm already lists {path}"),
+                        self.span_here(),
+                    )
+                    .with_related(self.elsewhere("first listed here", spans[index], self.pos)));
             }
             paths.push(path);
         }
@@ -4494,7 +4657,16 @@ impl Parser {
         self.triggers.clear();
         let arm = lower.b.finish_arm(paths, span, body);
         if let Err((erase, reveal)) = erase_last(&arm.exprs, &arm.body) {
-            return Err(self.err(Code::EraseOrder, format!("`reveal` at {reveal} can run after the `erase` at {erase}"), reveal).with_hint("`erase` is journaled and `reveal` is not, so a replay skips the erase and re-runs the reveal against a key that is gone"));
+            return Err(self
+                .err(
+                    Code::EraseOrder,
+                    "this `reveal` can run after the `erase`",
+                    reveal,
+                )
+                .with_hint(
+                    "`erase` is journaled and `reveal` is not, so a replay skips the erase and re-runs the reveal against a key that is gone",
+                )
+                .with_related(self.elsewhere("the `erase`", erase, self.pos)));
         }
         Ok(arm)
     }
@@ -4738,7 +4910,16 @@ impl Parser {
         at: Span,
     ) -> Result<(), Diagnostic> {
         if let Some(reveal) = reveal_in(lower.b.exprs(), value) {
-            return Err(self.err(Code::EraseOrder, format!("the id at {reveal} was learned by revealing, so `erase({subject}, ...)` would make a repeat request for an erased subject unreadable"), at).with_hint("take a subject id from a plaintext field"));
+            return Err(self
+                .err(
+                    Code::EraseOrder,
+                    format!(
+                        "this id was learned by revealing, so `erase({subject}, ...)` would make a repeat request for an erased subject unreadable"
+                    ),
+                    at,
+                )
+                .with_hint("take a subject id from a plaintext field")
+                .with_related(self.elsewhere("learned here", reveal, self.pos)));
         }
         Ok(())
     }
@@ -5769,7 +5950,7 @@ impl Parser {
         // `End` token and its span is 0:0.
         let at = program.function(&path[0]);
         let span = at.map(|def| def.span).unwrap_or_default();
-        let error = Diagnostic::new(
+        let mut error = Diagnostic::new(
             Code::RecursiveFn,
             format!(
                 "{}: a `fn` cannot call itself, directly or through another, so that every call ends",
@@ -5777,6 +5958,20 @@ impl Parser {
             ),
             span,
         );
+        // The cycle is a relation over declarations, so every link in it is a place a
+        // reader can be taken to. The chain stays in the message; a name in prose is
+        // not somewhere an editor can go. The path closes on the `fn` it started at,
+        // which is already the primary span, so that link is not repeated here.
+        for link in path.iter().filter_map(|name| program.function(name)) {
+            if link.span == span {
+                continue;
+            }
+            let related = Related::new(format!("`{}` is declared here", link.name), link.span);
+            error.related.push(match &link.module {
+                Some(module) => related.in_file(module),
+                None => related,
+            });
+        }
         Err(match at.and_then(|def| def.module.as_ref()) {
             Some(module) => error.in_file(module),
             None => error,
@@ -5820,11 +6015,26 @@ impl Parser {
             path.push_str(" -> ");
             path.push_str(&edge.to.to_string());
         }
-        let error = Diagnostic::new(
+        let mut error = Diagnostic::new(
             Code::SelfTrigger,
             format!("{path}: this effect can trigger itself, so the log would grow without end"),
             cycle[0].span,
         );
+        // One related per link, so the arms that close the loop can be walked. The
+        // first is the primary span, so the chain starts at the second.
+        for edge in &cycle[1..] {
+            let related = Related::new(
+                format!(
+                    "`{}` invokes `{}`, which appends {}",
+                    edge.effect, edge.command, edge.to
+                ),
+                edge.span,
+            );
+            error.related.push(match &edge.module {
+                Some(module) => related.in_file(module),
+                None => related,
+            });
+        }
         Err(match &cycle[0].module {
             Some(module) => error.in_file(module),
             None => error,
