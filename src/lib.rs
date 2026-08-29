@@ -5,6 +5,7 @@ pub mod lex;
 pub mod parse;
 pub mod scaled;
 pub mod testing;
+pub mod types;
 pub mod value;
 
 pub use build::Builder;

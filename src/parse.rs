@@ -10,6 +10,7 @@ use crate::ir::{
 };
 use crate::lex::{Keyword, Spanned, Sym, SyntaxError, Token, lex};
 use crate::scaled::Rounding;
+use crate::types::{default_type, fills, inner_of, method_sig, response_field, seal, wrap};
 use crate::value;
 
 pub fn parse(source: &str) -> Result<Program, SyntaxError> {
@@ -3204,7 +3205,8 @@ impl Parser {
                 while !self.at_sym(Sym::RParen) {
                     let hint = receiver
                         .as_ref()
-                        .and_then(|ty| arg_hint(ty, &name, args.len()));
+                        .and_then(|ty| method_sig(ty, &name))
+                        .and_then(|sig| sig.params.get(args.len()).cloned());
                     args.push(self.expr(lower, hint)?);
                     if !self.eat_sym(Sym::Comma) {
                         break;
@@ -3530,40 +3532,6 @@ impl Parser {
     }
 }
 
-/// Looks through `T?` to the `T` a literal in that position is really making.
-fn inner_of(ty: &Type) -> &Type {
-    match ty {
-        Type::Opt(inner) => inner,
-        _ => ty,
-    }
-}
-
-/// Whether a `found` literal may be written where `ty` is declared: the same type, or
-/// a bare `T` filling a `T?`. See `docs/optionals.md`.
-fn fills(found: &Type, ty: &Type) -> bool {
-    found == ty || matches!(ty, Type::Opt(inner) if inner.as_ref() == found)
-}
-
-/// One level, at the outside of the declared type, so a `List(String)` still does not
-/// become a `List(String?)`. Only ever called where `fills` already holds.
-fn wrap(lit: Literal, found: &Type, ty: &Type) -> Literal {
-    match ty {
-        Type::Opt(_) if found != ty => Literal::Some {
-            inner: found.clone(),
-            value: Box::new(lit),
-        },
-        _ => lit,
-    }
-}
-
-fn default_type(number: Number) -> Type {
-    if number.scale == 0 {
-        Type::Int
-    } else {
-        Type::Decimal(number.scale)
-    }
-}
-
 fn rounding_mode(name: &str) -> Option<Rounding> {
     Some(match name {
         "HalfUp" => Rounding::HalfUp,
@@ -3602,7 +3570,7 @@ impl Parser {
             },
             Expr::Method {
                 receiver, method, ..
-            } => method_type(&self.type_of(lower, *receiver)?, method),
+            } => method_sig(&self.type_of(lower, *receiver)?, method).map(|sig| sig.ret),
             Expr::If { then, .. } => self.type_of(lower, *then),
             Expr::Field { receiver, name } => match self.type_of(lower, *receiver)? {
                 Type::Record(ty) => self.record_def(&ty)?.field(name).map(|f| f.ty.clone()),
@@ -3653,64 +3621,6 @@ fn uuid_member(member: &str) -> String {
     }
 }
 
-/// A method's result type, for the places a binding's type has to be known before the
-/// program runs: a `for` variable and, once records exist, a field access.
-fn method_type(receiver: &Type, method: &str) -> Option<Type> {
-    Some(match (receiver, method) {
-        (Type::String, "trim" | "lower" | "upper" | "strip_prefix" | "after_last") => Type::String,
-        (Type::String, "len") => Type::Int,
-        (Type::String, "is_empty" | "contains" | "starts_with") => Type::Bool,
-        (Type::String, "to_int") => Type::opt(Type::Int),
-        (Type::String, "to_uuid") => Type::opt(Type::Uuid),
-        (Type::Json, "string") => Type::opt(Type::String),
-        (Type::Json, "int") => Type::opt(Type::Int),
-        (Type::Json, "bool") => Type::opt(Type::Bool),
-        (Type::Json, "json") => Type::opt(Type::Json),
-        (Type::Json, "array") => Type::opt(Type::list(Type::Json)),
-        (Type::Opt(inner), "unwrap_or") => inner.as_ref().clone(),
-        (Type::Opt(_), "is_some" | "is_none") => Type::Bool,
-        (Type::List(inner), "first") => Type::opt(inner.as_ref().clone()),
-        (Type::List(_) | Type::Map(..), "push" | "set" | "remove") => receiver.clone(),
-        (Type::List(_) | Type::Map(..), "len") => Type::Int,
-        (Type::List(_) | Type::Map(..), "is_empty" | "contains") => Type::Bool,
-        (Type::Map(_, value), "get") => Type::opt(value.as_ref().clone()),
-        (Type::Map(key, _), "keys") => Type::list(key.as_ref().clone()),
-        (Type::Map(_, value), "values") => Type::list(value.as_ref().clone()),
-        _ => return None,
-    })
-}
-
-/// The hint one argument of a method call gets. Without it `xs.push([])` and
-/// `m.get(id).unwrap_or(0)` have no target to resolve against.
-fn arg_hint(receiver: &Type, method: &str, index: usize) -> Option<Type> {
-    Some(match (receiver, method, index) {
-        (Type::Opt(inner), "unwrap_or", 0) => inner.as_ref().clone(),
-        (Type::String, "contains" | "starts_with" | "strip_prefix" | "after_last", 0) => {
-            Type::String
-        }
-        (Type::List(item), "push" | "remove" | "contains", 0) => item.as_ref().clone(),
-        (Type::Map(key, _), "get" | "remove" | "contains" | "set", 0) => key.as_ref().clone(),
-        (Type::Map(_, value), "set", 1) => value.as_ref().clone(),
-        _ => return None,
-    })
-}
-
-/// The two fields a `Response` carries. Parenless field access exists for these and
-/// nothing else, so this doubles as the check.
-fn response_field(name: &str) -> Option<Type> {
-    Some(match name {
-        "status" => Type::Int,
-        "body" => Type::Json,
-        _ => return None,
-    })
-}
-
-/// Rule 9: the two subject checks are not implemented yet. When they are, this is
-/// where the conflict one belongs, asserting what hekla's `enforce_subject_columns`
-/// does: a field written under two different subjects is an error, and a
-/// subject-bound value may not land in a field that discards the binding. The
-/// propagation that feeds them is live, and every handler stays in the IR, so the
-/// checker can recover both spans; only the checking is deferred.
 /// What a condition proves about one optional, and on which branch: `true` means the
 /// value is present in the `then` branch. Recognised on a single test, because a
 /// conjunction and a disjunction narrow in opposite directions and getting that wrong
@@ -5507,16 +5417,6 @@ fn scan(exprs: &Exprs, stmts: &[Stmt], incoming: Option<Span>) -> Result<Reach, 
 /// The declared type of the field a subject files its keys under. `@subject(x)` must
 /// name a field of the same event, so the event carrying the annotation carries `x`
 /// too; absent when nothing is scoped to the name at all.
-/// `Opt` stays outermost, so an optional subject-bound field is an optional whose
-/// content is sealed rather than a sealed optional. Everything that looks through an
-/// optional (`inner_of`, narrowing, `fills`) keeps working with one extra unwrap.
-fn seal(ty: Type, subject: Ident) -> Type {
-    match ty {
-        Type::Opt(inner) => Type::opt(seal(*inner, subject)),
-        other => Type::sealed(other, subject),
-    }
-}
-
 fn subject_field<'a>(events: &'a [EventDef], subject: &str) -> Option<&'a Type> {
     events
         .iter()
