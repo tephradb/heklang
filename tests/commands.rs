@@ -24,7 +24,7 @@ fn program(body: &str) -> Program {
 fn err(body: &str) -> String {
     parse(&format!("{PRELUDE}{body}\n"))
         .expect_err("expected this command to be rejected")
-        .message
+        .text()
 }
 
 fn placed(seq: u32, customer_id: i64, total: i64) -> Event {

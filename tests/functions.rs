@@ -55,7 +55,7 @@ fn fired(decls: &str, body: &str, sku: Option<&str>) -> Event {
 fn err(decls: &str, body: &str) -> String {
     parse(&source(decls, body))
         .expect_err("expected this to be rejected")
-        .message
+        .text()
 }
 
 const EMIT: &str = "  emit @plan.created { plan_id, sku: effective_sku(sku, plan_id), months }";
@@ -397,12 +397,12 @@ fn a_trailing_comma_needs_a_last_argument() {
         "  let t = now(,)\n  emit @plan.created { plan_id, sku, months }",
     ))
     .expect_err("there is no argument for the comma to follow")
-    .message;
+    .text();
     assert_eq!(bare, "expected `)`, found `,`");
 
     let short = parse(&source("", "  return reject(\"code\",)"))
         .expect_err("a missing argument is still missing")
-        .message;
+        .text();
     assert_eq!(short, "expected a value, found `)`");
 }
 
@@ -412,7 +412,7 @@ fn a_trailing_comma_needs_a_last_argument() {
 fn a_module_fn_still_needs_a_return_type() {
     let message = parse(&source("fn note(sku: String) { }", "return ok"))
         .expect_err("a module `fn` declares a result")
-        .message;
+        .text();
     assert!(message.contains("expected `->`"), "got: {message}");
 }
 

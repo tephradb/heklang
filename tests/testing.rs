@@ -89,7 +89,7 @@ fn err(body: &str) -> String {
     let source = format!("{PRELUDE}\n{EFFECTS}\n{body}");
     parse(&source)
         .expect_err("expected this test declaration to be rejected")
-        .message
+        .text()
 }
 
 // Rule 1: shape.
@@ -622,7 +622,7 @@ test \"a bad uuid\" {
   expect @a.b { id: \"not-a-uuid\" }
 }
 ";
-    let message = parse(source).expect_err("this is not a Uuid").message;
+    let message = parse(source).expect_err("this is not a Uuid").text();
     assert_eq!(message, "`not-a-uuid` is not a Uuid");
 }
 

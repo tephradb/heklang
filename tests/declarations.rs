@@ -56,14 +56,14 @@ command C(customer_id: Int) {
 ";
     let err = parse(source).expect_err("`customer` is defined below the declarations");
     assert!(
-        err.message.contains("is defined at 6:7"),
+        err.text().contains("is defined at 6:7"),
         "expected the definition site, got: {}",
-        err.message
+        err.text()
     );
     assert!(
-        err.message.contains("run before the body"),
+        err.text().contains("run before the body"),
         "expected the prologue rule to be explained, got: {}",
-        err.message
+        err.text()
     );
 }
 
@@ -80,11 +80,11 @@ command C(y: Int) {
 ";
     let err = parse(source).expect_err("`later` is not bound yet");
     assert!(
-        err.message.contains("not in scope yet"),
+        err.text().contains("not in scope yet"),
         "got: {}",
-        err.message
+        err.text()
     );
-    assert!(err.message.contains("6:7"), "got: {}", err.message);
+    assert!(err.text().contains("6:7"), "got: {}", err.text());
 }
 
 #[test]
@@ -96,7 +96,7 @@ command C(y: Int) {
 }
 ";
     let err = parse(source).expect_err("`nope` is never defined");
-    assert_eq!(err.message, "`nope` is not in scope");
+    assert_eq!(err.text(), "`nope` is not in scope");
 }
 
 #[test]
@@ -105,7 +105,7 @@ fn duplicate_declarations_are_rejected() {
 event @a.b { x: Int }
 ";
     assert_eq!(
-        parse(events).expect_err("duplicate event").message,
+        parse(events).expect_err("duplicate event").text(),
         "event @a.b is declared twice"
     );
 
@@ -113,7 +113,7 @@ event @a.b { x: Int }
 command C(y: Int) { return }
 ";
     assert_eq!(
-        parse(commands).expect_err("duplicate command").message,
+        parse(commands).expect_err("duplicate command").text(),
         "command `C` is declared twice"
     );
 }
@@ -130,7 +130,7 @@ command C(y: Int) {
 ";
     let err = parse(source).expect_err("`state` needs `fold` before its seed");
     assert_eq!(
-        err.message,
+        err.text(),
         "`seen` is a fold over the log, so `=` introduces a seed rather than a value; \
          write `= fold <seed>`"
     );
@@ -222,7 +222,7 @@ effect Same {
         let doubled = format!("event @order.placed {{ order_id: Uuid }}\n{item}\n{item}\n");
         let message = parse(&doubled)
             .expect_err("the same kind twice is still an error")
-            .message;
+            .text();
         assert_eq!(message, format!("{kind} `Dup` is declared twice"));
     }
 }

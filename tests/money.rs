@@ -18,7 +18,7 @@ fn parsed(params: &str, body: &str) -> Program {
 fn rejected(params: &str, body: &str) -> String {
     parse(&probe(params, body))
         .expect_err("expected the operator table to reject this")
-        .message
+        .text()
 }
 
 /// Runs the probe and returns the error, or `None` when the expression was fine.
@@ -204,7 +204,7 @@ fn money_has_no_currency_in_its_display() {
 fn there_is_no_currency_item() {
     let message = parse("currency USD\nevent @a.b { x: Int }\n")
         .expect_err("`currency` is not a declaration")
-        .message;
+        .text();
     assert_eq!(
         message,
         "expected `enum`, `record`, `const`, `fn`, `event`, `command`, `projector`, \

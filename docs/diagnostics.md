@@ -210,9 +210,40 @@ rather than a later addition because the lints that need it plug into this shape
 of changing it again, and because a warning never travels in `Err`: it does not stop a
 parse, so it belongs beside the errors rather than instead of a result.
 
-## 8. What this is not, yet
+## 8. A message and a hint
 
-`hint` and `related` are fields that nothing fills. Twenty-two messages still carry their
-advice inside the message after a `;`, and the eight that name a second place still
-interpolate it into their own text. Those are the next two pieces of work, and this
-document is where they land.
+**The message says what is wrong. The hint says why, or what to do about it.**
+
+```
+expected String, found Int?
+  = `unwrap_or` gives it a fallback, or a branch that proves it present makes it a String
+    without one
+```
+
+They were one string, joined by a `; `, in about eighty messages and in five helpers that
+built the tail from the types they were given. As one string a reader could render it or
+not, and nothing else; apart, a hover can show the first line and a panel the rest, and
+the hints that name a replacement can become an offer rather than prose.
+
+**`Diagnostic::text` joins them back**, with the same `; `, so a reader with one line to
+give gets what it always got. That is what `Display` uses, and it is why splitting eighty
+messages changed no assertion in the suite beyond the field it reads: the wording is the
+same wording.
+
+Two messages did change, and they are the shape to avoid. Their advice began `, and ...`,
+which reads as a clause of the sentence before it rather than as a line of its own. A hint
+stands alone or it is not a hint, so both were reworded to start after a `; ` like the
+rest, which is the only text this work altered.
+
+**Some hints name a replacement**: ``write `= fold <seed>` ``, ``did you mean `{name}()`?``,
+``move that `let` up``, ``write `for key, value in ...` ``. Those are what a code action
+will be built from, and they are the reason `hint` is a field rather than a suffix. It is
+not enough on its own: an applicable edit needs a span to replace and the text to put
+there, and a hint carries neither. It is the sentence a person reads, and the marker for
+where the edits are.
+
+## 9. What this is not, yet
+
+`related` is a field that nothing fills. The eight diagnostics that name a second place
+still interpolate it into their own text, so an editor cannot link to any of them. That is
+the next piece of work, and this document is where it lands.

@@ -77,7 +77,7 @@ fn label(event: &Event) -> String {
 fn err(params: &str, body: &str) -> String {
     parse(&source(params, body))
         .expect_err("expected this to be rejected")
-        .message
+        .text()
 }
 
 /// A body that emits `items` and a fixed label, so a test only writes the expression
@@ -261,7 +261,7 @@ fn an_empty_list_in_a_body_needs_no_target_type() {
 fn an_empty_map_in_a_body_still_needs_a_target_type() {
     let message = parse(&returning_json("{ \"m\": Map.empty }"))
         .expect_err("a map has no place in a body")
-        .message;
+        .text();
     assert!(
         message.starts_with("`Map.empty` needs a target type"),
         "got: {message}"

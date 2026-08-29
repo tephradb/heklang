@@ -292,6 +292,6 @@ fn a_fn_declared_in_two_modules_collides() {
         ("lib/stripe.hk", LIB),
     ])
     .expect_err("one name, one function");
-    assert_eq!(err.message, "fn `parse_gid` is declared twice");
+    assert_eq!(err.text(), "fn `parse_gid` is declared twice");
     assert_eq!(err.file.as_deref(), Some("lib/stripe.hk"));
 }

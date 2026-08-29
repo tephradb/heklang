@@ -52,7 +52,7 @@ command Read(text: String) {{
     );
     parse(&source)
         .expect_err("expected this to be rejected")
-        .message
+        .text()
 }
 
 // ---------------------------------------------------------------------------------

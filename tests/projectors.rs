@@ -73,7 +73,7 @@ fn purged(seq: u32) -> Event {
 fn err(body: &str) -> String {
     parse(&source(body))
         .expect_err("expected this projector to be rejected")
-        .message
+        .text()
 }
 
 /// Runs a projector over `log` and returns its read models.
@@ -483,7 +483,7 @@ fn update_outside_a_projector_says_where_it_belongs() {
     );
     let message = parse(&source)
         .expect_err("only a projector writes a read model")
-        .message;
+        .text();
     assert_eq!(
         message,
         "`update` writes an entity, so it can only appear in a projector"
@@ -510,7 +510,7 @@ fn uuid_and_timestamp_have_no_zero() {
         );
         let message = parse(&source)
             .expect_err("a patched entity needs a zero for every column")
-            .message;
+            .text();
         assert_eq!(
             message,
             format!(
@@ -721,7 +721,7 @@ projector P {
     assert_eq!(
         parse(source)
             .expect_err("Money(0) holds no decimal places")
-            .message,
+            .text(),
         "2 decimal places is too precise for Money(0)"
     );
 }
@@ -775,7 +775,7 @@ fn an_enum_field_needs_a_default_variant() {
 }}
 "
     );
-    let message = parse(&source).expect_err("no @default variant").message;
+    let message = parse(&source).expect_err("no @default variant").text();
     assert_eq!(
         message,
         "this `patch` materializes a `Order`, and `status` is a `Status` with no `@default` variant; give the enum one, give the field a default, or make this an `update`"
@@ -809,7 +809,7 @@ fn an_enum_declares_at_most_one_default() {
 "
     );
     assert_eq!(
-        parse(&source).expect_err("two defaults").message,
+        parse(&source).expect_err("two defaults").text(),
         "`Status` has more than one `@default` variant"
     );
 }
@@ -861,7 +861,7 @@ fn an_ambiguous_variant_names_the_candidates() {
     );
     let message = parse(&source)
         .expect_err("two enums declare `Placed`")
-        .message;
+        .text();
     assert!(
         message.contains("`Placed` is a variant of Status and Leg"),
         "got: {message}"
@@ -1023,7 +1023,7 @@ projector P {
 }
 ";
     assert_eq!(
-        parse(source).expect_err("duplicate projector").message,
+        parse(source).expect_err("duplicate projector").text(),
         "projector `P` is declared twice"
     );
 }
@@ -1041,7 +1041,7 @@ projector Q {
 }
 ";
     assert_eq!(
-        parse(source).expect_err("`Thing` belongs to P").message,
+        parse(source).expect_err("`Thing` belongs to P").text(),
         "entity `Thing` is not declared"
     );
 }
@@ -1072,7 +1072,7 @@ projector P {{
 "
         );
         assert_eq!(
-            parse(&source).expect_err("{ty} cannot be a key").message,
+            parse(&source).expect_err("{ty} cannot be a key").text(),
             format!("`id` is a {literal}, which cannot be an entity key")
         );
     }
@@ -1107,7 +1107,7 @@ command C(x: Int) {{
 }}
 "
         );
-        let message = parse(&source).expect_err("a write in a command").message;
+        let message = parse(&source).expect_err("a write in a command").text();
         assert!(
             message.contains("only appear in a projector"),
             "for `{keyword}`, got: {message}"
@@ -1133,7 +1133,7 @@ fn err_entity_body(body: &str) -> String {
     );
     parse(&source)
         .expect_err("expected this entity to be rejected")
-        .message
+        .text()
 }
 
 // Spans: a write-time failure points at the expression that produced the value.
@@ -1293,7 +1293,7 @@ projector P {
 }",
     )
     .expect_err("one column, one subject")
-    .message;
+    .text();
     assert!(
         message.contains("`Row.text` already holds content sealed under `customer_id`"),
         "got: {message}"

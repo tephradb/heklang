@@ -48,7 +48,7 @@ fn fired(params: &str, body: &str, args: Vec<(&str, Value)>) -> Event {
 fn err(params: &str, body: &str) -> String {
     parse(&source(params, body))
         .expect_err("expected this to be rejected")
-        .message
+        .text()
 }
 
 /// An emit that fills every field, so a test only writes the part it cares about.
@@ -311,7 +311,7 @@ fn a_string_literal_resolves_against_a_uuid_target() {
 
     let bad = parse("const N: Uuid = \"not-a-uuid\"\nevent @a.b { x: Int }\n")
         .expect_err("expected a rejection")
-        .message;
+        .text();
     assert_eq!(bad, "`not-a-uuid` is not a Uuid");
 }
 
@@ -319,7 +319,7 @@ fn a_string_literal_resolves_against_a_uuid_target() {
 fn a_const_takes_literals_and_literal_aggregates_only() {
     let message = parse("const N: Int = 1 + 1\nevent @a.b { x: Int }\n")
         .expect_err("expected a rejection")
-        .message;
+        .text();
     assert_eq!(
         message,
         "expected `enum`, `record`, `const`, `fn`, `event`, `command`, `projector`, `effect` or `test`, found `+`",
@@ -328,7 +328,7 @@ fn a_const_takes_literals_and_literal_aggregates_only() {
 
     let message = parse("const N: Int = \"one\"\nevent @a.b { x: Int }\n")
         .expect_err("expected a rejection")
-        .message;
+        .text();
     assert_eq!(message, "a Int const cannot be a String");
 }
 
@@ -379,7 +379,7 @@ fn a_const_cycle_names_the_whole_chain() {
     let message =
         parse("const A: Int = B\nconst B: Int = C\nconst C: Int = A\nevent @a.b { x: Int }\n")
             .expect_err("expected a rejection")
-            .message;
+            .text();
     assert_eq!(
         message,
         "`A` names `B` names `C` names `A`: a `const` cannot name itself, directly or through another, so that every const has a value"
@@ -387,7 +387,7 @@ fn a_const_cycle_names_the_whole_chain() {
 
     let alone = parse("const A: Int = A\nevent @a.b { x: Int }\n")
         .expect_err("expected a rejection")
-        .message;
+        .text();
     assert_eq!(
         alone,
         "`A` names `A`: a `const` cannot name itself, directly or through another, so that every const has a value"
@@ -400,7 +400,7 @@ fn a_const_cycle_names_the_whole_chain() {
 fn a_const_of_the_wrong_type_names_the_const() {
     let message = parse("const A: Int = B\nconst B: String = \"x\"\nevent @a.b { x: Int }\n")
         .expect_err("expected a rejection")
-        .message;
+        .text();
     assert_eq!(message, "a Int const cannot be `B`, which is a String");
 }
 
@@ -411,7 +411,7 @@ fn a_const_of_the_wrong_type_names_the_const() {
 fn a_const_still_ends_at_its_literal_when_another_const_names_it() {
     let message = parse("const A: Int = B\nconst B: Int = 1 + 1\nevent @a.b { x: Int }\n")
         .expect_err("expected a rejection")
-        .message;
+        .text();
     assert_eq!(
         message,
         "expected `enum`, `record`, `const`, `fn`, `event`, `command`, `projector`, `effect` or `test`, found `+`"
@@ -560,7 +560,7 @@ fn the_optional_wrap_does_not_recurse() {
         "const XS: List(String) = [\"a\"]\nconst YS: List(String?) = XS\nevent @a.b { x: Int }\n",
     )
     .expect_err("expected a rejection")
-    .message;
+    .text();
     assert_eq!(
         whole,
         "a List(String?) const cannot be `XS`, which is a List(String)"
@@ -568,7 +568,7 @@ fn the_optional_wrap_does_not_recurse() {
 
     let bad = parse("const N: Int? = \"x\"\nevent @a.b { x: Int }\n")
         .expect_err("expected a rejection")
-        .message;
+        .text();
     assert_eq!(bad, "a Int? const cannot be a String");
 }
 
@@ -586,12 +586,12 @@ fn an_empty_json_is_a_const() {
 
     let wrong = parse("const BLANK: Int = Json.empty\nevent @a.b { x: Int }\n")
         .expect_err("expected a rejection")
-        .message;
+        .text();
     assert_eq!(wrong, "a Int const cannot be a Json value");
 
     let member = parse("const BLANK: Json = Json.encode\nevent @a.b { x: Int }\n")
         .expect_err("expected a rejection")
-        .message;
+        .text();
     assert_eq!(member, "a Json const cannot be `Json.encode`");
 }
 
@@ -601,7 +601,7 @@ fn an_empty_json_is_a_const() {
 fn none_needs_an_optional_target() {
     let message = parse("const N: Int = none\nevent @a.b { x: Int }\n")
         .expect_err("expected a rejection")
-        .message;
+        .text();
     assert_eq!(message, "a Int const cannot be `none`");
 }
 
@@ -671,7 +671,7 @@ fn duplicate_declarations_are_rejected() {
     ] {
         let source = format!("{item}\n{item}\nevent @a.b {{ x: Int }}\n");
         assert_eq!(
-            parse(&source).expect_err("declared twice").message,
+            parse(&source).expect_err("declared twice").text(),
             format!("{kind} `Dup` is declared twice")
         );
     }
@@ -681,7 +681,7 @@ fn duplicate_declarations_are_rejected() {
 fn a_record_needs_at_least_one_field() {
     let message = parse("record Empty { }\nevent @a.b { x: Int }\n")
         .expect_err("expected a rejection")
-        .message;
+        .text();
     assert_eq!(message, "record `Empty` declares no fields");
 }
 
@@ -876,7 +876,7 @@ fn max_on_something_with_no_length_is_rejected() {
     for (source, expected) in cases {
         let message = parse(source)
             .expect_err("a length on something with no length")
-            .message;
+            .text();
         assert_eq!(message, expected, "for: {source}");
     }
 }
@@ -921,7 +921,7 @@ fn a_record_field_cannot_be_subject_bound() {
     let message =
         parse("record R { owner: Int, name: String @subject(owner) }\nevent @a.b { n: Int }\n")
             .expect_err("a record field cannot be `@subject`")
-            .message;
+            .text();
     assert!(
         message.starts_with("a record field cannot be `@subject`"),
         "got: {message}"

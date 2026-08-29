@@ -7,7 +7,7 @@ command Probe(total: Money(2), spend: Money(2), count: Int, rate: Decimal(4)) {
 
 fn literals(body: &str) -> Result<Vec<String>, String> {
     let source = format!("{PRELUDE}{body}\n}}\n");
-    let program = parse(&source).map_err(|err| err.message)?;
+    let program = parse(&source).map_err(|err| err.text())?;
     let command = &program.commands[0];
 
     let mut found = Vec::new();
@@ -218,5 +218,5 @@ fn money_literals_follow_the_declared_scale() {
 
     let source = "command Probe(spend: Money(0)) {\n  let a = spend > 1000.00\n  return\n}\n";
     let err = parse(source).expect_err("Money(0) holds no decimal places");
-    assert_eq!(err.message, "2 decimal places is too precise for Money(0)");
+    assert_eq!(err.text(), "2 decimal places is too precise for Money(0)");
 }

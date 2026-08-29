@@ -48,7 +48,7 @@ fn program(body: &str) -> Program {
 fn err(body: &str) -> String {
     parse(&source(body))
         .expect_err("expected this to be rejected")
-        .message
+        .text()
 }
 
 /// A command that emits one event, with every field written out and `field` overridden.
@@ -326,7 +326,7 @@ effect E {
 ",
     )
     .expect_err("a sum of sealed content reads it")
-    .message;
+    .text();
     assert!(
         message.contains("sealed under `customer_id`"),
         "got: {message}"

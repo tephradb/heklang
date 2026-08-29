@@ -360,18 +360,22 @@ impl Parser {
     }
 
     fn not_in_scope(&self, name: &str, span: Span) -> Diagnostic {
-        let message = match (self.later_let(name), self.prologue) {
-            (Some(span), true) => format!(
-                "`{name}` is defined at {span}, below the declarations; \
-                 `guard` and `state` run before the body, so they can only use names \
-                 bound above them; move that `let` up"
+        let (message, hint) = match (self.later_let(name), self.prologue) {
+            (Some(at), true) => (
+                format!("`{name}` is defined at {at}, below the declarations"),
+                Some(
+                    "`guard` and `state` run before the body, so they can only use names \
+                     bound above them; move that `let` up"
+                        .to_string(),
+                ),
             ),
-            (Some(span), false) => {
-                format!("`{name}` is not in scope yet; it is defined below at {span}")
-            }
-            (None, _) => format!("`{name}` is not in scope"),
+            (Some(at), false) => (
+                format!("`{name}` is not in scope yet"),
+                Some(format!("it is defined below at {at}")),
+            ),
+            (None, _) => (format!("`{name}` is not in scope"), None),
         };
-        self.err(Code::NotInScope, message, span)
+        self.advised(Code::NotInScope, (message, hint), span)
     }
 
     fn bump(&mut self) -> Spanned {
@@ -388,6 +392,33 @@ impl Parser {
     /// A diagnostic about the token in front of the cursor, covering that token.
     fn fail<T>(&self, code: Code, message: impl Into<String>) -> Result<T, Diagnostic> {
         Err(self.err(code, message, self.span_here()))
+    }
+
+    /// The same, with the advice the message used to carry after its `;`. Separate so a
+    /// reader can show one without the other; `Diagnostic::text` puts them back together.
+    fn fail_hint<T>(
+        &self,
+        code: Code,
+        message: impl Into<String>,
+        hint: impl Into<String>,
+    ) -> Result<T, Diagnostic> {
+        Err(self.err(code, message, self.span_here()).with_hint(hint))
+    }
+
+    /// A diagnostic whose advice the helper that wrote the message worked out with it.
+    /// The five that do only have advice for some of their cases, so it arrives as an
+    /// `Option` rather than a second argument every caller has to invent.
+    fn advised(
+        &self,
+        code: Code,
+        (message, hint): (impl Into<String>, Option<impl Into<String>>),
+        span: Span,
+    ) -> Diagnostic {
+        let error = self.err(code, message, span);
+        match hint {
+            Some(hint) => error.with_hint(hint),
+            None => error,
+        }
     }
 
     fn at_sym(&self, sym: Sym) -> bool {
@@ -915,9 +946,11 @@ impl Parser {
         if let Some(ret) = &ret
             && !always_returns(&body)
         {
-            return self.fail(Code::ReturnShape, format!(
-                "`{name}` can finish without returning a {ret}; every path out of a `fn` returns one"
-            ));
+            return self.fail_hint(
+                Code::ReturnShape,
+                format!("`{name}` can finish without returning a {ret}"),
+                "every path out of a `fn` returns one",
+            );
         }
         Ok(lower.b.finish_fn(ret, body, at))
     }
@@ -1064,12 +1097,7 @@ impl Parser {
             match annotation.as_str() {
                 "max" => max_len = Some(self.max_annotation(ty, field)?),
                 "subject" => {
-                    return Err(self.err(Code::BadAnnotation,
-                        format!(
-                            "a record field cannot be `@subject`, so `{field}` cannot carry personal data; a subject-bound value is recovered from the schema path, and a record reached through a container has no path to recover it from"
-                        ),
-                        at,
-                    ));
+                    return Err(self.err(Code::BadAnnotation, format!("a record field cannot be `@subject`, so `{field}` cannot carry personal data"), at).with_hint("a subject-bound value is recovered from the schema path, and a record reached through a container has no path to recover it from"));
                 }
                 other => {
                     return Err(self.err(
@@ -1088,11 +1116,13 @@ impl Parser {
     fn max_annotation(&mut self, ty: &Type, field: &str) -> Result<usize, Diagnostic> {
         let at = self.span_here();
         if !matches!(inner_of(ty), Type::String) {
-            return Err(self.err(
-                Code::BadAnnotation,
-                format!("`@max` bounds a length, so it applies to a String; `{field}` is a {ty}"),
-                at,
-            ));
+            return Err(self
+                .err(
+                    Code::BadAnnotation,
+                    "`@max` bounds a length, so it applies to a String",
+                    at,
+                )
+                .with_hint(format!("`{field}` is a {ty}")));
         }
         self.expect_sym(Sym::LParen)?;
         let number = self.expect_number()?;
@@ -1653,7 +1683,7 @@ impl Parser {
             // the advice `check_zeros` gives about one could not be followed.
             Token::Text(text) if matches!(target, Type::Timestamp) => {
                 let Some(micros) = value::timestamp(&text) else {
-                    return Err(self.err(Code::BadLiteral, not_a_timestamp(&text), at));
+                    return Err(self.advised(Code::BadLiteral, not_a_timestamp(&text), at));
                 };
                 Literal::Timestamp(micros)
             }
@@ -1840,8 +1870,10 @@ impl Parser {
     fn destructure_block(&mut self, lower: &mut Lower, def: &EventDef) -> Result<(), Diagnostic> {
         if !self.has_destructure() {
             if self.looks_like_destructure() {
-                return self.fail(Code::ExpectedToken,
-                    "this looks like a destructure block; a handler with one needs a body block after it",
+                return self.fail_hint(
+                    Code::ExpectedToken,
+                    "this looks like a destructure block",
+                    "a handler with one needs a body block after it",
                 );
             }
             return Ok(());
@@ -1921,11 +1953,13 @@ impl Parser {
         span: Span,
     ) -> Result<ExprId, Diagnostic> {
         if !self.eat_sym(Sym::Dot) {
-            return Err(self.err(
-                Code::UnknownMember,
-                format!("`{name}` is the event envelope; read a field from it, like `{name}.at`"),
-                span,
-            ));
+            return Err(self
+                .err(
+                    Code::UnknownMember,
+                    format!("`{name}` is the event envelope"),
+                    span,
+                )
+                .with_hint(format!("read a field from it, like `{name}.at`")));
         }
 
         let at = self.span_here();
@@ -1940,13 +1974,18 @@ impl Parser {
         let def = self.event.as_ref().expect("only called inside a handler");
         if def.field(&field).is_none() && self.triggers.len() > 1 {
             let listed: Vec<String> = self.triggers.iter().map(EventPath::to_string).collect();
-            return Err(self.err(Code::EventShape,
-                format!(
-                    "`{field}` is not shared by {}, so an arm listing them cannot name it; a binding names only what every listed type has, with the same type and the same `@subject`",
-                    listed.join(", ")
-                ),
-                at,
-            ));
+            return Err(self
+                .err(
+                    Code::EventShape,
+                    format!(
+                        "`{field}` is not shared by {}, so an arm listing them cannot name it",
+                        listed.join(", ")
+                    ),
+                    at,
+                )
+                .with_hint(
+                    "a binding names only what every listed type has, with the same type and the same `@subject`",
+                ));
         }
         let Some(declared) = def.field(&field) else {
             return Err(self.err(Code::UnknownMember,
@@ -2041,14 +2080,14 @@ impl Parser {
                 );
             };
             if id.subject.is_some() {
-                return self.fail(Code::BadAnnotation, format!(
-                    "`@subject({subject})` on `{name}` names a subject-encrypted field; a subject id is the name a key is filed under, so it cannot need a key itself"
-                ));
+                return self.fail_hint(
+                    Code::BadAnnotation,
+                    format!("`@subject({subject})` on `{name}` names a subject-encrypted field"),
+                    "a subject id is the name a key is filed under, so it cannot need a key itself",
+                );
             }
             if matches!(id.ty, Type::Opt(_)) {
-                return self.fail(Code::BadAnnotation, format!(
-                    "`@subject({subject})` on `{name}` names an optional field; a subject id is the name a key is filed under, so a missing one is not `no key`, it is no question at all"
-                ));
+                return self.fail_hint(Code::BadAnnotation, format!("`@subject({subject})` on `{name}` names an optional field"), "a subject id is the name a key is filed under, so a missing one is not `no key`, it is no question at all");
             }
         }
         Ok(())
@@ -2177,9 +2216,13 @@ impl Parser {
         let ty = self.type_ref()?;
         self.expect_sym(Sym::Assign)?;
         if !self.eat_word(Keyword::Fold) {
-            return self.fail(Code::StateShape, format!(
-                "`{name}` is a fold over the log, so `=` introduces a seed rather than a value; write `= fold <seed>`"
-            ));
+            return self.fail_hint(
+                Code::StateShape,
+                format!(
+                    "`{name}` is a fold over the log, so `=` introduces a seed rather than a value"
+                ),
+                "write `= fold <seed>`",
+            );
         }
         self.folding = true;
         let init = self.expr(lower, Some(ty.clone()))?;
@@ -2245,15 +2288,10 @@ impl Parser {
                     if let Some((have, first)) = &bound
                         && have != &field
                     {
-                        return Err(self.err(Code::StateShape,
-                            format!(
-                                "`{name}` folds under two subjects, `{have}` from {first} and `{field}` from {path}; one variable holds one subject, because `reveal` names the key by it"
-                            ),
-                            arm,
-                        ));
+                        return Err(self.err(Code::StateShape, format!("`{name}` folds under two subjects, `{have}` from {first} and `{field}` from {path}"), arm).with_hint("one variable holds one subject, because `reveal` names the key by it"));
                     }
                     if let Some((first, at)) = &plain {
-                        return Err(self.err(
+                        return Err(self.advised(
                             Code::StateShape,
                             self.mixed_fold(&name, &field, first),
                             *at,
@@ -2264,7 +2302,7 @@ impl Parser {
                 None => {
                     if let Some((have, _)) = &bound {
                         let message = self.mixed_fold(&name, have, &path);
-                        return Err(self.err(Code::StateShape, message, arm));
+                        return Err(self.advised(Code::StateShape, message, arm));
                     }
                     plain.get_or_insert((path.clone(), arm));
                 }
@@ -2284,9 +2322,20 @@ impl Parser {
 
     /// Rule 12: a seed may be plain, an arm may not. Said the same way whichever order
     /// the two arms are written in, because the defect is the pair rather than either.
-    fn mixed_fold(&self, name: &str, subject: &str, offender: &EventPath) -> String {
-        format!(
-            "`{name}` folds a subject-bound value under `{subject}`, so the arm on {offender} cannot fold a plain one into it; plaintext and a value that needs a key would share one slot, with nothing static to say which is in it. A seed may be plain, an arm may not."
+    fn mixed_fold(
+        &self,
+        name: &str,
+        subject: &str,
+        offender: &EventPath,
+    ) -> (String, Option<String>) {
+        (
+            format!(
+                "`{name}` folds a subject-bound value under `{subject}`, so the arm on {offender} cannot fold a plain one into it"
+            ),
+            Some(
+                "plaintext and a value that needs a key would share one slot, with nothing static to say which is in it. A seed may be plain, an arm may not."
+                    .to_string(),
+            ),
         )
     }
 
@@ -2442,9 +2491,11 @@ impl Parser {
             && seen != &subject
         {
             let message = format!(
-                "`{entity}.{field}` already holds content sealed under `{seen}`, so it cannot also hold content sealed under `{subject}`; one column holds one subject, because `erase` files a key under exactly one"
+                "`{entity}.{field}` already holds content sealed under `{seen}`, so it cannot also hold content sealed under `{subject}`"
             );
-            return Err(self.err(Code::SealBoundary, message, at));
+            return Err(self.err(Code::SealBoundary, message, at).with_hint(
+                "one column holds one subject, because `erase` files a key under exactly one",
+            ));
         }
         if target.subject.is_none() {
             target.ty = seal(target.ty.clone(), subject.clone());
@@ -2597,12 +2648,10 @@ impl Parser {
         self.expect_sym(Sym::RBrace)?;
         for declared in &def.fields {
             if !fields.iter().any(|(name, _)| name == &declared.name) {
-                return self.fail(
+                return self.fail_hint(
                     Code::MissingField,
-                    format!(
-                        "`{what} {}` needs `{}`; an event is written whole",
-                        def.path, declared.name
-                    ),
+                    format!("`{what} {}` needs `{}`", def.path, declared.name),
+                    "an event is written whole",
                 );
             }
         }
@@ -2778,9 +2827,10 @@ impl Parser {
         let span = self.span_here();
         if !self.eat_soft("expect") {
             if self.at_soft("run") || self.at_soft("project") || self.at_soft("deliver") {
-                return self.fail(
+                return self.fail_hint(
                     Code::TestShape,
-                    "a test does one thing; a second action is a second test, or a `given`",
+                    "a test does one thing",
+                    "a second action is a second test, or a `given`",
                 );
             }
             return self.fail(
@@ -2817,9 +2867,11 @@ impl Parser {
             Action::Project { projector, .. } => ("project", projector.as_str()),
             Action::Deliver { effect, .. } => ("deliver", effect.as_str()),
         };
-        self.fail(Code::TestShape, format!(
-            "{what} is not something `{word} {name}` produces; the action decides which expectations a test can write"
-        ))
+        self.fail_hint(
+            Code::TestShape,
+            format!("{what} is not something `{word} {name}` produces"),
+            "the action decides which expectations a test can write",
+        )
     }
 
     /// Rule 5: the appended events in order, or the outcome that stopped them.
@@ -2949,11 +3001,13 @@ impl Parser {
             let at = self.span_here();
             let name = self.expect_verb()?;
             let Some(verb) = Builtin::verb(&name) else {
-                return Err(self.err(
-                    Code::UnknownMember,
-                    format!("`http` has no verb `{name}`; it has get, post, put, patch and delete"),
-                    at,
-                ));
+                return Err(self
+                    .err(
+                        Code::UnknownMember,
+                        format!("`http` has no verb `{name}`"),
+                        at,
+                    )
+                    .with_hint("it has get, post, put, patch and delete"));
             };
             self.expect_sym(Sym::LParen)?;
             let url = self.expr(lower, Some(Type::String))?;
@@ -3134,17 +3188,20 @@ impl Parser {
                     } else {
                         "reject"
                     };
-                    return self.fail(Code::ReturnShape, match self.kind {
-                        Kind::Effect | Kind::EffectFn => format!(
-                            "`{outcome}` is a command's outcome; an effect's terminal outcome is `fail(...)`"
-                        ),
-                        Kind::Function => format!(
-                            "`{outcome}` is a command's outcome; a `fn` returns a value, so a caller decides what a bad one means"
-                        ),
-                        _ => format!(
-                            "`{outcome}` is a command's outcome; a projector write cannot fail in a way the program observes"
-                        ),
-                    });
+                    let why = match self.kind {
+                        Kind::Effect | Kind::EffectFn => {
+                            "an effect's terminal outcome is `fail(...)`"
+                        }
+                        Kind::Function => {
+                            "a `fn` returns a value, so a caller decides what a bad one means"
+                        }
+                        _ => "a projector write cannot fail in a way the program observes",
+                    };
+                    return self.fail_hint(
+                        Code::ReturnShape,
+                        format!("`{outcome}` is a command's outcome"),
+                        why,
+                    );
                 }
                 if let Some(want) = self.returns.clone() {
                     let at = self.span_here();
@@ -3199,8 +3256,10 @@ impl Parser {
                         );
                     }
                     Kind::Effect | Kind::EffectFn => {
-                        return self.fail(Code::WrongContext,
-                            "an effect never appends events; call a command with `invoke`, which appends under its own guard",
+                        return self.fail_hint(
+                            Code::WrongContext,
+                            "an effect never appends events",
+                            "call a command with `invoke`, which appends under its own guard",
                         );
                     }
                     Kind::Function => {
@@ -3357,14 +3416,17 @@ impl Parser {
             }
             Token::Word(Keyword::State) | Token::Word(Keyword::Guard) => {
                 if self.kind == Kind::Function {
-                    return self.fail(
+                    return self.fail_hint(
                         Code::StateShape,
-                        "a `fn` has no `state`; it is a pure function of its arguments",
+                        "a `fn` has no `state`",
+                        "it is a pure function of its arguments",
                     );
                 }
                 if self.kind == Kind::EffectFn {
-                    return self.fail(Code::StateShape,
-                        "an effect-local `fn` has no `state`; the fold belongs to the arm, so pass what it decided in as a parameter",
+                    return self.fail_hint(
+                        Code::StateShape,
+                        "an effect-local `fn` has no `state`",
+                        "the fold belongs to the arm, so pass what it decided in as a parameter",
                     );
                 }
                 self.fail(
@@ -3532,7 +3594,7 @@ impl Parser {
         if types::arithmetic(op, &left, &right).is_some() {
             return Ok(());
         }
-        Err(self.err(Code::BadOperands, bad_operands(op, &left, &right), span))
+        Err(self.advised(Code::BadOperands, bad_operands(op, &left, &right), span))
     }
 
     /// The same rule for a comparison, which the runtime holds to the same table: two
@@ -3551,7 +3613,7 @@ impl Parser {
         if types::comparable(op, &left, &right) {
             return Ok(());
         }
-        Err(self.err(Code::BadOperands, bad_operands(op, &left, &right), span))
+        Err(self.advised(Code::BadOperands, bad_operands(op, &left, &right), span))
     }
 
     fn unary_expr(
@@ -3605,12 +3667,7 @@ impl Parser {
                     } else {
                         format!("`{name}` reads content sealed under `{subject}`")
                     };
-                    return Err(self.err(Code::SealBoundary,
-                        format!(
-                            "{why}; `reveal` it first. `.is_some()` and `.is_none()` are the exception, because presence is not content"
-                        ),
-                        at,
-                    ));
+                    return Err(self.err(Code::SealBoundary, why, at).with_hint("`reveal` it first. `.is_some()` and `.is_none()` are the exception, because presence is not content"));
                 }
                 // Narrowing changes what the optional methods mean, so reading one off
                 // a narrowed value is a mistake worth catching here rather than at run
@@ -3619,12 +3676,7 @@ impl Parser {
                     && matches!(lower.b.exprs().get(value), Some(Expr::Unwrap(_)))
                     && let Some(ty) = &receiver
                 {
-                    return Err(self.err(Code::TypeMismatch,
-                        format!(
-                            "`{name}` reads an optional, and the branch above already proved this one present, so it is a {ty} here; use it directly"
-                        ),
-                        at,
-                    ));
+                    return Err(self.err(Code::TypeMismatch, format!("`{name}` reads an optional, and the branch above already proved this one present, so it is a {ty} here"), at).with_hint("use it directly"));
                 }
                 // The same table that types the result knows whether there is one to
                 // type. A receiver whose type is unknown is not accused, as everywhere
@@ -3633,7 +3685,11 @@ impl Parser {
                     Some(ty) => match method_sig(ty, &name) {
                         Some(sig) => Some(sig),
                         None => {
-                            return Err(self.err(Code::UnknownMember, no_method(ty, &name), at));
+                            return Err(self.advised(
+                                Code::UnknownMember,
+                                no_method(ty, &name),
+                                at,
+                            ));
                         }
                     },
                     None => None,
@@ -3697,11 +3753,13 @@ impl Parser {
                     ));
                 }
                 Some(ty) => {
-                    return Err(self.err(
-                        Code::UnknownMember,
-                        format!("no field `{name}` on {ty}; did you mean `{name}()`?"),
-                        at,
-                    ));
+                    return Err(self
+                        .err(
+                            Code::UnknownMember,
+                            format!("no field `{name}` on {ty}"),
+                            at,
+                        )
+                        .with_hint(format!("did you mean `{name}()`?")));
                 }
                 None => {}
             }
@@ -3750,7 +3808,7 @@ impl Parser {
             // The same rule for a `Timestamp`, in the expression half of it.
             Token::Text(text) if matches!(expect.as_ref().map(inner_of), Some(Type::Timestamp)) => {
                 let Some(micros) = value::timestamp(&text) else {
-                    return Err(self.err(Code::BadLiteral, not_a_timestamp(&text), span));
+                    return Err(self.advised(Code::BadLiteral, not_a_timestamp(&text), span));
                 };
                 Ok(lower.b.lit(Literal::Timestamp(micros)))
             }
@@ -3774,12 +3832,7 @@ impl Parser {
                     (self.type_of(lower, then), self.type_of(lower, otherwise))
                     && left != right
                 {
-                    return Err(self.err(Code::TypeMismatch,
-                        format!(
-                            "these branches give a {left} and a {right}, so this `if` has no one type; both arms are the value"
-                        ),
-                        span,
-                    ));
+                    return Err(self.err(Code::TypeMismatch, format!("these branches give a {left} and a {right}, so this `if` has no one type"), span).with_hint("both arms are the value"));
                 }
                 lower.b.at(span);
                 Ok(lower.b.if_expr(cond, then, otherwise))
@@ -3912,13 +3965,16 @@ impl Parser {
                             .filter(|def| def.has(&name))
                             .map(|def| def.name.as_str())
                             .collect();
-                        Err(self.err(Code::NeedsTargetType,
-                            format!(
-                                "`{name}` is a variant of {}, so it is ambiguous here; the target type would decide it",
-                                candidates.join(" and ")
-                            ),
-                            spanned.span,
-                        ))
+                        Err(self
+                            .err(
+                                Code::NeedsTargetType,
+                                format!(
+                                    "`{name}` is a variant of {}, so it is ambiguous here",
+                                    candidates.join(" and ")
+                                ),
+                                spanned.span,
+                            )
+                            .with_hint("the target type would decide it"))
                     }
                 }
             }
@@ -4128,20 +4184,20 @@ impl Parser {
 /// runtime's, so the static report and the dynamic one read the same, and two shapes
 /// carry the way out because in both the author knows what they meant and only needs
 /// the spelling.
-fn mismatch(found: &Type, want: &Type) -> String {
+fn mismatch(found: &Type, want: &Type) -> (String, Option<String>) {
     let fix = match (found, want) {
-        (Type::Opt(inner), _) if fills(inner, want) => format!(
-            "; `unwrap_or` gives it a fallback, or a branch that proves it present makes it a {inner} without one"
-        ),
+        (Type::Opt(inner), _) if fills(inner, want) => Some(format!(
+            "`unwrap_or` gives it a fallback, or a branch that proves it present makes it a {inner} without one"
+        )),
         (Type::Int | Type::String, Type::Timestamp) => {
-            ", and a Timestamp is written as a string, like \"2026-01-01T00:00:00Z\"".to_string()
+            Some("a Timestamp is written as a string, like \"2026-01-01T00:00:00Z\"".to_string())
         }
         (Type::String, Type::Uuid) => {
-            ", and a Uuid is written as a string, so this one is not one".to_string()
+            Some("a Uuid is written as a string, so this one is not one".to_string())
         }
-        _ => String::new(),
+        _ => None,
     };
-    format!("expected {want}, found {found}{fix}")
+    (format!("expected {want}, found {found}"), fix)
 }
 
 /// What a type-qualified name offers, which differs between the two that have any.
@@ -4156,70 +4212,82 @@ fn members_of(ty: &str) -> &'static str {
 /// emptiness question and a plain value asked a presence one, which is one confusion
 /// from either side, so each is named rather than only refused: an author who wrote
 /// `is_empty()` on a `String?` knows exactly what they meant.
-fn no_method(receiver: &Type, name: &str) -> String {
+fn no_method(receiver: &Type, name: &str) -> (String, Option<String>) {
     let instead = match (receiver, name) {
-        (Type::Opt(inner), "is_empty") => format!(
-            "; an optional is asked `is_none()`. `is_empty()` is a question for a {inner}, and this may not be holding one"
+        (Type::Opt(inner), "is_empty") => Some(format!(
+            "an optional is asked `is_none()`. `is_empty()` is a question for a {inner}, and this may not be holding one"
+        )),
+        (Type::String, "is_none" | "is_some") => Some(
+            "a String is always there, so `is_empty()` is the question. Absence is what a String? is for".to_string(),
         ),
-        (Type::String, "is_none" | "is_some") => {
-            "; a String is always there, so `is_empty()` is the question. Absence is what a String? is for".to_string()
-        }
-        (Type::Opt(_), _) => format!(
-            "; an optional has `is_some()`, `is_none()` and `unwrap_or(fallback)`, and `{name}` is a question for what it holds"
-        ),
+        (Type::Opt(_), _) => Some(format!(
+            "an optional has `is_some()`, `is_none()` and `unwrap_or(fallback)`, and `{name}` is a question for what it holds"
+        )),
         // Named because its absence is a decision rather than an oversight, and the
         // author who reached for it is the one the decision is addressed to.
-        (Type::Timestamp, _) => {
-            "; calendar arithmetic is not in the language, because month-end clamping is one opinion among several and a language that picks one cannot be argued with. Write it as a `fn`".to_string()
-        }
-        (_, "unwrap_or") => {
-            format!("; a {receiver} is already there, so there is nothing to fall back to")
-        }
-        _ => String::new(),
+        (Type::Timestamp, _) => Some(
+            "calendar arithmetic is not in the language, because month-end clamping is one opinion among several and a language that picks one cannot be argued with. Write it as a `fn`".to_string(),
+        ),
+        (_, "unwrap_or") => Some(format!(
+            "a {receiver} is already there, so there is nothing to fall back to"
+        )),
+        _ => None,
     };
-    format!("no method `{name}` on {receiver}{instead}")
+    (format!("no method `{name}` on {receiver}"), instead)
 }
 
 /// An operator with no row in the table. The three `docs/money.md` names get the reason
 /// as well as the fact, because each of them is a mistake with a shape: the operator is
 /// not missing, the expression means something the author did not intend.
-fn bad_operands(op: BinOp, lhs: &Type, rhs: &Type) -> String {
+fn bad_operands(op: BinOp, lhs: &Type, rhs: &Type) -> (String, Option<String>) {
     let why = match (lhs, op, rhs) {
-        (Type::Money(_), BinOp::Mul, Type::Money(_)) => {
-            "; two amounts multiplied is not an amount. An amount scales by an `Int` or a `Decimal`"
-        }
-        (Type::Money(a), _, Type::Money(b)) if a != b => {
-            "; two amounts meet at one scale, the rule `Decimal` has for the same reason: a silent rescale is how a total loses a cent"
-        }
+        (Type::Money(_), BinOp::Mul, Type::Money(_)) => Some(
+            "two amounts multiplied is not an amount. An amount scales by an `Int` or a `Decimal`",
+        ),
+        (Type::Money(a), _, Type::Money(b)) if a != b => Some(
+            "two amounts meet at one scale, the rule `Decimal` has for the same reason: a silent rescale is how a total loses a cent",
+        ),
         (Type::Money(_), BinOp::Add | BinOp::Sub, Type::Decimal(_))
-        | (Type::Decimal(_), BinOp::Add | BinOp::Sub, Type::Money(_)) => {
-            "; this adds a rate to an amount. To scale one, write `*`, or `mul(rate, HalfUp)` where the result has to round"
-        }
+        | (Type::Decimal(_), BinOp::Add | BinOp::Sub, Type::Money(_)) => Some(
+            "this adds a rate to an amount. To scale one, write `*`, or `mul(rate, HalfUp)` where the result has to round",
+        ),
         (Type::Decimal(a), _, Type::Decimal(b)) if a != b => {
-            "; two decimals meet at one scale, and widening one is the author's call to make"
+            Some("two decimals meet at one scale, and widening one is the author's call to make")
         }
-        _ => "",
+        _ => None,
     };
-    format!("cannot apply `{op}` to {lhs} and {rhs}{why}")
+    (
+        format!("cannot apply `{op}` to {lhs} and {rhs}"),
+        why.map(str::to_string),
+    )
 }
 
 /// A written `Timestamp` that did not read as one. The offset is the part authors
 /// leave off, and `value::timestamp` refuses a local time on purpose, so the message
 /// names the shape rather than only reporting that the text was wrong.
-fn not_a_timestamp(text: &str) -> String {
-    format!(
-        "`{text}` is not a Timestamp; it is RFC 3339 and carries an offset, like \"2026-01-01T00:00:00Z\" or \"2026-01-01T09:30:00+10:00\""
+fn not_a_timestamp(text: &str) -> (String, Option<String>) {
+    (
+        format!("`{text}` is not a Timestamp"),
+        Some(
+            "it is RFC 3339 and carries an offset, like \"2026-01-01T00:00:00Z\" or \"2026-01-01T09:30:00+10:00\"".to_string(),
+        ),
     )
 }
 
 /// Rule 11 stated where an author looks for it. `Uuid.new` sits next to `derive` in
 /// the same namespace, so its absence is visible rather than something to notice.
-fn uuid_member(member: &str) -> String {
+fn uuid_member(member: &str) -> (String, Option<String>) {
     match member {
-        "new" | "random" | "generate" | "v4" => format!(
-            "`Uuid` has no `{member}`: an id has to be derived from its inputs, so that a command retry and an effect replay produce the id they produced the first time; write `Uuid.derive(seed, name)`"
+        "new" | "random" | "generate" | "v4" => (
+            format!(
+                "`Uuid` has no `{member}`: an id has to be derived from its inputs, so that a command retry and an effect replay produce the id they produced the first time"
+            ),
+            Some("write `Uuid.derive(seed, name)`".to_string()),
         ),
-        _ => format!("`Uuid` has no `{member}`; it has `derive(seed, name)`"),
+        _ => (
+            format!("`Uuid` has no `{member}`"),
+            Some("it has `derive(seed, name)`".to_string()),
+        ),
     }
 }
 
@@ -4303,12 +4371,13 @@ impl Parser {
                     .position(|other| other.events.iter().any(|seen| seen == path));
                 if let Some(index) = clash {
                     let first = self.location(at[index]);
-                    return Err(self.err(Code::DeclaredTwice,
-                        format!(
-                            "`{name}` already has an arm on {path} at {first}; one event selects exactly one arm"
-                        ),
-                        arm.span,
-                    ));
+                    return Err(self
+                        .err(
+                            Code::DeclaredTwice,
+                            format!("`{name}` already has an arm on {path} at {first}"),
+                            arm.span,
+                        )
+                        .with_hint("one event selects exactly one arm"));
                 }
             }
             arms.push(arm);
@@ -4348,12 +4417,7 @@ impl Parser {
         // name would silently change which code runs at a call site that reads the
         // same in two files. Two different effects may each declare the name.
         if self.functions.iter().any(|other| other.name == name) {
-            return Err(self.err(Code::DeclaredTwice,
-                format!(
-                    "`{name}` is already a `fn` at module scope, and one is in scope inside every effect; an effect-local `fn` cannot shadow it"
-                ),
-                at,
-            ));
+            return Err(self.err(Code::DeclaredTwice, format!("`{name}` is already a `fn` at module scope, and one is in scope inside every effect"), at).with_hint("an effect-local `fn` cannot shadow it"));
         }
         let params = self.param_list(true)?;
         let ret = self.fn_result(Kind::EffectFn)?;
@@ -4410,8 +4474,10 @@ impl Parser {
             match self.peek() {
                 Token::Word(Keyword::State) => self.state_decl(&mut lower, events)?,
                 Token::Word(Keyword::Guard) => {
-                    return self.fail(Code::StateShape,
-                        "an effect has no `guard`; it appends nothing, so there is no append condition to build",
+                    return self.fail_hint(
+                        Code::StateShape,
+                        "an effect has no `guard`",
+                        "it appends nothing, so there is no append condition to build",
                     );
                 }
                 _ => break,
@@ -4428,12 +4494,7 @@ impl Parser {
         self.triggers.clear();
         let arm = lower.b.finish_arm(paths, span, body);
         if let Err((erase, reveal)) = erase_last(&arm.exprs, &arm.body) {
-            return Err(self.err(Code::EraseOrder,
-                format!(
-                    "`reveal` at {reveal} can run after the `erase` at {erase}; `erase` is journaled and `reveal` is not, so a replay skips the erase and re-runs the reveal against a key that is gone"
-                ),
-                reveal,
-            ));
+            return Err(self.err(Code::EraseOrder, format!("`reveal` at {reveal} can run after the `erase` at {erase}"), reveal).with_hint("`erase` is journaled and `reveal` is not, so a replay skips the erase and re-runs the reveal against a key that is gone"));
         }
         Ok(arm)
     }
@@ -4508,13 +4569,13 @@ impl Parser {
         }
         if fields.is_empty() {
             let at = spans[0];
-            return Err(self.err(Code::EventShape,
-                format!(
-                    "these event types share no field, so an arm listing them could name nothing; {} is the first that differs",
-                    paths[1]
-                ),
-                at,
-            ));
+            return Err(self
+                .err(
+                    Code::EventShape,
+                    "these event types share no field, so an arm listing them could name nothing",
+                    at,
+                )
+                .with_hint(format!("{} is the first that differs", paths[1])));
         }
         Ok(EventDef::new(first.path.clone(), fields))
     }
@@ -4543,8 +4604,14 @@ impl Parser {
         match name.as_str() {
             "fail" => {
                 self.gate(
-                    "`fail` is an effect's terminal outcome; a command returns `invalid(...)` or `reject(...)`",
-                    "`fail` is an effect's terminal outcome; a projector write cannot fail in a way the program observes",
+                    (
+                        "`fail` is an effect's terminal outcome",
+                        Some("a command returns `invalid(...)` or `reject(...)`"),
+                    ),
+                    (
+                        "`fail` is an effect's terminal outcome",
+                        Some("a projector write cannot fail in a way the program observes"),
+                    ),
                     "fail",
                     span,
                 )?;
@@ -4556,8 +4623,14 @@ impl Parser {
             }
             "log" => {
                 self.gate(
-                    "`log` is an effect builtin; a command's decision is already visible in what it emits",
-                    "`log` is an effect builtin; a projector runs once per rebuild, so its lines are not a trace",
+                    (
+                        "`log` is an effect builtin",
+                        Some("a command's decision is already visible in what it emits"),
+                    ),
+                    (
+                        "`log` is an effect builtin",
+                        Some("a projector runs once per rebuild, so its lines are not a trace"),
+                    ),
                     "log",
                     span,
                 )?;
@@ -4569,8 +4642,14 @@ impl Parser {
             }
             "erase" => {
                 self.gate(
-                    "only an effect crosses the decrypt boundary; a command decides from state without reaching personal data",
-                    "only an effect crosses the decrypt boundary; a projector stores what the event carries",
+                    (
+                        "only an effect crosses the decrypt boundary",
+                        Some("a command decides from state without reaching personal data"),
+                    ),
+                    (
+                        "only an effect crosses the decrypt boundary",
+                        Some("a projector stores what the event carries"),
+                    ),
                     "erase a subject key",
                     span,
                 )?;
@@ -4618,12 +4697,7 @@ impl Parser {
                 };
 
                 let Some(field) = subject_field(events, &subject) else {
-                    return Err(self.err(Code::EraseSubject,
-                        format!(
-                            "nothing is scoped to `{subject}`, so there is no key to erase; `erase` takes the subject id that a field is declared `@subject(...)` of"
-                        ),
-                        at,
-                    ));
+                    return Err(self.err(Code::EraseSubject, format!("nothing is scoped to `{subject}`, so there is no key to erase"), at).with_hint("`erase` takes the subject id that a field is declared `@subject(...)` of"));
                 };
                 // The declared type of the field the key is filed under. Skipped when
                 // the value's type is unknown, the way every other optional check here
@@ -4664,12 +4738,7 @@ impl Parser {
         at: Span,
     ) -> Result<(), Diagnostic> {
         if let Some(reveal) = reveal_in(lower.b.exprs(), value) {
-            return Err(self.err(Code::EraseOrder,
-                format!(
-                    "the id at {reveal} was learned by revealing, so `erase({subject}, ...)` would make a repeat request for an erased subject unreadable; take a subject id from a plaintext field"
-                ),
-                at,
-            ));
+            return Err(self.err(Code::EraseOrder, format!("the id at {reveal} was learned by revealing, so `erase({subject}, ...)` would make a repeat request for an erased subject unreadable"), at).with_hint("take a subject id from a plaintext field"));
         }
         Ok(())
     }
@@ -4693,11 +4762,13 @@ impl Parser {
     /// it a style. Rule 9's erase-last check runs over one arm's statement tree; the
     /// moment a helper can hold a `reveal` or an `erase` it has to follow calls.
     fn purity_error(&self, what: &str, span: Span) -> Diagnostic {
-        self.err(Code::ImpureFn,
-            format!(
-                "a `fn` is pure, so it cannot {what}; that is what keeps the erase-last check inside one arm instead of following calls"
-            ),
+        self.err(
+            Code::ImpureFn,
+            format!("a `fn` is pure, so it cannot {what}"),
             span,
+        )
+        .with_hint(
+            "that is what keeps the erase-last check inside one arm instead of following calls",
         )
     }
 
@@ -4724,12 +4795,7 @@ impl Parser {
         if want.subject() == Some(subject) {
             return Ok(());
         }
-        Err(self.err(Code::SealBoundary,
-            format!(
-                "this is content sealed under `{subject}` and a {want} is not; `reveal` it first, because writing it here takes it out from behind the decrypt boundary"
-            ),
-            at,
-        ))
+        Err(self.err(Code::SealBoundary, format!("this is content sealed under `{subject}` and a {want} is not"), at).with_hint("`reveal` it first, because writing it here takes it out from behind the decrypt boundary"))
     }
 
     /// A value written where a type is declared has to fill it. `docs/types.md` is the
@@ -4765,7 +4831,7 @@ impl Parser {
         if fills(&found.unsealed(), &want.unsealed()) {
             return Ok(());
         }
-        Err(self.err(Code::TypeMismatch, mismatch(&found, want), at))
+        Err(self.advised(Code::TypeMismatch, mismatch(&found, want), at))
     }
 
     /// The same rule where nothing declares a type: an interpolation hole, a
@@ -4801,12 +4867,7 @@ impl Parser {
         if self.kind != Kind::EffectFn {
             return Ok(());
         }
-        Err(self.err(Code::ArmOnly,
-            format!(
-                "an effect-local `fn` cannot {what}; it stays in the arm, which is what keeps rule 9's erase-last check inside one statement tree, so {fix}"
-            ),
-            span,
-        ))
+        Err(self.err(Code::ArmOnly, format!("an effect-local `fn` cannot {what}"), span).with_hint(format!("it stays in the arm, which is what keeps rule 9's erase-last check inside one statement tree, so {fix}")))
     }
 
     fn not_in_fn(&self, what: &str, span: Span) -> Result<(), Diagnostic> {
@@ -4818,15 +4879,15 @@ impl Parser {
 
     fn gate(
         &self,
-        command: &str,
-        projector: &str,
+        command: (&str, Option<&str>),
+        projector: (&str, Option<&str>),
         what: &str,
         span: Span,
     ) -> Result<(), Diagnostic> {
         match self.kind {
             Kind::Effect | Kind::EffectFn => Ok(()),
-            Kind::Command => Err(self.err(Code::WrongContext, command, span)),
-            Kind::Projector => Err(self.err(Code::WrongContext, projector, span)),
+            Kind::Command => Err(self.advised(Code::WrongContext, command, span)),
+            Kind::Projector => Err(self.advised(Code::WrongContext, projector, span)),
             Kind::Function => Err(self.purity_error(what, span)),
             Kind::Test => Err(self.err(
                 Code::WrongContext,
@@ -4874,10 +4935,7 @@ impl Parser {
                 // fills before its body runs. A helper has no such slot, and giving it
                 // one would make `now()` mean something different inside a call.
                 if self.kind == Kind::EffectFn {
-                    return Err(self.err(Code::ArmOnly,
-                        "an effect-local `fn` cannot read a clock; `now()` is pinned once per invocation, so read it in the arm and pass it in",
-                        span,
-                    ));
+                    return Err(self.err(Code::ArmOnly, "an effect-local `fn` cannot read a clock", span).with_hint("`now()` is pinned once per invocation, so read it in the arm and pass it in"));
                 }
                 self.not_in_fn("read a clock", span)?;
                 self.not_in_fold("read a clock", span)?;
@@ -4887,20 +4945,12 @@ impl Parser {
                 lower.b.at(span);
                 Ok(Some(lower.b.read(slot)))
             }
-            "erase" if called => Err(self.err(Code::NotAValue,
-                "`erase` is a statement rather than a value; it returns nothing, because there is nothing an author could do differently on either answer",
-                span,
-            )),
+            "erase" if called => Err(self.err(Code::NotAValue, "`erase` is a statement rather than a value", span).with_hint("it returns nothing, because there is nothing an author could do differently on either answer")),
             "fail" | "log" if called => Err(self.err(Code::NotAValue,
                 format!("`{name}` is a statement rather than a value"),
                 span,
             )),
-            "uuid4" | "random" | "uuid5" if called => Err(self.err(Code::NotInScope,
-                format!(
-                    "there is no `{name}` in heklang: an id has to be derived from its inputs, so that a command retry and an effect replay produce the id they produced the first time; write `Uuid.derive(seed, name)`"
-                ),
-                span,
-            )),
+            "uuid4" | "random" | "uuid5" if called => Err(self.err(Code::NotInScope, format!("there is no `{name}` in heklang: an id has to be derived from its inputs, so that a command retry and an effect replay produce the id they produced the first time"), span).with_hint("write `Uuid.derive(seed, name)`")),
             _ => Ok(None),
         }
     }
@@ -4913,7 +4963,7 @@ impl Parser {
         let at = self.span_here();
         let member = self.expect_ident()?;
         if member != "derive" {
-            return Err(self.err(Code::UnknownMember, uuid_member(&member), at));
+            return Err(self.advised(Code::UnknownMember, uuid_member(&member), at));
         }
         self.expect_sym(Sym::LParen)?;
         let seed = self.expr(lower, Some(Type::Uuid))?;
@@ -4932,15 +4982,23 @@ impl Parser {
         let at = self.span_here();
         let verb = self.expect_ident()?;
         let Some(builtin) = Builtin::verb(&verb) else {
-            return Err(self.err(
-                Code::UnknownMember,
-                format!("`http` has no verb `{verb}`; it has get, post, put, patch and delete"),
-                at,
-            ));
+            return Err(self
+                .err(
+                    Code::UnknownMember,
+                    format!("`http` has no verb `{verb}`"),
+                    at,
+                )
+                .with_hint("it has get, post, put, patch and delete"));
         };
         self.gate(
-            "a command decides from state and appends; only an effect can call out, because only an effect journals the call",
-            "a projector is a pure fold over the log, so it cannot make an HTTP call",
+            (
+                "a command decides from state and appends",
+                Some("only an effect can call out, because only an effect journals the call"),
+            ),
+            (
+                "a projector is a pure fold over the log, so it cannot make an HTTP call",
+                None,
+            ),
             "call out",
             span,
         )?;
@@ -4979,14 +5037,13 @@ impl Parser {
             // Rule 13: a timeout belongs to configuration, not to the call site.
             let at = self.span_here();
             let plural = if args.len() == 1 { "" } else { "s" };
-            return Err(self.err(Code::Arity,
-                format!(
-                    "`{}` takes {} argument{plural}; a timeout is configuration rather than a call argument",
-                    builtin.name(),
-                    args.len()
-                ),
-                at,
-            ));
+            return Err(self
+                .err(
+                    Code::Arity,
+                    format!("`{}` takes {} argument{plural}", builtin.name(), args.len()),
+                    at,
+                )
+                .with_hint("a timeout is configuration rather than a call argument"));
         }
         self.expect_sym(Sym::RParen)?;
         // Always present in the IR, empty when unwritten, so the interpreter reads one
@@ -5002,8 +5059,14 @@ impl Parser {
 
     fn reveal_call(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, Diagnostic> {
         self.gate(
-            "only an effect crosses the decrypt boundary; a command decides from state without reaching personal data",
-            "only an effect crosses the decrypt boundary; a projector stores what the event carries",
+            (
+                "only an effect crosses the decrypt boundary",
+                Some("a command decides from state without reaching personal data"),
+            ),
+            (
+                "only an effect crosses the decrypt boundary",
+                Some("a projector stores what the event carries"),
+            ),
             "decrypt",
             span,
         )?;
@@ -5023,12 +5086,7 @@ impl Parser {
                 Some(ty) => format!("this is a plain {ty}"),
                 None => "this is not one".to_string(),
             };
-            return Err(self.err(Code::SealBoundary,
-                format!(
-                    "`reveal` takes subject-bound content and {found}; it decrypts a field declared `@subject(...)`, or a `state` folded from one. An arm that transforms what it folds drops the seal, because the key belongs to the field's content rather than to whatever is computed from it"
-                ),
-                at,
-            ));
+            return Err(self.err(Code::SealBoundary, format!("`reveal` takes subject-bound content and {found}"), at).with_hint("it decrypts a field declared `@subject(...)`, or a `state` folded from one. An arm that transforms what it folds drops the seal, because the key belongs to the field's content rather than to whatever is computed from it"));
         }
 
         lower.b.at(span);
@@ -5128,10 +5186,13 @@ impl Parser {
             // are typed by what they are rather than by where they land.
             let inner = inner.or_else(|| self.in_body.then_some(Type::Json));
             let Some(inner) = inner else {
-                return Err(self.err(Code::NeedsTargetType,
-                    "an empty list needs a target type to know what it holds; that comes from the `state`, parameter or field it fills",
-                    span,
-                ));
+                return Err(self
+                    .err(
+                        Code::NeedsTargetType,
+                        "an empty list needs a target type to know what it holds",
+                        span,
+                    )
+                    .with_hint("that comes from the `state`, parameter or field it fills"));
             };
             lower.b.at(span);
             return Ok(lower.b.lit(Literal::List {
@@ -5229,10 +5290,7 @@ impl Parser {
             Some(Type::List(item)) => (second.as_ref().map(|_| Type::Int), item.as_ref().clone()),
             Some(Type::Map(key, value)) => {
                 if second.is_none() {
-                    return Err(self.err(Code::TypeMismatch,
-                        "a map yields a key beside its value, so `for` over one binds two names; write `for key, value in ...`",
-                        at,
-                    ));
+                    return Err(self.err(Code::TypeMismatch, "a map yields a key beside its value, so `for` over one binds two names", at).with_hint("write `for key, value in ...`"));
                 }
                 (Some(key.as_ref().clone()), value.as_ref().clone())
             }
@@ -5244,10 +5302,15 @@ impl Parser {
                 ));
             }
             None => {
-                return Err(self.err(Code::NeedsTargetType,
-                    "cannot tell what this holds; `for` needs the container's element type, which comes from a declaration",
-                    over_at,
-                ));
+                return Err(self
+                    .err(
+                        Code::NeedsTargetType,
+                        "cannot tell what this holds",
+                        over_at,
+                    )
+                    .with_hint(
+                        "`for` needs the container's element type, which comes from a declaration",
+                    ));
             }
         };
 
@@ -5293,11 +5356,9 @@ impl Parser {
             }));
         }
         if member != "parse" {
-            return Err(self.err(
-                Code::UnknownMember,
-                format!("`{ty}` has no `{member}`; it has {}", members_of(ty)),
-                at,
-            ));
+            return Err(self
+                .err(Code::UnknownMember, format!("`{ty}` has no `{member}`"), at)
+                .with_hint(format!("it has {}", members_of(ty))));
         }
         let builtin = if ty == "Timestamp" {
             Builtin::TimestampParse
@@ -5305,10 +5366,13 @@ impl Parser {
             // The scale is a property of where the amount lands, not of the text, so
             // it comes from the target the way `Money.empty` would.
             let Some(Type::Money(scale)) = expect.map(inner_of) else {
-                return Err(self.err(Code::NeedsTargetType,
-                    "`Money.parse` needs a target scale to know what it is parsing into; that comes from the field, parameter or `state` it fills",
-                    span,
-                ));
+                return Err(self
+                    .err(
+                        Code::NeedsTargetType,
+                        "`Money.parse` needs a target scale to know what it is parsing into",
+                        span,
+                    )
+                    .with_hint("that comes from the field, parameter or `state` it fills"));
             };
             Builtin::MoneyParse(*scale)
         };
@@ -5355,11 +5419,9 @@ impl Parser {
                     args: vec![value],
                 }))
             }
-            other => Err(self.err(
-                Code::UnknownMember,
-                format!("`Json` has no `{other}`; it has `empty` and `encode(value)`"),
-                at,
-            )),
+            other => Err(self
+                .err(Code::UnknownMember, format!("`Json` has no `{other}`"), at)
+                .with_hint("it has `empty` and `encode(value)`")),
         }
     }
 
@@ -5375,16 +5437,18 @@ impl Parser {
         let at = self.span_here();
         let member = self.expect_ident()?;
         if member != "empty" {
-            return Err(self.err(Code::UnknownMember,
-                format!("`Map` has no `{member}`; it has `empty`, and everything else is a method on a map value"),
-                at,
-            ));
+            return Err(self
+                .err(Code::UnknownMember, format!("`Map` has no `{member}`"), at)
+                .with_hint("it has `empty`, and everything else is a method on a map value"));
         }
         let Some(Type::Map(key, value)) = expect.map(inner_of) else {
-            return Err(self.err(Code::NeedsTargetType,
-                "`Map.empty` needs a target type to know what it holds; that comes from the `state`, parameter or field it fills",
-                span,
-            ));
+            return Err(self
+                .err(
+                    Code::NeedsTargetType,
+                    "`Map.empty` needs a target type to know what it holds",
+                    span,
+                )
+                .with_hint("that comes from the `state`, parameter or field it fills"));
         };
         let lit = Literal::EmptyMap(key.as_ref().clone(), value.as_ref().clone());
         lower.b.at(span);
@@ -5479,10 +5543,15 @@ impl Parser {
         // 7 still holds: `invoke` checks its fields against declared parameter types,
         // so an object only reaches one whose parameter is a `Json`.
         if !self.in_body && expect.map(inner_of) != Some(&Type::Json) {
-            return Err(self.err(Code::TypeMismatch,
-                "an object literal is an HTTP request body; `invoke` takes a typed struct, checked against the command's parameters",
-                span,
-            ));
+            return Err(self
+                .err(
+                    Code::TypeMismatch,
+                    "an object literal is an HTTP request body",
+                    span,
+                )
+                .with_hint(
+                    "`invoke` takes a typed struct, checked against the command's parameters",
+                ));
         }
 
         let outer = mem::replace(&mut self.no_record_literal, false);
@@ -5525,8 +5594,14 @@ impl Parser {
 
     fn invoke_expr(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, Diagnostic> {
         self.gate(
-            "`invoke` calls a command, so it can only appear in an effect; a command that needs another command's work emits, and an effect reacts",
-            "`invoke` calls a command, so it can only appear in an effect; a projector is a pure fold",
+            (
+                "`invoke` calls a command, so it can only appear in an effect",
+                Some("a command that needs another command's work emits, and an effect reacts"),
+            ),
+            (
+                "`invoke` calls a command, so it can only appear in an effect",
+                Some("a projector is a pure fold"),
+            ),
             "call a command",
             span,
         )?;
@@ -5657,21 +5732,23 @@ impl Parser {
                     let ty = &field.ty;
                     // An enum with no `@default` has no zero for a different reason
                     // than a `Uuid` does, and it has one more fix.
-                    let complaint = match ty {
-                        Type::Enum(name) => format!(
-                            "`{}` is a `{name}` with no `@default` variant; give the enum one, give the field a default, or make this an `update`",
-                            field.name
+                    let (complaint, fix) = match ty {
+                        Type::Enum(name) => (
+                            format!("`{}` is a `{name}` with no `@default` variant", field.name),
+                            "give the enum one, give the field a default, or make this an `update`"
+                                .to_string(),
                         ),
-                        _ => format!(
-                            "`{}` is a {ty} with no zero value; give it a default, make it `{ty}?`, or make this an `update`",
-                            field.name
+                        _ => (
+                            format!("`{}` is a {ty} with no zero value", field.name),
+                            format!("give it a default, make it `{ty}?`, or make this an `update`"),
                         ),
                     };
                     let error = Diagnostic::new(
                         Code::NoZeroValue,
                         format!("this `patch` materializes a `{entity}`, and {complaint}"),
                         span,
-                    );
+                    )
+                    .with_hint(fix);
                     return Err(match &projector.module {
                         Some(module) => error.in_file(module),
                         None => error,

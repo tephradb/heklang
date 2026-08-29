@@ -66,7 +66,7 @@ fn program(body: &str) -> Program {
 fn err(body: &str) -> String {
     parse(&source(body))
         .expect_err("expected this effect to be rejected")
-        .message
+        .text()
 }
 
 fn placed(seq: u32, customer_id: i64, total: i64) -> Event {
@@ -1005,7 +1005,7 @@ projector P {
 ",
     )
     .expect_err("a projector has no clock")
-    .message;
+    .text();
     assert_eq!(
         message,
         "a projector has no clock, because a rebuild must reproduce every value it writes"
@@ -1424,7 +1424,7 @@ fn the_fold_rules_hold_in_a_command_too() {
 }",
     ))
     .expect_err("a plain arm is a plain arm here too")
-    .message;
+    .text();
     assert!(
         message.contains("cannot fold a plain one into it"),
         "got: {message}"
@@ -1532,7 +1532,7 @@ effect E { on @e.happened as e { log(\"x\") } }
 ",
     )
     .expect_err("an optional subject id")
-    .message;
+    .text();
     assert!(
         message.contains("names an optional field"),
         "got: {message}"
@@ -1544,7 +1544,7 @@ effect E { on @e.happened as e { log(\"x\") } }
 ",
     )
     .expect_err("an encrypted subject id")
-    .message;
+    .text();
     assert!(
         message.contains("names a subject-encrypted field"),
         "got: {message}"
@@ -1556,7 +1556,7 @@ effect E { on @e.happened as e { log(\"x\") } }
 ",
     )
     .expect_err("a subject id that is not a field")
-    .message;
+    .text();
     assert!(
         message.contains("names no field of @e.happened"),
         "got: {message}"
@@ -1654,7 +1654,7 @@ effect Retry {
 fn an_effect_that_can_trigger_itself_is_rejected() {
     let message = parse(CYCLE)
         .expect_err("this would grow the log without end")
-        .message;
+        .text();
     assert!(
         message.contains("this effect can trigger itself"),
         "got: {message}"
@@ -1663,7 +1663,7 @@ fn an_effect_that_can_trigger_itself_is_rejected() {
 
 #[test]
 fn the_cycle_error_names_the_path() {
-    let message = parse(CYCLE).expect_err("rejected").message;
+    let message = parse(CYCLE).expect_err("rejected").text();
     assert!(
         message.starts_with("@order.placed -> Retry -> Replace -> @order.placed:"),
         "got: {message}"
@@ -1709,7 +1709,7 @@ fn command_err(body: &str) -> String {
         "{PRELUDE}command C(order_id: Uuid) {{\n{body}\n}}\n"
     ))
     .expect_err("expected this command to be rejected")
-    .message
+    .text()
 }
 
 fn projector_err(body: &str) -> String {
@@ -1720,7 +1720,7 @@ fn projector_err(body: &str) -> String {
 }}\n"
     ))
     .expect_err("expected this projector to be rejected")
-    .message
+    .text()
 }
 
 #[test]
@@ -2107,7 +2107,7 @@ fn a_response_is_not_declarable_anywhere_else() {
     ];
     for (what, source) in cases {
         assert_eq!(
-            parse(source).unwrap_err().message,
+            parse(source).unwrap_err().text(),
             "unknown type `Response`",
             "for {what}"
         );
@@ -2121,7 +2121,7 @@ fn a_container_of_responses_is_rejected() {
     for ty in ["List(Response)", "Map(String, Response)"] {
         let source = format!("event @a.b {{ x: Int }}\nfn f(rs: {ty}) -> Int {{\n  return 1\n}}\n");
         assert_eq!(
-            parse(&source).unwrap_err().message,
+            parse(&source).unwrap_err().text(),
             "unknown type `Response`",
             "for {ty}"
         );
@@ -2302,7 +2302,7 @@ fn a_trailing_comma_closes_an_effect_builtin() {
 }",
     ))
     .expect_err("a third positional argument is still rule 13")
-    .message;
+    .text();
     assert_eq!(
         third,
         "`http.post` takes 2 arguments; a timeout is configuration rather than a call argument"

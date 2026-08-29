@@ -47,7 +47,7 @@ command Write(note_id: Uuid, {params}) {{
     );
     parse(&source)
         .expect_err("expected this to be rejected")
-        .message
+        .text()
 }
 
 // ---------------------------------------------------------------------------------
@@ -274,7 +274,7 @@ command Write(note_id: Uuid) {{
 "
     );
     assert_eq!(
-        parse(&source).expect_err("expected a rejection").message,
+        parse(&source).expect_err("expected a rejection").text(),
         "unterminated multi-line string"
     );
 }
@@ -293,7 +293,7 @@ projector Notes {
 }
 ";
     assert_eq!(
-        parse(source).expect_err("expected a rejection").message,
+        parse(source).expect_err("expected a rejection").text(),
         "a String default cannot be an interpolated string"
     );
 }

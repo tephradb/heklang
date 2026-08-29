@@ -40,7 +40,7 @@ fn made(body: &str, text: &str) -> Value {
 fn err(body: &str) -> String {
     parse(&source(body))
         .expect_err("expected this to be rejected")
-        .message
+        .text()
 }
 
 // ---------------------------------------------------------------------------------
