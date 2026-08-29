@@ -3149,11 +3149,20 @@ impl Parser {
     fn or_expr(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
         let start = self.here();
         let mut lhs = self.and_expr(lower, expect)?;
+        // Captured before the operator is eaten, or the left operand's extent would
+        // swallow it.
+        let mut lhs_at = self.span_from(start);
+        // Checked only once an operator follows: an expression with no `||` after it is
+        // whatever the enclosing position wanted, not a boolean operand.
         while let Some(span) = self.eat_at(Sym::OrOr) {
+            self.check_bool(lower, lhs, lhs_at)?;
+            let from = self.here();
             let rhs = self.and_expr(lower, Some(Type::Bool))?;
+            self.check_bool(lower, rhs, self.span_from(from))?;
             lower.b.at(span);
             lhs = lower.b.binary(BinOp::Or, lhs, rhs);
             lhs = self.close(lower, lhs, start);
+            lhs_at = self.span_from(start);
         }
         Ok(lhs)
     }
@@ -3161,11 +3170,16 @@ impl Parser {
     fn and_expr(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
         let start = self.here();
         let mut lhs = self.cmp_expr(lower, expect)?;
+        let mut lhs_at = self.span_from(start);
         while let Some(span) = self.eat_at(Sym::AndAnd) {
+            self.check_bool(lower, lhs, lhs_at)?;
+            let from = self.here();
             let rhs = self.cmp_expr(lower, Some(Type::Bool))?;
+            self.check_bool(lower, rhs, self.span_from(from))?;
             lower.b.at(span);
             lhs = lower.b.binary(BinOp::And, lhs, rhs);
             lhs = self.close(lower, lhs, start);
+            lhs_at = self.span_from(start);
         }
         Ok(lhs)
     }
@@ -3293,7 +3307,9 @@ impl Parser {
     ) -> Result<ExprId, SyntaxError> {
         let start = self.here();
         if let Some(span) = self.eat_at(Sym::Bang) {
+            let from = self.here();
             let operand = self.unary_expr(lower, Some(Type::Bool))?;
+            self.check_bool(lower, operand, self.span_from(from))?;
             lower.b.at(span);
             let value = lower.b.unary(UnOp::Not, operand);
             return Ok(self.close(lower, value, start));
@@ -3751,6 +3767,10 @@ impl Parser {
         match lower.b.exprs().get(id)? {
             Expr::Lit(lit) => Some(value::literal(lit).ty()),
             Expr::Load(slot) => lower.b.slot_type(*slot).cloned(),
+            // `!` answers Bool whatever it was handed. Passing the operand's type through
+            // was what made `if !id` fail with "found Int": right answer, wrong reason,
+            // and it went quiet the moment the `!` was inside a `&&`.
+            Expr::Unary { op: UnOp::Not, .. } => Some(Type::Bool),
             Expr::Unary { operand, .. } => self.type_of(lower, *operand),
             // The narrowing already checked the slot held an optional; a load of
             // anything else is left alone rather than made into a second rule.
@@ -4436,6 +4456,15 @@ impl Parser {
     /// The seal is transparent here, as it is to the runtime: writing plaintext into a
     /// sealed position is the encrypting direction and needs no ceremony, and the other
     /// direction is `check_seal`'s, which has already run.
+    /// An operand of `&&`, `||` or `!`. `docs/types.md` lists these among the positions
+    /// that declare a type, so they get the same pair of checks every other declared
+    /// position gets. They used to get neither: `Bool` was threaded down as an inference
+    /// hint, and nothing downstream of `expr` ever compared anything to it.
+    fn check_bool(&self, lower: &Lower, value: ExprId, at: Span) -> Result<(), SyntaxError> {
+        self.check_seal(lower, value, &Type::Bool, at)?;
+        self.check_type(lower, value, &Type::Bool, at)
+    }
+
     fn check_type(
         &self,
         lower: &Lower,

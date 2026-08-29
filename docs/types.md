@@ -66,7 +66,8 @@ widens, nothing coerces numerically, and there is no subtyping except the one ru
 | --- | --- |
 | a literal | the literal's, after `docs/literal-inference.md` has resolved it |
 | a name | the slot's declared type |
-| `-x`, `!x` | the operand's |
+| `-x` | the operand's |
+| `!x` | `Bool`, whatever the operand was |
 | `a + b`, `a - b`, `a * b`, `a / b`, `a % b` | the operator table (below) |
 | `a == b`, `a < b`, `a && b` | `Bool` |
 | `x.method(...)` | the method table's return, for a receiver whose type is known |
@@ -150,7 +151,19 @@ record literal field, a list element and a comprehension's yield, a method argum
 default and a `const`, a `given` field and every `expect` value, an `if` condition and both operands
 of `&&`, `||` and `!` (which is where `if owner_email` stops being a program).
 
-They are one call site in the parser, so adding a position cannot forget the rule.
+Almost all of them are one call site in the parser, so adding a position cannot forget the rule.
+
+**The boolean operands are the exception, and were the one entry this list claimed without
+honouring.** They are not written through that call site: the ladder that parses `&&` and `||` sits
+*inside* it, so `Bool` reached them as an inference hint and nothing below ever compared anything to
+it. `if ok && id` passed. They now check each operand where the ladder builds it, which is the only
+place that has one operand rather than the whole expression.
+
+The `!` case is worth its own sentence, because it looked like it worked. `if !id` was rejected, but
+by the check on the whole condition rather than on the operand, and only because `!x` used to
+synthesise the operand's type. Put the same `!id` inside a `&&` and the condition synthesised `Bool`,
+so nothing was left to notice. Fixing the synthesis alone would have made `if !id` pass; the two go
+together.
 
 ### Where the check happens, and why not in a pass of its own
 

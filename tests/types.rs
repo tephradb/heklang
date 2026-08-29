@@ -615,3 +615,66 @@ fn a_jsons_shape_is_not_checked() {
         "blob_in.string(\"anything at all\").unwrap_or(\"\")",
     ));
 }
+
+/// Section 3's list of positions names both operands of `&&`, `||` and `!`, and until now
+/// it was the one entry the code did not honour. `Bool` was threaded down as an inference
+/// hint, and nothing below `expr` ever compared anything to it, so `if ok && id` passed.
+#[test]
+fn both_operands_of_a_boolean_operator_must_be_bool() {
+    for (params, condition, expected) in [
+        (", id: Int", "ok && id", "expected Bool, found Int"),
+        (", id: Int", "id && ok", "expected Bool, found Int"),
+        (", id: Int", "ok || id", "expected Bool, found Int"),
+        (", id: Int", "id || ok", "expected Bool, found Int"),
+        (
+            ", text: String",
+            "ok && text",
+            "expected Bool, found String",
+        ),
+        (", id: Int", "!id", "expected Bool, found Int"),
+        // The `!` was reached only because synthesis passed its operand's type through,
+        // so it went quiet the moment it sat inside a `&&`. Both are closed here.
+        (", id: Int", "ok && !id", "expected Bool, found Int"),
+        (", id: Int", "ok && id && ok", "expected Bool, found Int"),
+    ] {
+        let body = format!(
+            "command C(ok: Bool{params}) {{\n  if {condition} {{\n    return\n  }}\n  emit @thing.touched {{ id: 1 }}\n}}"
+        );
+        let message = err(&body);
+        assert!(
+            message.starts_with(expected),
+            "`{condition}`: expected {expected:?}, got {message:?}"
+        );
+    }
+}
+
+/// And the other half, because a check is worth what it rejects and worth nothing if it
+/// rejects a correct program. Every one of these is a boolean the checker has to see as
+/// one, including the two that only synthesis can answer for: a comparison and a method.
+#[test]
+fn a_boolean_operand_that_is_one_is_accepted() {
+    for (params, condition) in [
+        (", b: Bool", "ok && b"),
+        (", id: Int", "ok && id == 1"),
+        (", id: Int", "id > 1 || id < 0"),
+        (", text: String", "ok && text.is_empty()"),
+        (", maybe: String?", "ok && maybe.is_some()"),
+        (", b: Bool", "ok && b || !ok"),
+        (", b: Bool, c: Bool", "ok && b && c && !ok"),
+        (", b: Bool", "(ok || b) && !b"),
+    ] {
+        let body = format!(
+            "command C(ok: Bool{params}) {{\n  if {condition} {{\n    return\n  }}\n  emit @thing.touched {{ id: 1 }}\n}}"
+        );
+        program(&body);
+    }
+}
+
+/// Section 2's synthesis table: `!x` is a `Bool` whatever it was handed. It used to report
+/// the operand's type, which is what made `if !id` fail with "found Int" for the wrong
+/// reason, and it would have started passing the moment the operand was checked properly.
+#[test]
+fn a_negation_synthesises_bool() {
+    let body = "command C(b: Bool) {\n  emit @thing.happened { id: !b, name: \"n\", maybe: none, at: \"2026-01-01T00:00:00Z\", total: 0, rate: 0, status: Draft, tags: [], facts: Facts { note: \"n\", count: 0 }, blob: Json.empty }\n}";
+    assert_eq!(err(body), "expected Int, found Bool");
+}
