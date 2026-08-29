@@ -230,3 +230,23 @@ fn every_span_runs_forwards() {
         "only {checked} expressions; too few to mean much"
     );
 }
+
+/// Rule 4, for the lexer's own errors. They used to report at the cursor, which a scanner
+/// leaves *past* the character it gave up on, so `unexpected character` pointed one to
+/// the right of the character it named.
+#[test]
+fn an_unexpected_character_covers_that_character() {
+    let err = error("command A(id: Int) {\n  let x = #\n}\n");
+    assert_eq!(err.message, "unexpected character `#`");
+    assert_eq!(err.span, at(3, 11, 3, 12), "the `#`, one wide");
+}
+
+/// And the one this matters most for: an unterminated string ran to the end of the file,
+/// so the cursor was arbitrarily far from the quote that opened it. The extent now starts
+/// where the string did.
+#[test]
+fn an_unterminated_string_starts_at_its_quote() {
+    let err = error("command A(id: Int) {\n  let x = \"abc\n}\n");
+    assert_eq!(err.message, "unterminated string");
+    assert_eq!(err.span.start, Pos::new(3, 11), "the opening quote");
+}

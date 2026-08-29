@@ -96,6 +96,12 @@ is about rather than where the parser noticed. Those are different in three ways
 - **A name is about the name.** A field the event does not have used to report at the cursor, which
   by then had moved past the name onto the `:` after it.
 
+The lexer's own errors had the same shape of mistake, one level down. A scanner leaves the cursor
+*past* the character it gave up on, and the sub-scanners could not see where their token began, so
+`unexpected character` pointed one to the right of the character it named and `unterminated string`
+pointed at the end of the file rather than at the quote that opened it. The lexer now keeps the start
+of the token it is scanning, and an error inside one runs from there to wherever it stopped.
+
 ## 5. Where a diagnostic has no extent
 
 Three, and they are all the same thing said differently: the parser is not at a token.

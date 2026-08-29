@@ -270,6 +270,10 @@ struct Lexer {
     pos: usize,
     line: u32,
     col: u32,
+    /// Where the token being scanned began. The sub-scanners never see it otherwise, so
+    /// without it an error inside one reports at the cursor, which by then is past the
+    /// character it is about.
+    start: Pos,
     /// One entry per open interpolation, holding the brace depth inside its hole.
     /// This stack is the whole of the nesting rule: a string literal inside a hole
     /// re-enters the scanner and pushes its own entry, so nothing special-cases it.
@@ -283,6 +287,7 @@ impl Lexer {
             pos: 0,
             line: 1,
             col: 1,
+            start: Pos::new(1, 1),
             interp: Vec::new(),
         }
     }
@@ -313,8 +318,10 @@ impl Lexer {
         Pos::new(self.line, self.col)
     }
 
+    /// From the start of the token to wherever the scanner gave up. `unterminated string`
+    /// is about the quote that opened it rather than the end of the file it ran to.
     fn error<T>(&self, message: impl Into<String>) -> Result<T, SyntaxError> {
-        Err(SyntaxError::new(message, Span::point(self.at())))
+        Err(SyntaxError::new(message, Span::new(self.start, self.at())))
     }
 
     fn skip_trivia(&mut self) {
@@ -340,7 +347,8 @@ impl Lexer {
         let mut tokens = Vec::new();
         loop {
             self.skip_trivia();
-            let start = self.at();
+            self.start = self.at();
+            let start = self.start;
             let Some(next) = self.peek() else {
                 tokens.push(Spanned {
                     token: Token::End,
