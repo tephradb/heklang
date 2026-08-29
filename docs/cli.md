@@ -116,22 +116,35 @@ string would otherwise take the screen.
 Drawing it is also what keeps it honest: an extent nobody renders is one nobody checks,
 and a wrong one reads as a plausible position right up until something underlines it.
 
-## Every declaration that failed, not only the first
+## Every mistake, not only the first
 
 ```
 $ hek check
-commands/place-order.hk:14:36 [type-mismatch] expected String, found Int?
+commands/connect-shop.hk:11:18 [unknown-member] no method `trm` on String
+commands/connect-shop.hk:18:8 [not-declared] event @shop.reconneced is not declared
 commands/ship-order.hk:8:6 [type-mismatch] expected Bool, found String
-effects/notify.hk:31:8 [bad-operands] cannot apply `>` to Money(2) and Money(3)
 
 3 errors
 ```
 
-**One per declaration.** A declaration that fails is stepped over whole, and the next one
-is parsed as if nothing happened. Reporting several *inside* one declaration would need
-the expression ladder to carry a poison value for every result it returns, which is a
-rewrite of the error path rather than a place to recover; and the second error inside one
-body is usually the first one again, seen from further along.
+**A syntax error abandons its declaration. A semantic one does not.** A token the grammar
+cannot take means there is nothing left to read here, so the declaration is stepped over
+whole and the next one is parsed as if nothing happened. Everything else parsed, and the
+rest of the body is still worth checking: `text.trm()` is a well-formed method call and
+`emit @shop.reconneced { ... }` is a well-formed emit, and until this split the first hid
+the second eighteen lines away. `Code::is_syntax` is the cut, which is why the codes came
+first.
+
+**A rejected value becomes a poison.** `Expr::Invalid` has no type, and `docs/types.md`
+says an unknown type is never checked, so nothing downstream of a rejected value reports a
+second time. `let x = text.trm()` followed by two uses of `x` is one diagnostic, not three.
+That is what makes carrying on worth doing: without it the second error inside one body
+really would be the first one again, seen from further along.
+
+**Where there is nothing to carry on with, the block is stepped over.** An `emit` whose
+event is not declared has no field list to check its fields against, so the braces are
+skipped and the statements after them are read. One mistake, one diagnostic, and the rest
+of the body still checked.
 
 **Reporting stops at the end of the pass that found any.** The six passes
 (`docs/declarations.md`) each read what the one before it built, so an event whose fields

@@ -129,7 +129,11 @@ Three, and they are all the same thing said differently: the parser is not at a 
   own span, which it has to go and find.
 - **A runtime error raised outside any expression.** `interp::Error` carries a `Span` rather than an
   `Option<Span>`, and `Span::default()` is the value that means nowhere: such an error renders with
-  no position at all rather than with `0:0`. There is one, and it is an internal-invariant failure.
+  no position at all rather than with `0:0`. Three sites build one: the `From<ErrorKind>` conversion
+  a `?` uses where the caller has no place to give, an event that does not carry a field a handler
+  reads, and an `invoke` of a command that is not in the program. The last two are statements about
+  the log and the program rather than about a point in a file, so there is no expression to name
+  even in principle.
 
 ## 6. Two tokens whose span is not what an author would draw
 
@@ -294,7 +298,43 @@ that map, because two projectors may each declare a `Status`.
 **A related location carries its own file.** A second declaration is often in another
 module, and four of the five messages that named a position never said which.
 
-## 10. What this is not, yet
+## 10. What a diagnostic does not stop
+
+A diagnostic used to end the declaration it was found in, whatever it was, because
+`Result<_, Diagnostic>` was the only channel the parser had. That is right for a token the
+grammar cannot take and wrong for everything else: `text.trm()` is a well-formed method
+call and `emit @shop.reconneced { ... }` is a well-formed emit, and the first used to hide
+the second eighteen lines down the same command.
+
+**`Code::is_syntax` is the cut.** The lexical codes and `expected-token` abandon the
+declaration. Every other code records and carries on, so the rest of the body is checked.
+
+**`Expr::Invalid` is the poison.** A rejected value lowers to it, its type is `None`, and
+`docs/types.md` says an unknown type is never checked. So a value the checker refused
+reports once and every position it was written into stays quiet: this is the same device
+`TyKind::Error` is in rustc and `errorType` is in TypeScript, and heklang had half of it
+already in `type_of` returning an `Option`. Without it, carrying on would turn one
+mistyped name into twenty diagnostics, which is worse than stopping.
+
+It never reaches the interpreter. `check_files` fails whenever anything was recorded, so a
+program holding a poison is a program that did not check; `eval` answers `MalformedIr` if
+one ever arrives, which is a defect in the checker rather than a case in the language.
+
+**Where there is nothing to carry on with, the block is stepped over.** An `emit` whose
+event is not declared has no field list to check its fields against. Rather than guess, the
+braces are skipped and the statements after them are read.
+
+**Recording is not a mutation.** A semantic check deep in the expression ladder holds
+`&self` and has nothing to give back but the value it was handed, so the diagnostics live
+behind a `RefCell` rather than being threaded back up through every signature. This is what
+rustc does with `DiagCtxt` and for the same reason.
+
+**Declaration headers still abandon.** A parameter whose type does not exist leaves nothing
+coherent to check the body against, so those keep returning. So does a syntax error, which
+is what every compiler does: recovering from one is a parser question rather than a
+diagnostic one.
+
+## 11. What this is not, yet
 
 Severity is a channel with no producer: nothing is a warning. The lints that need one are
 the next piece of work, and this document is where they land.

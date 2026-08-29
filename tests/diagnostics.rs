@@ -620,3 +620,72 @@ fn a_second_declaration_covers_its_own_name() {
         assert_eq!(err.span, at(line, col, line, col + width), "{source}");
     }
 }
+
+// ---------------------------------------------------------------------------------
+// Rule 11: a semantic error does not abandon the declaration.
+
+/// Every error in a program, in the order they were found. `parse` gives the first;
+/// this is what `hek` prints.
+fn errors(source: &str) -> Vec<heklang::Diagnostic> {
+    heklang::check_files([("a.hk", source)]).expect_err("this source is meant to fail")
+}
+
+/// The finding this came from: a `.trm()` typo hid a misspelled event further down the
+/// same command, and fixing the first revealed the second. Neither is a syntax error,
+/// and there was no reason for either to hide the other.
+#[test]
+fn two_mistakes_in_one_body_are_both_reported() {
+    let found = errors(
+        "event @shop.connected { shop_id: Int, name: String }
+command C(shop_id: Int, owner_email: String) {
+  if owner_email.trm().is_empty() {
+    return invalid(\"no email\")
+  }
+  emit @shop.reconneced { shop_id, name: owner_email }
+}
+",
+    );
+
+    let lines: Vec<u32> = found.iter().map(|err| err.span.start.line).collect();
+    assert_eq!(lines, vec![3, 6], "one per mistake, in source order");
+    assert_eq!(found[0].code, Code::UnknownMember);
+    assert_eq!(found[1].code, Code::NotDeclared);
+}
+
+/// The poison is what keeps that from becoming a flood. A rejected value has no type,
+/// and `docs/types.md` says an unknown type is never checked, so the two positions it
+/// was written into say nothing.
+#[test]
+fn a_rejected_value_reports_once() {
+    let found = errors(
+        "event @a.b { id: Int, name: String }
+command C(id: Int, text: String) {
+  let x = text.trm()
+  emit @a.b { id: x, name: x }
+}
+",
+    );
+
+    assert_eq!(found.len(), 1, "got: {found:#?}");
+    assert_eq!(found[0].message, "no method `trm` on String");
+}
+
+/// A syntax error still abandons its declaration, because there is nothing left to
+/// read in it. The next declaration is checked as it always was.
+#[test]
+fn a_syntax_error_still_abandons_its_declaration() {
+    let found = errors(
+        "event @a.b { id: Int }
+command C(id: Int) {
+  let x =
+  emit @a.b { id }
+}
+command D(id: Int) { emit @a.b { id: \"x\" } }
+",
+    );
+
+    let lines: Vec<u32> = found.iter().map(|err| err.span.start.line).collect();
+    assert_eq!(lines, vec![4, 6], "the rest of `C` is not read, `D` is");
+    assert!(found[0].code.is_syntax());
+    assert!(!found[1].code.is_syntax());
+}

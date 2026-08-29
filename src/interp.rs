@@ -1671,6 +1671,9 @@ fn eval(
             };
             ctx.reveal(value, span)
         }
+        // The parser's poison. `check_files` fails whenever one was recorded, so a
+        // program holding one never gets this far.
+        Expr::Invalid => Err(at(ErrorKind::MalformedIr)),
     }
 }
 

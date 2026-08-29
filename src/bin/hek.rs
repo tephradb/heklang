@@ -6,8 +6,8 @@
 //! not exist yet), so "parses" and "checks" are the same pass. When the checker splits
 //! out, this is where it gets called.
 //!
-//! `check_files` rather than `parse_files`, because a run reports every declaration
-//! that failed rather than only the first. `docs/cli.md` has the granularity.
+//! `check_files` rather than `parse_files`, because a run reports every mistake it found
+//! rather than only the first. `docs/cli.md` has the granularity.
 
 use std::env;
 use std::fs;

@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::mem;
 
@@ -43,10 +44,11 @@ struct Bodies {
     seen: usize,
 }
 
-/// Every declaration that failed, rather than only the first. One error per declaration
-/// and reporting stops at the end of the pass that found any, because a later pass reads
-/// what an earlier one built: a signature that did not parse would make every body that
-/// names it wrong in a way its author did not write. `docs/cli.md` has the rest.
+/// Every mistake, rather than only the first. A syntax error abandons its declaration and
+/// a semantic one does not, and reporting stops at the end of the pass that found any,
+/// because a later pass reads what an earlier one built: a signature that did not parse
+/// would make every body that names it wrong in a way its author did not write.
+/// `docs/cli.md` has the rest.
 pub fn check_files<'a>(
     files: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> Result<Program, Vec<Diagnostic>> {
@@ -59,8 +61,8 @@ pub fn check_files<'a>(
         Ok(program) => Ok(program),
         // A pass that recorded nothing and still failed is one of the whole-program
         // checks, or a `skip_item` that found no next declaration to step to.
-        Err(first) if parser.errors.is_empty() => Err(vec![first]),
-        Err(_) => Err(parser.errors),
+        Err(first) if parser.errors.borrow().is_empty() => Err(vec![first]),
+        Err(_) => Err(parser.errors.into_inner()),
     }
 }
 
@@ -79,9 +81,13 @@ struct Parser {
     /// back to the module it came from.
     modules: Vec<(usize, Option<String>)>,
     pos: usize,
-    /// Every declaration that failed in the pass now running. `docs/cli.md` has the
-    /// granularity and why a pass is where reporting stops.
-    errors: Vec<Diagnostic>,
+    /// Everything wrong found in the pass now running. `docs/cli.md` has the granularity
+    /// and why a pass is where reporting stops.
+    ///
+    /// A `RefCell` because recording one is not a change to the parse: a semantic check
+    /// deep in the expression ladder holds `&self` and has nothing to give back but the
+    /// value it was handed.
+    errors: RefCell<Vec<Diagnostic>>,
     prologue: bool,
     /// Set while parsing a filter, a `state` seed or a fold arm. Narrower than
     /// `prologue`, which also covers a hoisted `let`: that runs once per request,
@@ -218,7 +224,7 @@ impl Parser {
             tokens,
             modules,
             pos: 0,
-            errors: Vec::new(),
+            errors: RefCell::new(Vec::new()),
             prologue: false,
             folding: false,
             command_end: 0,
@@ -449,6 +455,21 @@ impl Parser {
     /// A diagnostic about the token in front of the cursor, covering that token.
     fn fail<T>(&self, code: Code, message: impl Into<String>) -> Result<T, Diagnostic> {
         Err(self.err(code, message, self.span_here()))
+    }
+
+    /// Records a diagnostic and carries on. What a semantic check does instead of
+    /// returning one: the token stream still makes sense, so there is more of this
+    /// declaration to check and a second mistake in it is worth finding.
+    fn note(&self, error: Diagnostic) {
+        self.errors.borrow_mut().push(error);
+    }
+
+    /// The same, with a poison to carry on with. `Expr::Invalid` has no type, so nothing
+    /// downstream of it is checked and one rejected value stays one diagnostic rather
+    /// than becoming twenty.
+    fn record(&self, lower: &mut Lower, error: Diagnostic) -> ExprId {
+        self.note(error);
+        lower.b.expr(Expr::Invalid)
     }
 
     /// The same, with the advice the message used to carry after its `;`. Separate so a
@@ -718,7 +739,7 @@ impl Parser {
         match step(self) {
             Ok(value) => Ok(Some(value)),
             Err(err) => {
-                self.errors.push(err);
+                self.errors.borrow_mut().push(err);
                 self.pos = at;
                 self.skip_item()?;
                 Ok(None)
@@ -731,7 +752,7 @@ impl Parser {
     /// names it wrong in a way its author did not write: reporting those would be
     /// reporting the checker's confusion rather than the program's.
     fn settled(&mut self) -> Result<(), Diagnostic> {
-        match self.errors.first() {
+        match self.errors.borrow().first() {
             Some(err) => Err(err.clone()),
             None => Ok(()),
         }
@@ -3287,10 +3308,9 @@ impl Parser {
             let outer = mem::replace(&mut self.propagating, true);
             let value = if self.eat_sym(Sym::Colon) {
                 self.expr(lower, Some(expected))?
+            } else if lower.b.lookup(&name).is_none() {
+                self.record(lower, self.not_in_scope(&name, at))
             } else {
-                if lower.b.lookup(&name).is_none() {
-                    return Err(self.not_in_scope(&name, at));
-                }
                 lower.b.at(at);
                 lower.b.load(&name)
             };
@@ -3450,7 +3470,19 @@ impl Parser {
                 self.bump();
                 let at = self.span_here();
                 let path = self.expect_path()?;
-                let def = self.event_def(events, &path, at)?;
+                // The fields are checked against the event, so an event that is not
+                // declared leaves nothing to check them with. Stepping over the block
+                // keeps the statements after it readable, which is the point of
+                // carrying on at all.
+                let def = match self.event_def(events, &path, at) {
+                    Ok(def) => def,
+                    Err(error) => {
+                        self.note(error);
+                        self.skip_braced()?;
+                        let poison = lower.b.expr(Expr::Invalid);
+                        return Ok(Stmt::Discard(poison));
+                    }
+                };
                 self.expect_sym(Sym::LBrace)?;
 
                 let mut fields = Vec::new();
@@ -3458,19 +3490,25 @@ impl Parser {
                     let at = self.span_here();
                     let name = self.expect_ident()?;
                     let Some(declared) = def.field(&name) else {
-                        return Err(self.err(
+                        self.note(self.err(
                             Code::UnknownMember,
                             format!("{path} has no field `{name}`"),
                             at,
                         ));
+                        if self.eat_sym(Sym::Colon) {
+                            self.expr(lower, None)?;
+                        }
+                        if !self.eat_sym(Sym::Comma) {
+                            break;
+                        }
+                        continue;
                     };
                     let expected = declared.ty.clone();
                     let value = if self.eat_sym(Sym::Colon) {
                         self.expr(lower, Some(expected))?
+                    } else if lower.b.lookup(&name).is_none() {
+                        self.record(lower, self.not_in_scope(&name, at))
                     } else {
-                        if lower.b.lookup(&name).is_none() {
-                            return Err(self.not_in_scope(&name, at));
-                        }
                         lower.b.at(at);
                         lower.b.load(&name)
                     };
@@ -3631,8 +3669,8 @@ impl Parser {
         // sealed content in a plain position is a `reveal` that is missing, not a type
         // that is wrong.
         if let Some(want) = &expect {
-            self.check_seal(lower, value, want, at)?;
-            self.check_type(lower, value, want, at)?;
+            self.check_seal(lower, value, want, at);
+            self.check_type(lower, value, want, at);
         }
         Ok(value)
     }
@@ -3646,10 +3684,10 @@ impl Parser {
         // Checked only once an operator follows: an expression with no `||` after it is
         // whatever the enclosing position wanted, not a boolean operand.
         while let Some(span) = self.eat_at(Sym::OrOr) {
-            self.check_bool(lower, lhs, lhs_at)?;
+            self.check_bool(lower, lhs, lhs_at);
             let from = self.here();
             let rhs = self.and_expr(lower, Some(Type::Bool))?;
-            self.check_bool(lower, rhs, self.span_from(from))?;
+            self.check_bool(lower, rhs, self.span_from(from));
             lower.b.at(span);
             lhs = lower.b.binary(BinOp::Or, lhs, rhs);
             lhs = self.close(lower, lhs, start);
@@ -3663,10 +3701,10 @@ impl Parser {
         let mut lhs = self.cmp_expr(lower, expect)?;
         let mut lhs_at = self.span_from(start);
         while let Some(span) = self.eat_at(Sym::AndAnd) {
-            self.check_bool(lower, lhs, lhs_at)?;
+            self.check_bool(lower, lhs, lhs_at);
             let from = self.here();
             let rhs = self.cmp_expr(lower, Some(Type::Bool))?;
-            self.check_bool(lower, rhs, self.span_from(from))?;
+            self.check_bool(lower, rhs, self.span_from(from));
             lower.b.at(span);
             lhs = lower.b.binary(BinOp::And, lhs, rhs);
             lhs = self.close(lower, lhs, start);
@@ -3702,8 +3740,8 @@ impl Parser {
         // Rule 12: an equality on sealed content leaks whether two ciphertexts hold the
         // same thing, and under a real cipher it would not even answer. `reveal` both
         // sides, or compare something plaintext.
-        self.no_seal(lower, lhs, "be compared", lhs_at)?;
-        self.no_seal(lower, rhs, "be compared", rhs_at)?;
+        self.no_seal(lower, lhs, "be compared", lhs_at);
+        self.no_seal(lower, rhs, "be compared", rhs_at);
         self.settle(lower, lhs, rhs);
         // The comparison, not the operator: what is wrong is the pair, and an editor
         // underlining `>` alone says nothing about which two things did not meet.
@@ -3761,8 +3799,8 @@ impl Parser {
         // Rule 12: arithmetic reads its operands, and a sum of sealed content is
         // plaintext derived from it. The seal message is the useful one here, so it
         // gets to run first.
-        self.no_seal(lower, lhs, "be used in arithmetic", span)?;
-        self.no_seal(lower, rhs, "be used in arithmetic", span)?;
+        self.no_seal(lower, lhs, "be used in arithmetic", span);
+        self.no_seal(lower, rhs, "be used in arithmetic", span);
         let (Some(left), Some(right)) = (self.type_of(lower, lhs), self.type_of(lower, rhs)) else {
             return Ok(());
         };
@@ -3800,7 +3838,7 @@ impl Parser {
         if let Some(span) = self.eat_at(Sym::Bang) {
             let from = self.here();
             let operand = self.unary_expr(lower, Some(Type::Bool))?;
-            self.check_bool(lower, operand, self.span_from(from))?;
+            self.check_bool(lower, operand, self.span_from(from));
             lower.b.at(span);
             let value = lower.b.unary(UnOp::Not, operand);
             return Ok(self.close(lower, value, start));
@@ -3828,6 +3866,10 @@ impl Parser {
 
             if self.eat_sym(Sym::LParen) {
                 let receiver = self.type_of(lower, value);
+                // A rejected call still has its arguments read, so the tokens after it
+                // are still the tokens after a call and the rest of the body can be
+                // checked. What the call answers is the poison.
+                let mut poisoned = false;
                 // Rule 12: a method reads content, and content behind the seal needs
                 // `reveal` first. The presence checks are the exception, because
                 // asking whether an optional holds anything does not read what it
@@ -3842,7 +3884,10 @@ impl Parser {
                     } else {
                         format!("`{name}` reads content sealed under `{subject}`")
                     };
-                    return Err(self.err(Code::SealBoundary, why, at).with_hint("`reveal` it first. `.is_some()` and `.is_none()` are the exception, because presence is not content"));
+                    self.note(self.err(Code::SealBoundary, why, at).with_hint(
+                        "`reveal` it first. `.is_some()` and `.is_none()` are the exception, because presence is not content",
+                    ));
+                    poisoned = true;
                 }
                 // Narrowing changes what the optional methods mean, so reading one off
                 // a narrowed value is a mistake worth catching here rather than at run
@@ -3851,23 +3896,31 @@ impl Parser {
                     && matches!(lower.b.exprs().get(value), Some(Expr::Unwrap(_)))
                     && let Some(ty) = &receiver
                 {
-                    return Err(self.err(Code::TypeMismatch, format!("`{name}` reads an optional, and the branch above already proved this one present, so it is a {ty} here"), at).with_hint("use it directly"));
+                    self.note(
+                        self.err(
+                            Code::TypeMismatch,
+                            format!(
+                                "`{name}` reads an optional, and the branch above already proved this one present, so it is a {ty} here"
+                            ),
+                            at,
+                        )
+                        .with_hint("use it directly"),
+                    );
+                    poisoned = true;
                 }
                 // The same table that types the result knows whether there is one to
                 // type. A receiver whose type is unknown is not accused, as everywhere
                 // else, so this fires exactly where an answer exists.
                 let sig = match &receiver {
-                    Some(ty) => match method_sig(ty, &name) {
+                    Some(ty) if !poisoned => match method_sig(ty, &name) {
                         Some(sig) => Some(sig),
                         None => {
-                            return Err(self.advised(
-                                Code::UnknownMember,
-                                no_method(ty, &name),
-                                at,
-                            ));
+                            self.note(self.advised(Code::UnknownMember, no_method(ty, &name), at));
+                            poisoned = true;
+                            None
                         }
                     },
-                    None => None,
+                    _ => None,
                 };
                 let outer = mem::replace(&mut self.no_record_literal, false);
                 let mut args = Vec::new();
@@ -3899,7 +3952,11 @@ impl Parser {
                     ));
                 }
                 lower.b.at(span);
-                value = lower.b.method(value, &name, args);
+                value = if poisoned {
+                    lower.b.expr(Expr::Invalid)
+                } else {
+                    lower.b.method(value, &name, args)
+                };
                 value = self.close(lower, value, start);
                 continue;
             }
@@ -4133,7 +4190,9 @@ impl Parser {
                             .clone();
                         Ok(lower.b.lit(Literal::Enum { ty, variant: name }))
                     }
-                    0 => Err(self.not_in_scope(&name, spanned.span)),
+                    // A name nothing declares is one mistake. The poison has no type,
+                    // so whatever this was written into does not report a second.
+                    0 => Ok(self.record(lower, self.not_in_scope(&name, spanned.span))),
                     _ => {
                         let candidates: Vec<&str> = self
                             .visible_enums()
@@ -4351,6 +4410,9 @@ impl Parser {
             // not be there still reads as one.
             // Rule 12: an optional in, an optional out, and the seal comes off.
             Expr::Reveal(value) => Some(self.type_of(lower, *value)?.unsealed()),
+            // The poison. `docs/types.md` says an unknown type is never checked, which
+            // is what keeps one rejected value from becoming twenty diagnostics.
+            Expr::Invalid => None,
         }
     }
 }
@@ -4994,26 +5056,20 @@ impl Parser {
     /// Everywhere else it would leave the boundary without `reveal`, which is the one
     /// thing the seal exists to stop. A `state` fold and an entity column are the
     /// exceptions: both take it by propagating the seal onto themselves.
-    fn check_seal(
-        &self,
-        lower: &Lower,
-        value: ExprId,
-        want: &Type,
-        at: Span,
-    ) -> Result<(), Diagnostic> {
+    fn check_seal(&self, lower: &Lower, value: ExprId, want: &Type, at: Span) {
         if self.folding || self.propagating {
-            return Ok(());
+            return;
         }
         let Some(found) = self.type_of(lower, value) else {
-            return Ok(());
+            return;
         };
         let Some(subject) = found.subject() else {
-            return Ok(());
+            return;
         };
         if want.subject() == Some(subject) {
-            return Ok(());
+            return;
         }
-        Err(self.err(Code::SealBoundary, format!("this is content sealed under `{subject}` and a {want} is not"), at).with_hint("`reveal` it first, because writing it here takes it out from behind the decrypt boundary"))
+        self.note(self.err(Code::SealBoundary, format!("this is content sealed under `{subject}` and a {want} is not"), at).with_hint("`reveal` it first, because writing it here takes it out from behind the decrypt boundary"))
     }
 
     /// A value written where a type is declared has to fill it. `docs/types.md` is the
@@ -5031,45 +5087,33 @@ impl Parser {
     /// that declare a type, so they get the same pair of checks every other declared
     /// position gets. They used to get neither: `Bool` was threaded down as an inference
     /// hint, and nothing downstream of `expr` ever compared anything to it.
-    fn check_bool(&self, lower: &Lower, value: ExprId, at: Span) -> Result<(), Diagnostic> {
-        self.check_seal(lower, value, &Type::Bool, at)?;
-        self.check_type(lower, value, &Type::Bool, at)
+    fn check_bool(&self, lower: &Lower, value: ExprId, at: Span) {
+        self.check_seal(lower, value, &Type::Bool, at);
+        self.check_type(lower, value, &Type::Bool, at);
     }
 
-    fn check_type(
-        &self,
-        lower: &Lower,
-        value: ExprId,
-        want: &Type,
-        at: Span,
-    ) -> Result<(), Diagnostic> {
+    fn check_type(&self, lower: &Lower, value: ExprId, want: &Type, at: Span) {
         let Some(found) = self.type_of(lower, value) else {
-            return Ok(());
+            return;
         };
         if fills(&found.unsealed(), &want.unsealed()) {
-            return Ok(());
+            return;
         }
-        Err(self.advised(Code::TypeMismatch, mismatch(&found, want), at))
+        self.note(self.advised(Code::TypeMismatch, mismatch(&found, want), at));
     }
 
     /// The same rule where nothing declares a type: an interpolation hole, a
     /// comparison, an HTTP body. Reading content into any of them is reading it.
-    fn no_seal(
-        &self,
-        lower: &Lower,
-        value: ExprId,
-        what: &str,
-        at: Span,
-    ) -> Result<(), Diagnostic> {
+    fn no_seal(&self, lower: &Lower, value: ExprId, what: &str, at: Span) {
         let Some(subject) = self
             .type_of(lower, value)
             .as_ref()
             .and_then(Type::subject)
             .cloned()
         else {
-            return Ok(());
+            return;
         };
-        Err(self.err(
+        self.note(self.err(
             Code::SealBoundary,
             format!(
                 "this is content sealed under `{subject}`, so it cannot {what} without `reveal`"
@@ -5342,7 +5386,7 @@ impl Parser {
         loop {
             let at = self.span_here();
             let hole = self.expr(lower, None)?;
-            self.no_seal(lower, hole, "be interpolated into a string", at)?;
+            self.no_seal(lower, hole, "be interpolated into a string", at);
             parts.push(hole);
             let spanned = self.bump();
             match spanned.token {
@@ -5797,7 +5841,7 @@ impl Parser {
             self.expect_sym(Sym::Colon)?;
             let at = self.span_here();
             let value = self.expr(lower, None)?;
-            self.no_seal(lower, value, "be sent in a request body", at)?;
+            self.no_seal(lower, value, "be sent in a request body", at);
             fields.push((key, value));
             if !self.eat_sym(Sym::Comma) {
                 break;
@@ -6234,6 +6278,7 @@ fn children(expr: &Expr) -> Vec<ExprId> {
         Expr::Call { args, .. } => args.clone(),
         Expr::Invoke { args, .. } => args.iter().map(|(_, id)| *id).collect(),
         Expr::Reveal(value) => vec![*value],
+        Expr::Invalid => Vec::new(),
     }
 }
 

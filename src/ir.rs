@@ -714,6 +714,11 @@ pub enum Expr {
     /// Rule 12. Nothing but the value: subject-ness is a property of the value now,
     /// so the field, the subject and its id all ride on it. See `docs/effects.md`.
     Reveal(ExprId),
+    /// A value a semantic check rejected. Its type is unknown, so nothing downstream
+    /// checks it and one mistake stays one diagnostic. It never reaches the
+    /// interpreter: a program with one recorded is a program that failed to check.
+    /// See `docs/diagnostics.md`.
+    Invalid,
 }
 
 /// What a `for` or a comprehension binds. `index` is the key over a map and the
