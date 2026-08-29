@@ -116,13 +116,14 @@ fn a_call_is_checked_against_the_declared_parameters() {
         "`effective_sku` takes 2 arguments"
     );
     // A parameter's type is the argument's hint, so inference works through a call the
-    // way it works through `emit`.
+    // way it works through `emit`. A non-numeric one is not a hint at all, so the
+    // literal keeps its own type and the mismatch is reported as one.
     assert_eq!(
         err(
             "",
             "  emit @plan.created { plan_id, sku: effective_sku(sku, 1), months }"
         ),
-        "a number cannot be a Uuid"
+        "expected Uuid, found Int"
     );
 }
 

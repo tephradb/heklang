@@ -114,6 +114,25 @@ fn a_money_method_hints_the_literal_beside_it() {
     );
 }
 
+/// A target that cannot hold a number is not a target, so the literal keeps its own
+/// type and the real mistake is the one reported. Resolving against it instead said
+/// "a number cannot be a String" about the `0` in `email > 0`, which is true and is not
+/// what is wrong with that line.
+#[test]
+fn a_non_numeric_target_is_not_a_target() {
+    // The literal keeps its own type, and the position it is in says what it wanted.
+    check_error(
+        "let a = total.mul(rate, 1)\nreturn",
+        "expected Rounding, found Int",
+    );
+    // The case that prompted this: the target came from the other operand, and
+    // "a number cannot be a String" is true of the `0` and is not what is wrong here.
+    check_error(
+        "let a = \"{count}\" > 0\nreturn",
+        "cannot apply `>` to String and Int",
+    );
+}
+
 /// A `Bool` target describes the comparison rather than its operands, so it must not
 /// reach them. It used to, and the row above was unwritable inside an `if`: the literal
 /// hit `Bool` before the other operand could type it, and reported "a number cannot be

@@ -391,7 +391,7 @@ fn the_rule_holds_at_every_declared_position() {
   let f = Facts { note: 1, count: 0 }
   emit @thing.touched { id }
 }",
-            "a number cannot be a String",
+            "expected String, found Int",
         ),
         // a list element, against the element type the target declared
         (

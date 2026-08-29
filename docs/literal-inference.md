@@ -54,12 +54,30 @@ and the author never wrote a type at all.
 both give `Decimal(1) + Decimal(1)`. Since widening is exact, the more precise side is always the
 safe target.
 
-**A `Bool` annotation is not a target for either operand.** It describes the comparison, and a
-comparison's operands are whatever they are. The parser reads the left operand before it knows a
-comparison follows, so without this rule `if 5 > count` resolves `5` against `Bool` and reports "a
-number cannot be a Bool" about a literal the right operand types perfectly well. Nothing resolves
-against `Bool`, so dropping the annotation there costs no inference. This is what makes the
-`1000.00 < spend` row above writable inside an `if` and not only in a `let`.
+**A target that cannot hold a number is not a target.** Only `Int`, `Decimal(n)` and `Money(n)` are,
+and a literal offered anything else takes its default and lets the position it is in say what it
+actually wanted. This is not leniency: it moves the report from the literal to the mistake.
+
+```
+if owner_email > 0            → cannot apply `>` to String and Int
+total.mul(rate, 1)            → expected Rounding, found Int
+effective_sku(sku, 1)         → expected Uuid, found Int
+```
+
+Each of those used to read "a number cannot be a `X`", which is true of the literal and is not what
+is wrong with the line. The `>` case is the one that shows why: the target came from the *other
+operand*, so the parser was reporting a type it had inferred, about a token the author wrote for a
+different reason entirely.
+
+**A `Bool` annotation is not a target for either operand.** The same rule, one level up. A `Bool`
+describes the comparison, not its operands, and the parser reads the left operand before it knows a
+comparison follows. Without this, `if 5 > count` resolves `5` against `Bool`. Nothing resolves
+against `Bool`, so dropping it costs no inference, and it is what makes the `1000.00 < spend` row
+above writable inside an `if` and not only in a `let`.
+
+A declaration is different, and keeps the older message: `const LAUNCH: Timestamp = 5` says a number
+cannot be a Timestamp and names the string form, because there the target is not inferred from
+anything. It is what the author wrote three tokens ago.
 
 ## Table
 

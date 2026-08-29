@@ -3548,9 +3548,17 @@ impl Parser {
         expect: Option<Type>,
         at: &Spanned,
     ) -> Result<ExprId, SyntaxError> {
-        let defaulted = expect.is_none();
+        // A target that is not numeric is not a target. It reaches here from the other
+        // operand of a comparison, so `owner_email > 0` used to hint `String` onto the
+        // `0` and report that a number cannot be a String. That is true and it is not
+        // the mistake: the mistake is comparing a String to a number, and the operator
+        // table says so once the literal has been allowed a type of its own. `settle`
+        // already ignores a hint that will not resolve, so this only moves the moment.
+        let target = expect
+            .filter(|ty| matches!(inner_of(ty), Type::Int | Type::Decimal(_) | Type::Money(_)));
+        let defaulted = target.is_none();
         // A literal in a `T?` position is still a `T`; the write site wraps it.
-        let ty = match expect {
+        let ty = match target {
             Some(ty) => inner_of(&ty).clone(),
             None => default_type(number),
         };
