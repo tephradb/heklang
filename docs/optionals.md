@@ -43,9 +43,17 @@ interpreter, and the rule is only worth anything if it holds at all of them. It 
 a `state` seed and a fold arm each stored a bare value into an optional slot until they were fixed;
 the record and container positions did the same until the sweep that produced this table; and the
 last two rows failed differently again, by rejecting the write outright, so that an optional-typed
-constant had no writable value at all. The first two failures are silent, because nothing
-type-checks a frame slot: the wrong shape sits there until an `.is_none()` reaches it and reports
+constant had no writable value at all. The first two failures were silent, because nothing
+type-checked a frame slot: the wrong shape sat there until an `.is_none()` reached it and reported
 that a `String` has no such method, naming a symptom several statements away from the write.
+
+**That silence is gone, twice over.** `docs/types.md`'s check catches a mismatch before the program
+runs wherever it can name the type, and every write position that only coerced now also checks: a
+`state` seed and each fold arm, a `fn` parameter and its return, a list element and a comprehension's
+yield, a record literal field, `push` and `set`. So a mismatch is reported at the write, with its
+span, rather than wherever the value is next read. Doing that found one more instance of the same
+class: a sealed value did not fit the `state` it was folded into, because the runtime's type test
+looked through a seal at the top and not through one under an `Opt`.
 
 The last two rows are also why the rule now lives in one place. Every literal position funnels
 through one function in the parser, so the wrap happens where a declared type meets a found type and

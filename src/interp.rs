@@ -498,7 +498,8 @@ impl<'a> Interpreter<'a> {
         let filters = resolve_filters(program, &arm.exprs, &arm.slices, &mut frame)?;
         for state in &arm.states {
             let value = eval(program, &arm.exprs, &mut frame, state.init, None)?;
-            frame.set(state.slot, coerce(value, &state.ty))?;
+            let value = fitted_at(value, &state.ty, arm.exprs.span(state.init))?;
+            frame.set(state.slot, value)?;
         }
         // Rule 3: the fold stops at the trigger's own position, inclusive, so state is
         // a pure function of the log prefix and that position, and counts the trigger.
@@ -692,7 +693,8 @@ fn execute(
     let filters = resolve_filters(program, &command.exprs, &command.slices, &mut frame)?;
     for state in &command.states {
         let value = eval(program, &command.exprs, &mut frame, state.init, None)?;
-        frame.set(state.slot, coerce(value, &state.ty))?;
+        let value = fitted_at(value, &state.ty, command.exprs.span(state.init))?;
+        frame.set(state.slot, value)?;
     }
 
     let after = log.len() as u64;
@@ -828,7 +830,8 @@ fn fold(
             }
             for update in &slice.updates {
                 let value = eval(program, exprs, frame, update.value, None)?;
-                frame.set(update.slot, coerce(value, &update.ty))?;
+                let value = fitted_at(value, &update.ty, exprs.span(update.value))?;
+                frame.set(update.slot, value)?;
             }
         }
     }
@@ -1218,6 +1221,26 @@ pub fn coerce(value: Value, ty: &Type) -> Value {
     }
 }
 
+/// A value meeting a declared type at a write. `coerce` alone was silent about a
+/// mismatch, so the wrong shape sat in the slot until some later read reported that a
+/// `String` has no `is_none`, naming a symptom several statements from its cause.
+/// `docs/types.md`'s check catches these before the program runs wherever it can name
+/// the type; this is the backstop for wherever it cannot.
+fn fitted(value: Value, ty: &Type) -> Result<Value, ErrorKind> {
+    let value = coerce(value, ty);
+    if value.has_type(ty) {
+        return Ok(value);
+    }
+    Err(ErrorKind::TypeMismatch {
+        expected: ty.clone(),
+        found: value.ty(),
+    })
+}
+
+fn fitted_at(value: Value, ty: &Type, span: Span) -> Result<Value, Error> {
+    fitted(value, ty).map_err(|kind| Error::at(kind, span))
+}
+
 fn check_field(
     program: &Program,
     ty: &Type,
@@ -1449,7 +1472,7 @@ fn eval(
             for item in items {
                 let value = eval(program, exprs, frame, *item, ctx.as_deref_mut())?;
                 values.push(match inner {
-                    Some(declared) => coerce(value, declared),
+                    Some(declared) => fitted_at(value, declared, exprs.span(*item))?,
                     None => value,
                 });
             }
@@ -1481,7 +1504,7 @@ fn eval(
                 }
                 let value = eval(program, exprs, frame, *yields, ctx.as_deref_mut())?;
                 let value = match declared {
-                    Some(declared) => coerce(value, declared),
+                    Some(declared) => fitted_at(value, declared, exprs.span(*yields))?,
                     None => value,
                 };
                 inner.get_or_insert_with(|| value.ty());
@@ -1513,12 +1536,12 @@ fn eval(
                 .record(ty)
                 .ok_or_else(|| at(ErrorKind::MalformedIr))?;
             let mut values = BTreeMap::new();
-            for (name, value) in fields {
-                let value = eval(program, exprs, frame, *value, ctx.as_deref_mut())?;
+            for (name, written) in fields {
+                let value = eval(program, exprs, frame, *written, ctx.as_deref_mut())?;
                 // A declared field coerces, exactly as an entity column and an event
                 // field do.
                 let value = match def.field(name) {
-                    Some(declared) => coerce(value, &declared.ty),
+                    Some(declared) => fitted_at(value, &declared.ty, exprs.span(*written))?,
                     None => return Err(at(ErrorKind::MalformedIr)),
                 };
                 values.insert(name.clone(), value);
@@ -1632,8 +1655,9 @@ fn enter_function(
     }
     for (param, value) in def.params.iter().zip(args) {
         // The same coercion `bind_params` applies, so a bare `T` fills a `T?`.
+        let value = fitted_at(value, &param.ty, span)?;
         frame
-            .set(param.slot, coerce(value, &param.ty))
+            .set(param.slot, value)
             .map_err(|kind| Error::at(kind, span))?;
     }
     let mut sink = match ctx {
@@ -1661,7 +1685,7 @@ fn call_function(
         return Err(Error::at(ErrorKind::MalformedIr, span));
     };
     match enter_function(program, def, args, span, ctx)? {
-        Flow::Return(Ret::Value(value)) => Ok(coerce(value, ret)),
+        Flow::Return(Ret::Value(value)) => fitted_at(value, ret, span),
         _ => Err(Error::at(ErrorKind::MalformedIr, span)),
     }
 }
@@ -2131,7 +2155,7 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
             // The element type is declared, so a bare `T` into a `List(T?)` wraps here
             // the way it would into any other declared position.
             let pushed = args.into_iter().next().ok_or(ErrorKind::MalformedIr)?;
-            items.push(coerce(pushed, inner));
+            items.push(fitted(pushed, inner)?);
             Ok(Value::List {
                 inner: inner.clone(),
                 items,
@@ -2183,7 +2207,7 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
             let mut args = args.into_iter();
             let at = map_key(&args.next().ok_or(ErrorKind::MalformedIr)?)?;
             let stored = args.next().ok_or(ErrorKind::MalformedIr)?;
-            entries.insert(at, coerce(stored, value));
+            entries.insert(at, fitted(stored, value)?);
             Ok(Value::Map {
                 key: key.clone(),
                 value: value.clone(),

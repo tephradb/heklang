@@ -144,11 +144,12 @@ impl Value {
     /// sealed one. The boundary it guards is a parse-time rule, which is what makes
     /// this safe to be lenient about. See `docs/effects.md` rule 12.
     pub fn has_type(&self, ty: &Type) -> bool {
-        match (self, ty) {
-            (Value::Sealed { inner, .. }, _) => inner.has_type(&ty.unsealed()),
-            (_, Type::Sealed(inner, _)) => self.has_type(inner),
-            _ => &self.ty() == ty,
-        }
+        // Unsealing both sides rather than matching on either, because a seal can sit
+        // under an `Opt` as well as at the top: an `Opt(String)` holding sealed content
+        // and an `Opt(Sealed(String, x))` are the same shape to a runtime that does not
+        // model ciphertext, and treating them as different made a folded credential
+        // fail to fit the `state` it was folded into.
+        self.ty().unsealed() == ty.unsealed()
     }
 
     /// The value behind the seal, if there is one. A plain value is its own content,
