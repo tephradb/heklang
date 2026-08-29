@@ -21,8 +21,9 @@ A command may use an event declared in another file, a projector may reference e
 alongside, an effect may invoke a command from a third file, and the files may be passed in any
 order. This is the layered declaration collection that already made order irrelevant inside one
 file, applied to every module at once: the earlier passes collect declarations across the whole
-program, the last one parses the bodies. There are four of them, and `docs/declarations.md` has the
-table of what each reads and why. What matters here is that every pass runs over **every module**
+program, then one parses the bodies and the last one parses the tests. There are six of them, and
+`docs/declarations.md` has the table of what each reads and why. What matters here is that every
+pass runs over **every module**
 before the next one starts, so a record in one file may name an enum in another and an event in a
 third may name that record.
 

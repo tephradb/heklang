@@ -219,6 +219,9 @@ pub struct Function {
     pub frame: usize,
     pub exprs: Exprs,
     pub body: Vec<Stmt>,
+    /// Where the `fn` is declared, so the recursion check can point at one. It runs
+    /// after every pass, by which time the cursor is at the end of the last module.
+    pub span: Span,
 }
 
 /// A named product type at module scope. Unlike an entity it is an ordinary value:

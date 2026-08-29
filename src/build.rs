@@ -278,7 +278,7 @@ impl Builder {
         })
     }
 
-    pub fn finish_fn(self, ret: Option<Type>, body: Vec<Stmt>) -> Function {
+    pub fn finish_fn(self, ret: Option<Type>, body: Vec<Stmt>, span: Span) -> Function {
         Function {
             name: self.name,
             module: self.module,
@@ -287,6 +287,7 @@ impl Builder {
             frame: self.frame as usize,
             exprs: self.exprs,
             body,
+            span,
         }
     }
 

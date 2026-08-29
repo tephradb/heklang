@@ -820,6 +820,7 @@ impl Parser {
     /// `state`, `guard` and a hoisted clock are all things a pure helper cannot have.
     fn fn_decl(&mut self, events: &[EventDef], kind: Kind) -> Result<Function, SyntaxError> {
         let module = self.module_at(self.pos).map(str::to_string);
+        let at = self.span_here();
         self.expect_word(Keyword::Fn)?;
         let name = self.expect_ident()?;
         let mut lower = Lower {
@@ -851,7 +852,7 @@ impl Parser {
                 "`{name}` can finish without returning a {ret}; every path out of a `fn` returns one"
             ));
         }
-        Ok(lower.b.finish_fn(ret, body))
+        Ok(lower.b.finish_fn(ret, body, at))
     }
 
     /// The `-> Type` after a parameter list. Optional for an effect-local `fn` and
@@ -5366,10 +5367,23 @@ impl Parser {
             return Ok(());
         };
         let names: Vec<String> = path.iter().map(|name| format!("`{name}`")).collect();
-        self.fail(format!(
-            "{}: a `fn` cannot call itself, directly or through another, so that every call ends",
-            names.join(" calls ")
-        ))
+        // The first `fn` in the cycle rather than the cursor, which by now is at the
+        // end of the last module: this check runs after every pass, so `here()` is the
+        // `End` token and its span is 0:0.
+        let at = program.function(&path[0]);
+        let span = at.map(|def| def.span).unwrap_or_default();
+        let error = SyntaxError::new(
+            format!(
+                "{}: a `fn` cannot call itself, directly or through another, so that every call ends",
+                names.join(" calls ")
+            ),
+            span.line,
+            span.col,
+        );
+        Err(match at.and_then(|def| def.module.as_ref()) {
+            Some(module) => error.in_file(module),
+            None => error,
+        })
     }
 
     fn check_cycles(&self, program: &Program) -> Result<(), SyntaxError> {
