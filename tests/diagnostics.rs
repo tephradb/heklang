@@ -551,3 +551,45 @@ effect E {
     };
     assert_eq!(erase.span.start.line, 4);
 }
+
+/// Rule 4 in a third place. A path is one token and a diagnostic about one covers it;
+/// `event_def` reported at the cursor, which by then had moved onto the `{` after it, so
+/// a misspelled event underlined the brace.
+#[test]
+fn an_undeclared_event_covers_the_path() {
+    for (source, line, col, width) in [
+        ("command C(id: Int) {\n  emit @no.such { id }\n}\n", 2, 8, 8),
+        (
+            "projector P {\n  entity Row { id: Int @key }\n  on @no.such { id } { put Row { id } }\n}\n",
+            3,
+            6,
+            8,
+        ),
+        ("effect E {\n  on @no.such { log(\"x\") }\n}\n", 2, 6, 8),
+        (
+            "command C(id: Int) {\n  state n: Int = fold 0\n    on @no.such(id) => n\n  return\n}\n",
+            3,
+            8,
+            8,
+        ),
+        (
+            "test \"t\" {\n  given @no.such { id: 1 }\n  project P\n}\n",
+            2,
+            9,
+            8,
+        ),
+    ] {
+        let err = parse(source).expect_err("`@no.such` is not declared");
+        assert_eq!(err.message, "event @no.such is not declared", "{source}");
+        assert_eq!(err.span, at(line, col, line, col + width), "{source}");
+    }
+}
+
+/// The same for a type name, which reported at the cursor and so covered whatever
+/// followed the name rather than the name.
+#[test]
+fn an_unknown_type_covers_the_name() {
+    let err = parse("command C(x: Nope) { return }\n").expect_err("`Nope` is not a type");
+    assert_eq!(err.message, "unknown type `Nope`");
+    assert_eq!(err.span, at(1, 14, 1, 18));
+}

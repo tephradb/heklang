@@ -1977,8 +1977,9 @@ impl Parser {
 
     fn handler(&mut self, projector: &Ident, events: &[EventDef]) -> Result<Handler, Diagnostic> {
         self.expect_word(Keyword::On)?;
+        let at = self.span_here();
         let path = self.expect_path()?;
-        let def = self.event_def(events, &path)?.clone();
+        let def = self.event_def(events, &path, at)?.clone();
 
         let mut lower = Lower {
             b: Builder::new(projector),
@@ -2251,6 +2252,7 @@ impl Parser {
     }
 
     fn type_ref(&mut self) -> Result<Type, Diagnostic> {
+        let named = self.span_here();
         let name = self.expect_ident()?;
         let ty = match name.as_str() {
             "Bool" => Type::Bool,
@@ -2288,7 +2290,13 @@ impl Parser {
                 Some(def) => Type::Enum(def.name.clone()),
                 None => match self.record_def(other) {
                     Some(def) => Type::Record(def.name.clone()),
-                    None => return self.fail(Code::UnknownType, format!("unknown type `{other}`")),
+                    None => {
+                        return Err(self.err(
+                            Code::UnknownType,
+                            format!("unknown type `{other}`"),
+                            named,
+                        ));
+                    }
                 },
             },
         };
@@ -2381,8 +2389,9 @@ impl Parser {
         while self.at_word(Keyword::On) {
             let arm = self.span_here();
             self.bump();
+            let at = self.span_here();
             let (path, filters) = self.slice_ref(lower, events)?;
-            let def = self.event_def(events, &path)?;
+            let def = self.event_def(events, &path, at)?;
 
             lower.b.push_scope();
             let mut binds = Vec::new();
@@ -2496,8 +2505,9 @@ impl Parser {
         lower: &mut Lower,
         events: &[EventDef],
     ) -> Result<(EventPath, Vec<Filter>), Diagnostic> {
+        let at = self.span_here();
         let path = self.expect_path()?;
-        let def = self.event_def(events, &path)?;
+        let def = self.event_def(events, &path, at)?;
         self.expect_sym(Sym::LParen)?;
 
         let mut filters = Vec::new();
@@ -2536,14 +2546,22 @@ impl Parser {
         Ok((path, filters))
     }
 
+    /// The span is the caller's, because every caller has just consumed the path and
+    /// the cursor is one token past it. Reported at the cursor, `emit @shop.reconneced`
+    /// underlined the `{` that followed rather than the name that was wrong.
     fn event_def<'a>(
         &self,
         events: &'a [EventDef],
         path: &EventPath,
+        at: Span,
     ) -> Result<&'a EventDef, Diagnostic> {
         match events.iter().find(|def| &def.path == path) {
             Some(def) => Ok(def),
-            None => self.fail(Code::NotDeclared, format!("event {path} is not declared")),
+            None => Err(self.err(
+                Code::NotDeclared,
+                format!("event {path} is not declared"),
+                at,
+            )),
         }
     }
 
@@ -2745,9 +2763,14 @@ impl Parser {
     fn given_decl(&mut self, lower: &mut Lower, program: &Program) -> Result<Given, Diagnostic> {
         let span = self.span_here();
         self.bump();
+        let at = self.span_here();
         let path = self.expect_path()?;
         let Some(def) = program.event(&path) else {
-            return self.fail(Code::NotDeclared, format!("event {path} is not declared"));
+            return Err(self.err(
+                Code::NotDeclared,
+                format!("event {path} is not declared"),
+                at,
+            ));
         };
         self.expect_sym(Sym::LBrace)?;
         let fields = self.event_fields(lower, def, "given")?;
@@ -3044,9 +3067,14 @@ impl Parser {
             });
         }
         if matches!(self.peek(), Token::Path(_)) {
+            let at = self.span_here();
             let path = self.expect_path()?;
             let Some(def) = program.event(&path) else {
-                return self.fail(Code::NotDeclared, format!("event {path} is not declared"));
+                return Err(self.err(
+                    Code::NotDeclared,
+                    format!("event {path} is not declared"),
+                    at,
+                ));
             };
             self.expect_sym(Sym::LBrace)?;
             let fields = self.event_fields(lower, def, "expect")?;
@@ -3416,8 +3444,9 @@ impl Parser {
                 }
                 let span = self.span_here();
                 self.bump();
+                let at = self.span_here();
                 let path = self.expect_path()?;
-                let def = self.event_def(events, &path)?;
+                let def = self.event_def(events, &path, at)?;
                 self.expect_sym(Sym::LBrace)?;
 
                 let mut fields = Vec::new();
@@ -4589,21 +4618,24 @@ impl Parser {
         let span = self.span_here();
         self.expect_word(Keyword::On)?;
 
-        let mut paths = vec![self.expect_path()?];
+        // Captured before the path rather than after it: the extent of a path is the
+        // path, and `self.span_here()` once it has been consumed is whatever follows.
         let mut spans = vec![self.span_here()];
+        let mut paths = vec![self.expect_path()?];
         while self.eat_sym(Sym::Comma) {
-            spans.push(self.span_here());
+            let at = self.span_here();
             let path = self.expect_path()?;
             if let Some(index) = paths.iter().position(|other| other == &path) {
                 return Err(self
                     .err(
                         Code::DeclaredTwice,
                         format!("this arm already lists {path}"),
-                        self.span_here(),
+                        at,
                     )
                     .with_related(self.elsewhere("first listed here", spans[index], self.pos)));
             }
             paths.push(path);
+            spans.push(at);
         }
         let def = self.common_fields(&paths, &spans, events)?;
         self.triggers = paths.clone();
@@ -4713,14 +4745,15 @@ impl Parser {
         spans: &[Span],
         events: &[EventDef],
     ) -> Result<EventDef, Diagnostic> {
-        let first = self.event_def(events, &paths[0])?.clone();
+        let first = self.event_def(events, &paths[0], spans[0])?.clone();
         if paths.len() == 1 {
             return Ok(first);
         }
 
         let rest: Vec<&EventDef> = paths[1..]
             .iter()
-            .map(|path| self.event_def(events, path))
+            .zip(&spans[1..])
+            .map(|(path, at)| self.event_def(events, path, *at))
             .collect::<Result<_, _>>()?;
 
         let mut fields = Vec::new();

@@ -98,6 +98,14 @@ is about rather than where the parser noticed. Those are different in three ways
   by then had moved past the name onto the `:` after it. An annotation had the same fault in four
   places, so `@subject(shop_id)` on a column that cannot take one was reported at its `(`.
 
+That last one is worth its own paragraph, because it kept coming back. `emit @shop.reconneced { ... }`
+underlined the `{`: `event_def` reported with the cursor, and all six of its callers had just
+consumed the path. So did the two places that inlined the same message, the first path of a
+multi-path arm, and `unknown type`. Nine sites, one shape, found three times before it was
+looked for. A helper that reports where the cursor happens to be is reporting where its caller
+left it, so `event_def` takes the span its caller had; the rule is that anything reporting about
+a token it did not consume itself is given that token.
+
 The lexer's own errors had the same shape of mistake, one level down. A scanner leaves the cursor
 *past* the character it gave up on, and the sub-scanners could not see where their token began, so
 `unexpected character` pointed one to the right of the character it named and `unterminated string`
