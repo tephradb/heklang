@@ -625,3 +625,96 @@ test \"a bad uuid\" {
     let message = parse(source).expect_err("this is not a Uuid").message;
     assert_eq!(message, "`not-a-uuid` is not a Uuid");
 }
+
+/// A port found this by writing its first test against a subject-bound field: the report
+/// read `expected none, got none`, which is the failure a reader cannot act on. An `Opt`
+/// carries its element type, sealing one seals that type, and an absent optional keeps
+/// the seal because there was never a key (`docs/effects.md` rule 12). So two absent
+/// optionals differed by a type nobody wrote and both printed the same.
+#[test]
+fn an_absent_subject_bound_optional_matches_an_absent_one() {
+    let source = "event @a.b { owner: Int, note: String? @subject(owner) }
+
+command Make(owner: Int, note: String?) {
+  emit @a.b { owner, note }
+}
+
+test \"absent\" {
+  run Make { owner: 1, note: none }
+  expect @a.b { owner: 1, note: none }
+}
+
+test \"present\" {
+  run Make { owner: 1, note: \"hello\" }
+  expect @a.b { owner: 1, note: \"hello\" }
+}
+";
+    let program = parse(source).expect("this parses");
+    for result in run_tests(&program) {
+        assert!(result.passed(), "{}: {:?}", result.name, result.outcome);
+    }
+}
+
+/// `docs/projectors.md`: writing sealed content into a column seals the column, so a
+/// projector storing a subject-bound field holds content rather than plaintext. A test
+/// names what it put in and asks whether that is what came out, which is a question about
+/// content and not about the key, so the two meet unsealed.
+#[test]
+fn a_sealed_column_can_be_asserted_by_its_content() {
+    let source = "event @shop.connected { shop_id: Int, shop_name: String @subject(shop_id) }
+
+projector Shops {
+  entity Shop {
+    shop_id: Int @key,
+    shop_name: String,
+  }
+
+  on @shop.connected { shop_id, shop_name } {
+    put Shop { shop_id, shop_name }
+  }
+}
+
+test \"a personal column is readable\" {
+  given @shop.connected { shop_id: 1, shop_name: \"Test Shop\" }
+  project Shops
+  expect Shop[1] { shop_name: \"Test Shop\" }
+}
+";
+    let program = parse(source).expect("this parses");
+    assert!(only(&run_tests(&program)).passed());
+}
+
+/// And the other direction, because a check is worth what it rejects: unsealing to compare
+/// must not make every value match every other one.
+#[test]
+fn a_sealed_column_holding_something_else_still_fails() {
+    let source = "event @shop.connected { shop_id: Int, shop_name: String @subject(shop_id) }
+
+projector Shops {
+  entity Shop {
+    shop_id: Int @key,
+    shop_name: String,
+  }
+
+  on @shop.connected { shop_id, shop_name } {
+    put Shop { shop_id, shop_name }
+  }
+}
+
+test \"a personal column is readable\" {
+  given @shop.connected { shop_id: 1, shop_name: \"Test Shop\" }
+  project Shops
+  expect Shop[1] { shop_name: \"Some Other Shop\" }
+}
+";
+    let program = parse(source).expect("this parses");
+    let results = run_tests(&program);
+    let result = only(&results);
+    let TestOutcome::Failed(why) = &result.outcome else {
+        panic!("expected a mismatch, got {:?}", result.outcome);
+    };
+    assert!(
+        why.contains("expected \"Some Other Shop\", got \"Test Shop\""),
+        "and it names both sides in the clear: {why}"
+    );
+}

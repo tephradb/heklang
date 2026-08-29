@@ -129,8 +129,13 @@ impl Type {
     /// through `Opt`: `Opt(Sealed(String, x))` unseals to `Opt(String)`.
     pub fn unsealed(&self) -> Type {
         match self {
-            Type::Sealed(inner, _) => inner.as_ref().clone(),
+            Type::Sealed(inner, _) => inner.unsealed(),
             Type::Opt(inner) => Type::opt(inner.unsealed()),
+            // A container holding sealed content is not itself sealed, so nothing above
+            // looked inside one. Two empty `List`s whose element types differed only by a
+            // seal then compared unequal, and both printed as `[]`.
+            Type::List(inner) => Type::list(inner.unsealed()),
+            Type::Map(key, value) => Type::map(key.unsealed(), value.unsealed()),
             other => other.clone(),
         }
     }

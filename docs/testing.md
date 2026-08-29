@@ -162,6 +162,27 @@ every time an unrelated column was added.
 `expect no` is what makes `update` (rule 5 of `docs/projectors.md`) testable at all, since the
 difference between it and `patch` is precisely whether a row is there.
 
+### A subject-bound value is matched on its content
+
+A column or an event field bound by `@subject` holds sealed content (`docs/projectors.md`: writing
+sealed content into a column seals the column). A test writes the plaintext and the two meet with the
+seal off both sides:
+
+```
+expect Shop[1] { shop_name: "Test Shop" }
+```
+
+**This is not a hole in rule 12's boundary.** That rule is about what a *program* may read, and it is
+a parse-time rule enforced on programs. A test states an input and asks whether that is what came
+out, which is a question about content and never about the key; and it sees nothing an embedder does
+not, since `Row::field` hands back the value either way. A mismatch reports both sides in the clear,
+because a report that said `got <sealed under shop_id>` would describe a question nobody asked.
+
+The absent optional is the case that made this necessary rather than merely nice. An optional carries
+its element type; sealing one seals that type and leaves the value absent, because there was never a
+key (`docs/effects.md` rule 12). Two absent optionals then differed by a type nobody wrote, and a
+port's first test against a subject-bound field failed with `expected none, got none`.
+
 ## 7. What `deliver` expects
 
 An effect's output is a **trace**: the ordered list of things it did to the world.

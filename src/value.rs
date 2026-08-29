@@ -161,8 +161,42 @@ impl Value {
                 inner: inner.unsealed(),
                 value: value.map(|value| Box::new(value.unsealed())),
             },
+            Value::List { inner, items } => Value::List {
+                inner: inner.unsealed(),
+                items: items.into_iter().map(Value::unsealed).collect(),
+            },
+            Value::Map {
+                key,
+                value,
+                entries,
+            } => Value::Map {
+                key,
+                value: value.unsealed(),
+                entries: entries
+                    .into_iter()
+                    .map(|(at, held)| (at, held.unsealed()))
+                    .collect(),
+            },
             other => other,
         }
+    }
+
+    /// Whether two values hold the same content, with the decrypt boundary off both. This
+    /// is the question a test asks and the only place that asks it: `expect Shop[1] {
+    /// shop_name: "Test Shop" }` names what was put in, and the column holds it sealed
+    /// under the shop.
+    ///
+    /// Equality itself stays exact, because everywhere else a seal is part of what a value
+    /// is. Here it is not: a test states an input and asks whether that is what came out,
+    /// and nothing about the key lifecycle is in the question. `has_type` already answers
+    /// the type half of it the same way.
+    ///
+    /// The absent optional is why this is not only about content. An `Opt` carries its
+    /// element type, and sealing one seals that type while leaving the value `None`
+    /// (`docs/effects.md` rule 12: there was never a key). Two absent optionals then
+    /// differed by a type nobody wrote, and both printed as `none`.
+    pub fn same(&self, other: &Value) -> bool {
+        self.clone().unsealed() == other.clone().unsealed()
     }
 }
 

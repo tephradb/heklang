@@ -211,8 +211,13 @@ fn check_run(
             });
             let wanted = values.at(*value, ty.as_ref())?;
             match actual.fields.get(name) {
-                Some(found) if found == &wanted => {}
+                Some(found) if found.same(&wanted) => {}
                 Some(found) => {
+                    // The content, not `<sealed under ...>`: the comparison above took the
+                    // seal off both sides, so a report that puts it back describes a
+                    // question nobody asked. A test names what it put in and is owed
+                    // what came out.
+                    let found = found.clone().unsealed();
                     return Ok(Some(format!(
                         "{path}.{name}: expected {wanted}, got {found}"
                     )));
@@ -286,8 +291,9 @@ fn mismatch(
         });
         let wanted = values.at(*value, ty.as_ref())?;
         match row.field(name) {
-            Some(found) if found == &wanted => {}
+            Some(found) if found.same(&wanted) => {}
             Some(found) => {
+                let found = found.clone().unsealed();
                 return Ok(Some(format!(
                     "{entity}[{}].{name}: expected {wanted}, got {found}",
                     show(key)
