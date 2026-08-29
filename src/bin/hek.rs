@@ -15,7 +15,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use heklang::{Program, TestOutcome, check_files, run_tests};
+use heklang::{Program, SyntaxError, TestOutcome, check_files, run_tests};
 
 const USAGE: &str = "\
 hek: check heklang sources and run their tests
@@ -104,6 +104,9 @@ fn run() -> Result<bool, String> {
             // to. The count goes last so a long list ends by saying how long it was.
             for err in &errors {
                 println!("{err}");
+                if let Some(drawn) = underline(&sources, err) {
+                    print!("{drawn}");
+                }
             }
             let s = if errors.len() == 1 { "" } else { "s" };
             println!("\n{} error{s}", errors.len());
@@ -201,6 +204,42 @@ fn walk(dir: &Path, found: &mut Vec<PathBuf>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The source line a diagnostic is about, with its extent drawn underneath. The header
+/// line above it already says where to jump to; this says what the message is about, which
+/// is the thing a position alone cannot.
+///
+/// `None` where there is nothing to draw: an error with no module, one whose span is the
+/// end-of-file sentinel, or a line that is not in the file. `docs/diagnostics.md` rule 5
+/// has why each of those has no extent.
+fn underline(sources: &[(String, String)], err: &SyntaxError) -> Option<String> {
+    let file = err.file.as_deref()?;
+    let body = sources
+        .iter()
+        .find(|(name, _)| name == file)
+        .map(|(_, body)| body.as_str())?;
+
+    let number = err.span.start.line;
+    let text = body.lines().nth(number.checked_sub(1)? as usize)?;
+
+    // Columns count `char`s (`docs/diagnostics.md` rule 1), so the gap in front of the
+    // carets is measured in `char`s too. A span ending on a later line is drawn to the end
+    // of this one and no further: a raw string would otherwise take the screen.
+    let start = err.span.start.col.max(1) as usize - 1;
+    let end = if err.span.end.line == number {
+        err.span.end.col.max(1) as usize - 1
+    } else {
+        text.chars().count()
+    };
+    let width = end.saturating_sub(start).max(1);
+
+    let gutter = " ".repeat(number.to_string().len());
+    Some(format!(
+        "{gutter} |\n{number} | {text}\n{gutter} | {}{}\n",
+        " ".repeat(start),
+        "^".repeat(width)
+    ))
 }
 
 /// The name an error is reported under: relative to the root, so a diagnostic reads

@@ -284,3 +284,99 @@ fn help_succeeds_and_names_both_commands() {
     let text = stdout(&output);
     assert!(text.contains("hek [check|test] [path]"), "{text}");
 }
+
+/// The line of carets a run drew, without its trailing newline.
+fn caret_line(text: &str) -> &str {
+    text.lines()
+        .find(|line| line.contains("^"))
+        .expect("a diagnostic was drawn")
+}
+
+/// `docs/cli.md`: the header says where to jump, and the line under it says what the
+/// message is about. The extent is the thing a position alone cannot carry, so drawing it
+/// is also what keeps it honest: a wrong span is visible here and nowhere else.
+#[test]
+fn an_error_is_drawn_under_the_source_it_is_about() {
+    let root = project(
+        "underline",
+        &[
+            ("events.hk", EVENTS),
+            (
+                "a.hk",
+                "command One(order_id: Int, total: Money(2), text: String) {\n  emit @order.placed { order_id, total: text }\n}\n",
+            ),
+        ],
+    );
+    let text = stdout(&run(&root, &["check"]));
+
+    assert!(
+        text.contains("a.hk:2:41: expected Money(2), found String"),
+        "the header is unchanged: {text}"
+    );
+    assert!(
+        text.contains("2 |   emit @order.placed { order_id, total: text }\n"),
+        "the source line, with its number in the gutter: {text}"
+    );
+    let carets = caret_line(&text);
+    assert_eq!(
+        carets.find(char::is_alphanumeric),
+        None,
+        "the caret line holds nothing but the gutter and the carets: {carets:?}"
+    );
+    assert_eq!(
+        carets.matches("^").count(),
+        4,
+        "`text` is four wide: {text}"
+    );
+    assert_eq!(
+        carets.find("^"),
+        Some("  | ".len() + 40),
+        "under column 41: {text}"
+    );
+}
+
+/// `docs/diagnostics.md` rule 5: the end of the file has no extent, so there is nothing
+/// to draw and the header stands alone rather than being followed by an empty gutter.
+#[test]
+fn an_error_with_no_extent_draws_nothing() {
+    let root = project(
+        "underline-none",
+        &[("events.hk", EVENTS), ("a.hk", "command One(id: Int) {\n")],
+    );
+    let text = stdout(&run(&root, &["check"]));
+
+    assert!(text.contains(":0:0: unclosed `{`"), "{text}");
+    assert!(
+        !text.contains('^'),
+        "there is no line 0 to draw under: {text}"
+    );
+}
+
+/// `docs/diagnostics.md` rule 6: a span may end on a later line. It is drawn to the end
+/// of the first one and stops, because a raw string would otherwise take the screen.
+#[test]
+fn a_span_over_several_lines_is_drawn_to_the_end_of_the_first() {
+    let root = project(
+        "underline-multiline",
+        &[
+            ("events.hk", EVENTS),
+            (
+                "a.hk",
+                "command One(total: Money(2)) {\n  emit @order.placed { order_id: \"\"\"one\ntwo\"\"\", total }\n}\n",
+            ),
+        ],
+    );
+    let text = stdout(&run(&root, &["check"]));
+
+    assert!(
+        text.contains("a.hk:2:34: expected Int, found String"),
+        "{text}"
+    );
+    let carets = caret_line(&text);
+    assert_eq!(
+        carets.matches("^").count(),
+        6,
+        "six characters, to the end of line 2 and no further: {text}"
+    );
+    assert!(!text.contains("3 | "), "and line 3 is not drawn: {text}");
+}

@@ -72,10 +72,29 @@ the command that grows rather than a new one.
 ## Reporting
 
 A syntax error prints as `file:line:col: message`, with the file relative to the path the
-run was pointed at, so an editor jumps to it.
+run was pointed at, so an editor jumps to it. The position is the start of the extent the
+diagnostic covers, and `docs/diagnostics.md` is the contract for that extent.
 
-The position printed is the start. A diagnostic also carries the extent it is about, which
-`docs/diagnostics.md` is the contract for, and which a reader that can draw a range uses.
+Under it goes the source line, with the extent drawn:
+
+```
+a.hk:2:41: expected Money(2), found String
+  |
+2 |   emit @order.placed { order_id, total: text }
+  |                                         ^^^^
+```
+
+**The header is what an editor reads and the drawing is what a person reads**, so the
+header is exactly what it was before there were extents. The gutter is as wide as the line
+number. Columns count `char`s, so the carets line up under text that is not ASCII.
+
+Two cases draw less or nothing. A span with nothing in it (the end of the file, rule 5 of
+`docs/diagnostics.md`) prints the header alone, because there is no line 0 to draw under.
+A span ending on a later line is drawn to the end of the first and stops, since a raw
+string would otherwise take the screen.
+
+Drawing it is also what keeps it honest: an extent nobody renders is one nobody checks,
+and a wrong one reads as a plausible position right up until something underlines it.
 
 ## Every declaration that failed, not only the first
 
