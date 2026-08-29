@@ -593,3 +593,30 @@ fn an_unknown_type_covers_the_name() {
     assert_eq!(err.message, "unknown type `Nope`");
     assert_eq!(err.span, at(1, 14, 1, 18));
 }
+
+/// The same shape once more: five duplicate checks ran after the declaration had been
+/// read whole, so `enum E is declared twice` underlined the declaration *after* the
+/// second `E`. The token index each pass already keeps is what the span comes from.
+#[test]
+fn a_second_declaration_covers_its_own_name() {
+    for (source, line, col, width) in [
+        ("enum E { A }\nenum E { B }\n", 2, 6, 1),
+        ("const A: Int = 1\nconst A: Int = 2\n", 2, 7, 1),
+        ("event @a.b { id: Int }\nevent @a.b { id: Int }\n", 2, 7, 4),
+        (
+            "event @a.b { id: Int }\nprojector P {\n  entity Row { id: Int @key }\n  on @a.b { id } { put Row { id } }\n}\nprojector P {\n  entity Row { id: Int @key }\n  on @a.b { id } { put Row { id } }\n}\n",
+            6,
+            11,
+            1,
+        ),
+        (
+            "event @a.b { id: Int }\neffect E {\n  on @a.b { log(\"x\") }\n}\neffect E {\n  on @a.b { log(\"y\") }\n}\n",
+            5,
+            8,
+            1,
+        ),
+    ] {
+        let err = parse(source).expect_err("declared twice");
+        assert_eq!(err.span, at(line, col, line, col + width), "{source}");
+    }
+}

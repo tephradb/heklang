@@ -106,6 +106,12 @@ looked for. A helper that reports where the cursor happens to be is reporting wh
 left it, so `event_def` takes the span its caller had; the rule is that anything reporting about
 a token it did not consume itself is given that token.
 
+The same rule catches a check that runs *after* a whole declaration. Five of the
+`declared-twice` checks read the declaration first and then reported at the cursor, which by
+then was on the next declaration entirely: a second `enum E` underlined the `command` below
+it. Each pass already keeps the index of the token it started at, and the name is the token
+after the keyword in every declaration heklang has, so that is what the span comes from.
+
 The lexer's own errors had the same shape of mistake, one level down. A scanner leaves the cursor
 *past* the character it gave up on, and the sub-scanners could not see where their token began, so
 `unexpected character` pointed one to the right of the character it named and `unterminated string`

@@ -277,12 +277,16 @@ impl Parser {
     /// The same for a token named by index, which is how the passes remember where a
     /// declaration began.
     fn at_token(&self, message: impl Into<String>, pos: usize) -> Related {
-        let span = self
-            .tokens
+        self.elsewhere(message, self.token_span(pos), pos)
+    }
+
+    /// The extent of a token named by index. `Span::default()` past the end, which is the
+    /// end-of-file sentinel's own span.
+    fn token_span(&self, pos: usize) -> Span {
+        self.tokens
             .get(pos)
             .map(|spanned| spanned.span)
-            .unwrap_or_default();
-        self.elsewhere(message, span, pos)
+            .unwrap_or_default()
     }
 
     /// Records where a name was declared, so the diagnostic for a second one can point
@@ -744,7 +748,7 @@ impl Parser {
                         "enum",
                         &def.name,
                         format!("enum `{}` is declared twice", def.name),
-                        self.span_here(),
+                        self.token_span(named),
                     ));
                 }
                 self.declare("enum", &def.name, named);
@@ -802,7 +806,7 @@ impl Parser {
                         "const",
                         &shell.name,
                         format!("const `{}` is declared twice", shell.name),
-                        self.span_here(),
+                        self.token_span(named),
                     ));
                 }
                 self.declare("const", &shell.name, named);
@@ -831,7 +835,7 @@ impl Parser {
                         "event",
                         &path,
                         format!("event {path} is declared twice"),
-                        self.span_here(),
+                        self.token_span(named),
                     ));
                 }
                 self.declare("event", &path, named);
@@ -845,7 +849,7 @@ impl Parser {
                         "projector",
                         &projector.name,
                         format!("projector `{}` is declared twice", projector.name),
-                        self.span_here(),
+                        self.token_span(named),
                     ));
                 }
                 self.declare("projector", &projector.name, named);
@@ -891,7 +895,7 @@ impl Parser {
                         "effect",
                         &effect.name,
                         format!("effect `{}` is declared twice", effect.name),
-                        self.span_here(),
+                        self.token_span(named),
                     ));
                 }
                 self.declare("effect", &effect.name, named);
@@ -1390,7 +1394,7 @@ impl Parser {
                             .err(
                                 Code::DeclaredTwice,
                                 format!("enum `{}` is declared twice", def.name),
-                                self.span_here(),
+                                self.token_span(named),
                             )
                             .with_related(self.at_token("first declared here", enum_at[index])));
                     }
@@ -1418,7 +1422,7 @@ impl Parser {
                             .err(
                                 Code::DeclaredTwice,
                                 format!("entity `{}` is declared twice", def.name),
-                                self.span_here(),
+                                self.token_span(named),
                             )
                             .with_related(self.at_token("first declared here", entity_at[index])));
                     }
