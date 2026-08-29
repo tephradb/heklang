@@ -83,6 +83,23 @@ fn addition_and_comparison_cross_hint() {
     check("let a = count >= 10\nreturn", &["Int(10)"]);
 }
 
+/// A `Bool` target describes the comparison rather than its operands, so it must not
+/// reach them. It used to, and the row above was unwritable inside an `if`: the literal
+/// hit `Bool` before the other operand could type it, and reported "a number cannot be
+/// a Bool" about a number that was never meant to be one.
+#[test]
+fn a_bool_target_does_not_reach_the_operands() {
+    check("if 5 > count {\n  return\n}\nreturn", &["Int(5)"]);
+    check(
+        "if 1000.00 < spend {\n  return\n}\nreturn",
+        &["Money(100000, scale 2)"],
+    );
+    check(
+        "if count >= 10 && 0.5 < rate {\n  return\n}\nreturn",
+        &["Int(10)", "Decimal(5000, scale 4)"],
+    );
+}
+
 #[test]
 fn defaulted_literals_settle_toward_more_places() {
     check(

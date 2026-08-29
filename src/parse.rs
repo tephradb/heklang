@@ -3064,7 +3064,11 @@ impl Parser {
     }
 
     fn cmp_expr(&mut self, lower: &mut Lower, expect: Option<Type>) -> Result<ExprId, SyntaxError> {
-        let lhs = self.add_expr(lower, expect)?;
+        // A `Bool` target describes the comparison rather than its operands, and this
+        // cannot know yet whether one follows. Nothing resolves against `Bool`, so
+        // dropping it costs no inference and stops `if 5 > count` from reporting "a
+        // number cannot be a Bool" about a literal the other operand would have typed.
+        let lhs = self.add_expr(lower, expect.filter(|ty| ty != &Type::Bool))?;
         let Some((op, span)) = self.eat_op(&[
             (Sym::Eq, BinOp::Eq),
             (Sym::Ne, BinOp::Ne),

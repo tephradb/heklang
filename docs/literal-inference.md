@@ -54,6 +54,13 @@ and the author never wrote a type at all.
 both give `Decimal(1) + Decimal(1)`. Since widening is exact, the more precise side is always the
 safe target.
 
+**A `Bool` annotation is not a target for either operand.** It describes the comparison, and a
+comparison's operands are whatever they are. The parser reads the left operand before it knows a
+comparison follows, so without this rule `if 5 > count` resolves `5` against `Bool` and reports "a
+number cannot be a Bool" about a literal the right operand types perfectly well. Nothing resolves
+against `Bool`, so dropping the annotation there costs no inference. This is what makes the
+`1000.00 < spend` row above writable inside an `if` and not only in a `let`.
+
 ## Table
 
 Assume a command with `total: Money(2)`, `spend: Money(2)`, `count: Int`, `rate: Decimal(4)`.
