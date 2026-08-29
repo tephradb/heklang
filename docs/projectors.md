@@ -192,7 +192,11 @@ The demand is not on the declaration, it is on the **write**:
 That follows from where a zero is actually consulted. `materialize` is the only caller of the zero
 table, and a materializing `patch` on an absent key is the only caller of `materialize`. `put`
 requires every field to be written and never reads a zero, so a defaulted column must still appear in
-a `put`. `update` drops the write when the row is absent, so it creates nothing.
+a `put`, and the checker says so at the write:
+
+> `put Order` needs `customer_id`; a `put` writes the whole row, so it never reads a default
+
+`update` drops the write when the row is absent, so it creates nothing.
 
 So an entity that nothing patches was being asked for a value that provably nothing reads, and the
 usual way to supply one is a sentinel: exactly the thing the table above refuses to make a zero. The

@@ -91,11 +91,34 @@ One pass, not one per `state`: ten folds over a million events read the log once
 Step 3 is why the prologue exists at all, and why a `let` a filter names must be **above** it. The
 error says so rather than saying "not in scope":
 
-> `customer` is defined at 12:3, below the declarations; `guard` and `state` run before the body, so
-> they can only use names bound above them; move that `let` up
+> `customer` is defined below the declarations; `guard` and `state` run before the body, so they can
+> only use names bound above them; move that `let` up
+
+The definition site is a related location rather than a position written into the sentence, so an
+editor can go to it. `docs/diagnostics.md` section 9 has why.
 
 Step 5 is subtle and load-bearing: `after` is taken before the fold, so the condition means "nothing
 new in these slices since the position I started reading at".
+
+## `emit` writes an event whole
+
+Every field the event declares is given, each of them once. There is no partial event and no
+default: an event is a fact, and a fact with a hole in it is a different fact.
+
+```
+emit @order.cancelled { order_id }
+```
+
+> `emit @order.cancelled` needs `customer_id`; an event is written whole
+
+This is the same rule `given` holds to (`docs/testing.md` rule 2), a record literal holds to, and an
+`invoke`'s arguments hold to, and it is checked in the same place: at the write, against the
+declaration. It was the runtime that held it for `emit` and for `put`, which meant a command that
+omitted a field checked clean and failed at the append, so a branch no test reached shipped broken.
+`docs/projectors.md` rule 5 has the `put` half.
+
+The shorthand is `{ order_id }` for `{ order_id: order_id }`, so writing every field is usually
+writing every name.
 
 ## Three outcomes, and the condition comes back with all of them
 

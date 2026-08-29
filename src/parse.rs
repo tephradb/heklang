@@ -3288,22 +3288,36 @@ impl Parser {
 
     /// The `{ field: value, shorthand }` block shared by `put` and `patch`. Closes
     /// the block itself, since both callers do the same thing after.
+    /// `whole` is where the block began, for a `put`, which writes every column. A
+    /// `patch` and an `update` pass `None`: writing some of a row is what they are for.
     fn write_fields(
         &mut self,
         lower: &mut Lower,
         def: &EntityDef,
+        whole: Option<Pos>,
     ) -> Result<Vec<(Ident, ExprId)>, Diagnostic> {
-        let mut fields = Vec::new();
+        let mut fields: Vec<(Ident, ExprId)> = Vec::new();
         while !self.at_sym(Sym::RBrace) {
             let at = self.span_here();
             let name = self.expect_ident()?;
             let Some(declared) = def.field(&name) else {
-                return Err(self.err(
+                self.note(self.err(
                     Code::UnknownMember,
                     format!("entity `{}` has no field `{name}`", def.name),
                     at,
                 ));
+                if self.eat_sym(Sym::Colon) {
+                    self.expr(lower, None)?;
+                }
+                if !self.eat_sym(Sym::Comma) {
+                    break;
+                }
+                continue;
             };
+            let twice = fields.iter().any(|(seen, _)| seen == &name);
+            if twice {
+                self.note(self.err(Code::DuplicateField, format!("`{name}` is given twice"), at));
+            }
             let expected = declared.ty.clone();
             let outer = mem::replace(&mut self.propagating, true);
             let value = if self.eat_sym(Sym::Colon) {
@@ -3316,12 +3330,34 @@ impl Parser {
             };
             self.propagating = outer;
             self.propagate_subject(lower, &def.name, &name, value, at)?;
-            fields.push((name, value));
+            // The second one is read and dropped, so what is left is a set and the
+            // completeness check below reads it as one.
+            if !twice {
+                fields.push((name, value));
+            }
             if !self.eat_sym(Sym::Comma) {
                 break;
             }
         }
         self.expect_sym(Sym::RBrace)?;
+        // Rule 5: `put` never reads the zero table, so a column it leaves out has no
+        // value to fall back on. The runtime held this and the checker did not, which
+        // meant a missing column reached the projection rather than the report.
+        if let Some(brace) = whole
+            && let Some(missing) = def
+                .fields
+                .iter()
+                .find(|declared| !fields.iter().any(|(name, _)| name == &declared.name))
+        {
+            self.note(
+                self.err(
+                    Code::MissingField,
+                    format!("`put {}` needs `{}`", def.name, missing.name),
+                    self.span_from(brace),
+                )
+                .with_hint("a `put` writes the whole row, so it never reads a default"),
+            );
+        }
         Ok(fields)
     }
     fn statement(&mut self, lower: &mut Lower, events: &[EventDef]) -> Result<Stmt, Diagnostic> {
@@ -3483,6 +3519,7 @@ impl Parser {
                         return Ok(Stmt::Discard(poison));
                     }
                 };
+                let brace = self.here();
                 self.expect_sym(Sym::LBrace)?;
 
                 let mut fields = Vec::new();
@@ -3503,6 +3540,16 @@ impl Parser {
                         }
                         continue;
                     };
+                    let twice = fields
+                        .iter()
+                        .any(|(seen, _): &(Ident, ExprId)| seen == &name);
+                    if twice {
+                        self.note(self.err(
+                            Code::DuplicateField,
+                            format!("`{name}` is given twice"),
+                            at,
+                        ));
+                    }
                     let expected = declared.ty.clone();
                     let value = if self.eat_sym(Sym::Colon) {
                         self.expr(lower, Some(expected))?
@@ -3512,13 +3559,34 @@ impl Parser {
                         lower.b.at(at);
                         lower.b.load(&name)
                     };
-                    fields.push((name, value));
+                    // The second one is read and dropped, so what is left is a set and
+                    // the completeness check below reads it as one.
+                    if !twice {
+                        fields.push((name, value));
+                    }
                     if !self.eat_sym(Sym::Comma) {
                         break;
                     }
                 }
 
                 self.expect_sym(Sym::RBrace)?;
+                // An event is written whole, the rule `given` and a record literal
+                // already held to. The block is what is incomplete, so it is what the
+                // diagnostic covers.
+                if let Some(missing) = def
+                    .fields
+                    .iter()
+                    .find(|declared| !fields.iter().any(|(name, _)| name == &declared.name))
+                {
+                    self.note(
+                        self.err(
+                            Code::MissingField,
+                            format!("`emit {path}` needs `{}`", missing.name),
+                            self.span_from(brace),
+                        )
+                        .with_hint("an event is written whole"),
+                    );
+                }
                 Ok(Stmt::Emit {
                     event: path,
                     fields,
@@ -3536,8 +3604,9 @@ impl Parser {
                 let span = self.span_here();
                 self.bump();
                 let (name, def) = self.entity_ref()?;
+                let brace = self.here();
                 self.expect_sym(Sym::LBrace)?;
-                let fields = self.write_fields(lower, &def)?;
+                let fields = self.write_fields(lower, &def, Some(brace))?;
                 Ok(Stmt::Put {
                     entity: name,
                     fields,
@@ -3577,7 +3646,7 @@ impl Parser {
                     loads: Vec::new(),
                     slots: HashMap::new(),
                 });
-                let fields = self.write_fields(lower, &def)?;
+                let fields = self.write_fields(lower, &def, None)?;
                 let stored = self.stored.take().expect("set just above");
 
                 Ok(Stmt::Patch {

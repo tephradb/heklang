@@ -209,16 +209,17 @@ fn put_writes_every_field_patch_only_the_listed_ones() {
     );
 }
 
+/// Rule 5: `put` never reads the zero table, so a column it leaves out has no value to
+/// fall back on. The runtime held this and the checker did not, which meant a projector
+/// that missed a column checked clean and failed on the first event it saw.
 #[test]
 fn put_must_write_every_field() {
     let source = source("  on @order.placed { order_id } {\n    put Order { order_id }\n  }");
-    let program = parse(&source).expect("a partial `put` parses");
-    let interpreter = Interpreter::with_log(&program, vec![placed(1, 7, 2_599)]);
-    let message = interpreter
-        .project("P")
-        .expect_err("`put` writes all fields")
-        .to_string();
-    assert!(message.contains("is missing field"), "got: {message}");
+    let err = parse(&source).expect_err("a partial `put`");
+    assert_eq!(
+        err.text(),
+        "`put Order` needs `customer_id`; a `put` writes the whole row, so it never reads a default"
+    );
 }
 
 #[test]
@@ -1320,4 +1321,15 @@ projector P {
 }",
     )
     .unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+}
+
+/// And writes each column once, in a `patch` as well as a `put`: a column written twice
+/// in one block is a mistake whichever statement it is in.
+#[test]
+fn a_write_gives_each_column_once() {
+    let source = source(
+        "  on @order.placed { order_id, total } {\n    patch Order[order_id] { total, total }\n  }",
+    );
+    let err = parse(&source).expect_err("`total` is written twice");
+    assert_eq!(err.text(), "`total` is given twice");
 }

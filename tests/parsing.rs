@@ -14,22 +14,41 @@ const PRELUDE: &str = "event @read.done {
 }
 ";
 
+/// The event's fields, with the one under test given `expr` and the rest their zero.
+/// An event is written whole, and written once: these used to list every field and then
+/// append the one under test a second time, which the checker now rejects.
+fn fields(field: &str, expr: &str) -> String {
+    let zeros = [
+        ("at", "none"),
+        ("amount", "none"),
+        ("count", "none"),
+        ("id", "none"),
+        ("text", "\"\""),
+        ("flag", "false"),
+    ];
+    assert!(
+        zeros.iter().any(|(name, _)| *name == field),
+        "`{field}` is not a field of @read.done"
+    );
+    zeros
+        .iter()
+        .map(|(name, zero)| {
+            let value = if *name == field { expr } else { zero };
+            format!("{name}: {value}")
+        })
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
 /// Runs a command whose only job is to emit one field, and returns the event.
 fn read(field: &str, expr: &str, text: &str) -> Value {
     let source = format!(
         "{PRELUDE}
 command Read(text: String) {{
-  emit @read.done {{
-    at: none,
-    amount: none,
-    count: none,
-    id: none,
-    text: \"\",
-    flag: false,
-    {field}: {expr},
-  }}
+  emit @read.done {{ {} }}
 }}
-"
+",
+        fields(field, expr)
     );
     let program = parse(&source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
     let mut interpreter = Interpreter::new(&program);
@@ -46,9 +65,10 @@ fn err(field: &str, expr: &str) -> String {
     let source = format!(
         "{PRELUDE}
 command Read(text: String) {{
-  emit @read.done {{ at: none, amount: none, count: none, id: none, text: \"\", flag: false, {field}: {expr} }}
+  emit @read.done {{ {} }}
 }}
-"
+",
+        fields(field, expr)
     );
     parse(&source)
         .expect_err("expected this to be rejected")

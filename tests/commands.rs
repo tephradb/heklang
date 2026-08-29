@@ -395,3 +395,27 @@ fn a_command_may_commit_having_emitted_nothing() {
     // condition is how a command asserts that something has not happened.
     assert_eq!(execution.condition.slices.len(), 1);
 }
+
+/// An event is written whole, the rule `given` and a record literal already held to.
+/// `emit` did not run it: a command that omitted a field checked clean and raised
+/// `event @order.cancelled is missing field ...` at the append instead, so an untested
+/// branch shipped broken.
+#[test]
+fn an_emit_gives_every_field() {
+    let message = err("command Cancel(order_id: Uuid) {
+  emit @order.cancelled { order_id }
+}");
+    assert_eq!(
+        message,
+        "`emit @order.cancelled` needs `customer_id`; an event is written whole"
+    );
+}
+
+/// And gives each of them once, which the same gap allowed.
+#[test]
+fn an_emit_gives_each_field_once() {
+    let message = err("command Cancel(order_id: Uuid, customer_id: Int) {
+  emit @order.cancelled { order_id, order_id, customer_id }
+}");
+    assert_eq!(message, "`order_id` is given twice");
+}
