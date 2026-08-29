@@ -250,3 +250,35 @@ fn an_unterminated_string_starts_at_its_quote() {
     assert_eq!(err.message, "unterminated string");
     assert_eq!(err.span.start, Pos::new(3, 11), "the opening quote");
 }
+
+/// Rule 4: an annotation is one `@name` token, and a diagnostic about one covers it. All
+/// four of these reported at the cursor, which by then had moved past the annotation onto
+/// whatever followed, so `@subject(shop_id)` was reported at its `(`.
+#[test]
+fn an_unknown_annotation_covers_the_annotation() {
+    for (source, line, col, width) in [
+        ("event @a.b { id: Int, note: String @nope }\n", 1, 36, 5),
+        ("record R { note: String @nope }\n", 1, 25, 5),
+        ("enum E { @nope A, B }\n", 1, 10, 5),
+        (
+            "event @a.b { id: Int }\nprojector P {\n  entity Row {\n    id: Int @key,\n    text: String @nope,\n  }\n  on @a.b { id } { put Row { id, text: \"x\" } }\n}\n",
+            5,
+            18,
+            5,
+        ),
+    ] {
+        let err = parse(source).expect_err("`@nope` is not an annotation");
+        assert_eq!(err.message, "unknown annotation `@nope`");
+        assert_eq!(err.span, at(line, col, line, col + width), "{source}");
+    }
+}
+
+/// The same for the name that is not one name. `@a.b` is four characters and the span is
+/// four wide, which is the token rather than anything counted from the text.
+#[test]
+fn a_dotted_annotation_name_covers_the_whole_path() {
+    let err = parse("event @a.b { id: Int, note: String @a.b }\n")
+        .expect_err("an annotation name is one segment");
+    assert_eq!(err.message, "an annotation name cannot contain `.`");
+    assert_eq!(err.span, at(1, 36, 1, 40));
+}

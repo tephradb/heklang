@@ -81,6 +81,7 @@ error reads, so a `Money` mismatch at run time now covers the same text the stat
 | a name that is not in scope | that name |
 | a declaration declared twice | its name in the second declaration |
 | a field given twice, or one the event does not have | that field's name |
+| an annotation the declaration does not take | that annotation, `@` included |
 | a value in a position that declares a type | the whole value |
 | an arithmetic or comparison mistake | both operands and the operator between them |
 | a method the receiver does not have | the method's name |
@@ -94,7 +95,8 @@ is about rather than where the parser noticed. Those are different in three ways
   `a > b`. The operator is where the mistake is spelled and the pair is what it is about, and an
   editor can underline only one of them.
 - **A name is about the name.** A field the event does not have used to report at the cursor, which
-  by then had moved past the name onto the `:` after it.
+  by then had moved past the name onto the `:` after it. An annotation had the same fault in four
+  places, so `@subject(shop_id)` on a column that cannot take one was reported at its `(`.
 
 The lexer's own errors had the same shape of mistake, one level down. A scanner leaves the cursor
 *past* the character it gave up on, and the sub-scanners could not see where their token began, so

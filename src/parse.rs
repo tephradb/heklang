@@ -1006,7 +1006,7 @@ impl Parser {
             let at = self.span_here();
             self.bump();
             let [annotation] = segments.as_slice() else {
-                return self.fail("an annotation name cannot contain `.`");
+                return Err(self.err("an annotation name cannot contain `.`", at));
             };
             match annotation.as_str() {
                 "max" => max_len = Some(self.max_annotation(ty, field)?),
@@ -1403,9 +1403,12 @@ impl Parser {
             let mut is_key = false;
 
             while let Token::Path(segments) = self.peek().clone() {
+                // Before the bump: an annotation is one `@name` token, and the cursor is
+                // past it once that is consumed.
+                let mark = self.span_here();
                 self.bump();
                 let [annotation] = segments.as_slice() else {
-                    return self.fail("an annotation name cannot contain `.`");
+                    return Err(self.err("an annotation name cannot contain `.`", mark));
                 };
                 match annotation.as_str() {
                     "key" => is_key = true,
@@ -1415,7 +1418,9 @@ impl Parser {
                     "max" => {
                         field.max_len = Some(self.max_annotation(&field.ty.clone(), &field_name)?);
                     }
-                    other => return self.fail(format!("unknown annotation `@{other}`")),
+                    other => {
+                        return Err(self.err(format!("unknown annotation `@{other}`"), mark));
+                    }
                 }
             }
 
@@ -1837,9 +1842,10 @@ impl Parser {
             let mut field = FieldDef::new(&name, ty);
 
             while let Token::Path(segments) = self.peek().clone() {
+                let mark = self.span_here();
                 self.bump();
                 let [annotation] = segments.as_slice() else {
-                    return self.fail("an annotation name cannot contain `.`");
+                    return Err(self.err("an annotation name cannot contain `.`", mark));
                 };
                 match annotation.as_str() {
                     "subject" => {
@@ -1852,7 +1858,9 @@ impl Parser {
                         field = field.max_len(max);
                     }
                     "no_index" => field = field.no_index(),
-                    other => return self.fail(format!("unknown annotation `@{other}`")),
+                    other => {
+                        return Err(self.err(format!("unknown annotation `@{other}`"), mark));
+                    }
                 }
             }
 
