@@ -5,6 +5,9 @@
 //! `docs/effects.md` both record which ones are still deferred to a checker that does
 //! not exist yet), so "parses" and "checks" are the same pass. When the checker splits
 //! out, this is where it gets called.
+//!
+//! `check_files` rather than `parse_files`, because a run reports every declaration
+//! that failed rather than only the first. `docs/cli.md` has the granularity.
 
 use std::env;
 use std::fs;
@@ -12,7 +15,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use heklang::{Program, TestOutcome, parse_files, run_tests};
+use heklang::{Program, TestOutcome, check_files, run_tests};
 
 const USAGE: &str = "\
 hek: check heklang sources and run their tests
@@ -25,7 +28,7 @@ usage:
 
 `path` is a directory or a single `.hk` file, and defaults to the current
 directory. With no command `hek` does both. Every file under `path` is one
-module of one program; see docs/modules.md.
+module of one program, and declaration order across them does not matter.
 ";
 
 fn main() -> ExitCode {
@@ -82,7 +85,7 @@ fn run() -> Result<bool, String> {
         ));
     };
 
-    // Read every file before parsing any: `parse_files` borrows all of them at once,
+    // Read every file before parsing any: `check_files` borrows all of them at once,
     // because one program is assembled from all the modules together.
     let mut sources = Vec::new();
     for path in &paths {
@@ -94,11 +97,16 @@ fn run() -> Result<bool, String> {
         .map(|(name, body)| (name.as_str(), body.as_str()))
         .collect();
 
-    let program = match parse_files(files) {
+    let program = match check_files(files) {
         Ok(program) => program,
-        Err(err) => {
-            // Already `file:line:col: message`, which is what an editor jumps to.
-            println!("{err}");
+        Err(errors) => {
+            // Each is already `file:line:col: message`, which is what an editor jumps
+            // to. The count goes last so a long list ends by saying how long it was.
+            for err in &errors {
+                println!("{err}");
+            }
+            let s = if errors.len() == 1 { "" } else { "s" };
+            println!("\n{} error{s}", errors.len());
             return Ok(false);
         }
     };

@@ -21,6 +21,6 @@ pub use ir::{
     UnOp, Update,
 };
 pub use lex::SyntaxError;
-pub use parse::{parse, parse_files};
+pub use parse::{check_files, parse, parse_files};
 pub use testing::{TestOutcome, TestResult, run_tests};
 pub use value::{Event, Invoked, Json, Key, Record, Value};

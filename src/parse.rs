@@ -29,6 +29,40 @@ pub fn parse_files<'a>(
     Parser::open(files)?.program()
 }
 
+/// What pass D collects while it walks. A struct rather than five locals so the pass
+/// body can be a method, which is what lets one declaration fail without ending the run.
+#[derive(Default)]
+struct Bodies {
+    commands: Vec<Command>,
+    effects: Vec<Effect>,
+    functions: Vec<Function>,
+    /// Where each `test` starts, for pass E to come back to.
+    tests: Vec<usize>,
+    /// How many projector shells pass D has filled in, since it walks them in order.
+    seen: usize,
+}
+
+/// Every declaration that failed, rather than only the first. One error per declaration
+/// and reporting stops at the end of the pass that found any, because a later pass reads
+/// what an earlier one built: a signature that did not parse would make every body that
+/// names it wrong in a way its author did not write. `docs/cli.md` has the rest.
+pub fn check_files<'a>(
+    files: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<Program, Vec<SyntaxError>> {
+    let files: Vec<(Option<&str>, &str)> = files
+        .into_iter()
+        .map(|(name, source)| (Some(name), source))
+        .collect();
+    let mut parser = Parser::open(files).map_err(|err| vec![err])?;
+    match parser.program() {
+        Ok(program) => Ok(program),
+        // A pass that recorded nothing and still failed is one of the whole-program
+        // checks, or a `skip_item` that found no next declaration to step to.
+        Err(first) if parser.errors.is_empty() => Err(vec![first]),
+        Err(_) => Err(parser.errors),
+    }
+}
+
 /// Per-declaration lowering state: the arena and scopes being built, plus the
 /// numeric literals that were typed by default and may still be retyped.
 struct Lower {
@@ -44,6 +78,9 @@ struct Parser {
     /// back to the module it came from.
     modules: Vec<(usize, Option<String>)>,
     pos: usize,
+    /// Every declaration that failed in the pass now running. `docs/cli.md` has the
+    /// granularity and why a pass is where reporting stops.
+    errors: Vec<SyntaxError>,
     prologue: bool,
     /// Set while parsing a filter, a `state` seed or a fold arm. Narrower than
     /// `prologue`, which also covers a hoisted `let`: that runs once per request,
@@ -175,6 +212,7 @@ impl Parser {
             tokens,
             modules,
             pos: 0,
+            errors: Vec::new(),
             prologue: false,
             folding: false,
             command_end: 0,
@@ -440,70 +478,18 @@ impl Parser {
         // A: enums, and the names of records, so a record field may name a record.
         self.pos = 0;
         let items = self.pos;
-        loop {
-            match self.peek() {
-                Token::End => break,
-                Token::Word(Keyword::Enum) => {
-                    let def = self.enum_decl()?;
-                    if self.module_enums.iter().any(|other| other.name == def.name) {
-                        return self.fail(format!("enum `{}` is declared twice", def.name));
-                    }
-                    self.module_enums.push(def);
-                }
-                Token::Word(Keyword::Record) => {
-                    let module = self.module_at(self.pos).map(str::to_string);
-                    self.bump();
-                    let (line, col) = self.here();
-                    let name = self.expect_ident()?;
-                    if self.records.iter().any(|other| other.name == name) {
-                        return Err(self.err(
-                            format!("record `{name}` is declared twice"),
-                            line,
-                            col,
-                        ));
-                    }
-                    self.records.push(RecordDef {
-                        name,
-                        module,
-                        fields: Vec::new(),
-                    });
-                    self.skip_braced()?;
-                }
-                _ => self.skip_item()?,
-            }
-        }
+        self.sweep(items, |parser| parser.name_item())?;
+        self.settled()?;
 
         // B: record fields, now that every type they might name has a name.
-        self.pos = items;
         let mut index = 0usize;
-        loop {
-            match self.peek() {
-                Token::End => break,
-                Token::Word(Keyword::Record) => {
-                    let fields = self.record_fields()?;
-                    self.records[index].fields = fields;
-                    index += 1;
-                }
-                _ => self.skip_item()?,
-            }
-        }
+        self.sweep(items, |parser| parser.record_item(&mut index))?;
+        self.settled()?;
 
         // C0: every const's name and type, and where its value starts. Values are not
         // read here, because one may name a const declared below it or in another file.
-        self.pos = items;
-        loop {
-            match self.peek() {
-                Token::End => break,
-                Token::Word(Keyword::Const) => {
-                    let shell = self.const_shell()?;
-                    if self.shell_of(&shell.name).is_some() {
-                        return self.fail(format!("const `{}` is declared twice", shell.name));
-                    }
-                    self.shells.push(shell);
-                }
-                _ => self.skip_item()?,
-            }
-        }
+        self.sweep(items, |parser| parser.const_item())?;
+        self.settled()?;
         for index in 0..self.shells.len() {
             let name = self.shells[index].name.clone();
             self.resolve_const(&name)?;
@@ -519,90 +505,31 @@ impl Parser {
         });
 
         // C: everything whose declaration is a signature rather than a body.
-        self.pos = items;
         let mut events: Vec<EventDef> = Vec::new();
         let mut projectors: Vec<Projector> = Vec::new();
-        loop {
-            match self.peek() {
-                Token::End => break,
-                Token::Word(Keyword::Enum) | Token::Word(Keyword::Record) => self.skip_item()?,
-                Token::Word(Keyword::Const) => self.skip_item()?,
-                Token::Word(Keyword::Event) => {
-                    let event = self.event_decl()?;
-                    if events.iter().any(|def| def.path == event.path) {
-                        return self.fail(format!("event {} is declared twice", event.path));
-                    }
-                    events.push(event);
-                }
-                Token::Word(Keyword::Projector) => {
-                    let projector = self.projector_shell()?;
-                    if projectors.iter().any(|other| other.name == projector.name) {
-                        return self
-                            .fail(format!("projector `{}` is declared twice", projector.name));
-                    }
-                    projectors.push(projector);
-                }
-                Token::Word(Keyword::Command) => self.command_signature()?,
-                Token::Word(Keyword::Fn) => self.fn_signature()?,
-                Token::Word(Keyword::Effect) | Token::Word(Keyword::Test) => self.skip_item()?,
-                other => return self.fail(Self::expected_item(other)),
-            }
-        }
+        self.sweep(items, |parser| {
+            parser.signature_item(&mut events, &mut projectors)
+        })?;
+        self.settled()?;
 
         // D: bodies.
-        self.pos = items;
-        let mut commands = Vec::new();
-        let mut effects: Vec<Effect> = Vec::new();
-        let mut functions = Vec::new();
-        let mut tests: Vec<usize> = Vec::new();
-        let mut seen = 0usize;
-        loop {
-            match self.peek() {
-                Token::End => break,
-                Token::Word(Keyword::Event)
-                | Token::Word(Keyword::Enum)
-                | Token::Word(Keyword::Record)
-                | Token::Word(Keyword::Const) => self.skip_item()?,
-                Token::Word(Keyword::Command) => {
-                    let command = self.command_decl(&events)?;
-                    commands.push(command);
-                }
-                Token::Word(Keyword::Fn) => functions.push(self.fn_decl(&events, Kind::Function)?),
-                Token::Word(Keyword::Projector) => {
-                    let (handlers, entities) =
-                        self.projector_handlers(&projectors[seen], &events)?;
-                    projectors[seen].handlers = handlers;
-                    projectors[seen].entities = entities;
-                    seen += 1;
-                }
-                Token::Word(Keyword::Effect) => {
-                    let effect = self.effect_decl(&events)?;
-                    if effects.iter().any(|other| other.name == effect.name) {
-                        return self.fail(format!("effect `{}` is declared twice", effect.name));
-                    }
-                    effects.push(effect);
-                }
-                // E: tests, after the program is assembled, because a test names commands,
-                // projectors and effects that pass D is still collecting.
-                Token::Word(Keyword::Test) => {
-                    tests.push(self.pos);
-                    self.skip_item()?;
-                }
-                other => return self.fail(Self::expected_item(other)),
-            }
-        }
+        let mut bodies = Bodies::default();
+        self.sweep(items, |parser| {
+            parser.body_item(&events, &mut projectors, &mut bodies)
+        })?;
+        self.settled()?;
 
         let mut program = Program {
             events,
-            commands,
+            commands: bodies.commands,
             projectors,
-            effects,
+            effects: bodies.effects,
             // Cloned rather than taken: pass E below resolves a test's values against the
             // same tables, so they have to stay in the parser until it has run.
             enums: self.module_enums.clone(),
             records: self.records.clone(),
             consts: self.consts.clone(),
-            functions,
+            functions: bodies.functions,
             tests: Vec::new(),
         };
         self.check_recursion(&program)?;
@@ -611,19 +538,204 @@ impl Parser {
 
         // E: every test, against the finished program. Order is irrelevant here for
         // the same reason it is everywhere else: nothing a test names is scoped.
-        for at in tests {
+        for at in bodies.tests {
             self.pos = at;
-            let test = self.test_decl(&program)?;
-            if program.tests.iter().any(|other| other.name == test.name) {
-                return Err(self.err(
-                    format!("test {:?} is declared twice", test.name),
-                    test.span.line,
-                    test.span.col,
-                ));
+            let recovered = self.recovering(at, |parser| {
+                let test = parser.test_decl(&program)?;
+                if program.tests.iter().any(|other| other.name == test.name) {
+                    return Err(parser.err(
+                        format!("test {:?} is declared twice", test.name),
+                        test.span.line,
+                        test.span.col,
+                    ));
+                }
+                Ok(test)
+            })?;
+            if let Some(test) = recovered {
+                program.tests.push(test);
             }
-            program.tests.push(test);
         }
+        self.settled()?;
         Ok(program)
+    }
+
+    /// One pass over every module's tokens, from `items` to the end, running `step`
+    /// once per declaration and stepping over the ones that failed.
+    fn sweep(
+        &mut self,
+        items: usize,
+        mut step: impl FnMut(&mut Self) -> Result<(), SyntaxError>,
+    ) -> Result<(), SyntaxError> {
+        self.pos = items;
+        while !matches!(self.peek(), Token::End) {
+            let at = self.pos;
+            self.recovering(at, &mut step)?;
+        }
+        Ok(())
+    }
+
+    /// Runs one declaration. A failure is recorded rather than returned, and the cursor
+    /// goes back to the declaration's first token so `skip_item` can step over the whole
+    /// thing: that is what makes a second error, in a second declaration, reachable at
+    /// all. `skip_item` failing is different, because it means the braces do not balance
+    /// and there is no next declaration to find.
+    fn recovering<T>(
+        &mut self,
+        at: usize,
+        step: impl FnOnce(&mut Self) -> Result<T, SyntaxError>,
+    ) -> Result<Option<T>, SyntaxError> {
+        match step(self) {
+            Ok(value) => Ok(Some(value)),
+            Err(err) => {
+                self.errors.push(err);
+                self.pos = at;
+                self.skip_item()?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// The first error a pass recorded, which ends the run. A later pass reads what an
+    /// earlier one built, so a signature that did not parse would make every body that
+    /// names it wrong in a way its author did not write: reporting those would be
+    /// reporting the checker's confusion rather than the program's.
+    fn settled(&mut self) -> Result<(), SyntaxError> {
+        match self.errors.first() {
+            Some(err) => Err(err.clone()),
+            None => Ok(()),
+        }
+    }
+
+    /// Pass A: enums, and the names of records.
+    fn name_item(&mut self) -> Result<(), SyntaxError> {
+        match self.peek() {
+            Token::Word(Keyword::Enum) => {
+                let def = self.enum_decl()?;
+                if self.module_enums.iter().any(|other| other.name == def.name) {
+                    return self.fail(format!("enum `{}` is declared twice", def.name));
+                }
+                self.module_enums.push(def);
+            }
+            Token::Word(Keyword::Record) => {
+                let module = self.module_at(self.pos).map(str::to_string);
+                self.bump();
+                let (line, col) = self.here();
+                let name = self.expect_ident()?;
+                if self.records.iter().any(|other| other.name == name) {
+                    return Err(self.err(format!("record `{name}` is declared twice"), line, col));
+                }
+                self.records.push(RecordDef {
+                    name,
+                    module,
+                    fields: Vec::new(),
+                });
+                self.skip_braced()?;
+            }
+            _ => self.skip_item()?,
+        }
+        Ok(())
+    }
+
+    /// Pass B: a record's fields. `index` walks the shells pass A pushed, so a record
+    /// that failed there is not one this can be asked about.
+    fn record_item(&mut self, index: &mut usize) -> Result<(), SyntaxError> {
+        match self.peek() {
+            Token::Word(Keyword::Record) => {
+                let fields = self.record_fields()?;
+                self.records[*index].fields = fields;
+                *index += 1;
+            }
+            _ => self.skip_item()?,
+        }
+        Ok(())
+    }
+
+    /// Pass C0: a const's name and type, and where its value starts.
+    fn const_item(&mut self) -> Result<(), SyntaxError> {
+        match self.peek() {
+            Token::Word(Keyword::Const) => {
+                let shell = self.const_shell()?;
+                if self.shell_of(&shell.name).is_some() {
+                    return self.fail(format!("const `{}` is declared twice", shell.name));
+                }
+                self.shells.push(shell);
+            }
+            _ => self.skip_item()?,
+        }
+        Ok(())
+    }
+
+    /// Pass C: everything whose declaration is a signature rather than a body.
+    fn signature_item(
+        &mut self,
+        events: &mut Vec<EventDef>,
+        projectors: &mut Vec<Projector>,
+    ) -> Result<(), SyntaxError> {
+        match self.peek() {
+            Token::Word(Keyword::Enum) | Token::Word(Keyword::Record) => self.skip_item()?,
+            Token::Word(Keyword::Const) => self.skip_item()?,
+            Token::Word(Keyword::Event) => {
+                let event = self.event_decl()?;
+                if events.iter().any(|def| def.path == event.path) {
+                    return self.fail(format!("event {} is declared twice", event.path));
+                }
+                events.push(event);
+            }
+            Token::Word(Keyword::Projector) => {
+                let projector = self.projector_shell()?;
+                if projectors.iter().any(|other| other.name == projector.name) {
+                    return self.fail(format!("projector `{}` is declared twice", projector.name));
+                }
+                projectors.push(projector);
+            }
+            Token::Word(Keyword::Command) => self.command_signature()?,
+            Token::Word(Keyword::Fn) => self.fn_signature()?,
+            Token::Word(Keyword::Effect) | Token::Word(Keyword::Test) => self.skip_item()?,
+            other => return self.fail(Self::expected_item(other)),
+        }
+        Ok(())
+    }
+
+    /// Pass D: bodies, and the position of every `test` for pass E to come back to.
+    fn body_item(
+        &mut self,
+        events: &[EventDef],
+        projectors: &mut [Projector],
+        out: &mut Bodies,
+    ) -> Result<(), SyntaxError> {
+        match self.peek() {
+            Token::Word(Keyword::Event)
+            | Token::Word(Keyword::Enum)
+            | Token::Word(Keyword::Record)
+            | Token::Word(Keyword::Const) => self.skip_item()?,
+            Token::Word(Keyword::Command) => {
+                let command = self.command_decl(events)?;
+                out.commands.push(command);
+            }
+            Token::Word(Keyword::Fn) => out.functions.push(self.fn_decl(events, Kind::Function)?),
+            Token::Word(Keyword::Projector) => {
+                let (handlers, entities) =
+                    self.projector_handlers(&projectors[out.seen], events)?;
+                projectors[out.seen].handlers = handlers;
+                projectors[out.seen].entities = entities;
+                out.seen += 1;
+            }
+            Token::Word(Keyword::Effect) => {
+                let effect = self.effect_decl(events)?;
+                if out.effects.iter().any(|other| other.name == effect.name) {
+                    return self.fail(format!("effect `{}` is declared twice", effect.name));
+                }
+                out.effects.push(effect);
+            }
+            // E: tests, after the program is assembled, because a test names commands,
+            // projectors and effects that pass D is still collecting.
+            Token::Word(Keyword::Test) => {
+                out.tests.push(self.pos);
+                self.skip_item()?;
+            }
+            other => return self.fail(Self::expected_item(other)),
+        }
+        Ok(())
     }
 
     /// Pass 1: a command's name and parameter types, so rule 7 can check an `invoke`
@@ -3767,7 +3879,7 @@ fn no_method(receiver: &Type, name: &str) -> String {
         // Named because its absence is a decision rather than an oversight, and the
         // author who reached for it is the one the decision is addressed to.
         (Type::Timestamp, _) => {
-            "; calendar arithmetic is deliberately not in the language, since month-end clamping is one opinion among several. `docs/functions.md` has the argument, and a `fn` is where it goes".to_string()
+            "; calendar arithmetic is not in the language, because month-end clamping is one opinion among several and a language that picks one cannot be argued with. Write it as a `fn`".to_string()
         }
         (_, "unwrap_or") => {
             format!("; a {receiver} is already there, so there is nothing to fall back to")

@@ -72,7 +72,38 @@ the command that grows rather than a new one.
 ## Reporting
 
 A syntax error prints as `file:line:col: message`, with the file relative to the path the
-run was pointed at, so an editor jumps to it. Parsing stops at the first one.
+run was pointed at, so an editor jumps to it.
+
+## Every declaration that failed, not only the first
+
+```
+$ hek check
+commands/place-order.hk:14:36: expected String, found Int?
+commands/ship-order.hk:8:6: expected Bool, found String
+effects/notify.hk:31:8: cannot apply `>` to Money(2) and Money(3); two amounts meet at one scale
+
+3 errors
+```
+
+**One per declaration.** A declaration that fails is stepped over whole, and the next one
+is parsed as if nothing happened. Reporting several *inside* one declaration would need
+the expression ladder to carry a poison value for every result it returns, which is a
+rewrite of the error path rather than a place to recover; and the second error inside one
+body is usually the first one again, seen from further along.
+
+**Reporting stops at the end of the pass that found any.** The six passes
+(`docs/declarations.md`) each read what the one before it built, so an event whose fields
+did not parse makes every body that names it wrong in a way its author did not write.
+Reporting those would be reporting the checker's confusion. In practice the type errors
+are all in pass D, so one run names every command, projector and effect with something
+wrong in it.
+
+The three whole-program checks that run after the passes (recursion, the self-trigger
+cycle, and a `patch`'s zero values) still report one at a time, because each of them is a
+statement about the program rather than about a declaration.
+
+`parse_files` keeps returning the first error alone, for an embedder that wants one;
+`check_files` is what `hek` calls.
 
 A test prints as `pass`, `FAIL` or `ERROR`, and the last two carry a reason on the line
 below. `docs/testing.md` rule 9 is why the last two are separate: a mismatch is the test

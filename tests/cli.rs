@@ -132,6 +132,61 @@ fn a_syntax_error_names_the_file_and_position() {
         "expected a relative path and a position: {text}"
     );
     assert!(text.contains("event @nope.here is not declared"), "{text}");
+    assert!(text.contains("\n1 error"), "and it says how many: {text}");
+}
+
+/// A run reports every declaration that failed, across every file, and ends by saying
+/// how many. One error per declaration: the run steps over the one that failed and
+/// parses the next as if nothing happened.
+#[test]
+fn every_declaration_that_failed_is_reported() {
+    let root = project(
+        "many-errors",
+        &[
+            ("events.hk", EVENTS),
+            (
+                "a.hk",
+                "command One(order_id: Int, text: String) {
+  emit @order.placed { order_id, total: text }
+}
+
+command Two(order_id: Int, total: Money(2), text: String) {
+  if text {
+    return
+  }
+  emit @order.placed { order_id, total }
+}
+",
+            ),
+            (
+                "b.hk",
+                "command Three(order_id: Int, a: Money(2), b: Money(3)) {
+  if a > b {
+    return
+  }
+  emit @order.placed { order_id, total: a }
+}
+",
+            ),
+        ],
+    );
+    let output = run(&root, &["check"]);
+
+    assert!(!output.status.success());
+    let text = stdout(&output);
+    assert!(
+        text.contains("a.hk:2:41: expected Money(2), found String"),
+        "the first declaration: {text}"
+    );
+    assert!(
+        text.contains("a.hk:6:6: expected Bool, found String"),
+        "and the next one in the same file: {text}"
+    );
+    assert!(
+        text.contains("b.hk:2:8: cannot apply `>` to Money(2) and Money(3)"),
+        "and the next file: {text}"
+    );
+    assert!(text.contains("\n3 errors"), "{text}");
 }
 
 /// `check` stops after parsing, which is what a pre-commit hook wants.
