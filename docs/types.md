@@ -117,8 +117,8 @@ Anything else, with both types known, is a compile error naming both operands. *
 total loses a cent. A literal is the one thing that widens, and it does so before it is a value at all.
 
 A comparison follows the same table: `==` and `!=` on any two of the same type, and `< <= > >=` on
-`Int`, `Decimal(s)`, `Money(n)` and `String`. `Money(2) > Money(3)` is an error for the reason
-`Money(2) + Money(3)` is.
+`Int`, `Decimal(s)`, `Money(n)`, `String` and `Timestamp`. `Money(2) > Money(3)` is an error for the
+reason `Money(2) + Money(3)` is.
 
 **Arithmetic on sealed content is rejected.** A sum of it is plaintext derived from it, so `reveal`
 comes first, the same rule that already covers interpolation and comparison.
@@ -178,21 +178,15 @@ story.
 
 ## 5. Known gaps
 
-- **`Timestamp` and `Uuid` do not order.** `<` and `>` accept `Int`, `Decimal`, `Money` and `String`
-  only, which the runtime has always been true of and the check now says out loud. Both are ordered
-  types elsewhere in the language: each may be an entity key, and a key's ordering is what paginates
-  a read model. So this is an absence rather than a decision, and it is more visible now that a
-  moment can be written down.
+- **`Uuid` does not order.** `<` and `>` accept `Int`, `Decimal(n)`, `Money(n)`, `String` and
+  `Timestamp`. A `Uuid` may be an entity key, so it orders somewhere, but that order is for
+  pagination rather than for asking which id is larger, and no program has wanted to ask.
 - **A record's fields are not checked against the record.** `Record { .. }` synthesises that record's
   type without confirming the literal built it correctly; the field-by-field check happens where the
   literal is parsed, which covers the same ground by a different route.
-- **A `Timestamp` is opaque, and that makes one documented escape unreachable.**
-  `docs/functions.md` defers `add_months` on the grounds that month-end clamping is one calendar
-  opinion among several and belongs in a `fn` an application can disagree with. Nothing can write
-  that `fn`: a `Timestamp` has no methods, no arithmetic and no way in or out except
-  `Timestamp.parse`, so the opinion has nowhere to live. `Timestamp.from_micros` is named as future
-  work in `docs/effects.md`, and the pair it would make with a `micros()` reader is what would make
-  the deferral true.
+- **A moment built from parts is on the second.** `Timestamp.from_parts` takes no sub-second
+  argument, so calendar arithmetic through it drops any fraction the original carried. The written
+  form and `Timestamp.parse` both keep microseconds.
 
 ## Methods
 
@@ -204,3 +198,15 @@ table.
 The message names the way out for the confusion this sees most, which is one confusion from two
 sides: `is_empty()` asked of a `String?` and `is_none()` asked of a `String`. A real port made that
 edit by hand in eight files, having found each one by running it.
+
+### A `Timestamp` can be taken apart
+
+```
+at.year()  at.month()  at.day()  at.hour()  at.minute()  at.second()   -> Int
+Timestamp.from_parts(year, month, day, hour, minute, second)           -> Timestamp?
+```
+
+UTC, and the constructor is fallible because six numbers do not always name a date. These exist so
+that calendar arithmetic can be written as a `fn`, which is where `docs/functions.md` argues it
+belongs: month-end clamping is one opinion among several, so the language supplies the calendar and
+the author supplies the rule. Before them that argument had nowhere to send anyone.

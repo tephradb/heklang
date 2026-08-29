@@ -691,6 +691,10 @@ pub enum Builtin {
     UuidDerive,
     JsonEncode,
     TimestampParse,
+    /// A moment built from its calendar fields. Fallible, because Feb 30 is not a date,
+    /// and that optional is where an author writing calendar arithmetic says what they
+    /// want done about it.
+    TimestampFromParts,
     /// Carries the target scale, which comes from where the result lands rather than
     /// from the text: `"10.5"` is a different value at scale 2 and at scale 3.
     MoneyParse(u8),
@@ -715,6 +719,7 @@ impl Builtin {
             Builtin::UuidDerive
                 | Builtin::JsonEncode
                 | Builtin::TimestampParse
+                | Builtin::TimestampFromParts
                 | Builtin::MoneyParse(_)
         )
     }
@@ -737,6 +742,7 @@ impl Builtin {
             Builtin::UuidDerive => "Uuid.derive",
             Builtin::JsonEncode => "Json.encode",
             Builtin::TimestampParse => "Timestamp.parse",
+            Builtin::TimestampFromParts => "Timestamp.from_parts",
             Builtin::MoneyParse(_) => "Money.parse",
         }
     }

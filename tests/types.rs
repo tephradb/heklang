@@ -523,6 +523,68 @@ fn calendar_arithmetic_says_why_it_is_absent() {
     );
 }
 
+/// And the decision has somewhere to send an author, which is what makes it a decision
+/// rather than a hole with a rationale attached. A moment comes apart into its calendar
+/// fields and goes back together from them.
+#[test]
+fn a_timestamp_comes_apart_and_goes_back_together() {
+    for (method, expected) in [
+        ("year", 2026),
+        ("month", 3),
+        ("day", 15),
+        ("hour", 9),
+        ("minute", 30),
+        ("second", 45),
+    ] {
+        assert_eq!(
+            fired(
+                ", at_in: Timestamp",
+                "id",
+                &format!("at_in.{method}()"),
+                vec![("at_in", Value::Timestamp(1_773_567_045_000_000))],
+            ),
+            Value::Int(expected),
+            "for `{method}`"
+        );
+    }
+    // Back again, to the same moment. Fallible, because six numbers are not always a
+    // date, and that optional is where an author's clamping rule goes.
+    assert_eq!(
+        fired(
+            "",
+            "at",
+            "Timestamp.from_parts(2026, 3, 15, 9, 30, 45).unwrap_or(\"2000-01-01T00:00:00Z\")",
+            Vec::new(),
+        ),
+        Value::Timestamp(1_773_567_045_000_000)
+    );
+    assert_eq!(
+        fired(
+            "",
+            "id",
+            "if Timestamp.from_parts(2026, 2, 30, 0, 0, 0).is_none() { 1 } else { 0 }",
+            Vec::new(),
+        ),
+        Value::Int(1),
+        "February has no thirtieth"
+    );
+}
+
+/// A moment orders, because an application that works with them asks "before" and
+/// "after" constantly, and nothing could answer either until now.
+#[test]
+fn two_moments_compare() {
+    assert_eq!(
+        fired(
+            ", a: Timestamp, b: Timestamp",
+            "id",
+            "if a < b { 1 } else { 0 }",
+            vec![("a", Value::Timestamp(1)), ("b", Value::Timestamp(2))],
+        ),
+        Value::Int(1)
+    );
+}
+
 /// Arity is the table's too, and the argument types checked themselves on the way in
 /// through the hint the same table gave them.
 #[test]

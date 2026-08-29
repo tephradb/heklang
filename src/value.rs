@@ -720,3 +720,72 @@ fn days_in_month(year: i64, month: i64) -> i64 {
         _ => 0,
     }
 }
+
+/// A moment's calendar fields in UTC: year, month, day, hour, minute, second. The
+/// inverse of `days_from_civil`, by the same algorithm, so a value that goes out
+/// through these and back through `from_parts` is the same value to the second.
+///
+/// Euclidean division rather than truncating, so a moment before 1970 lands on the day
+/// it is in rather than the one after it.
+pub fn parts(micros: i64) -> (i64, i64, i64, i64, i64, i64) {
+    const DAY: i64 = 86_400_000_000;
+    let days = micros.div_euclid(DAY);
+    let seconds = micros.rem_euclid(DAY) / 1_000_000;
+
+    let shifted = days + 719_468;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+
+    (
+        if month <= 2 { year + 1 } else { year },
+        month,
+        day,
+        seconds / 3600,
+        seconds % 3600 / 60,
+        seconds % 60,
+    )
+}
+
+/// A moment from its calendar fields, or `None` when they do not name one. The range
+/// checks are the same ones `timestamp` applies to written text, because a date is a
+/// date however it was reached.
+///
+/// Sub-second precision is not a parameter and is not preserved: a moment built from
+/// parts is on the second.
+pub fn from_parts(
+    year: i64,
+    month: i64,
+    day: i64,
+    hour: i64,
+    minute: i64,
+    second: i64,
+) -> Option<i64> {
+    if !(1..=12).contains(&month)
+        || day < 1
+        || day > days_in_month(year, month)
+        || !(0..=23).contains(&hour)
+        || !(0..=59).contains(&minute)
+        || !(0..=59).contains(&second)
+    {
+        return None;
+    }
+    days_from_civil(year, month, day)
+        .checked_mul(86_400)?
+        .checked_add(hour * 3600 + minute * 60 + second)?
+        .checked_mul(1_000_000)
+}

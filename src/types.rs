@@ -105,9 +105,12 @@ pub fn comparable(op: BinOp, lhs: &Type, rhs: &Type) -> bool {
     }
     match op {
         BinOp::Eq | BinOp::Ne => true,
+        // `Timestamp` orders because a moment does, and because an application that
+        // works with them asks "before" and "after" constantly. It is the same order
+        // that makes one an entity key.
         _ => matches!(
             lhs,
-            Type::Int | Type::Decimal(_) | Type::Money(_) | Type::String
+            Type::Int | Type::Decimal(_) | Type::Money(_) | Type::String | Type::Timestamp
         ),
     }
 }
@@ -199,6 +202,14 @@ pub fn method_sig(receiver: &Type, method: &str) -> Option<Sig> {
             ret: Type::Money(*scale),
         }),
         (Type::Money(scale), "div") => sig(vec![Type::Int, Type::Rounding], Type::Money(*scale)),
+
+        // A moment's calendar fields in UTC. These and `Timestamp.from_parts` are what
+        // make calendar arithmetic writable as a `fn`, which is where the opinion about
+        // month-end clamping belongs: the language gives the calendar and the author
+        // gives the rule. Without them the deferral had nowhere to defer to.
+        (Type::Timestamp, "year" | "month" | "day" | "hour" | "minute" | "second") => {
+            sig(Vec::new(), Type::Int)
+        }
 
         (Type::Outcome, "ok") => sig(Vec::new(), Type::Bool),
         (Type::Outcome, "code" | "message") => sig(Vec::new(), Type::opt(Type::String)),

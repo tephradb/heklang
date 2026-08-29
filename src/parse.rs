@@ -3824,6 +3824,7 @@ impl Parser {
                 Builtin::UuidDerive => Type::Uuid,
                 Builtin::JsonEncode => Type::String,
                 Builtin::TimestampParse => Type::opt(Type::Timestamp),
+                Builtin::TimestampFromParts => Type::opt(Type::Timestamp),
                 Builtin::MoneyParse(scale) => Type::opt(Type::Money(*scale)),
                 Builtin::HttpGet
                 | Builtin::HttpPost
@@ -3860,6 +3861,14 @@ fn mismatch(found: &Type, want: &Type) -> String {
         _ => String::new(),
     };
     format!("expected {want}, found {found}{fix}")
+}
+
+/// What a type-qualified name offers, which differs between the two that have any.
+fn members_of(ty: &str) -> &'static str {
+    match ty {
+        "Timestamp" => "`parse(text)` and `from_parts(year, month, day, hour, minute, second)`",
+        _ => "`parse(text)`",
+    }
 }
 
 /// A method the receiver does not have. The pair this sees most is an optional asked an
@@ -4987,9 +4996,28 @@ impl Parser {
         self.expect_sym(Sym::Dot)?;
         let (line, col) = self.here();
         let member = self.expect_ident()?;
+        // The one calendar constructor. Fallible, because six numbers do not always
+        // name a date, and that optional is where an author writing month arithmetic
+        // says what they want done about a day the target month does not have.
+        if ty == "Timestamp" && member == "from_parts" {
+            self.expect_sym(Sym::LParen)?;
+            let mut args = Vec::new();
+            for _ in 0..6 {
+                if !args.is_empty() {
+                    self.expect_sym(Sym::Comma)?;
+                }
+                args.push(self.expr(lower, Some(Type::Int))?);
+            }
+            self.end_args()?;
+            lower.b.at(span);
+            return Ok(lower.b.expr(Expr::Call {
+                builtin: Builtin::TimestampFromParts,
+                args,
+            }));
+        }
         if member != "parse" {
             return Err(self.err(
-                format!("`{ty}` has no `{member}`; it has `parse(text)`"),
+                format!("`{ty}` has no `{member}`; it has {}", members_of(ty)),
                 line,
                 col,
             ));

@@ -274,15 +274,37 @@ a builtin commits the language to it forever: clamp to the last day, roll into t
 refuse. Different jurisdictions and different contracts want different ones, and a language that
 picks cannot be argued with.
 
-**The deferral is not yet honest, and a port proved it.** Reaching for `add_months` now says why it
-is absent and where it belongs, which is an improvement on failing at run time. But nothing can write
-the replacement: a `Timestamp` has no methods, no arithmetic and no way in or out except
-`Timestamp.parse`, so the opinion this refuses to hold has nowhere to be held instead. What would fix
-it is the pair `Timestamp.from_micros(n)` and a `micros()` reader, one of which `docs/effects.md`
-already names as future work. Until then this is a decision with no escape hatch, and
-`docs/types.md` records it as a gap rather than a feature.
+**A port proved the deferral was empty, and that is what fixed it.** Reaching for `add_months` used
+to fail at run time; then it failed at check time with the argument above; and neither was any use,
+because nothing could write the replacement. A `Timestamp` had no methods, no arithmetic and no way
+in or out but `Timestamp.parse`, so the opinion the language refused to hold had nowhere else to be
+held. A decision with no escape hatch is not a decision, it is a hole with a rationale attached.
 
-Now that `fn` exists, that helper belongs in a shipped `lib/` where an application can read it,
+So the language supplies the calendar and the author supplies the rule. `at.year()` through
+`at.second()` read a moment's fields, and `Timestamp.from_parts(...)` builds one back, returning a
+`Timestamp?` because six numbers do not always name a date. **That optional is where the opinion
+goes**: February has no thirtieth, and what to do about it is the thing a builtin would have decided
+for everyone.
+
+```
+// Clamping, in a lib/ an application can disagree with.
+fn add_months(at: Timestamp, months: Int) -> Timestamp {
+  let total = at.year() * 12 + at.month() - 1 + months
+  let year = total / 12
+  let month = total % 12 + 1
+  let last = days_in_month(year, month)
+  let day = if at.day() > last { last } else { at.day() }
+  return Timestamp.from_parts(
+    year, month, day, at.hour(), at.minute(), at.second(),
+  ).unwrap_or(at)
+}
+```
+
+Rolling over instead is the same function with `day` left alone and the `unwrap_or` replaced by a
+carry into the next month. Refusing is the same function returning the `Timestamp?`. All three are
+ten lines and none of them is the language's to pick.
+
+That helper belongs in a shipped `lib/` where an application can read it,
 disagree with it and replace it. That is the general shape of the rule: **a `fn` is where an opinion
 goes, and the language is for what has no defensible alternative.**
 

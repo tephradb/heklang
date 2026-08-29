@@ -1572,6 +1572,22 @@ fn eval(
                     let value = values.first().ok_or_else(|| at(ErrorKind::MalformedIr))?;
                     return Ok(Value::Str(Json::from_value(value).to_string()));
                 }
+                Builtin::TimestampFromParts => {
+                    let mut fields = [0i64; 6];
+                    for (slot, value) in fields.iter_mut().zip(&values) {
+                        let Value::Int(field) = value else {
+                            return Err(at(ErrorKind::MalformedIr));
+                        };
+                        *slot = *field;
+                    }
+                    let [year, month, day, hour, minute, second] = fields;
+                    return Ok(
+                        match value::from_parts(year, month, day, hour, minute, second) {
+                            Some(micros) => Value::some(Value::Timestamp(micros)),
+                            None => Value::none(Type::Timestamp),
+                        },
+                    );
+                }
                 Builtin::TimestampParse | Builtin::MoneyParse(_) => {
                     let Some(Value::Str(text)) = values.first() else {
                         return Err(at(ErrorKind::MalformedIr));
@@ -1863,6 +1879,7 @@ fn binary(op: BinOp, lhs: Value, rhs: Value) -> Result<Value, ErrorKind> {
                     },
                 ) if scale == other => a.cmp(b),
                 (Value::Str(a), Value::Str(b)) => a.cmp(b),
+                (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b),
                 _ => {
                     return Err(ErrorKind::BadOperands {
                         op,
@@ -2273,6 +2290,18 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
         // step down, and one step into an array.
         (Value::Json(json), "json") => json_field(json, method, &args, Type::Json),
         (Value::Json(json), "array") => json_field(json, method, &args, Type::list(Type::Json)),
+        (Value::Timestamp(micros), "year" | "month" | "day" | "hour" | "minute" | "second") => {
+            expect_arity(method, 0, &args)?;
+            let (year, month, day, hour, minute, second) = value::parts(*micros);
+            Ok(Value::Int(match method {
+                "year" => year,
+                "month" => month,
+                "day" => day,
+                "hour" => hour,
+                "minute" => minute,
+                _ => second,
+            }))
+        }
         (Value::Invoked(outcome), "ok") => {
             expect_arity(method, 0, &args)?;
             Ok(Value::Bool(outcome.ok()))

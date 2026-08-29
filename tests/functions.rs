@@ -415,3 +415,80 @@ fn a_module_fn_still_needs_a_return_type() {
         .message;
     assert!(message.contains("expected `->`"), "got: {message}");
 }
+
+/// The argument against a `Timestamp.add_months` builtin is that month-end clamping is
+/// one calendar opinion among several, and that the opinion belongs in a `fn` an
+/// application can disagree with. That is only an argument if the `fn` can be written,
+/// and for a long time it could not be: a `Timestamp` had no way in or out.
+#[test]
+fn the_calendar_opinion_is_writable_as_a_fn() {
+    const LIB: &str = "
+fn days_in_month(year: Int, month: Int) -> Int {
+  if month == 2 {
+    if year % 4 == 0 && year % 100 != 0 || year % 400 == 0 {
+      return 29
+    }
+    return 28
+  }
+  if month == 4 || month == 6 || month == 9 || month == 11 {
+    return 30
+  }
+  return 31
+}
+
+fn add_months(at: Timestamp, months: Int) -> Timestamp {
+  let total = at.year() * 12 + at.month() - 1 + months
+  let year = total / 12
+  let month = total % 12 + 1
+  let last = days_in_month(year, month)
+  let day = if at.day() > last { last } else { at.day() }
+  return Timestamp.from_parts(
+    year, month, day, at.hour(), at.minute(), at.second(),
+  ).unwrap_or(at)
+}
+
+event @warranty.sold { id: Int, expires_at: Timestamp }
+
+command RecordSale(id: Int, at: Timestamp, months: Int) {
+  emit @warranty.sold { id, expires_at: add_months(at, months) }
+}
+";
+
+    let program = parse(LIB).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+    let expiry = |at: &str, months: i64| -> Value {
+        let mut interpreter = Interpreter::new(&program);
+        let execution = interpreter
+            .run(
+                "RecordSale",
+                vec![
+                    ("id", Value::Int(1)),
+                    (
+                        "at",
+                        Value::Timestamp(heklang::value::timestamp(at).expect("a moment")),
+                    ),
+                    ("months", Value::Int(months)),
+                ],
+            )
+            .unwrap_or_else(|err| panic!("expected this to run: {err}"));
+        match execution.outcome {
+            Outcome::Ok(events) => events[0].field("expires_at").cloned().expect("the field"),
+            other => panic!("expected an append, got {other:?}"),
+        }
+    };
+    let moment = |text: &str| Value::Timestamp(heklang::value::timestamp(text).expect("a moment"));
+
+    assert_eq!(
+        expiry("2026-03-15T09:30:00Z", 24),
+        moment("2028-03-15T09:30:00Z")
+    );
+    // The opinion: clamp rather than roll into the next month.
+    assert_eq!(
+        expiry("2026-01-31T00:00:00Z", 1),
+        moment("2026-02-28T00:00:00Z")
+    );
+    assert_eq!(
+        expiry("2024-01-31T00:00:00Z", 1),
+        moment("2024-02-29T00:00:00Z"),
+        "and a leap February gets its twenty-ninth"
+    );
+}
