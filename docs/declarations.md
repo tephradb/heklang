@@ -181,7 +181,7 @@ runtime lookup.
 rather than calls, so they construct nothing and read nothing. It is also why both may be a `state`
 seed and an entity default.
 
-### A string literal resolves against a `Uuid` target
+### A string literal resolves against a `Uuid` or `Timestamp` target
 
 There is no Uuid literal token, because a bare word of hex and dashes is not one and quoting it is
 the only sane spelling. So the **target type** is what makes `"6ba7b810-..."` a `Uuid`, and it is
@@ -194,6 +194,24 @@ literal shape: one token, typed by where it lands.
 The rule holds at **every** position with a target type, not only in a `const` or an entity default,
 which is where it used to stop. A `test` is what found that: a suite is mostly ids, and
 `run Ship { order_id: "0190d1a1-..." }` had no way to be written.
+
+**`Timestamp` follows it, for a reason that was found the same way.** A moment had no literal at all:
+the only ways to reach one were `now()`, `e.at` and `Timestamp.parse(text)`, and the last returns a
+`Timestamp?` that nothing can unwrap into a required field. So an event carrying a `processed_at:
+Timestamp` could not be written in a `given`, a `Timestamp` column could not be given the default
+that `docs/projectors.md`'s zero rule tells it to have, and the advice that rule prints named an
+escape the language did not offer.
+
+```
+const LAUNCH: Timestamp = "2026-01-01T00:00:00Z"
+
+given @order.paid { order_id: 1, processed_at: "2026-02-02T02:02:02Z" }
+```
+
+The string is RFC 3339 and carries an offset, checked by the same reading `Timestamp.parse` does. The
+two are one function met twice: a literal is text the author wrote, so it is checked now; `parse` is
+text a webhook sent, so it is checked then and returns an optional. That is exactly the split `Uuid`
+already has between a literal and `text.to_uuid()`.
 
 ### A const may name another const
 

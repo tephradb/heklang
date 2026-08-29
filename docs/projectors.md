@@ -175,6 +175,11 @@ way to write, so the restriction costs nothing and is additive to lift.
 mistaken for data. A row that materialized with `00000000-0000-0000-0000-000000000000` looks like a
 row that was written, and a `placed_at` of 1970-01-01 sorts to the top of every query.
 
+Both are writable as a `= <literal>` default, which is a string in each case
+(`docs/declarations.md`). That is worth saying because it was not true for `Timestamp` until
+recently: the error below offered "give it a default" as one of three escapes, and for a `Timestamp`
+column it was the one that could not be taken.
+
 `@key` fields need no default, because the subscript supplies them.
 
 ### A zero is required only where a zero is read

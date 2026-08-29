@@ -1554,7 +1554,7 @@ fn eval(
                         return Err(at(ErrorKind::MalformedIr));
                     };
                     return Ok(match builtin {
-                        Builtin::TimestampParse => match parse_timestamp(text) {
+                        Builtin::TimestampParse => match value::timestamp(text) {
                             Some(micros) => Value::some(Value::Timestamp(micros)),
                             None => Value::none(Type::Timestamp),
                         },
@@ -2337,107 +2337,6 @@ fn optional_str(value: Option<&str>) -> Value {
     }
 }
 
-/// Rule 11. There is no `Uuid.new`, so an id is always derived from one that already
-/// exists, and a retry or a replay derives the same one.
-/// RFC 3339 to epoch microseconds. Hand-rolled rather than a dependency: the shapes
-/// that arrive on a webhook are a small set, and a calendar library is a large surface
-/// and a large opinion for one function.
-fn parse_timestamp(text: &str) -> Option<i64> {
-    let digits = |part: Option<&str>| -> Option<i64> {
-        let part = part?;
-        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
-            return None;
-        }
-        part.parse().ok()
-    };
-    let bytes = text.as_bytes();
-    if bytes.len() < 20 || bytes[4] != b'-' || bytes[7] != b'-' {
-        return None;
-    }
-    if !matches!(bytes[10], b'T' | b't' | b' ') || bytes[13] != b':' || bytes[16] != b':' {
-        return None;
-    }
-    let year = digits(text.get(0..4))?;
-    let month = digits(text.get(5..7))?;
-    let day = digits(text.get(8..10))?;
-    let hour = digits(text.get(11..13))?;
-    let minute = digits(text.get(14..16))?;
-    let second = digits(text.get(17..19))?;
-    if !(1..=12).contains(&month)
-        || day < 1
-        || day > days_in_month(year, month)
-        || hour > 23
-        || minute > 59
-        || second > 59
-    {
-        return None;
-    }
-
-    let mut rest = &text[19..];
-    let mut fraction = 0i64;
-    if let Some(tail) = rest.strip_prefix('.') {
-        let written: String = tail.chars().take_while(char::is_ascii_digit).collect();
-        if written.is_empty() {
-            return None;
-        }
-        rest = &tail[written.len()..];
-        let mut micros = written.clone();
-        micros.truncate(6);
-        while micros.len() < 6 {
-            micros.push('0');
-        }
-        fraction = digits(Some(&micros))?;
-    }
-
-    // A local time with no offset is not RFC 3339, and guessing one is how a warranty
-    // ends up expiring on the wrong day.
-    let offset = match rest {
-        "Z" | "z" => 0,
-        _ => {
-            let sign = match rest.as_bytes().first() {
-                Some(b'+') => 1,
-                Some(b'-') => -1,
-                _ => return None,
-            };
-            if rest.len() != 6 || rest.as_bytes()[3] != b':' {
-                return None;
-            }
-            let hours = digits(rest.get(1..3))?;
-            let minutes = digits(rest.get(4..6))?;
-            if hours > 23 || minutes > 59 {
-                return None;
-            }
-            sign * (hours * 3600 + minutes * 60)
-        }
-    };
-
-    let seconds = days_from_civil(year, month, day)
-        .checked_mul(86_400)?
-        .checked_add(hour * 3600 + minute * 60 + second - offset)?;
-    seconds.checked_mul(1_000_000)?.checked_add(fraction)
-}
-
-/// Days since 1970-01-01, by Howard Hinnant's civil-calendar algorithm.
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let shifted = if month > 2 { month - 3 } else { month + 9 };
-    let day_of_year = (153 * shifted + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
-}
-
-fn days_in_month(year: i64, month: i64) -> i64 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
-        2 => 28,
-        _ => 0,
-    }
-}
-
 /// A decimal string at the target scale, by exactly the rule a written literal follows:
 /// widening is exact, and more places than the target holds is a failure rather than a
 /// silent round.
@@ -2467,6 +2366,8 @@ fn parse_money(text: &str, scale: u8) -> Option<Value> {
     Some(value::literal(&lit))
 }
 
+/// Rule 11. There is no `Uuid.new`, so an id is always derived from one that already
+/// exists, and a retry or a replay derives the same one.
 fn uuid_derive(args: &[Value]) -> Result<Value, ErrorKind> {
     let (Some(Value::Uuid(seed)), Some(Value::Str(name))) = (args.first(), args.get(1)) else {
         return Err(ErrorKind::BadArgument {

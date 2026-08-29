@@ -1413,6 +1413,16 @@ impl Parser {
                 }
                 Literal::Uuid(text)
             }
+            // A `Timestamp` is written the way a `Uuid` is, and for the same reason:
+            // there is no token for one, so the target type is what makes this string
+            // a moment. Without it a `Timestamp` column had no writable default, and
+            // the advice `check_zeros` gives about one could not be followed.
+            Token::Text(text) if matches!(target, Type::Timestamp) => {
+                let Some(micros) = value::timestamp(&text) else {
+                    return Err(self.err(not_a_timestamp(&text), line, col));
+                };
+                Literal::Timestamp(micros)
+            }
             Token::Text(text) => Literal::Str(text),
             Token::Sym(Sym::LBracket) => {
                 let Type::List(inner) = target else {
@@ -3263,6 +3273,13 @@ impl Parser {
                 }
                 Ok(lower.b.lit(Literal::Uuid(text)))
             }
+            // The same rule for a `Timestamp`, in the expression half of it.
+            Token::Text(text) if matches!(expect.as_ref().map(inner_of), Some(Type::Timestamp)) => {
+                let Some(micros) = value::timestamp(&text) else {
+                    return Err(self.err(not_a_timestamp(&text), span.line, span.col));
+                };
+                Ok(lower.b.lit(Literal::Timestamp(micros)))
+            }
             Token::Text(text) => Ok(lower.b.lit(Literal::Str(text))),
             Token::Word(Keyword::True) => Ok(lower.b.bool(true)),
             Token::Word(Keyword::False) => Ok(lower.b.bool(false)),
@@ -3614,6 +3631,15 @@ impl Parser {
             Expr::Reveal(value) => Some(self.type_of(lower, *value)?.unsealed()),
         }
     }
+}
+
+/// A written `Timestamp` that did not read as one. The offset is the part authors
+/// leave off, and `value::timestamp` refuses a local time on purpose, so the message
+/// names the shape rather than only reporting that the text was wrong.
+fn not_a_timestamp(text: &str) -> String {
+    format!(
+        "`{text}` is not a Timestamp; it is RFC 3339 and carries an offset, like \"2026-01-01T00:00:00Z\" or \"2026-01-01T09:30:00+10:00\""
+    )
 }
 
 /// Rule 11 stated where an author looks for it. `Uuid.new` sits next to `derive` in

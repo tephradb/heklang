@@ -106,6 +106,47 @@ fn a_bad_timestamp_is_none_rather_than_an_error() {
     }
 }
 
+/// A string in a `Timestamp` position is a `Timestamp`, read by the same function at
+/// parse time. The author's text cannot be absent, so this one is not an optional.
+#[test]
+fn a_written_timestamp_is_read_at_parse_time() {
+    assert_eq!(
+        read("at", "\"2020-01-01T00:00:00Z\"", ""),
+        Value::some(Value::Timestamp(1_577_836_800_000_000))
+    );
+    // The same reading, so the offset and the fraction behave as they do at run time.
+    assert_eq!(
+        read("at", "\"2020-01-01T01:00:00+01:00\"", ""),
+        Value::some(Value::Timestamp(1_577_836_800_000_000))
+    );
+    assert_eq!(
+        read("at", "\"2020-01-01T00:00:00.123456789Z\"", ""),
+        Value::some(Value::Timestamp(1_577_836_800_123_456))
+    );
+}
+
+/// The literal half fails at parse time where `Timestamp.parse` would give `none`, and
+/// the message names the shape rather than only reporting that the text was wrong.
+#[test]
+fn a_written_timestamp_that_is_not_one_is_rejected() {
+    for text in [
+        "2020-01-01",
+        "2020-01-01T00:00:00",
+        "2023-02-29T00:00:00Z",
+        "not a timestamp",
+    ] {
+        let message = err("at", &format!("\"{text}\""));
+        assert!(
+            message.contains(&format!("`{text}` is not a Timestamp")),
+            "for {text:?}, got: {message}"
+        );
+        assert!(
+            message.contains("RFC 3339") && message.contains("offset"),
+            "expected the shape to be named, got: {message}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------------
 // Money.parse
 

@@ -64,6 +64,20 @@ the precision a `Timestamp` has.
 Ranges are checked, so `2023-02-29` is `none` and `2024-02-29` is a date. That is worth a test rather
 than a claim, since a hand-rolled calendar is where leap years go wrong.
 
+### It shares its reading with the literal
+
+A string in a `Timestamp` position **is** a `Timestamp` (`docs/declarations.md`), checked by this same
+function at parse time. So there is one reading of RFC 3339 and two ways in, split by where the text
+came from:
+
+| Written | Read | Gives |
+| --- | --- | --- |
+| `at: "2026-01-01T00:00:00Z"` | at parse time, by the target type | `Timestamp`, or an error naming the shape |
+| `Timestamp.parse(body.string("at").unwrap_or(""))` | at run time | `Timestamp?` |
+
+The author's text is checked now and cannot be absent; a webhook's is checked then and can be
+anything. `Uuid` and `text.to_uuid()` are the same pair, which is why this needs no rule of its own.
+
 ## What is deliberately absent
 
 - **No `Timestamp.add_months`**, and no calendar arithmetic at all. `docs/functions.md` has the

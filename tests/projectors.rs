@@ -520,6 +520,64 @@ fn uuid_and_timestamp_have_no_zero() {
     }
 }
 
+/// The error above offers three escapes, so all three have to exist. The default is the
+/// one a `Timestamp` column could not take: there was no way to write a moment down, so
+/// the advice named a door that was not there.
+#[test]
+fn every_escape_the_zero_error_offers_is_writable() {
+    for (ty, literal) in [
+        ("Uuid", "\"6ba7b810-9dad-11d1-80b4-00c04fd430c8\""),
+        ("Timestamp", "\"2026-01-01T00:00:00Z\""),
+    ] {
+        for column in [format!("stamp: {ty} = {literal}"), format!("stamp: {ty}?")] {
+            let source = format!(
+                "{EVENTS}projector P {{
+  entity Thing {{
+    id: Int @key,
+    {column},
+    seen: Int,
+  }}
+  on @order.placed {{ order_id }} {{
+    patch Thing[1] {{ seen: .seen + 1 }}
+  }}
+}}
+"
+            );
+            parse(&source).unwrap_or_else(|err| panic!("for `{column}`: {err}"));
+        }
+    }
+}
+
+/// And the default is read, not merely accepted: a materializing `patch` puts it in the
+/// row, which is the whole reason the zero table exists.
+#[test]
+fn a_written_timestamp_default_materializes_a_row() {
+    let source = format!(
+        "{EVENTS}projector P {{
+  entity Thing {{
+    id: Int @key,
+    stamp: Timestamp = \"2020-01-01T00:00:00Z\",
+    seen: Int,
+  }}
+  on @order.placed {{ order_id }} {{
+    patch Thing[1] {{ seen: .seen + 1 }}
+  }}
+}}
+"
+    );
+    let program = parse(&source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+    let interpreter = Interpreter::with_log(&program, vec![placed(1, 7, 1000)]);
+    let store = interpreter
+        .project("P")
+        .unwrap_or_else(|err| panic!("expected this to project: {err}"));
+    let row = store.get("Thing", &Key::Int(1)).expect("the row");
+    assert_eq!(
+        row.field("stamp"),
+        Some(&Value::Timestamp(1_577_836_800_000_000))
+    );
+    assert_eq!(row.field("seen"), Some(&Value::Int(1)));
+}
+
 /// The same entity, written only by `put`, `update` and `delete`. Nothing can
 /// materialize it, so nothing ever reads a zero for `stamp`, and demanding one would
 /// be demanding a sentinel: exactly what the table refuses to make a zero.
