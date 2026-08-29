@@ -274,6 +274,14 @@ a builtin commits the language to it forever: clamp to the last day, roll into t
 refuse. Different jurisdictions and different contracts want different ones, and a language that
 picks cannot be argued with.
 
+**The deferral is not yet honest, and a port proved it.** Reaching for `add_months` now says why it
+is absent and where it belongs, which is an improvement on failing at run time. But nothing can write
+the replacement: a `Timestamp` has no methods, no arithmetic and no way in or out except
+`Timestamp.parse`, so the opinion this refuses to hold has nowhere to be held instead. What would fix
+it is the pair `Timestamp.from_micros(n)` and a `micros()` reader, one of which `docs/effects.md`
+already names as future work. Until then this is a decision with no escape hatch, and
+`docs/types.md` records it as a gap rather than a feature.
+
 Now that `fn` exists, that helper belongs in a shipped `lib/` where an application can read it,
 disagree with it and replace it. That is the general shape of the rule: **a `fn` is where an opinion
 goes, and the language is for what has no defensible alternative.**

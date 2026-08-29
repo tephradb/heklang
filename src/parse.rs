@@ -3251,12 +3251,23 @@ impl Parser {
                         col,
                     ));
                 }
+                // The same table that types the result knows whether there is one to
+                // type. A receiver whose type is unknown is not accused, as everywhere
+                // else, so this fires exactly where an answer exists.
+                let sig = match &receiver {
+                    Some(ty) => match method_sig(ty, &name) {
+                        Some(sig) => Some(sig),
+                        None => {
+                            return Err(self.err(no_method(ty, &name), line, col));
+                        }
+                    },
+                    None => None,
+                };
                 let outer = mem::replace(&mut self.no_record_literal, false);
                 let mut args = Vec::new();
                 while !self.at_sym(Sym::RParen) {
-                    let hint = receiver
+                    let hint = sig
                         .as_ref()
-                        .and_then(|ty| method_sig(ty, &name))
                         .and_then(|sig| sig.params.get(args.len()).cloned().flatten());
                     args.push(self.expr(lower, hint)?);
                     if !self.eat_sym(Sym::Comma) {
@@ -3265,6 +3276,22 @@ impl Parser {
                 }
                 self.expect_sym(Sym::RParen)?;
                 self.no_record_literal = outer;
+                // The argument types checked themselves on the way in, through the
+                // hint; the count is what is left, and it is the table's again.
+                if let Some(sig) = &sig
+                    && sig.params.len() != args.len()
+                {
+                    let plural = if sig.params.len() == 1 { "" } else { "s" };
+                    return Err(self.err(
+                        format!(
+                            "`{name}` takes {} argument{plural}, and this gives {}",
+                            sig.params.len(),
+                            args.len()
+                        ),
+                        line,
+                        col,
+                    ));
+                }
                 lower.b.at(span);
                 value = lower.b.method(value, &name, args);
                 continue;
@@ -3712,6 +3739,34 @@ fn mismatch(found: &Type, want: &Type) -> String {
         _ => String::new(),
     };
     format!("expected {want}, found {found}{fix}")
+}
+
+/// A method the receiver does not have. The pair this sees most is an optional asked an
+/// emptiness question and a plain value asked a presence one, which is one confusion
+/// from either side, so each is named rather than only refused: an author who wrote
+/// `is_empty()` on a `String?` knows exactly what they meant.
+fn no_method(receiver: &Type, name: &str) -> String {
+    let instead = match (receiver, name) {
+        (Type::Opt(inner), "is_empty") => format!(
+            "; an optional is asked `is_none()`. `is_empty()` is a question for a {inner}, and this may not be holding one"
+        ),
+        (Type::String, "is_none" | "is_some") => {
+            "; a String is always there, so `is_empty()` is the question. Absence is what a String? is for".to_string()
+        }
+        (Type::Opt(_), _) => format!(
+            "; an optional has `is_some()`, `is_none()` and `unwrap_or(fallback)`, and `{name}` is a question for what it holds"
+        ),
+        // Named because its absence is a decision rather than an oversight, and the
+        // author who reached for it is the one the decision is addressed to.
+        (Type::Timestamp, _) => {
+            "; calendar arithmetic is deliberately not in the language, since month-end clamping is one opinion among several. `docs/functions.md` has the argument, and a `fn` is where it goes".to_string()
+        }
+        (_, "unwrap_or") => {
+            format!("; a {receiver} is already there, so there is nothing to fall back to")
+        }
+        _ => String::new(),
+    };
+    format!("no method `{name}` on {receiver}{instead}")
 }
 
 /// An operator with no row in the table. The three `docs/money.md` names get the reason

@@ -186,5 +186,21 @@ story.
 - **A record's fields are not checked against the record.** `Record { .. }` synthesises that record's
   type without confirming the literal built it correctly; the field-by-field check happens where the
   literal is parsed, which covers the same ground by a different route.
-- **Arity and argument types for a method** are known here but not yet enforced, so `x.trim(1)` is
-  still a runtime error.
+- **A `Timestamp` is opaque, and that makes one documented escape unreachable.**
+  `docs/functions.md` defers `add_months` on the grounds that month-end clamping is one calendar
+  opinion among several and belongs in a `fn` an application can disagree with. Nothing can write
+  that `fn`: a `Timestamp` has no methods, no arithmetic and no way in or out except
+  `Timestamp.parse`, so the opinion has nowhere to live. `Timestamp.from_micros` is named as future
+  work in `docs/effects.md`, and the pair it would make with a `micros()` reader is what would make
+  the deferral true.
+
+## Methods
+
+The receiver's type decides which methods exist, so where the receiver is known a method that is not
+on it is caught where it is written rather than when it runs. So is the count of its arguments; their
+types check themselves on the way in, because the hint each one resolves against comes from the same
+table.
+
+The message names the way out for the confusion this sees most, which is one confusion from two
+sides: `is_empty()` asked of a `String?` and `is_none()` asked of a `String`. A real port made that
+edit by hand in eight files, having found each one by running it.

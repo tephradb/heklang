@@ -361,7 +361,7 @@ fn a_trailing_comma_closes_an_argument_list() {
         ),
         (
             "method",
-            "  emit @plan.created { plan_id, sku, months: months.min(1,) }",
+            "  emit @plan.created { plan_id, sku: sku.unwrap_or(\"\",), months }",
         ),
         (
             "Uuid.derive",

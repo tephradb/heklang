@@ -450,6 +450,96 @@ projector P {
 }
 
 // ---------------------------------------------------------------------------------
+// Rule 3: methods.
+
+/// The table that types a method's result knows whether there is one to type, so a
+/// method the receiver does not have is caught where it is written.
+#[test]
+fn a_method_must_exist_on_its_receiver() {
+    for (params, value, expected) in [
+        (
+            ", text: String",
+            "text.frobnicate()",
+            "no method `frobnicate` on String",
+        ),
+        (", n: Int", "n.min(1)", "no method `min` on Int"),
+        (
+            ", xs: List(String)",
+            "xs.set(1, \"a\")",
+            "no method `set` on List(String)",
+        ),
+        (
+            ", m: Map(Int, String)",
+            "m.push(\"a\")",
+            "no method `push` on Map(Int, String)",
+        ),
+    ] {
+        let message = err(&emitting(params, "name", value));
+        assert!(
+            message.starts_with(expected),
+            "for `{value}`, got: {message}"
+        );
+    }
+}
+
+/// The pair this sees most is one confusion from either side, so each names the other.
+/// It is exactly the edit a real port had to make by hand in eight files.
+#[test]
+fn the_emptiness_and_presence_questions_name_each_other() {
+    let message = err(&emitting(", text: String?", "name", "text.is_empty()"));
+    assert!(
+        message.contains("an optional is asked `is_none()`"),
+        "got: {message}"
+    );
+    let message = err(&emitting(", text: String", "name", "text.is_none()"));
+    assert!(
+        message.contains("a String is always there"),
+        "got: {message}"
+    );
+    let message = err(&emitting(", text: String", "name", "text.unwrap_or(\"\")"));
+    assert!(
+        message.contains("is already there, so there is nothing to fall back to"),
+        "got: {message}"
+    );
+}
+
+/// `docs/functions.md` argues that calendar arithmetic is one opinion among several and
+/// belongs in a `fn`. That decision is only visible if reaching for it says so, and a
+/// real port reached for it.
+#[test]
+fn calendar_arithmetic_says_why_it_is_absent() {
+    let message = err(&emitting(
+        ", at_in: Timestamp",
+        "at",
+        "at_in.add_months(12)",
+    ));
+    assert!(
+        message.contains("no method `add_months` on Timestamp"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("month-end clamping is one opinion among several"),
+        "got: {message}"
+    );
+}
+
+/// Arity is the table's too, and the argument types checked themselves on the way in
+/// through the hint the same table gave them.
+#[test]
+fn a_methods_arity_and_arguments_are_checked() {
+    let message = err(&emitting(", text: String", "name", "text.trim(1)"));
+    assert_eq!(message, "`trim` takes 0 arguments, and this gives 1");
+
+    let message = err(&emitting(", m: Map(Int, String)", "name", "m.get()"));
+    assert_eq!(message, "`get` takes 1 argument, and this gives 0");
+
+    // The key's type comes from the map, so a wrong one is a type error rather than an
+    // arity one.
+    let message = err(&emitting(", m: Map(Int, String)", "name", "m.get(\"one\")"));
+    assert_eq!(message, "expected Int, found String");
+}
+
+// ---------------------------------------------------------------------------------
 // Rule 4: what is deliberately not checked.
 
 /// `Json` is opaque on purpose: its shape came from outside and is not a promise the
