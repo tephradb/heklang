@@ -297,6 +297,28 @@ program that needs one sends the field it declared for it (`docs/money.md`).
 **Object keys are sorted.** That is rule 14's defined iteration order (see below), and it is why the
 same object built twice serialises byte-identically.
 
+### The table read backwards
+
+`Value::from_json(&json, &ty, defs)` is the same table inbound, and a host needs it: every field of
+every stored record, every read-model column and every command argument arrives as JSON and has to
+become a value of a declared type. One table met twice, rather than two kept in step.
+
+**It takes the type rather than inferring one.** `"1.5"` is 1.50 at `Money(2)` and 1.500 at
+`Money(3)`, and only the declaration says which was written. A `Timestamp` and an `Int` are both
+numbers, and an enum variant is checked against its declaration rather than taken on trust.
+
+**A `null` fills an optional and nothing else.** An absent object key reads as `null`, so a missing
+optional is absent and a missing required field is an error rather than a zero quietly standing in.
+
+**A seal is not in the JSON.** `Sealed(T, subject)` reads as its content, because a seal carries the
+subject's id and that lives in a sibling field. A host that stores sealed content rebuilds the seal,
+and `Value::Sealed` is public for exactly that; `docs/host.md` section 7 has the read-model side.
+
+**A mismatch is data, not a broken host.** A record written before a field changed type reads back
+wrong, and that gets its own answer: `Mismatch` names the path, the declared type and the shape that
+was stored, and it arrives as `ErrorKind::Mismatch` rather than `ErrorKind::Host`. Saying `Host`
+would blame a store that is working exactly as asked.
+
 Iteration over JSON arrays is deferred, and there is no list type. An array can arrive in a response
 body and be carried around; nothing in the language takes it apart yet.
 

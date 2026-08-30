@@ -1,8 +1,8 @@
 //! `docs/effects.md` as executable tests, one test per numbered rule.
 
 use heklang::{
-    Effectful, Event, EventPath, Interpreter, Invocation, Invoked, Journal, Json, Program,
-    Recorded, Reply, Type, Value, parse,
+    Defs, Effectful, Event, EventPath, Interpreter, Invocation, Invoked, Journal, Json, Key,
+    Program, Recorded, Reply, Type, Value, parse,
 };
 
 const URL: &str = "https://mail.example/confirm";
@@ -2939,4 +2939,178 @@ effect E {
         .expect("two hundred is a busy log, not a runaway");
     assert_eq!(counts.done, 200, "every source event was handled");
     assert!(counts.wedged.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Rule 8's table read the other way: JSON as a declared type reads it.
+// ---------------------------------------------------------------------------
+
+const SHAPES: &str = "enum Tier { @default Free, Paid }
+record Line { sku: String, qty: Int, price: Money(3), note: String? }";
+
+fn shapes() -> Program {
+    parse(&format!("{PRELUDE}\n{SHAPES}\n")).expect("parses")
+}
+
+/// Everything `Json::from_value` can write, read back as the type that wrote it. The
+/// two directions are one table, so a value that survives this cannot be re-typed by a
+/// round trip through a store.
+#[test]
+fn the_conversion_table_round_trips() {
+    let program = shapes();
+    let defs = Defs::of(&program);
+    let cases: Vec<(Type, Value)> = vec![
+        (Type::Bool, Value::Bool(true)),
+        (Type::Int, Value::Int(-9)),
+        (Type::String, Value::str("ada")),
+        (
+            Type::Uuid,
+            Value::uuid("0190d1a1-0000-7000-8000-000000000001"),
+        ),
+        (Type::Timestamp, Value::Timestamp(1_700_000_000_000_000)),
+        (Type::Money(2), Value::money(2_599, 2)),
+        (Type::Decimal(4), Value::decimal(-12_345, 4)),
+        (
+            Type::Enum("Tier".to_string()),
+            Value::Enum {
+                ty: "Tier".to_string(),
+                variant: "Paid".to_string(),
+            },
+        ),
+        (Type::Opt(Box::new(Type::Int)), Value::none(Type::Int)),
+        (Type::Opt(Box::new(Type::Int)), Value::some(Value::Int(3))),
+        (
+            Type::List(Box::new(Type::Int)),
+            Value::list(Type::Int, [Value::Int(1), Value::Int(2)]),
+        ),
+        (
+            Type::Map(Box::new(Type::Int), Box::new(Type::String)),
+            Value::map(
+                Type::Int,
+                Type::String,
+                [(Key::Int(7), Value::str("seven"))],
+            ),
+        ),
+        (
+            Type::Record("Line".to_string()),
+            Value::record(
+                "Line",
+                [
+                    ("sku", Value::str("A1")),
+                    ("qty", Value::Int(2)),
+                    ("price", Value::money(1_500, 3)),
+                    ("note", Value::none(Type::String)),
+                ],
+            ),
+        ),
+    ];
+
+    for (ty, value) in cases {
+        let written = Json::from_value(&value);
+        let read = Value::from_json(&written, &ty, defs).expect("reads back");
+        assert_eq!(read, value, "{ty} did not survive the round trip");
+    }
+}
+
+/// The same string is a different value at a different scale, which is the whole reason
+/// the reader takes a type rather than inferring one from the JSON.
+#[test]
+fn a_scale_comes_from_the_declaration_and_not_from_the_text() {
+    let program = shapes();
+    let defs = Defs::of(&program);
+    let written = Json::str("1.5");
+
+    assert_eq!(
+        Value::from_json(&written, &Type::Money(2), defs).expect("reads"),
+        Value::money(150, 2)
+    );
+    assert_eq!(
+        Value::from_json(&written, &Type::Money(3), defs).expect("reads"),
+        Value::money(1_500, 3)
+    );
+}
+
+/// More places than the target holds is a failure rather than a silent round, which is
+/// the rule a written literal already follows.
+#[test]
+fn a_decimal_that_does_not_fit_its_scale_is_a_mismatch() {
+    let program = shapes();
+    let defs = Defs::of(&program);
+    let err = Value::from_json(&Json::str("1.555"), &Type::Money(2), defs).expect_err("too fine");
+    assert_eq!(err.expected, Type::Money(2));
+}
+
+/// The case this exists for: a field that was an `Int` when the record was written and
+/// is read back under a program that has changed. The answer names where it was, so an
+/// operator can see which field moved.
+#[test]
+fn a_stored_value_of_the_wrong_shape_names_where_it_was() {
+    let program = shapes();
+    let defs = Defs::of(&program);
+    let written = Json::obj([
+        ("sku", Json::str("A1")),
+        ("qty", Json::str("two")),
+        ("price", Json::str("1.500")),
+        ("note", Json::Null),
+    ]);
+
+    let err = Value::from_json(&written, &Type::Record("Line".to_string()), defs)
+        .expect_err("qty is not an Int");
+
+    assert_eq!(err.path, vec!["qty".to_string()]);
+    assert_eq!(err.expected, Type::Int);
+    assert_eq!(err.found, "a string");
+    let rendered = err.to_string();
+    assert!(rendered.starts_with("qty: expected "), "{rendered}");
+    assert!(rendered.ends_with("stored a string"), "{rendered}");
+}
+
+/// An absent key reads as `null`, so a missing optional is absent and a missing required
+/// field is the mismatch it actually is rather than a zero quietly standing in.
+#[test]
+fn an_absent_key_fills_an_optional_and_fails_a_required_field() {
+    let program = shapes();
+    let defs = Defs::of(&program);
+
+    let complete = Json::obj([
+        ("sku", Json::str("A1")),
+        ("qty", Json::Int(2)),
+        ("price", Json::str("1.500")),
+    ]);
+    let value =
+        Value::from_json(&complete, &Type::Record("Line".to_string()), defs).expect("reads");
+    let Value::Record { fields, .. } = value else {
+        panic!("a record");
+    };
+    assert_eq!(fields.get("note"), Some(&Value::none(Type::String)));
+
+    let short = Json::obj([("sku", Json::str("A1"))]);
+    let err = Value::from_json(&short, &Type::Record("Line".to_string()), defs)
+        .expect_err("qty is missing");
+    assert_eq!(err.path, vec!["qty".to_string()]);
+    assert_eq!(err.found, "null");
+}
+
+/// A seal carries the subject's id, which lives in a sibling field rather than in this
+/// value, so it cannot come back out of the JSON. A host rebuilds it, and this reads the
+/// content the seal was around.
+#[test]
+fn a_seal_is_not_in_the_json() {
+    let program = shapes();
+    let defs = Defs::of(&program);
+    let ty = Type::Sealed(Box::new(Type::String), "customer_id".to_string());
+
+    let value = Value::from_json(&Json::str("ada@example.com"), &ty, defs).expect("reads");
+    assert_eq!(value, Value::str("ada@example.com"));
+}
+
+/// An enum is checked against its declaration, so a variant that was removed is a
+/// mismatch rather than a value nothing else in the program can match on.
+#[test]
+fn an_unknown_variant_is_a_mismatch() {
+    let program = shapes();
+    let defs = Defs::of(&program);
+    let err = Value::from_json(&Json::str("Trial"), &Type::Enum("Tier".to_string()), defs)
+        .expect_err("Trial is not a Tier");
+    assert_eq!(err.found, "a variant it does not have");
 }

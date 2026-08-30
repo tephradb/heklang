@@ -10,8 +10,7 @@ use crate::host::{
 };
 use crate::ir::{
     Absent, Assign, BinOp, Builtin, Command, Effect, EntityDef, EnvField, EventPath, Expr, ExprId,
-    Exprs, Function, Ident, Iter, Number, Program, Projector, Return, Slice, Slot, Span, Stmt,
-    Type, UnOp,
+    Exprs, Function, Ident, Iter, Program, Projector, Return, Slice, Slot, Span, Stmt, Type, UnOp,
 };
 use crate::scaled::{self, Rounding};
 use crate::value::{self, Event, Invoked, Json, Key, Record, Value};
@@ -51,7 +50,11 @@ pub enum ErrorKind {
     /// The host could not do what was asked. Rendered as the host wrote it: heklang has
     /// no vocabulary for a store's failures and should not invent one.
     Host(String),
-
+    /// A stored value is not what its declaration says. The one failure on this seam
+    /// that is about data rather than about a broken host, which is why it is not a
+    /// `Host`: a record written before a field changed type reads like this, and an
+    /// operator quarantines the reader rather than mistrusting the store.
+    Mismatch(value::Mismatch),
     /// The host refused the append: something in the read set landed at or after
     /// `after`. Not an `Outcome`, because the three outcomes are the command's own
     /// answer and a conflict is the runtime's. `docs/host.md` has what an adapter
@@ -154,7 +157,7 @@ impl fmt::Display for ErrorKind {
                 write!(f, "{url} did not answer; every attempt was retryable")
             }
             ErrorKind::Host(why) => write!(f, "{why}"),
-
+            ErrorKind::Mismatch(why) => write!(f, "{why}"),
             ErrorKind::Conflict { after } => write!(
                 f,
                 "the log moved under this run: something it read landed at or after position {after}"
@@ -288,6 +291,12 @@ impl fmt::Display for Error {
 }
 
 impl error::Error for Error {}
+
+impl From<value::Mismatch> for ErrorKind {
+    fn from(why: value::Mismatch) -> Self {
+        ErrorKind::Mismatch(why)
+    }
+}
 
 impl From<ErrorKind> for Error {
     fn from(kind: ErrorKind) -> Self {
@@ -1722,10 +1731,12 @@ fn eval(
                             Some(micros) => Value::some(Value::Timestamp(micros)),
                             None => Value::none(Type::Timestamp),
                         },
-                        Builtin::MoneyParse(scale) => match parse_money(text, *scale) {
-                            Some(value) => Value::some(value),
-                            None => Value::none(Type::Money(*scale)),
-                        },
+                        Builtin::MoneyParse(scale) => {
+                            match value::parse_scaled(text, &Type::Money(*scale)) {
+                                Some(value) => Value::some(value),
+                                None => Value::none(Type::Money(*scale)),
+                            }
+                        }
                         _ => return Err(at(ErrorKind::MalformedIr)),
                     });
                 }
@@ -2515,35 +2526,6 @@ fn optional_str(value: Option<&str>) -> Value {
         Some(value) => Value::some(Value::str(value)),
         None => Value::none(Type::String),
     }
-}
-
-/// A decimal string at the target scale, by exactly the rule a written literal follows:
-/// widening is exact, and more places than the target holds is a failure rather than a
-/// silent round.
-fn parse_money(text: &str, scale: u8) -> Option<Value> {
-    let (negative, rest) = match text.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, text),
-    };
-    let (whole, fraction) = rest.split_once('.').unwrap_or((rest, ""));
-    if whole.is_empty() || !whole.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    if rest.contains('.') && fraction.is_empty() {
-        return None;
-    }
-    if !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    let mut written = String::from(whole);
-    written.push_str(fraction);
-    let value: i128 = written.parse().ok()?;
-    let value = if negative { -value } else { value };
-    let places = u8::try_from(fraction.len()).ok()?;
-    let lit = Number::new(value, places)
-        .resolve(&Type::Money(scale))
-        .ok()?;
-    Some(value::literal(&lit))
 }
 
 /// Rule 11. There is no `Uuid.new`, so an id is always derived from one that already

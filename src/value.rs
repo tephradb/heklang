@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 use std::sync::Arc;
 
-use crate::ir::{EntityField, EnumDef, EventPath, Ident, Literal, RecordDef, Type};
+use crate::ir::{
+    EntityField, EnumDef, EventPath, Ident, Literal, Number, Program, Projector, RecordDef, Type,
+};
 use crate::scaled::{self, Rounding};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +122,16 @@ impl Value {
             value,
             entries: entries.into_iter().collect(),
         }
+    }
+
+    /// Rule 8's conversion table read the other way: JSON as the declared type reads it.
+    ///
+    /// [`Json::from_value`] writes and this reads, so the two are one table met twice
+    /// rather than two kept in step. It takes the type rather than inferring one,
+    /// because a `Money(2)` and a `Money(3)` are different types that read different
+    /// values out of the same string and only a declaration knows which was written.
+    pub fn from_json(json: &Json, ty: &Type, defs: Defs<'_>) -> Result<Value, Mismatch> {
+        read_json(json, ty, defs, &mut Vec::new())
     }
 
     pub fn ty(&self) -> Type {
@@ -319,6 +331,27 @@ pub struct Defs<'a> {
     pub records: &'a [RecordDef],
 }
 
+impl<'a> Defs<'a> {
+    /// The module's declarations, which is what an event field or a command parameter
+    /// resolves against.
+    pub fn of(program: &'a Program) -> Defs<'a> {
+        Defs {
+            local: &[],
+            enums: &program.enums,
+            records: &program.records,
+        }
+    }
+
+    /// The same, with one projector's own enums in front of the module's, which is the
+    /// precedence the parser applies to an entity column.
+    pub fn in_projector(program: &'a Program, projector: &'a Projector) -> Defs<'a> {
+        Defs {
+            local: &projector.enums,
+            ..Defs::of(program)
+        }
+    }
+}
+
 impl Defs<'_> {
     pub fn enum_def(&self, name: &str) -> Option<&EnumDef> {
         self.local
@@ -479,6 +512,188 @@ pub fn can_key(ty: &Type) -> bool {
         ty,
         Type::Int | Type::String | Type::Uuid | Type::Timestamp | Type::Enum(_)
     )
+}
+
+/// A decimal string read at a target scale, by exactly the rule a written literal
+/// follows: widening is exact, and more places than the target holds is a failure
+/// rather than a silent round. `ty` is the `Money(n)` or `Decimal(n)` being filled.
+pub fn parse_scaled(text: &str, ty: &Type) -> Option<Value> {
+    let (negative, rest) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let (whole, fraction) = rest.split_once('.').unwrap_or((rest, ""));
+    if whole.is_empty() || !whole.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if rest.contains('.') && fraction.is_empty() {
+        return None;
+    }
+    if !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let mut written = String::from(whole);
+    written.push_str(fraction);
+    let value: i128 = written.parse().ok()?;
+    let value = if negative { -value } else { value };
+    let places = u8::try_from(fraction.len()).ok()?;
+    let lit = Number::new(value, places).resolve(ty).ok()?;
+    Some(literal(&lit))
+}
+
+/// What a stored value was not.
+///
+/// Rule 8's table read backwards can fail, and it fails on **data** rather than on a
+/// broken host: a record written before a field changed type reads exactly like this.
+/// That is why it is its own answer and not `ErrorKind::Host`, which says the store is
+/// broken when the store is fine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mismatch {
+    /// Where in the value, outermost first: a field, then a record's field, and so on.
+    /// Empty when the whole value is the wrong shape.
+    pub path: Vec<Ident>,
+    pub expected: Type,
+    /// What was stored instead, as a shape rather than as content: a mismatch is
+    /// reported to an operator, and the content may be personal.
+    pub found: String,
+}
+
+impl fmt::Display for Mismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !self.path.is_empty() {
+            write!(f, "{}: ", self.path.join("."))?;
+        }
+        write!(f, "expected {}, stored {}", self.expected, self.found)
+    }
+}
+
+/// The shape of a JSON value, for a message that does not quote its content.
+fn shape(json: &Json) -> &'static str {
+    match json {
+        Json::Null => "null",
+        Json::Bool(_) => "a boolean",
+        Json::Int(_) => "a number",
+        Json::Str(_) => "a string",
+        Json::Arr(_) => "an array",
+        Json::Obj(_) => "an object",
+    }
+}
+
+fn key_from_text(text: &str, ty: &Type, defs: Defs<'_>) -> Option<Key> {
+    Some(match ty {
+        Type::Int => Key::Int(text.parse().ok()?),
+        Type::String => Key::Str(text.into()),
+        Type::Uuid => Key::Uuid(text.into()),
+        Type::Timestamp => Key::Timestamp(text.parse().ok()?),
+        Type::Enum(name) => {
+            let def = defs.enum_def(name)?;
+            if !def.has(text) {
+                return None;
+            }
+            Key::Enum {
+                ty: name.clone(),
+                variant: text.to_string(),
+            }
+        }
+        _ => return None,
+    })
+}
+
+fn read_json(
+    json: &Json,
+    ty: &Type,
+    defs: Defs<'_>,
+    path: &mut Vec<Ident>,
+) -> Result<Value, Mismatch> {
+    let wrong = |found: String, path: &Vec<Ident>| Mismatch {
+        path: path.clone(),
+        expected: ty.clone(),
+        found,
+    };
+    Ok(match (ty, json) {
+        // A seal is not in the JSON, and cannot be: it carries the subject's id, which
+        // lives in a sibling field rather than in this value. A host that stores sealed
+        // content rebuilds it, and `Value::Sealed` is public for exactly that.
+        (Type::Sealed(inner, _), _) => read_json(json, inner, defs, path)?,
+
+        // The one place `null` means something rather than being the wrong shape.
+        (Type::Opt(inner), Json::Null) => Value::none(inner.as_ref().clone()),
+        // Built by hand rather than through `Value::some`, so a declared inner type
+        // survives verbatim: `Opt(Sealed(String, x))` must not come back as `Opt(String)`.
+        (Type::Opt(inner), _) => Value::Opt {
+            inner: inner.as_ref().clone(),
+            value: Some(Box::new(read_json(json, inner, defs, path)?)),
+        },
+
+        (Type::Bool, Json::Bool(value)) => Value::Bool(*value),
+        (Type::Int, Json::Int(value)) => Value::Int(*value),
+        (Type::String, Json::Str(value)) => Value::str(value.as_str()),
+        (Type::Uuid, Json::Str(value)) => Value::uuid(value.as_str()),
+        // Microseconds, which is what a `Timestamp` is and what `Json::from_value`
+        // wrote. A host whose envelope holds RFC 3339 converts with `timestamp` first.
+        (Type::Timestamp, Json::Int(micros)) => Value::Timestamp(*micros),
+        // A string at the target scale, so nothing was lost to a float on the way out
+        // and nothing is lost coming back.
+        (Type::Money(_) | Type::Decimal(_), Json::Str(text)) => {
+            parse_scaled(text, ty).ok_or_else(|| wrong("a decimal it cannot hold".into(), path))?
+        }
+        (Type::Enum(name), Json::Str(variant)) => {
+            let known = defs.enum_def(name).is_some_and(|def| def.has(variant));
+            if !known {
+                return Err(wrong("a variant it does not have".into(), path));
+            }
+            Value::Enum {
+                ty: name.clone(),
+                variant: variant.clone(),
+            }
+        }
+        (Type::Record(name), Json::Obj(fields)) => {
+            let Some(def) = defs.records.iter().find(|def| &def.name == name) else {
+                return Err(wrong("an object".into(), path));
+            };
+            let mut built = BTreeMap::new();
+            for field in &def.fields {
+                // An absent key reads as `null`, so a missing optional is absent and a
+                // missing required field is the mismatch it actually is.
+                let found = fields.get(&field.name).unwrap_or(&Json::Null);
+                path.push(field.name.clone());
+                let value = read_json(found, &field.ty, defs, path)?;
+                path.pop();
+                built.insert(field.name.clone(), value);
+            }
+            Value::Record {
+                ty: name.clone(),
+                fields: built,
+            }
+        }
+        (Type::List(inner), Json::Arr(items)) => {
+            let mut built = Vec::with_capacity(items.len());
+            for (index, item) in items.iter().enumerate() {
+                path.push(index.to_string());
+                built.push(read_json(item, inner, defs, path)?);
+                path.pop();
+            }
+            Value::list(inner.as_ref().clone(), built)
+        }
+        // A map's keys were strings on the way out, so they are read back as the key
+        // type rather than guessed from their text.
+        (Type::Map(key, value), Json::Obj(entries)) => {
+            let mut built = BTreeMap::new();
+            for (text, held) in entries {
+                let Some(at) = key_from_text(text, key, defs) else {
+                    return Err(wrong("a key it cannot hold".into(), path));
+                };
+                path.push(text.clone());
+                let held = read_json(held, value, defs, path)?;
+                path.pop();
+                built.insert(at, held);
+            }
+            Value::map(key.as_ref().clone(), value.as_ref().clone(), built)
+        }
+        // Rule 8 leaves a `Json` field's shape unchecked in both directions.
+        (Type::Json, _) => Value::Json(json.clone()),
+        _ => return Err(wrong(shape(json).to_string(), path)),
+    })
 }
 
 /// A JSON value, for HTTP bodies (rule 8). Hand-rolled rather than a dependency,
