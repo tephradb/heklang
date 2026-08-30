@@ -20,7 +20,7 @@ pass   an email that already placed an order is refused
 ## Usage
 
 ```
-hek [check|test] [path]
+hek [check|test] [--boundaries] [path]
 ```
 
 | Command | Does |
@@ -30,6 +30,21 @@ hek [check|test] [path]
 | `hek` | both |
 
 `path` is a directory or a single `.hk` file, and defaults to the current directory.
+
+`--boundaries` adds one line per command naming what it guards, transitively
+(`docs/guards.md`). It is asked for rather than printed, because `check` is a pass/fail
+gate and this is an enumeration rather than a summary: a 26-command program would pay 26
+lines on every run to restate what its own `guard` lines already say. What it adds is the
+part the page cannot show, which is what a guard reaches *through* another guard.
+
+```
+$ hek check --boundaries
+checked 9 files
+  5 events, 6 commands, 9 guards, 3 consts, 21 tests
+
+  Subscribe guards CourseIsDefined, StudentIsRegistered, CourseHasSeats
+  Unsubscribe guards SubscriptionIsActive
+```
 
 Exit status is 0 when everything parsed and every test passed, and 1 otherwise. `check`
 is the pre-commit form: a failing test does not fail it, because a test that fails is a

@@ -26,10 +26,12 @@ const USAGE: &str = "\
 hek: check heklang sources and run their tests
 
 usage:
-  hek [check|test] [path]
+  hek [check|test] [--boundaries] [path]
 
   check   parse every `.hk` file under `path` as one program
   test    the same, then run every `test` declaration in it
+
+  --boundaries  print what each command guards, transitively
 
 `path` is a directory or a single `.hk` file, and defaults to the current
 directory. With no command `hek` does both. Every file under `path` is one
@@ -54,6 +56,7 @@ fn run() -> Result<bool, String> {
     let mut args = env::args().skip(1);
     let mut command = Command::Both;
     let mut root: Option<PathBuf> = None;
+    let mut asked_for_boundaries = false;
 
     for arg in args.by_ref() {
         match arg.as_str() {
@@ -61,6 +64,7 @@ fn run() -> Result<bool, String> {
                 print!("{USAGE}");
                 return Ok(true);
             }
+            "--boundaries" => asked_for_boundaries = true,
             "check" if root.is_none() => command = Command::Check,
             "test" if root.is_none() => command = Command::Test,
             other if other.starts_with('-') => {
@@ -119,7 +123,9 @@ fn run() -> Result<bool, String> {
     let s = if files == 1 { "" } else { "s" };
     println!("checked {files} file{s}");
     println!("  {}", counts(&program));
-    boundaries(&program);
+    if asked_for_boundaries {
+        boundaries(&program);
+    }
 
     if command == Command::Check {
         return Ok(true);
@@ -158,11 +164,14 @@ fn suite(program: &Program) -> bool {
 
 /// What each command guards, transitively. A guard's slices join the boundary of what
 /// names it, so once guards compose the append condition is a closure rather than
-/// something a reader can take off the page. Printing it is what pays for that: two
-/// commands meant to conflict on the same events can be compared here, which is the one
-/// question `docs/testing.md` §8 deliberately keeps out of a test.
+/// something a reader can take off the page. This is how to see it: two commands meant to
+/// conflict on the same events can be compared here, which is the one question
+/// `docs/testing.md` §8 deliberately keeps out of a test.
 ///
-/// Silent when nothing guards, so a program without guards prints what it always did.
+/// **Asked for, not printed by default.** `check` is a pass/fail gate, and this is one
+/// line per command rather than a summary, so a 26-command program pays 26 lines on every
+/// run to restate what its own `guard` lines already say. Only the transitive part is
+/// information, and only when someone is asking.
 fn boundaries(program: &Program) {
     let named: Vec<&heklang::Command> = program
         .commands

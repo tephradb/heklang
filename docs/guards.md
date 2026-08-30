@@ -147,14 +147,18 @@ is the duplication this construct exists to remove.
 
 **The cost is that the boundary stops being readable off the page.** A command's append condition is
 now the transitive closure of what it guards, so a fold added three levels down widens the boundary
-of every command above it and gives them more contention, invisibly. `hek check` prints the closure,
-which is what pays for it:
+of every command above it and gives them more contention, invisibly. `hek check --boundaries` prints
+the closure, which is what pays for it:
 
 ```
   ArchivePlan guards PlanExists, ShopIsConnected
 ```
 
-That listing is also the only way to compare two commands' boundaries, since a test cannot ask.
+`ShopIsConnected` is two levels down and in the condition, and that line is the only place it shows.
+The listing is also the only way to compare two commands' boundaries, since a test cannot ask.
+
+**Asked for rather than printed**, because it is an enumeration rather than a summary, and for a
+program whose guards do not nest it restates the `guard` lines a reader just read.
 
 **A guard is copied, not called.** `src/inline.rs` splices it into whatever names it, before the
 interpreter sees either, so a command reaches the fold with one arena, one frame, one slice list and

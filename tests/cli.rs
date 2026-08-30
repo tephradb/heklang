@@ -282,7 +282,10 @@ fn help_succeeds_and_names_both_commands() {
 
     assert!(output.status.success());
     let text = stdout(&output);
-    assert!(text.contains("hek [check|test] [path]"), "{text}");
+    assert!(
+        text.contains("hek [check|test] [--boundaries] [path]"),
+        "{text}"
+    );
 }
 
 /// The line of carets a run drew, without its trailing newline.
@@ -519,7 +522,8 @@ command ArchivePlan(plan_id: Int, shop_id: Int) {
 }
 ";
     let root = project("guarded", &[("app.hk", source)]);
-    let output = hek(&["check", root.to_str().expect("a utf-8 path")]);
+    let path = root.to_str().expect("a utf-8 path").to_string();
+    let output = hek(&["check", "--boundaries", &path]);
 
     assert!(output.status.success(), "{}", stderr(&output));
     let text = stdout(&output);
@@ -531,12 +535,32 @@ command ArchivePlan(plan_id: Int, shop_id: Int) {
     );
 }
 
-/// A program with no guards prints what it always printed.
+/// `check` is a pass/fail gate, so the listing is asked for. Without the flag it prints
+/// the counts and nothing per command, however many guards the program has.
 #[test]
-fn check_says_nothing_about_boundaries_when_nothing_guards() {
-    let root = project("unguarded", &[("events.hk", EVENTS)]);
+fn check_says_nothing_about_boundaries_unless_asked() {
+    let source = "\
+event @shop.connected { shop_id: Int }
+event @shop.renamed { shop_id: Int }
+
+guard ShopIsConnected(shop_id: Int) {
+  state connected: Bool = fold false
+    on @shop.connected(shop_id) => true
+  if !connected {
+    return reject(\"shop_not_found\", \"shop does not exist\")
+  }
+}
+
+command RenameShop(shop_id: Int) {
+  guard ShopIsConnected { shop_id }
+  emit @shop.renamed { shop_id }
+}
+";
+    let root = project("quiet", &[("app.hk", source)]);
     let output = hek(&["check", root.to_str().expect("a utf-8 path")]);
 
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(!stdout(&output).contains("guards"), "{}", stdout(&output));
+    let text = stdout(&output);
+    assert!(text.contains("1 guard"), "{text}");
+    assert!(!text.contains("RenameShop guards"), "{text}");
 }
