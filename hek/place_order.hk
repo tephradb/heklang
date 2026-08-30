@@ -21,6 +21,43 @@ event @customer.blocked {
   reason: String,
 }
 
+// guards/order.hk
+//
+// Each of these is a proposition about the log with one refusal, named for what it
+// asserts rather than for the entity it reads. The order they appear in the command is
+// the order they refuse in.
+
+guard CustomerIsNotBlocked(customer_id: Int) {
+  // A leading `let` a filter names is hoisted here exactly as it is in a command: a
+  // guard's prologue is a command's prologue.
+  let customer = customer_id
+  state blocked: Bool = fold false
+    on @customer.blocked(customer_id: customer) => true
+
+  if blocked {
+    return reject("customer_blocked", "this customer cannot place orders")
+  }
+}
+
+guard EmailIsUnused(email: String) {
+  state taken: Bool = fold false
+    on @order.placed(email) => true
+
+  if taken {
+    return reject("email_taken", "that email has already placed an order")
+  }
+}
+
+guard UnderOpenOrderLimit(customer_id: Int) {
+  state open_orders: Int = fold 0
+    on @order.placed(customer_id) => open_orders + 1
+    on @order.cancelled(customer_id) => open_orders - 1
+
+  if open_orders >= 10 {
+    return reject("too_many_open", "too many open orders")
+  }
+}
+
 // commands/place_order.hk
 
 command PlaceOrder(
@@ -34,34 +71,18 @@ command PlaceOrder(
 ) {
   guard @order.placed(order_id), @order.cancelled(order_id)
 
-  state email_taken: Bool = fold false
-    on @order.placed(email) => true
+  guard CustomerIsNotBlocked { customer_id }
+  guard EmailIsUnused { email }
+  guard UnderOpenOrderLimit { customer_id }
 
-  state open_orders: Int = fold 0
-    on @order.placed(customer_id) => open_orders + 1
-    on @order.cancelled(customer_id) => open_orders - 1
-
+  // Folded here rather than guarded, because it decides a discount rather than a
+  // refusal, and a guard hands nothing back.
   state lifetime_spend: Money(2) = fold 0
     on @order.placed(customer_id) { total } => lifetime_spend + total
 
-  let customer = customer_id
-  state blocked: Bool = fold false
-    on @customer.blocked(customer_id: customer) => true
-
+  // Not a guard either: it is about the input rather than the log, so it folds nothing.
   if address.trim() == "" {
     return invalid("address must not be blank")
-  }
-
-  if blocked {
-    return reject("customer_blocked", "this customer cannot place orders")
-  }
-
-  if email_taken {
-    return reject("email_taken", "that email has already placed an order")
-  }
-
-  if open_orders >= 10 {
-    return reject("too_many_open", "too many open orders")
   }
 
   let discounted = if lifetime_spend > 1000.00 {

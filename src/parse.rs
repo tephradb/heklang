@@ -2791,7 +2791,7 @@ impl Parser {
     /// initialiser reading a `state` is not available until the fold has run, so that
     /// one stays an ordinary body statement and `deferred` remembers its slot for the
     /// `let`s below it. The two are indistinguishable to anything but a filter, since
-    /// nothing between step 2 and step 7 changes what the prologue could have read.
+    /// nothing between step 2 and step 8 changes what the prologue could have read.
     fn hoisted_let(
         &mut self,
         lower: &mut Lower,

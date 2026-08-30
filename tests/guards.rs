@@ -520,3 +520,24 @@ fn a_guard_argument_cannot_read_a_state() {
         "`course` is taken from `seen`, which has not folded yet"
     );
 }
+
+/// A guard is its own name space, the second one reachable from source. `docs/declarations.md`
+/// claims a command and a guard may share a name, so here is the claim.
+#[test]
+fn a_command_and_a_guard_may_share_a_name() {
+    let source = format!(
+        "{EVENTS}command Same(course: String) {{
+  guard Same {{ course }}
+  emit @student.subscribed {{ course, student: \"s\" }}
+}}
+guard Same(course: String) {{
+  state d: Bool = fold false
+    on @course.defined(course) => true
+  if !d {{ return reject(\"undefined_course\", \"no such course\") }}
+}}
+"
+    );
+    let program = program(&source);
+    assert!(program.command("Same").is_some());
+    assert!(program.guard("Same").is_some());
+}

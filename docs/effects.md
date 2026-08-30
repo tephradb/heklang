@@ -118,8 +118,9 @@ each having a slightly different one.
 
 An arm's prologue is **`state` alone**. A command hoists a leading `let` so that a filter can name
 it; an arm's filters have the trigger binding instead, so a `let` in an arm is an ordinary body
-statement and may call out. There is no `guard` either, because an effect has no append condition to
-build: `docs/commands.md` has what one is and why a `state` declares it.
+statement and may call out. There is no `guard` either, in either of its shapes, because an effect
+has no append condition to build and no `Outcome` to refuse with: `docs/commands.md` has what a
+condition is and why a `state` declares it, and `docs/guards.md` has the named form.
 
 ## 3. The fold stops at the trigger's own position, inclusive
 

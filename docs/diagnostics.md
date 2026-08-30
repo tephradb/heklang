@@ -210,6 +210,7 @@ be the whole of it:
 | `erase-order` | rule 9: a `reveal` reachable from an `erase` |
 | `test-shape` | a test body out of order, or an expectation its action cannot produce |
 | `recursive-fn` | a `fn` that calls itself |
+| `recursive-guard` | a guard that names itself |
 | `self-trigger` | an effect that can trigger itself |
 | `const-cycle` | a `const` that names itself |
 

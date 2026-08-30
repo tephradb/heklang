@@ -67,7 +67,9 @@ the condition. So the two keywords are not two spellings of one idea:
 Naming both `let` would leave the thing that decides whether concurrent appends conflict looking
 exactly like the thing that shortens an expression. The cost of keeping them apart is one word.
 
-**`guard` is a `state` that binds nothing.** Not by analogy; it is the same call:
+**A `guard` also declares slices, and usually declares folds too.** `guard <Name> { args }` names a
+proposition whose own folds join this command's condition; the raw `guard @order.placed(id)` form is
+a `state` that binds nothing, and is the same call:
 
 ```rust
 pub fn guard(&mut self, event: EventPath, filters: Vec<Filter>) -> SliceId {
@@ -75,8 +77,7 @@ pub fn guard(&mut self, event: EventPath, filters: Vec<Filter>) -> SliceId {
 }
 ```
 
-Use it when the decision depends on a slice being *empty* and there is no value to keep. See
-"`guard` is rarely what you want" below, which is a stronger claim than it sounds.
+`docs/guards.md` has both, and "`guard` names a proposition" below has when to reach for which.
 
 **Rejected: `let name = fold ...`.** It is one keyword instead of two, and it hides the append
 condition inside the same syntax as arithmetic. A reader scanning for what a command conflicts on
@@ -97,13 +98,18 @@ Fixed, and worth knowing because it explains every scoping rule below:
 5. `after` is taken: the log length *before* the fold;
 6. **the fold** runs, one pass over the log, applying every matching slice per record in declaration
    order;
-7. **the body** runs, appending into an emit buffer;
-8. the outcome and the `AppendCondition` are returned together.
+7. **the guards' decisions** run, in the order the guards are written (`docs/guards.md`);
+8. **the body** runs, appending into an emit buffer;
+9. the outcome and the `AppendCondition` are returned together.
 
-One pass, not one per `state`: ten folds over a million events read the log once.
+One pass, not one per `state`: ten folds over a million events read the log once, and a guard adds
+folds rather than reads.
+
+Step 7 is why a `guard` is a declaration rather than a statement. A guard's folds happen at step 6
+with every other, its decision at step 7, and neither straddles the two.
 
 **A `let` is hoisted only when it can be.** Step 2 runs before the fold, so a `let` whose initialiser
-reads a `state` has nothing to read, and that one stays an ordinary body statement at step 7 instead.
+reads a `state` has nothing to read, and that one stays an ordinary body statement at step 8 instead.
 It applies transitively: a `let` reading such a `let` stays with it.
 
 ```
@@ -112,11 +118,11 @@ state open: Int = fold 0
 state shut: Int = fold 0
   on @order.cancelled(customer_id) => shut + 1
 
-let live = open - shut          // step 7, after the fold, because it reads a state
+let live = open - shut          // step 8, after the fold, because it reads a state
 ```
 
 The two placements are indistinguishable except to a filter, because nothing between step 2 and step
-7 changes what the prologue could have read. So the rule costs an author nothing to not know, which
+8 changes what the prologue could have read. So the rule costs an author nothing to not know, which
 is the point: writing `let live = open - shut` under the folds means what it looks like it means.
 
 **A seed may not read a `state` either**, and that one is rejected rather than deferred. Step 4 runs
@@ -209,19 +215,29 @@ if refusal.is_some() {
 
 `docs/functions.md` has the rule and why the type is spellable in a `fn` signature and nowhere else.
 
-## `guard` is rarely what you want
+## `guard` names a proposition
 
-A real 26-command application uses `guard` **zero times** and `state` 56 times.
+The commoner shape by far, and it has its own document: `docs/guards.md`.
 
-That is not an accident of style. A `state` fold already contributes its slice, so a command that
-folds `@order.placed(order_id)` to decide whether an order exists has *already* declared that slice
-as its conflict boundary. Writing `guard @order.placed(order_id)` beside it adds a second, identical
-slice and no safety.
+```
+guard CourseIsDefined { course }
+guard StudentIsRegistered { student }
+```
 
-`guard` earns its place only when the decision needs a slice in the boundary that nothing folds: the
-one counter-example in either tree guards `@order.placed(order_id)` while folding on other fields.
-So it is not a construct that *only* misleads, and it stays; but reach for `state` first, and add a
-`guard` when you can say which slice it adds that no fold already covers.
+Each names a declared proposition about the log, folds it, and refuses if it does not hold. The
+guards' slices join this command's condition, so the boundary is the union of what it guards, and
+the order on the page is the precedence of the refusals.
+
+**The raw form stays, and it is the rare one.** `guard @order.placed(order_id)` adds slices to the
+boundary and binds nothing. A `state` fold already contributes its slice, so a command that folds
+`@order.placed(order_id)` to decide whether an order exists has *already* declared that slice as its
+conflict boundary, and writing `guard @order.placed(order_id)` beside it adds a second, identical
+slice and no safety. It earns its place only when the decision needs a slice in the boundary that
+nothing folds: the one counter-example in either tree guards `@order.placed(order_id)` while folding
+on other fields.
+
+So: name a guard when the proposition has a refusal, reach for `state` when the value is this
+command's own, and write raw slices when you can say which slice they add that no fold covers.
 
 ## What a command may not do
 
