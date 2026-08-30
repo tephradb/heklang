@@ -4,8 +4,8 @@ use std::fmt;
 
 use uuid::Uuid;
 
-use crate::harness::{Harness, Reply, Request};
-use crate::host::{AppendCondition, Predicate};
+use crate::harness::{Harness, Reply};
+use crate::host::{AppendCondition, Attempt, Host, Log, Predicate, Query, Request};
 use crate::ir::{
     Absent, Assign, BinOp, Builtin, Command, Effect, EntityDef, EnvField, EventPath, Expr, ExprId,
     Exprs, Function, Ident, Iter, Number, Program, Projector, Return, Slice, Slot, Span, Stmt,
@@ -373,11 +373,21 @@ impl Store {
     }
 }
 
-pub struct Interpreter<'a> {
+/// What left, and what rule 5 absorbed on the way. Counted here rather than on the
+/// host because the retry loop is heklang's: a host performs one attempt.
+#[derive(Debug, Clone, Default)]
+struct Traffic {
+    sent: Vec<Request>,
+    performed: usize,
+    absorbed: usize,
+}
+
+pub struct Interpreter<'a, H = Harness> {
     program: &'a Program,
-    /// The log, the key store and the network. Everything the interpreter did not
-    /// compute for itself lives here.
-    host: Harness,
+    /// The log, the clock, the key store and the network. Everything the interpreter
+    /// did not compute for itself.
+    host: H,
+    traffic: Traffic,
     lines: Vec<String>,
     /// What the effects did to the world, in order. `docs/testing.md` rule 7 asserts
     /// against this, and it is the whole of what an effect produces. Not part of the
@@ -385,22 +395,16 @@ pub struct Interpreter<'a> {
     trace: Vec<Effectful>,
 }
 
-impl<'a> Interpreter<'a> {
+/// The harness's own affordances: seeding a log, scripting a reply and shredding a key
+/// are how a test writes a world, and `docs/testing.md` section 3 is where the language
+/// spells them. A real host is handed one that already exists.
+impl<'a> Interpreter<'a, Harness> {
     pub fn new(program: &'a Program) -> Self {
-        Self {
-            program,
-            host: Harness::default(),
-            lines: Vec::new(),
-            trace: Vec::new(),
-        }
+        Self::with_host(program, Harness::default())
     }
 
     pub fn with_log(program: &'a Program, log: impl IntoIterator<Item = Event>) -> Self {
-        let mut interpreter = Self::new(program);
-        for event in log {
-            interpreter.append(event);
-        }
-        interpreter
+        Self::with_host(program, Harness::with_log(log))
     }
 
     pub fn log(&self) -> &[Record] {
@@ -413,7 +417,7 @@ impl<'a> Interpreter<'a> {
         self.host.push(event);
     }
 
-    /// Queues the replies one URL will answer with, as hekla's own test harness does.
+    /// Queues the replies one URL will answer with.
     pub fn script(&mut self, url: &str, replies: impl IntoIterator<Item = Reply>) {
         self.host.script(url, replies);
     }
@@ -421,22 +425,41 @@ impl<'a> Interpreter<'a> {
     /// Marks a subject erased without an effect having done it, which is the case rule
     /// 12's message is about: the erase is usually not local.
     pub fn erase_subject(&mut self, subject: &str, id: &str) {
-        self.host.erase(subject, id);
+        self.host.erase_subject(subject, id);
+    }
+}
+
+impl<'a, H: Host> Interpreter<'a, H> {
+    /// A program against a world that already exists.
+    pub fn with_host(program: &'a Program, host: H) -> Self {
+        Self {
+            program,
+            host,
+            traffic: Traffic::default(),
+            lines: Vec::new(),
+            trace: Vec::new(),
+        }
     }
 
-    /// HTTP calls actually performed, so a replay can be shown not re-firing them.
-    /// Every request that actually left, including the attempts rule 5 absorbed.
+    /// The world this ran against, so an embedder can read back what its own host
+    /// recorded. Shared: the interpreter is still using it.
+    pub fn host(&self) -> &H {
+        &self.host
+    }
+
+    /// Every request that actually left, including the attempts rule 5 absorbed. Not
+    /// the host's to report: the loop that made them is heklang's.
     pub fn requests(&self) -> &[Request] {
-        self.host.requests()
+        &self.traffic.sent
     }
 
     pub fn http_calls(&self) -> usize {
-        self.host.performed()
+        self.traffic.performed
     }
 
     /// Retryable responses the runtime absorbed, which the handler never saw (rule 5).
     pub fn absorbed(&self) -> usize {
-        self.host.absorbed()
+        self.traffic.absorbed
     }
 
     /// `log` output. Not journaled (rule 10), so a replay adds to it again.
@@ -474,7 +497,7 @@ impl<'a> Interpreter<'a> {
         position: u64,
         journal: &mut Journal,
     ) -> Result<Invocation, Error> {
-        let Some(record) = self.host.record(position) else {
+        let Some(record) = self.host.record(position)? else {
             return Err(ErrorKind::NoSuchPosition(position).into());
         };
         // Rule 1: one event selects exactly one arm, so this is a lookup.
@@ -502,13 +525,16 @@ impl<'a> Interpreter<'a> {
         }
         // Rule 3: the fold stops at the trigger's own position, inclusive, so state is
         // a pure function of the log prefix and that position, and counts the trigger.
-        let prefix = &self.host.records()[..=position as usize];
+        let query = Query {
+            slices: predicates,
+            upto: Some(position),
+        };
         fold(
             program,
             &arm.exprs,
+            &self.host,
+            &query,
             &arm.slices,
-            &predicates,
-            prefix,
             &mut frame,
         )?;
 
@@ -517,12 +543,13 @@ impl<'a> Interpreter<'a> {
             program: self.program,
             host: &mut self.host,
             journal,
+            traffic: &mut self.traffic,
             lines: &mut self.lines,
             trace: &mut self.trace,
             used: &mut used,
         };
         if let Some(slot) = arm.now {
-            let at = ctx.now();
+            let at = ctx.now()?;
             frame.set(slot, Value::Timestamp(at))?;
         }
 
@@ -556,27 +583,29 @@ impl<'a> Interpreter<'a> {
     /// stops the walk, because a wedged invocation does not advance.
     pub fn drive(&mut self, effect: &str) -> Result<Counts, Error> {
         let mut counts = Counts::default();
-        let start = self.host.head() as usize;
+        let start = self.host.head()? as usize;
         // One entry per event the walk visits. Everything already in the log is a step
         // zero, and an event appended while handling one at step `d` is a `d + 1`.
         let mut steps = vec![0u32; start];
         let mut position = 0u64;
 
-        while position < self.host.head() {
+        while position < self.host.head()? {
             // One journal per invocation: it is the memory of this position's calls,
             // and nothing carries between positions.
             let mut journal = Journal::default();
-            let before = self.host.head();
+            let before = self.host.head()?;
             let outcome = self.deliver(effect, position, &mut journal);
 
-            if self.host.head() > before {
+            if self.host.head()? > before {
                 let step = steps[position as usize] + 1;
-                steps.resize(self.host.head() as usize, step);
+                steps.resize(self.host.head()? as usize, step);
                 if step > CASCADE {
-                    let events = self.host.records()[start..]
-                        .iter()
-                        .map(|record| record.event.path.to_string())
-                        .collect();
+                    let mut events = Vec::new();
+                    for position in start as u64..self.host.head()? {
+                        if let Some(record) = self.host.record(position)? {
+                            events.push(record.event.path.to_string());
+                        }
+                    }
                     return Err(ErrorKind::Cascade {
                         effect: effect.to_string(),
                         events,
@@ -614,8 +643,24 @@ impl<'a> Interpreter<'a> {
     }
 
     fn fold_into(&self, projector: &Projector) -> Result<Store, Error> {
+        let mut slices: Vec<Predicate> = Vec::new();
+        for handler in &projector.handlers {
+            let slice = Predicate::new(handler.event.clone(), Vec::new());
+            // Two handlers may share a path, and a host looping slices outer would
+            // otherwise visit one record twice.
+            if !slices.contains(&slice) {
+                slices.push(slice);
+            }
+        }
+        let query = Query { slices, upto: None };
+
         let mut store = Store::default();
-        for record in self.host.records() {
+        let mut records = Vec::new();
+        self.host.read(&query, &mut |record| {
+            records.push(record.clone());
+            Ok(())
+        })?;
+        for record in &records {
             for handler in &projector.handlers {
                 if handler.event != record.event.path {
                     continue;
@@ -666,7 +711,7 @@ impl<'a> Interpreter<'a> {
 
 fn execute(
     program: &Program,
-    host: &mut Harness,
+    host: &mut dyn Host,
     command: &Command,
     args: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
 ) -> Result<Execution, Error> {
@@ -692,13 +737,17 @@ fn execute(
         frame.set(state.slot, value)?;
     }
 
-    let after = host.head();
+    let after = host.head()?;
+    let query = Query {
+        slices: predicates,
+        upto: None,
+    };
     fold(
         program,
         &command.exprs,
+        host,
+        &query,
         &command.slices,
-        &predicates,
-        host.records(),
         &mut frame,
     )?;
 
@@ -719,7 +768,7 @@ fn execute(
 
     let condition = AppendCondition {
         after,
-        slices: predicates,
+        slices: query.slices,
     };
 
     let outcome = match ret {
@@ -734,9 +783,7 @@ fn execute(
     // Emitted events are already validated at the emit site, where each field still
     // has an expression to point a span at.
     if let Outcome::Ok(events) = &outcome {
-        for event in events {
-            host.push(event.clone());
-        }
+        host.append(events, &condition)?;
     }
 
     Ok(Execution { outcome, condition })
@@ -808,17 +855,20 @@ fn resolve(
         .collect()
 }
 
+/// The query and the slices are parallel by construction: `resolve` makes one
+/// predicate per slice, in order. The host narrows, and this re-checks, because a
+/// store that can only narrow approximately is still correct.
 fn fold(
     program: &Program,
     exprs: &Exprs,
+    log: &dyn Log,
+    query: &Query,
     slices: &[Slice],
-    predicates: &[Predicate],
-    log: &[Record],
     frame: &mut Frame,
 ) -> Result<(), Error> {
-    for record in log {
+    log.read(query, &mut |record| {
         let event = &record.event;
-        for (slice, predicate) in slices.iter().zip(predicates) {
+        for (slice, predicate) in slices.iter().zip(&query.slices) {
             if !matches(predicate, event)? {
                 continue;
             }
@@ -834,8 +884,8 @@ fn fold(
                 frame.set(update.slot, value)?;
             }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 fn matches(predicate: &Predicate, event: &Event) -> Result<bool, Error> {
@@ -1097,7 +1147,7 @@ fn exec_stmt(
                 return Err(Error::at(ErrorKind::BadSubject(value.ty()), *span));
             };
             match sink {
-                Sink::Effect(ctx) => ctx.erase(subject, &id),
+                Sink::Effect(ctx) => ctx.erase(subject, &id)?,
                 _ => return Err(Error::at(ErrorKind::MalformedIr, *span)),
             }
             Ok(Flow::Next)
@@ -2452,6 +2502,18 @@ fn uuid_derive(args: &[Value]) -> Result<Value, ErrorKind> {
 /// is the bug, and depth is what tells them apart. Volume never could.
 const CASCADE: u32 = 32;
 
+/// How many attempts the runtime makes before a call wedges. Retryable statuses and
+/// transport errors are absorbed here, so the handler never sees one (rule 5). The
+/// policy is the language's and the attempt is the host's: two hosts answering one
+/// program differently is exactly what rule 5 exists to rule out.
+const ATTEMPTS: usize = 4;
+
+/// 408, 425, 429 and any 5xx each name a condition that clears on its own, with the
+/// same request.
+fn is_retryable(status: u16) -> bool {
+    matches!(status, 408 | 425 | 429) || status >= 500
+}
+
 /// A recorded impure call. `reveal` and `log` are absent, which is rule 10's
 /// unjournaled set being a property of the type rather than a marker in the syntax.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2524,8 +2586,9 @@ impl Counts {
 /// `eval` because an effect builtin is an expression.
 struct Effects<'a> {
     program: &'a Program,
-    host: &'a mut Harness,
+    host: &'a mut dyn Host,
     journal: &'a mut Journal,
+    traffic: &'a mut Traffic,
     lines: &'a mut Vec<String>,
     trace: &'a mut Vec<Effectful>,
     /// How many times each call has been made so far in this invocation, so a repeated
@@ -2546,6 +2609,7 @@ impl<'a> Effects<'a> {
             program: self.program,
             host: self.host,
             journal: self.journal,
+            traffic: self.traffic,
             lines: self.lines,
             trace: self.trace,
             used: self.used,
@@ -2574,14 +2638,14 @@ impl Effects<'_> {
 
     /// Rule 11: journaled, and pinned once per invocation rather than once per call,
     /// which is where this diverges from hekla.
-    fn now(&mut self) -> i64 {
+    fn now(&mut self) -> Result<i64, Error> {
         let (ordinal, found) = self.recorded("now()");
         if let Some(Recorded::Now(at)) = found {
-            return at;
+            return Ok(at);
         }
         let at = self.host.now();
         self.record("now()", ordinal, Recorded::Now(at));
-        at
+        Ok(at)
     }
 
     /// The journal key is the verb, the URL and the body, and deliberately **not** the
@@ -2604,7 +2668,7 @@ impl Effects<'_> {
         }
 
         let sent = body.clone();
-        let Some((status, body)) = self.host.call(builtin, url, body.clone(), headers) else {
+        let Some((status, body)) = self.send(builtin, url, body.clone(), headers) else {
             return Err(ErrorKind::Unreachable(url.to_string()));
         };
         // One entry per logical call, so the retries rule 5 absorbed do not show up as
@@ -2673,7 +2737,7 @@ impl Effects<'_> {
                 id,
                 inner,
             } => {
-                if self.host.erased(&subject, &id) {
+                if self.host.erased(&subject, &id)? {
                     return Err(Error::at(ErrorKind::Erased { field, subject, id }, span));
                 }
                 Ok(*inner)
@@ -2691,18 +2755,48 @@ impl Effects<'_> {
         }
     }
 
-    fn erase(&mut self, subject: &Ident, id: &str) {
+    fn erase(&mut self, subject: &Ident, id: &str) -> Result<(), Error> {
         let call = format!("erase {subject}={id}");
         let (ordinal, found) = self.recorded(&call);
         if found.is_some() {
-            return;
+            return Ok(());
         }
-        self.host.erase(subject, id);
+        self.host.erase(subject, id)?;
         self.trace.push(Effectful::Erase {
             subject: subject.clone(),
             id: id.to_string(),
         });
         self.record(&call, ordinal, Recorded::Erased);
+        Ok(())
+    }
+
+    /// Rule 5: a retryable status or a transport error is absorbed and retried with the
+    /// same request, so only a decidable result reaches the handler. `None` is every
+    /// attempt retryable, which wedges.
+    fn send(
+        &mut self,
+        builtin: Builtin,
+        url: &str,
+        body: Option<Json>,
+        headers: Json,
+    ) -> Option<(i64, Json)> {
+        let request = Request {
+            verb: builtin.name(),
+            url: url.to_string(),
+            body,
+            headers,
+        };
+        for _ in 0..ATTEMPTS {
+            self.traffic.performed += 1;
+            self.traffic.sent.push(request.clone());
+            match self.host.send(&request) {
+                Attempt::Response { status, body } if !is_retryable(status) => {
+                    return Some((i64::from(status), body));
+                }
+                _ => self.traffic.absorbed += 1,
+            }
+        }
+        None
     }
 }
 

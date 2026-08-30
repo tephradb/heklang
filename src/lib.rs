@@ -13,8 +13,8 @@ pub mod value;
 
 pub use build::Builder;
 pub use diagnostic::{Code, Diagnostic, Related, Severity};
-pub use harness::{Harness, Reply, Request};
-pub use host::{AppendCondition, Predicate};
+pub use harness::{Harness, Reply};
+pub use host::{AppendCondition, Attempt, Clock, Host, Http, Keys, Log, Predicate, Query, Request};
 pub use interp::{
     Counts, Effectful, Error, ErrorKind, Execution, Interpreter, Invocation, Journal, Outcome,
     Recorded, Row, Store,
