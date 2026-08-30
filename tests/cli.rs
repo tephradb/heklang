@@ -484,3 +484,59 @@ fn a_long_hint_wraps_under_itself() {
         "the continuation lines up under the text, not under the `=`: {text}"
     );
 }
+
+/// A guard's slices join the boundary of whatever names it, transitively, so the append
+/// condition stops being something a reader can take off the page. `check` prints the
+/// closure, which is what makes two commands' boundaries comparable at all: a test
+/// cannot ask (`docs/testing.md` §8).
+#[test]
+fn check_names_what_a_command_guards() {
+    let source = "\
+event @shop.connected { shop_id: Int }
+event @plan.created { plan_id: Int, shop_id: Int }
+event @plan.archived { plan_id: Int, shop_id: Int }
+
+guard ShopIsConnected(shop_id: Int) {
+  state connected: Bool = fold false
+    on @shop.connected(shop_id) => true
+  if !connected {
+    return reject(\"shop_not_found\", \"shop does not exist\")
+  }
+}
+
+guard PlanExists(plan_id: Int, shop_id: Int) {
+  guard ShopIsConnected { shop_id }
+  state exists: Bool = fold false
+    on @plan.created(plan_id, shop_id) => true
+  if !exists {
+    return reject(\"plan_not_found\", \"no such plan\")
+  }
+}
+
+command ArchivePlan(plan_id: Int, shop_id: Int) {
+  guard PlanExists { plan_id, shop_id }
+  emit @plan.archived { plan_id, shop_id }
+}
+";
+    let root = project("guarded", &[("app.hk", source)]);
+    let output = hek(&["check", root.to_str().expect("a utf-8 path")]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("2 guards"), "{text}");
+    // `ShopIsConnected` is two levels down and still in the boundary.
+    assert!(
+        text.contains("ArchivePlan guards PlanExists, ShopIsConnected"),
+        "{text}"
+    );
+}
+
+/// A program with no guards prints what it always printed.
+#[test]
+fn check_says_nothing_about_boundaries_when_nothing_guards() {
+    let root = project("unguarded", &[("events.hk", EVENTS)]);
+    let output = hek(&["check", root.to_str().expect("a utf-8 path")]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!stdout(&output).contains("guards"), "{}", stdout(&output));
+}

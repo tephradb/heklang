@@ -119,6 +119,7 @@ fn run() -> Result<bool, String> {
     let s = if files == 1 { "" } else { "s" };
     println!("checked {files} file{s}");
     println!("  {}", counts(&program));
+    boundaries(&program);
 
     if command == Command::Check {
         return Ok(true);
@@ -155,6 +156,47 @@ fn suite(program: &Program) -> bool {
     failed == 0
 }
 
+/// What each command guards, transitively. A guard's slices join the boundary of what
+/// names it, so once guards compose the append condition is a closure rather than
+/// something a reader can take off the page. Printing it is what pays for that: two
+/// commands meant to conflict on the same events can be compared here, which is the one
+/// question `docs/testing.md` §8 deliberately keeps out of a test.
+///
+/// Silent when nothing guards, so a program without guards prints what it always did.
+fn boundaries(program: &Program) {
+    let named: Vec<&heklang::Command> = program
+        .commands
+        .iter()
+        .filter(|command| !command.calls.is_empty())
+        .collect();
+    if named.is_empty() {
+        return;
+    }
+    println!();
+    for command in named {
+        let mut reached: Vec<String> = Vec::new();
+        for call in &command.calls {
+            through(program, &call.guard, &mut reached);
+        }
+        println!("  {} guards {}", command.name, reached.join(", "));
+    }
+}
+
+/// A guard and everything it guards, first named first, each once however many paths
+/// reach it.
+fn through(program: &Program, name: &str, out: &mut Vec<String>) {
+    if out.iter().any(|seen| seen == name) {
+        return;
+    }
+    out.push(name.to_string());
+    let Some(guard) = program.guard(name) else {
+        return;
+    };
+    for call in &guard.calls {
+        through(program, &call.guard, out);
+    }
+}
+
 /// What the program declares, so a run says something even when there are no tests.
 fn counts(program: &Program) -> String {
     let mut parts = Vec::new();
@@ -165,6 +207,7 @@ fn counts(program: &Program) -> String {
     };
     count(program.events.len(), "event", "events");
     count(program.commands.len(), "command", "commands");
+    count(program.guards.len(), "guard", "guards");
     count(program.projectors.len(), "projector", "projectors");
     count(program.effects.len(), "effect", "effects");
     count(program.functions.len(), "fn", "fns");
