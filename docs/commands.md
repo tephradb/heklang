@@ -30,7 +30,12 @@ is what the runtime appends against:
 ```rust
 pub struct AppendCondition {
     pub after: u64,
-    pub slices: Vec<SliceId>,
+    pub slices: Vec<Predicate>,
+}
+
+pub struct Predicate {
+    pub event: EventPath,
+    pub filters: Vec<(Ident, Value)>,
 }
 ```
 
@@ -38,6 +43,15 @@ Every run returns one of those beside its outcome, so the read set is observable
 the Dynamic Consistency Boundary: **what you folded is what you conflict on.** If another writer
 appends into one of those slices after position `after`, this append is rejected and retried against
 the new log.
+
+**A slice comes back resolved, not as a pointer.** `@order.placed(customer_id)` leaves as
+`@order.placed` narrowed to `customer_id = 7`, because a filter is an expression the command
+evaluated and "which slice" means nothing to a host that did not compile the program. Resolving is
+what makes the condition answerable: it is the same shape a tag query has, so the host that appends
+against it can also index on it.
+
+The filters are sorted by field name, so one slice is one predicate however it was written: two
+filters in either order narrow the same events and have no business comparing unequal.
 
 A `let` compiles to an assignment in the prologue. It produces no slice and contributes nothing to
 the condition. So the two keywords are not two spellings of one idea:

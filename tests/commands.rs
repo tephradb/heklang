@@ -71,6 +71,39 @@ fn a_state_puts_its_slices_in_the_append_condition() {
     assert_eq!(execution.condition.slices.len(), 2);
 }
 
+/// A slice is a predicate, not a pointer: it names the event and the values its
+/// filters resolved to, because "which slice" means nothing to a host that did not
+/// compile the program.
+#[test]
+fn a_slice_carries_the_values_it_was_narrowed_to() {
+    let program = program(COUNTING);
+    let mut interpreter = Interpreter::new(&program);
+    let execution = interpreter
+        .run(
+            "Place",
+            [
+                ("order_id", Value::uuid(ORDER)),
+                ("customer_id", Value::Int(7)),
+                ("total", Value::money(2_599, 2)),
+            ],
+        )
+        .expect("ran");
+    let paths: Vec<String> = execution
+        .condition
+        .slices
+        .iter()
+        .map(|slice| slice.event.to_string())
+        .collect();
+    assert_eq!(paths, ["@order.placed", "@order.cancelled"]);
+    for slice in &execution.condition.slices {
+        assert_eq!(
+            slice.filters,
+            [("customer_id".to_string(), Value::Int(7))],
+            "the filter resolved to the argument the run was given"
+        );
+    }
+}
+
 #[test]
 fn a_let_puts_nothing_in_the_append_condition() {
     let program = program(

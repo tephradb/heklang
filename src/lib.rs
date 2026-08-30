@@ -1,5 +1,6 @@
 pub mod build;
 pub mod diagnostic;
+pub mod host;
 pub mod interp;
 pub mod ir;
 pub mod lex;
@@ -11,9 +12,10 @@ pub mod value;
 
 pub use build::Builder;
 pub use diagnostic::{Code, Diagnostic, Related, Severity};
+pub use host::{AppendCondition, Predicate};
 pub use interp::{
-    AppendCondition, Counts, Effectful, Error, ErrorKind, Execution, Http, Interpreter, Invocation,
-    Journal, Outcome, Recorded, Reply, Request, Row, Store,
+    Counts, Effectful, Error, ErrorKind, Execution, Http, Interpreter, Invocation, Journal,
+    Outcome, Recorded, Reply, Request, Row, Store,
 };
 pub use ir::{
     Absent, Action, Arm, Assign, BinOp, Bind, Builtin, Command, ConstDef, Effect, EntityDef,

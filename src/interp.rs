@@ -4,10 +4,11 @@ use std::fmt;
 
 use uuid::Uuid;
 
+use crate::host::{AppendCondition, Predicate};
 use crate::ir::{
     Absent, Assign, BinOp, Builtin, Command, Effect, EntityDef, EnvField, EventPath, Expr, ExprId,
-    Exprs, Function, Ident, Iter, Number, Program, Projector, Return, Slice, SliceId, Slot, Span,
-    Stmt, Type, UnOp,
+    Exprs, Function, Ident, Iter, Number, Program, Projector, Return, Slice, Slot, Span, Stmt,
+    Type, UnOp,
 };
 use crate::scaled::{self, Rounding};
 use crate::value::{self, Event, Invoked, Json, Key, Record, Value};
@@ -16,12 +17,6 @@ use crate::value::{self, Event, Invoked, Json, Key, Record, Value};
 /// instant rather than the epoch.
 const EPOCH_MICROS: i64 = 1_577_836_800_000_000;
 const MINUTE_MICROS: i64 = 60_000_000;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppendCondition {
-    pub after: u64,
-    pub slices: Vec<SliceId>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Execution {
@@ -506,7 +501,7 @@ impl<'a> Interpreter<'a> {
         }
 
         run_assigns(program, &arm.exprs, &arm.prologue, &mut frame)?;
-        let filters = resolve_filters(program, &arm.exprs, &arm.slices, &mut frame)?;
+        let predicates = resolve(program, &arm.exprs, &arm.slices, &mut frame)?;
         for state in &arm.states {
             let value = eval(program, &arm.exprs, &mut frame, state.init, None)?;
             let value = fitted_at(value, &state.ty, arm.exprs.span(state.init))?;
@@ -519,7 +514,7 @@ impl<'a> Interpreter<'a> {
             program,
             &arm.exprs,
             &arm.slices,
-            &filters,
+            &predicates,
             prefix,
             &mut frame,
         )?;
@@ -711,7 +706,7 @@ fn execute(
     bind_params(command, &mut args, &mut frame)?;
     run_assigns(program, &command.exprs, &command.prologue, &mut frame)?;
 
-    let filters = resolve_filters(program, &command.exprs, &command.slices, &mut frame)?;
+    let predicates = resolve(program, &command.exprs, &command.slices, &mut frame)?;
     for state in &command.states {
         let value = eval(program, &command.exprs, &mut frame, state.init, None)?;
         let value = fitted_at(value, &state.ty, command.exprs.span(state.init))?;
@@ -723,7 +718,7 @@ fn execute(
         program,
         &command.exprs,
         &command.slices,
-        &filters,
+        &predicates,
         log,
         &mut frame,
     )?;
@@ -745,9 +740,7 @@ fn execute(
 
     let condition = AppendCondition {
         after,
-        slices: (0..command.slices.len())
-            .map(|index| SliceId(index as u32))
-            .collect(),
+        slices: predicates,
     };
 
     let outcome = match ret {
@@ -811,20 +804,27 @@ fn run_assigns(
     Ok(())
 }
 
-fn resolve_filters(
+/// Every slice with its filters evaluated. This runs before the fold, so what a run
+/// read is known whatever the body goes on to decide, which is why the condition comes
+/// back with a refusal too.
+fn resolve(
     program: &Program,
     exprs: &Exprs,
     slices: &[Slice],
     frame: &mut Frame,
-) -> Result<Vec<Vec<Value>>, Error> {
+) -> Result<Vec<Predicate>, Error> {
     slices
         .iter()
         .map(|slice| {
-            slice
+            let filters = slice
                 .filters
                 .iter()
-                .map(|filter| eval(program, exprs, frame, filter.value, None))
-                .collect()
+                .map(|filter| {
+                    let value = eval(program, exprs, frame, filter.value, None)?;
+                    Ok((filter.field.clone(), value))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            Ok(Predicate::new(slice.event.clone(), filters))
         })
         .collect()
 }
@@ -833,14 +833,14 @@ fn fold(
     program: &Program,
     exprs: &Exprs,
     slices: &[Slice],
-    filters: &[Vec<Value>],
+    predicates: &[Predicate],
     log: &[Record],
     frame: &mut Frame,
 ) -> Result<(), Error> {
     for record in log {
         let event = &record.event;
-        for (index, slice) in slices.iter().enumerate() {
-            if slice.event != event.path || !matches(slice, &filters[index], event)? {
+        for (slice, predicate) in slices.iter().zip(predicates) {
+            if !matches(predicate, event)? {
                 continue;
             }
 
@@ -859,9 +859,12 @@ fn fold(
     Ok(())
 }
 
-fn matches(slice: &Slice, filters: &[Value], event: &Event) -> Result<bool, Error> {
-    for (filter, expected) in slice.filters.iter().zip(filters) {
-        if field(event, &filter.field)? != expected {
+fn matches(predicate: &Predicate, event: &Event) -> Result<bool, Error> {
+    if predicate.event != event.path {
+        return Ok(false);
+    }
+    for (name, expected) in &predicate.filters {
+        if field(event, name)? != expected {
             return Ok(false);
         }
     }
