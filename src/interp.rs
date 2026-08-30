@@ -4,8 +4,10 @@ use std::fmt;
 
 use uuid::Uuid;
 
-use crate::harness::{Harness, Reply};
-use crate::host::{AppendCondition, Attempt, Host, Log, Predicate, Query, Request};
+use crate::harness::{Harness, Journal, Reply};
+use crate::host::{
+    AppendCondition, Attempt, Calls, Host, Log, Predicate, Query, Recorded, Request,
+};
 use crate::ir::{
     Absent, Assign, BinOp, Builtin, Command, Effect, EntityDef, EnvField, EventPath, Expr, ExprId,
     Exprs, Function, Ident, Iter, Number, Program, Projector, Return, Slice, Slot, Span, Stmt,
@@ -255,6 +257,15 @@ impl Error {
         }
     }
 
+    /// Fills the span in when the error has none, which is the case for anything a
+    /// host raised: it knows what went wrong and not where it was asked from.
+    fn located(mut self, span: Span) -> Self {
+        if self.span == Span::default() {
+            self.span = span;
+        }
+        self
+    }
+
     fn in_module(mut self, module: Option<&str>) -> Self {
         if self.module.is_none() {
             self.module = module.map(str::to_string);
@@ -495,7 +506,7 @@ impl<'a, H: Host> Interpreter<'a, H> {
         &mut self,
         effect: &str,
         position: u64,
-        journal: &mut Journal,
+        journal: &mut dyn Calls,
     ) -> Result<Invocation, Error> {
         let target = self
             .program
@@ -510,7 +521,7 @@ impl<'a, H: Host> Interpreter<'a, H> {
         &mut self,
         effect: &'a Effect,
         position: u64,
-        journal: &mut Journal,
+        journal: &mut dyn Calls,
     ) -> Result<Invocation, Error> {
         let Some(record) = self.host.record(position)? else {
             return Err(ErrorKind::NoSuchPosition(position).into());
@@ -1688,7 +1699,8 @@ fn eval(
             } else {
                 None
             };
-            ctx.http(*builtin, &url, body, headers).map_err(at)
+            ctx.http(*builtin, &url, body, headers)
+                .map_err(|err| err.located(span))
         }
         Expr::Invoke { command, args } => {
             let mut values: BTreeMap<Ident, Value> = BTreeMap::new();
@@ -2529,41 +2541,6 @@ fn is_retryable(status: u16) -> bool {
     matches!(status, 408 | 425 | 429) || status >= 500
 }
 
-/// A recorded impure call. `reveal` and `log` are absent, which is rule 10's
-/// unjournaled set being a property of the type rather than a marker in the syntax.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Recorded {
-    Response { status: i64, body: Json },
-    Invoked(Invoked),
-    Now(i64),
-    Erased,
-}
-
-/// Durable execution's memory: an impure call looks itself up here first and performs
-/// the real call only when nothing is recorded. The key describes the call, plus an
-/// ordinal for repeated identical calls, which is hekla's content-hash-and-
-/// disambiguator scheme with a key that prints. A real host hashes it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Journal {
-    entries: BTreeMap<(String, u32), Recorded>,
-}
-
-impl Journal {
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    pub fn calls(&self) -> impl Iterator<Item = (&str, &Recorded)> {
-        self.entries
-            .iter()
-            .map(|((call, _), recorded)| (call.as_str(), recorded))
-    }
-}
-
 /// What one delivery came to. `Ignored` is not an outcome: no arm selected the event,
 /// so there was no invocation to have one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2602,7 +2579,7 @@ impl Counts {
 struct Effects<'a> {
     program: &'a Program,
     host: &'a mut dyn Host,
-    journal: &'a mut Journal,
+    journal: &'a mut dyn Calls,
     traffic: &'a mut Traffic,
     lines: &'a mut Vec<String>,
     trace: &'a mut Vec<Effectful>,
@@ -2633,33 +2610,27 @@ impl<'a> Effects<'a> {
 }
 
 impl Effects<'_> {
-    fn recorded(&mut self, call: &str) -> (u32, Option<Recorded>) {
+    fn recorded(&mut self, call: &str) -> Result<(u32, Option<Recorded>), Error> {
         let counter = self.used.entry(call.to_string()).or_insert(0);
         let ordinal = *counter;
         *counter += 1;
-        let found = self
-            .journal
-            .entries
-            .get(&(call.to_string(), ordinal))
-            .cloned();
-        (ordinal, found)
+        let found = self.journal.recorded(call, ordinal)?;
+        Ok((ordinal, found))
     }
 
-    fn record(&mut self, call: &str, ordinal: u32, recorded: Recorded) {
-        self.journal
-            .entries
-            .insert((call.to_string(), ordinal), recorded);
+    fn record(&mut self, call: &str, ordinal: u32, recorded: Recorded) -> Result<(), Error> {
+        self.journal.record(call, ordinal, recorded)
     }
 
     /// Rule 11: journaled, and pinned once per invocation rather than once per call,
     /// which is where this diverges from hekla.
     fn now(&mut self) -> Result<i64, Error> {
-        let (ordinal, found) = self.recorded("now()");
+        let (ordinal, found) = self.recorded("now()")?;
         if let Some(Recorded::Now(at)) = found {
             return Ok(at);
         }
         let at = self.host.now();
-        self.record("now()", ordinal, Recorded::Now(at));
+        self.record("now()", ordinal, Recorded::Now(at))?;
         Ok(at)
     }
 
@@ -2672,19 +2643,19 @@ impl Effects<'_> {
         url: &str,
         body: Option<Json>,
         headers: Json,
-    ) -> Result<Value, ErrorKind> {
+    ) -> Result<Value, Error> {
         let call = match &body {
             Some(body) => format!("{} {url} {body}", builtin.name()),
             None => format!("{} {url}", builtin.name()),
         };
-        let (ordinal, found) = self.recorded(&call);
+        let (ordinal, found) = self.recorded(&call)?;
         if let Some(Recorded::Response { status, body }) = found {
             return Ok(Value::Response { status, body });
         }
 
         let sent = body.clone();
         let Some((status, body)) = self.send(builtin, url, body.clone(), headers) else {
-            return Err(ErrorKind::Unreachable(url.to_string()));
+            return Err(Error::new(ErrorKind::Unreachable(url.to_string())));
         };
         // One entry per logical call, so the retries rule 5 absorbed do not show up as
         // calls a test has to expect.
@@ -2700,7 +2671,7 @@ impl Effects<'_> {
                 status,
                 body: body.clone(),
             },
-        );
+        )?;
         Ok(Value::Response { status, body })
     }
 
@@ -2713,7 +2684,7 @@ impl Effects<'_> {
                 .collect(),
         );
         let call = format!("invoke {command} {rendered}");
-        let (ordinal, found) = self.recorded(&call);
+        let (ordinal, found) = self.recorded(&call)?;
         if let Some(Recorded::Invoked(outcome)) = found {
             return Ok(Value::Invoked(outcome));
         }
@@ -2734,7 +2705,7 @@ impl Effects<'_> {
             Outcome::Invalid(message) => Invoked::Invalid(message),
             Outcome::Reject { code, message } => Invoked::Reject { code, message },
         };
-        self.record(&call, ordinal, Recorded::Invoked(outcome.clone()));
+        self.record(&call, ordinal, Recorded::Invoked(outcome.clone()))?;
         Ok(Value::Invoked(outcome))
     }
 
@@ -2772,7 +2743,7 @@ impl Effects<'_> {
 
     fn erase(&mut self, subject: &Ident, id: &str) -> Result<(), Error> {
         let call = format!("erase {subject}={id}");
-        let (ordinal, found) = self.recorded(&call);
+        let (ordinal, found) = self.recorded(&call)?;
         if found.is_some() {
             return Ok(());
         }
@@ -2781,7 +2752,7 @@ impl Effects<'_> {
             subject: subject.clone(),
             id: id.to_string(),
         });
-        self.record(&call, ordinal, Recorded::Erased);
+        self.record(&call, ordinal, Recorded::Erased)?;
         Ok(())
     }
 

@@ -5,8 +5,8 @@
 use std::cell::RefCell;
 
 use heklang::{
-    AppendCondition, Attempt, Clock, Error, Event, EventPath, Harness, Http, Interpreter, Keys,
-    Log, Outcome, Predicate, Program, Query, Record, Request, Value, parse,
+    AppendCondition, Attempt, Calls, Clock, Error, Event, EventPath, Harness, Http, Interpreter,
+    Keys, Log, Outcome, Predicate, Program, Query, Record, Recorded, Reply, Request, Value, parse,
 };
 
 const PRELUDE: &str = "event @order.placed {
@@ -203,6 +203,70 @@ fn a_second_run_folds_what_the_first_appended() {
         matches!(second.outcome, Outcome::Reject { ref code, .. } if code == "one_per_customer")
     );
     assert_eq!(second.condition.after, 1, "the head moved");
+}
+
+// ---------------------------------------------------------------------------------
+// The journal, as somebody else's store.
+
+/// A journal that is not `Journal`. Flat rather than keyed, so nothing about it is
+/// borrowed from the harness's shape.
+#[derive(Default)]
+struct Ledger {
+    rows: Vec<(String, u32, Recorded)>,
+}
+
+impl Calls for Ledger {
+    fn recorded(&self, call: &str, ordinal: u32) -> Result<Option<Recorded>, Error> {
+        Ok(self
+            .rows
+            .iter()
+            .find(|(seen, at, _)| seen == call && *at == ordinal)
+            .map(|(_, _, recorded)| recorded.clone()))
+    }
+
+    fn record(&mut self, call: &str, ordinal: u32, recorded: Recorded) -> Result<(), Error> {
+        self.rows.push((call.to_string(), ordinal, recorded));
+        Ok(())
+    }
+}
+
+const NOTIFY: &str = "effect Notify {
+  on @order.placed as e {
+    let response = http.post(\"https://mail.example/confirm\", { \"order\": e.order_id })
+    if response.status >= 400 { fail(\"rejected\") }
+  }
+}";
+
+/// The whole of durable execution: the second delivery finds the call recorded and does
+/// not perform it again. That the journal is the host's store rather than heklang's is
+/// exactly what has to work for an effect to survive a restart.
+#[test]
+fn a_journal_the_host_owns_makes_the_second_delivery_a_replay() {
+    let program = program(NOTIFY);
+    let mut interpreter = Interpreter::new(&program);
+    interpreter.append(Event::new(
+        EventPath::new(["order", "placed"]),
+        [
+            ("order_id".to_string(), Value::uuid(ORDER)),
+            ("customer_id".to_string(), Value::Int(7)),
+            ("total".to_string(), Value::money(1, 2)),
+        ],
+    ));
+    interpreter.script("https://mail.example/confirm", [Reply::Status(200)]);
+
+    let mut ledger = Ledger::default();
+    interpreter.deliver("Notify", 0, &mut ledger).expect("ran");
+    assert_eq!(interpreter.http_calls(), 1);
+    assert_eq!(ledger.rows.len(), 1, "one call, one row");
+
+    interpreter
+        .deliver("Notify", 0, &mut ledger)
+        .expect("replayed");
+    assert_eq!(
+        interpreter.http_calls(),
+        1,
+        "the recorded response answered it, so nothing left twice"
+    );
 }
 
 // ---------------------------------------------------------------------------------

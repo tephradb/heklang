@@ -7,7 +7,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::host::{AppendCondition, Attempt, Clock, Http, Keys, Log, Query, Request};
+use crate::host::{
+    AppendCondition, Attempt, Calls, Clock, Http, Keys, Log, Query, Recorded, Request,
+};
 use crate::interp::{Error, ErrorKind};
 use crate::ir::Ident;
 use crate::value::{Event, Json, Record};
@@ -22,6 +24,44 @@ pub enum Reply {
     Status(u16),
     Body(u16, Json),
     Transport(String),
+}
+
+/// Durable execution's memory, in memory: an impure call looks itself up here first and
+/// performs the real call only when nothing is recorded.
+///
+/// One per invocation, which is why `deliver` takes it rather than the interpreter
+/// holding one. A host that wants a replay to survive a restart implements [`Calls`]
+/// over its own store instead.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Journal {
+    entries: BTreeMap<(String, u32), Recorded>,
+}
+
+impl Journal {
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn calls(&self) -> impl Iterator<Item = (&str, &Recorded)> {
+        self.entries
+            .iter()
+            .map(|((call, _), recorded)| (call.as_str(), recorded))
+    }
+}
+
+impl Calls for Journal {
+    fn recorded(&self, call: &str, ordinal: u32) -> Result<Option<Recorded>, Error> {
+        Ok(self.entries.get(&(call.to_string(), ordinal)).cloned())
+    }
+
+    fn record(&mut self, call: &str, ordinal: u32, recorded: Recorded) -> Result<(), Error> {
+        self.entries.insert((call.to_string(), ordinal), recorded);
+        Ok(())
+    }
 }
 
 /// A log, a key store and a network, none of them real.

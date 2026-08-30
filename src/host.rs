@@ -7,7 +7,7 @@
 
 use crate::interp::Error;
 use crate::ir::{EventPath, Ident};
-use crate::value::{Event, Json, Record, Value};
+use crate::value::{Event, Invoked, Json, Record, Value};
 
 /// One resolved read: an event path and the values its filters narrowed it to.
 ///
@@ -149,6 +149,28 @@ pub enum Attempt {
 /// answer the same program differently.
 pub trait Http {
     fn send(&mut self, request: &Request) -> Attempt;
+}
+
+/// A recorded impure call. `reveal` and `log` are absent, which is rule 10's
+/// unjournaled set being a property of the type rather than a marker in the syntax.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Recorded {
+    Response { status: i64, body: Json },
+    Invoked(Invoked),
+    Now(i64),
+    Erased,
+}
+
+/// Durable execution's memory for one invocation.
+///
+/// Separate from [`Host`] because it is per invocation rather than per world: `deliver`
+/// takes one, and nothing carries between positions. The key describes the call and
+/// prints, plus an ordinal for repeated identical calls; a host that would rather store
+/// a hash hashes exactly that string, which is what keeps the hash a host's business
+/// and the key the language's.
+pub trait Calls {
+    fn recorded(&self, call: &str, ordinal: u32) -> Result<Option<Recorded>, Error>;
+    fn record(&mut self, call: &str, ordinal: u32, recorded: Recorded) -> Result<(), Error>;
 }
 
 /// Everything the interpreter needs from the world outside it, apart from the journal:
