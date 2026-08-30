@@ -2,6 +2,7 @@ pub mod build;
 pub mod diagnostic;
 pub mod harness;
 pub mod host;
+pub mod inline;
 pub mod interp;
 pub mod ir;
 pub mod lex;

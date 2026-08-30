@@ -395,6 +395,18 @@ fn cases() -> Vec<(Code, String)> {
         (Code::ReturnShape, "fn f(a: Int) -> Int { return }\n"),
         (Code::TestShape, "test \"x\" { }\n"),
         (Code::RecursiveFn, "fn f(a: Int) -> Int { return f(a) }\n"),
+        (
+            Code::RecursiveGuard,
+            concat!(
+                "event @a.b { x: Int }\n",
+                "guard G(x: Int) {\n",
+                "  guard G { x }\n",
+                "  state s: Bool = fold false\n",
+                "    on @a.b(x) => true\n",
+                "  if !s { return reject(\"no\", \"no\") }\n",
+                "}\n",
+            ),
+        ),
         (Code::ConstCycle, "const A: Int = B\nconst B: Int = A\n"),
     ];
 

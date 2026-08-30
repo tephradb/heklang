@@ -83,6 +83,7 @@ pub enum Code {
 
     // Statements about the whole program, checked after every pass.
     RecursiveFn,
+    RecursiveGuard,
     SelfTrigger,
     ConstCycle,
 }
@@ -128,6 +129,7 @@ impl Code {
         Code::EraseOrder,
         Code::TestShape,
         Code::RecursiveFn,
+        Code::RecursiveGuard,
         Code::SelfTrigger,
         Code::ConstCycle,
     ];
@@ -171,6 +173,7 @@ impl Code {
             Code::EraseOrder => "erase-order",
             Code::TestShape => "test-shape",
             Code::RecursiveFn => "recursive-fn",
+            Code::RecursiveGuard => "recursive-guard",
             Code::SelfTrigger => "self-trigger",
             Code::ConstCycle => "const-cycle",
         }

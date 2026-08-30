@@ -4,6 +4,7 @@ use std::mem;
 
 use crate::build::Builder;
 use crate::diagnostic::{Code, Diagnostic, Related};
+use crate::inline;
 use crate::ir::{
     Absent, Action, Arm, BinOp, Bind, Builtin, Command, ConstDef, Effect, EntityDef, EntityField,
     EnumDef, EnvField, EventDef, EventPath, Expect, Expr, ExprId, Exprs, FieldDef, Filter,
@@ -695,8 +696,12 @@ impl Parser {
             tests: Vec::new(),
         };
         self.check_recursion(&program)?;
+        self.check_guards(&program)?;
         self.check_cycles(&program)?;
         self.check_zeros(&program)?;
+        // Guards are spliced before pass E, so a test runs the command the interpreter
+        // will: a `guard` is a compile-time copy and nothing downstream knows the word.
+        inline::splice(&mut program);
 
         // E: every test, against the finished program. Order is irrelevant here for
         // the same reason it is everywhere else: nothing a test names is scoped.
@@ -2576,6 +2581,20 @@ impl Parser {
                 lower.b.at(at);
                 lower.b.load(&field)
             };
+            // An argument becomes a prologue assignment, which runs before any fold, so
+            // this would read the other `state`'s seed rather than what it folds to. The
+            // same mistake a seed makes, rejected the same way.
+            if let Some((read, at)) = lower.b.state_read(value) {
+                return Err(self
+                    .err(
+                        Code::StateShape,
+                        format!("`{field}` is taken from `{read}`, which has not folded yet"),
+                        at,
+                    )
+                    .with_hint(format!(
+                        "a guard's arguments are evaluated before any fold runs, so this reads `{read}`'s own seed; pass a parameter, or a `let` above the declarations"
+                    )));
+            }
             args.push((field, value));
             if !self.eat_sym(Sym::Comma) {
                 break;
@@ -6539,6 +6558,41 @@ impl Parser {
         // not somewhere an editor can go. The path closes on the `fn` it started at,
         // which is already the primary span, so that link is not repeated here.
         for link in path.iter().filter_map(|name| program.function(name)) {
+            if link.span == span {
+                continue;
+            }
+            let related = Related::new(format!("`{}` is declared here", link.name), link.span);
+            error.related.push(match &link.module {
+                Some(module) => related.in_file(module),
+                None => related,
+            });
+        }
+        Err(match at.and_then(|def| def.module.as_ref()) {
+            Some(module) => error.in_file(module),
+            None => error,
+        })
+    }
+
+    /// A guard is spliced into what names it, so a cycle is a copy with no end. The
+    /// arguments are not consulted and could not be: the splice happens before anything
+    /// is evaluated, so `guard A { n: n + 1 }` inside `A` does not terminate either.
+    /// Runs after pass D, because the answer is in the bodies rather than the signatures.
+    fn check_guards(&self, program: &Program) -> Result<(), Diagnostic> {
+        let Some(path) = inline::cycle(program) else {
+            return Ok(());
+        };
+        let names: Vec<String> = path.iter().map(|name| format!("`{name}`")).collect();
+        let at = program.guard(&path[0]);
+        let span = at.map(|def| def.span).unwrap_or_default();
+        let mut error = Diagnostic::new(
+            Code::RecursiveGuard,
+            format!(
+                "{}: a guard is copied into what names it, so one that names itself has no end",
+                names.join(" guards ")
+            ),
+            span,
+        );
+        for link in path.iter().filter_map(|name| program.guard(name)) {
             if link.span == span {
                 continue;
             }

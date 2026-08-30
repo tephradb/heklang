@@ -430,6 +430,8 @@ impl Builder {
         self.calls.push(GuardCall {
             guard: guard.into(),
             args,
+            at_slice: self.slices.len(),
+            at_state: self.states.len(),
             span,
         });
     }

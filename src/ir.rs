@@ -602,6 +602,11 @@ pub struct Guard {
 pub struct GuardCall {
     pub guard: Ident,
     pub args: Vec<(Ident, ExprId)>,
+    /// How many slices and states the caller had declared when this was written, so the
+    /// splice puts the guard's own where the author put the guard. Source order is the
+    /// decision order, and it costs nothing to make the IR agree with it.
+    pub at_slice: usize,
+    pub at_state: usize,
     pub span: Span,
 }
 
@@ -672,6 +677,21 @@ pub struct Exprs {
 }
 
 impl Exprs {
+    /// How many nodes are in the arena, which is the offset the next splice shifts by.
+    pub fn len(&self) -> u32 {
+        self.nodes.len() as u32
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    /// Every node with its span, in arena order, so one arena can be appended to
+    /// another. See `src/inline.rs`.
+    pub fn entries(&self) -> impl Iterator<Item = (&Expr, Span)> {
+        self.nodes.iter().zip(self.spans.iter().copied())
+    }
+
     pub fn push(&mut self, expr: Expr, span: Span) -> ExprId {
         let id = ExprId(self.nodes.len() as u32);
         self.nodes.push(expr);
