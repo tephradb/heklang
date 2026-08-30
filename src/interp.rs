@@ -1,9 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::BTreeMap;
 use std::error;
 use std::fmt;
 
 use uuid::Uuid;
 
+use crate::harness::{Harness, Reply, Request};
 use crate::host::{AppendCondition, Predicate};
 use crate::ir::{
     Absent, Assign, BinOp, Builtin, Command, Effect, EntityDef, EnvField, EventPath, Expr, ExprId,
@@ -12,11 +13,6 @@ use crate::ir::{
 };
 use crate::scaled::{self, Rounding};
 use crate::value::{self, Event, Invoked, Json, Key, Record, Value};
-
-/// 2020-01-01T00:00:00Z, so a synthesised envelope timestamp reads as a plausible
-/// instant rather than the epoch.
-const EPOCH_MICROS: i64 = 1_577_836_800_000_000;
-const MINUTE_MICROS: i64 = 60_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Execution {
@@ -379,14 +375,13 @@ impl Store {
 
 pub struct Interpreter<'a> {
     program: &'a Program,
-    log: Vec<Record>,
-    /// The key store, modelled as a lifecycle: a subject is erased or it is not. That
-    /// is what rules 9 and 12 turn on. Ciphertext is not modelled; see `docs/effects.md`.
-    erased: BTreeSet<(Ident, String)>,
-    http: Http,
+    /// The log, the key store and the network. Everything the interpreter did not
+    /// compute for itself lives here.
+    host: Harness,
     lines: Vec<String>,
     /// What the effects did to the world, in order. `docs/testing.md` rule 7 asserts
-    /// against this, and it is the whole of what an effect produces.
+    /// against this, and it is the whole of what an effect produces. Not part of the
+    /// world: it is heklang's record of what it asked the world for.
     trace: Vec<Effectful>,
 }
 
@@ -394,9 +389,7 @@ impl<'a> Interpreter<'a> {
     pub fn new(program: &'a Program) -> Self {
         Self {
             program,
-            log: Vec::new(),
-            erased: BTreeSet::new(),
-            http: Http::default(),
+            host: Harness::default(),
             lines: Vec::new(),
             trace: Vec::new(),
         }
@@ -411,39 +404,39 @@ impl<'a> Interpreter<'a> {
     }
 
     pub fn log(&self) -> &[Record] {
-        &self.log
+        self.host.records()
     }
 
     /// Appends with a synthesised envelope. The id and timestamp are derived from the
     /// position so a run is reproducible; a real host stamps its own.
     pub fn append(&mut self, event: Event) {
-        append(&mut self.log, event);
+        self.host.push(event);
     }
 
     /// Queues the replies one URL will answer with, as hekla's own test harness does.
     pub fn script(&mut self, url: &str, replies: impl IntoIterator<Item = Reply>) {
-        self.http.script(url, replies);
+        self.host.script(url, replies);
     }
 
     /// Marks a subject erased without an effect having done it, which is the case rule
     /// 12's message is about: the erase is usually not local.
     pub fn erase_subject(&mut self, subject: &str, id: &str) {
-        self.erased.insert((subject.to_string(), id.to_string()));
+        self.host.erase(subject, id);
     }
 
     /// HTTP calls actually performed, so a replay can be shown not re-firing them.
     /// Every request that actually left, including the attempts rule 5 absorbed.
     pub fn requests(&self) -> &[Request] {
-        &self.http.sent
+        self.host.requests()
     }
 
     pub fn http_calls(&self) -> usize {
-        self.http.performed
+        self.host.performed()
     }
 
     /// Retryable responses the runtime absorbed, which the handler never saw (rule 5).
     pub fn absorbed(&self) -> usize {
-        self.http.absorbed
+        self.host.absorbed()
     }
 
     /// `log` output. Not journaled (rule 10), so a replay adds to it again.
@@ -481,7 +474,7 @@ impl<'a> Interpreter<'a> {
         position: u64,
         journal: &mut Journal,
     ) -> Result<Invocation, Error> {
-        let Some(record) = self.log.get(position as usize).cloned() else {
+        let Some(record) = self.host.record(position) else {
             return Err(ErrorKind::NoSuchPosition(position).into());
         };
         // Rule 1: one event selects exactly one arm, so this is a lookup.
@@ -509,7 +502,7 @@ impl<'a> Interpreter<'a> {
         }
         // Rule 3: the fold stops at the trigger's own position, inclusive, so state is
         // a pure function of the log prefix and that position, and counts the trigger.
-        let prefix = &self.log[..=position as usize];
+        let prefix = &self.host.records()[..=position as usize];
         fold(
             program,
             &arm.exprs,
@@ -522,10 +515,8 @@ impl<'a> Interpreter<'a> {
         let mut used = BTreeMap::new();
         let mut ctx = Effects {
             program: self.program,
-            log: &mut self.log,
+            host: &mut self.host,
             journal,
-            http: &mut self.http,
-            erased: &mut self.erased,
             lines: &mut self.lines,
             trace: &mut self.trace,
             used: &mut used,
@@ -565,24 +556,24 @@ impl<'a> Interpreter<'a> {
     /// stops the walk, because a wedged invocation does not advance.
     pub fn drive(&mut self, effect: &str) -> Result<Counts, Error> {
         let mut counts = Counts::default();
-        let start = self.log.len();
+        let start = self.host.head() as usize;
         // One entry per event the walk visits. Everything already in the log is a step
         // zero, and an event appended while handling one at step `d` is a `d + 1`.
         let mut steps = vec![0u32; start];
         let mut position = 0u64;
 
-        while (position as usize) < self.log.len() {
+        while position < self.host.head() {
             // One journal per invocation: it is the memory of this position's calls,
             // and nothing carries between positions.
             let mut journal = Journal::default();
-            let before = self.log.len();
+            let before = self.host.head();
             let outcome = self.deliver(effect, position, &mut journal);
 
-            if self.log.len() > before {
+            if self.host.head() > before {
                 let step = steps[position as usize] + 1;
-                steps.resize(self.log.len(), step);
+                steps.resize(self.host.head() as usize, step);
                 if step > CASCADE {
-                    let events = self.log[start..]
+                    let events = self.host.records()[start..]
                         .iter()
                         .map(|record| record.event.path.to_string())
                         .collect();
@@ -624,7 +615,7 @@ impl<'a> Interpreter<'a> {
 
     fn fold_into(&self, projector: &Projector) -> Result<Store, Error> {
         let mut store = Store::default();
-        for record in &self.log {
+        for record in self.host.records() {
             for handler in &projector.handlers {
                 if handler.event != record.event.path {
                     continue;
@@ -669,25 +660,13 @@ impl<'a> Interpreter<'a> {
 
         // Every failure below is inside this command, so the module is stamped once here
         // rather than at each raise site.
-        execute(self.program, &mut self.log, command, args).map_err(|err| err.in_module(module))
+        execute(self.program, &mut self.host, command, args).map_err(|err| err.in_module(module))
     }
-}
-
-/// Appends with a synthesised envelope, derived from the position so a run is
-/// reproducible. Free rather than a method, so an effect's `invoke` can append too.
-fn append(log: &mut Vec<Record>, event: Event) {
-    let position = log.len() as u64;
-    log.push(Record::new(
-        format!("0190d1a1-0000-7000-9000-{position:012}"),
-        position,
-        EPOCH_MICROS + position as i64 * MINUTE_MICROS,
-        event,
-    ));
 }
 
 fn execute(
     program: &Program,
-    log: &mut Vec<Record>,
+    host: &mut Harness,
     command: &Command,
     args: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
 ) -> Result<Execution, Error> {
@@ -695,7 +674,7 @@ fn execute(
     // Rule 11: the request's append time, pinned once before anything runs, so it is
     // well defined even for a command that goes on to append nothing.
     if let Some(slot) = command.now {
-        let at = EPOCH_MICROS + log.len() as i64 * MINUTE_MICROS;
+        let at = host.now();
         frame.set(slot, Value::Timestamp(at))?;
     }
 
@@ -713,13 +692,13 @@ fn execute(
         frame.set(state.slot, value)?;
     }
 
-    let after = log.len() as u64;
+    let after = host.head();
     fold(
         program,
         &command.exprs,
         &command.slices,
         &predicates,
-        log,
+        host.records(),
         &mut frame,
     )?;
 
@@ -756,7 +735,7 @@ fn execute(
     // has an expression to point a span at.
     if let Outcome::Ok(events) = &outcome {
         for event in events {
-            append(log, event.clone());
+            host.push(event.clone());
         }
     }
 
@@ -2473,10 +2452,6 @@ fn uuid_derive(args: &[Value]) -> Result<Value, ErrorKind> {
 /// is the bug, and depth is what tells them apart. Volume never could.
 const CASCADE: u32 = 32;
 
-/// How many attempts the runtime makes before a call wedges. Retryable statuses and
-/// transport errors are absorbed here, so the handler never sees one (rule 5).
-const ATTEMPTS: usize = 4;
-
 /// A recorded impure call. `reveal` and `log` are absent, which is rule 10's
 /// unjournaled set being a property of the type rather than a marker in the syntax.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2510,87 +2485,6 @@ impl Journal {
             .iter()
             .map(|((call, _), recorded)| (call.as_str(), recorded))
     }
-}
-
-/// Scripted HTTP, as hekla's own test harness does it.
-#[derive(Debug, Clone, Default)]
-pub struct Http {
-    scripted: BTreeMap<String, VecDeque<Reply>>,
-    performed: usize,
-    absorbed: usize,
-    sent: Vec<Request>,
-}
-
-/// One request as it left, so a test can assert what was sent rather than only what
-/// came back. The `Idempotency-Key` case is why headers are worth seeing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Request {
-    pub verb: &'static str,
-    pub url: String,
-    pub body: Option<Json>,
-    pub headers: Json,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Reply {
-    Status(u16),
-    Body(u16, Json),
-    Transport(String),
-}
-
-impl Http {
-    fn script(&mut self, url: &str, replies: impl IntoIterator<Item = Reply>) {
-        self.scripted
-            .entry(url.to_string())
-            .or_default()
-            .extend(replies);
-    }
-
-    /// The terminal response, or `None` when every attempt was retryable, which wedges.
-    /// Rule 5 lives here: a retryable status or a transport error is absorbed and
-    /// retried with the same request, so only a decidable result reaches the handler.
-    fn call(
-        &mut self,
-        builtin: Builtin,
-        url: &str,
-        body: Option<Json>,
-        headers: Json,
-    ) -> Option<(i64, Json)> {
-        for _ in 0..ATTEMPTS {
-            self.performed += 1;
-            self.sent.push(Request {
-                verb: builtin.name(),
-                url: url.to_string(),
-                body: body.clone(),
-                headers: headers.clone(),
-            });
-            let reply = self
-                .scripted
-                .get_mut(url)
-                .and_then(VecDeque::pop_front)
-                .unwrap_or(Reply::Status(404));
-            let (status, body) = match reply {
-                Reply::Status(status) => (status, Json::Null),
-                Reply::Body(status, body) => (status, body),
-                Reply::Transport(_) => {
-                    self.absorbed += 1;
-                    continue;
-                }
-            };
-            if is_retryable(status) {
-                self.absorbed += 1;
-                continue;
-            }
-            return Some((i64::from(status), body));
-        }
-        None
-    }
-}
-
-/// 408, 425, 429 and any 5xx each name a condition that clears on its own, with the
-/// same request.
-fn is_retryable(status: u16) -> bool {
-    matches!(status, 408 | 425 | 429) || status >= 500
 }
 
 /// What one delivery came to. `Ignored` is not an outcome: no arm selected the event,
@@ -2630,10 +2524,8 @@ impl Counts {
 /// `eval` because an effect builtin is an expression.
 struct Effects<'a> {
     program: &'a Program,
-    log: &'a mut Vec<Record>,
+    host: &'a mut Harness,
     journal: &'a mut Journal,
-    http: &'a mut Http,
-    erased: &'a mut BTreeSet<(Ident, String)>,
     lines: &'a mut Vec<String>,
     trace: &'a mut Vec<Effectful>,
     /// How many times each call has been made so far in this invocation, so a repeated
@@ -2652,10 +2544,8 @@ impl<'a> Effects<'a> {
     fn reborrow(&mut self) -> Effects<'_> {
         Effects {
             program: self.program,
-            log: self.log,
+            host: self.host,
             journal: self.journal,
-            http: self.http,
-            erased: self.erased,
             lines: self.lines,
             trace: self.trace,
             used: self.used,
@@ -2689,7 +2579,7 @@ impl Effects<'_> {
         if let Some(Recorded::Now(at)) = found {
             return at;
         }
-        let at = EPOCH_MICROS + self.log.len() as i64 * MINUTE_MICROS;
+        let at = self.host.now();
         self.record("now()", ordinal, Recorded::Now(at));
         at
     }
@@ -2714,7 +2604,7 @@ impl Effects<'_> {
         }
 
         let sent = body.clone();
-        let Some((status, body)) = self.http.call(builtin, url, body.clone(), headers) else {
+        let Some((status, body)) = self.host.call(builtin, url, body.clone(), headers) else {
             return Err(ErrorKind::Unreachable(url.to_string()));
         };
         // One entry per logical call, so the retries rule 5 absorbed do not show up as
@@ -2757,7 +2647,7 @@ impl Effects<'_> {
             command: command.clone(),
             args: args.clone(),
         });
-        let execution = execute(self.program, self.log, target, args)?;
+        let execution = execute(self.program, self.host, target, args)?;
         // The cut: `Conflict` and `Unavailable` are the runtime's, and
         // `AlreadyCommitted` is indistinguishable from `Ok` from here, as it should be.
         let outcome = match execution.outcome {
@@ -2783,7 +2673,7 @@ impl Effects<'_> {
                 id,
                 inner,
             } => {
-                if self.erased.contains(&(subject.clone(), id.clone())) {
+                if self.host.erased(&subject, &id) {
                     return Err(Error::at(ErrorKind::Erased { field, subject, id }, span));
                 }
                 Ok(*inner)
@@ -2807,7 +2697,7 @@ impl Effects<'_> {
         if found.is_some() {
             return;
         }
-        self.erased.insert((subject.clone(), id.to_string()));
+        self.host.erase(subject, id);
         self.trace.push(Effectful::Erase {
             subject: subject.clone(),
             id: id.to_string(),

@@ -6,7 +6,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::interp::{Effectful, Error, Interpreter, Outcome, Reply, Row, Store, coerce};
+use crate::harness::Reply;
+use crate::interp::{Effectful, Error, Interpreter, Outcome, Row, Store, coerce};
 use crate::ir::{Action, Expect, ExprId, Exprs, Ident, Program, ReplySpec, Setup, Test, Type};
 use crate::value::{Event, Json, Key, Value};
 
