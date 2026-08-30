@@ -231,6 +231,12 @@ only other output is a decision not to call out.
 Everything the runner asserts goes through the same public API an embedder has, which is what keeps
 this list honest: a test cannot see anything a program cannot.
 
+**That is also what lets the runner take a world rather than own one.** An outcome and an effect
+trace come from the interpreter, and the one thing left that a world supplies is a row, read through
+`Rows::row` (`docs/host.md` section 7) which is the read a `patch` already makes. So a suite can run
+against a real log and real read models without anything on the list above becoming visible, and
+without a second definition of what `expect` means.
+
 ## 9. Running
 
 `run_tests(&program)` returns one result per test, in declaration order, each carrying the test's
@@ -248,3 +254,9 @@ being unable to run at all, and collapsing them makes a broken command look like
 A test runs against a fresh interpreter with only its own `given` log, so tests cannot affect each
 other and the order they are declared in does not matter, which is the same property
 `docs/modules.md` claims for every other declaration.
+
+`run_tests_in(&program, &mut fresh)` is the same run against a `World` an embedder brings: its log,
+its read models, its key store. `fresh` is called once per test rather than once per run, because
+"only its own `given` log" is a property of the world and not of the interpreter. A world that cannot
+be built reads as **errored**, not as every expectation failing: that is the runner's own footing
+giving way rather than the program being wrong, which is the same distinction the table above makes.

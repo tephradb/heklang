@@ -13,7 +13,7 @@ pub mod value;
 
 pub use build::Builder;
 pub use diagnostic::{Code, Diagnostic, Related, Severity};
-pub use harness::{Harness, Journal, Reply};
+pub use harness::{Harness, Journal, Reply, Sandbox};
 pub use host::{
     AppendCondition, Attempt, Calls, Clock, Host, Http, Keys, Log, Predicate, Query, Recorded,
     Request, Rows,
@@ -30,7 +30,7 @@ pub use ir::{
     Type, UnOp, Update,
 };
 pub use parse::{check_files, parse, parse_files};
-pub use testing::{TestOutcome, TestResult, run_tests};
+pub use testing::{TestOutcome, TestResult, World, run_tests, run_tests_in};
 pub use value::{Defs, Event, Invoked, Json, Key, Mismatch, Record, Value};
 
 /// A host parses a program once and serves from several threads, so the string a

@@ -6,8 +6,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::harness::Reply;
-use crate::interp::{Effectful, Error, Interpreter, Outcome, Row, Store, coerce};
+use crate::harness::{Reply, Sandbox};
+use crate::host::{Host, Rows};
+use crate::interp::{Effectful, Error, Interpreter, Outcome, Row, coerce};
 use crate::ir::{Action, Expect, ExprId, Exprs, Ident, Program, ReplySpec, Setup, Test, Type};
 use crate::value::{Event, Json, Key, Value};
 
@@ -44,22 +45,63 @@ impl fmt::Display for TestResult {
     }
 }
 
-/// Every test in the program, each against a fresh interpreter holding only its own
+/// The world one test runs in: a log to seed, a network to script, keys to shred, and
+/// the read models a `project` writes into and a row expectation reads back from.
+///
+/// [`Sandbox`] is the in-memory one and a real runtime brings another, so a suite can be
+/// run against the store it will actually deploy on without a second definition of what
+/// `expect` means.
+///
+/// Rule 8 survives the generalisation. Everything the runner asserts still comes from
+/// the public API: an outcome, the effect trace, and one row through [`Rows::row`],
+/// which is the read a `patch` already makes. A world is asked for nothing a program
+/// could not reach.
+pub trait World: Sized {
+    type Host: Host;
+    type Rows: Rows;
+
+    /// One `given` event, appended with the world's own envelope.
+    fn given(&mut self, event: Event) -> Result<(), Error>;
+    /// One queued reply for a URL.
+    fn respond(&mut self, url: &str, reply: Reply) -> Result<(), Error>;
+    /// A subject whose key is already destroyed.
+    fn erased(&mut self, subject: &str, id: &str) -> Result<(), Error>;
+    /// Setup is finished; hand over what the action runs against.
+    fn open(self) -> Result<(Self::Host, Self::Rows), Error>;
+}
+
+/// Every test in the program, each against a fresh in-memory world holding only its own
 /// `given` log. Declaration order decides the report's order and nothing else.
 pub fn run_tests(program: &Program) -> Vec<TestResult> {
+    run_tests_in(program, &mut || Ok(Sandbox::default()))
+}
+
+/// The same run, against a world the crate does not own.
+///
+/// A fresh world per test rather than one reused, because rule 9's "only its own `given`
+/// log" is a property of the world and not of the interpreter.
+pub fn run_tests_in<W: World>(
+    program: &Program,
+    fresh: &mut dyn FnMut() -> Result<W, Error>,
+) -> Vec<TestResult> {
     program
         .tests
         .iter()
         .map(|test| TestResult {
             name: test.name.clone(),
             module: test.module.clone(),
-            outcome: run_test(program, test),
+            outcome: match fresh() {
+                Ok(world) => run_test(program, test, world),
+                // A world that cannot be built is not the program's fault, so it reads
+                // as an error rather than as every test failing.
+                Err(err) => TestOutcome::Errored(err.to_string()),
+            },
         })
         .collect()
 }
 
-fn run_test(program: &Program, test: &Test) -> TestOutcome {
-    match check(program, test) {
+fn run_test<W: World>(program: &Program, test: &Test, world: W) -> TestOutcome {
+    match check(program, test, world) {
         Ok(None) => TestOutcome::Passed,
         Ok(Some(why)) => TestOutcome::Failed(why),
         Err(err) => TestOutcome::Errored(err),
@@ -67,10 +109,9 @@ fn run_test(program: &Program, test: &Test) -> TestOutcome {
 }
 
 /// `Ok(None)` passed, `Ok(Some(why))` a mismatch, `Err` the run itself could not go on.
-fn check(program: &Program, test: &Test) -> Result<Option<String>, String> {
+fn check<W: World>(program: &Program, test: &Test, mut world: W) -> Result<Option<String>, String> {
     let mut values = Values::new(program, test);
 
-    let mut log = Vec::new();
     for given in &test.given {
         let def = program
             .event(&given.event)
@@ -82,13 +123,14 @@ fn check(program: &Program, test: &Test) -> Result<Option<String>, String> {
             let ty = def.field(name).map(|field| field.ty.clone());
             fields.insert(name.clone(), values.at(*value, ty.as_ref())?);
         }
-        log.push(Event {
-            path: given.event.clone(),
-            fields,
-        });
+        world
+            .given(Event {
+                path: given.event.clone(),
+                fields,
+            })
+            .map_err(|err: Error| err.to_string())?;
     }
 
-    let mut interpreter = Interpreter::with_log(program, log);
     for setup in &test.setup {
         match setup {
             Setup::Respond { url, reply, .. } => {
@@ -98,14 +140,21 @@ fn check(program: &Program, test: &Test) -> Result<Option<String>, String> {
                     ReplySpec::Body(status, body) => Reply::Body(*status, values.json(*body)?),
                     ReplySpec::Timeout => Reply::Transport("timeout".to_string()),
                 };
-                interpreter.script(&url, [reply]);
+                world
+                    .respond(&url, reply)
+                    .map_err(|err: Error| err.to_string())?;
             }
             Setup::Erased { subject, id, .. } => {
                 let id = values.text(*id)?;
-                interpreter.erase_subject(subject, &id);
+                world
+                    .erased(subject, &id)
+                    .map_err(|err: Error| err.to_string())?;
             }
         }
     }
+
+    let (host, mut rows) = world.open().map_err(|err: Error| err.to_string())?;
+    let mut interpreter = Interpreter::with_host(program, host);
 
     match &test.action {
         Action::Run { command, args, .. } => {
@@ -119,10 +168,10 @@ fn check(program: &Program, test: &Test) -> Result<Option<String>, String> {
             check_run(&mut values, &test.expect, execution.outcome)
         }
         Action::Project { projector, .. } => {
-            let store = interpreter
-                .project(projector)
+            interpreter
+                .project_into(projector, &mut rows)
                 .map_err(|err: Error| err.to_string())?;
-            check_project(&mut values, projector, &test.expect, &store)
+            check_project(&mut values, projector, &test.expect, &rows)
         }
         Action::Deliver { effect, .. } => {
             let counts = interpreter
@@ -235,7 +284,7 @@ fn check_project(
     values: &mut Values<'_>,
     projector: &str,
     expect: &[Expect],
-    store: &Store,
+    rows: &dyn Rows,
 ) -> Result<Option<String>, String> {
     for wanted in expect {
         match wanted {
@@ -246,16 +295,22 @@ fn check_project(
                 ..
             } => {
                 let key = key_of(values.eval(*key)?)?;
-                let Some(row) = store.get(entity, &key) else {
+                let found = rows
+                    .row(entity, &key)
+                    .map_err(|err: Error| err.to_string())?;
+                let Some(row) = found else {
                     return Ok(Some(format!("{entity}[{}] is absent", show(&key))));
                 };
-                if let Some(why) = mismatch(values, projector, entity, &key, row, fields)? {
+                if let Some(why) = mismatch(values, projector, entity, &key, &row, fields)? {
                     return Ok(Some(why));
                 }
             }
             Expect::NoRow { entity, key, .. } => {
                 let key = key_of(values.eval(*key)?)?;
-                if store.get(entity, &key).is_some() {
+                let found = rows
+                    .row(entity, &key)
+                    .map_err(|err: Error| err.to_string())?;
+                if found.is_some() {
                     return Ok(Some(format!("{entity}[{}] is present", show(&key))));
                 }
             }

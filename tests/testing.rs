@@ -3,7 +3,13 @@
 //! These test the test construct: each case parses a small program that declares its
 //! own `test`s, runs them, and asserts on the verdicts.
 
-use heklang::{TestOutcome, TestResult, parse, run_tests};
+use std::cell::Cell;
+use std::rc::Rc;
+
+use heklang::{
+    Error, Event, Harness, Ident, Key, Reply, Row, Rows, TestOutcome, TestResult, World, parse,
+    run_tests, run_tests_in,
+};
 
 const PRELUDE: &str = "event @plan.created { plan_id: Int, title: String, price: Money(2) }
 event @plan.sold { plan_id: Int, price: Money(2) }
@@ -716,5 +722,159 @@ test \"a personal column is readable\" {
     assert!(
         why.contains("expected \"Some Other Shop\", got \"Test Shop\""),
         "and it names both sides in the clear: {why}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Rule 8, the other half: the same expectations against a world the crate does not own.
+// ---------------------------------------------------------------------------
+
+/// Read models that are not a `Store`, counting what reached them so a test can tell a
+/// projection that went through this from one that quietly went somewhere else.
+#[derive(Default)]
+struct Ledger {
+    rows: Vec<(String, Key, Row)>,
+    writes: Rc<Cell<usize>>,
+}
+
+impl Rows for Ledger {
+    fn row(&self, entity: &str, key: &Key) -> Result<Option<Row>, Error> {
+        Ok(self
+            .rows
+            .iter()
+            .find(|(name, at, _)| name == entity && at == key)
+            .map(|(_, _, row)| row.clone()))
+    }
+
+    fn put(&mut self, entity: &Ident, key: Key, row: Row) -> Result<(), Error> {
+        self.writes.set(self.writes.get() + 1);
+        self.rows
+            .retain(|(name, at, _)| !(name == entity && at == &key));
+        self.rows.push((entity.clone(), key, row));
+        Ok(())
+    }
+
+    fn delete(&mut self, entity: &Ident, key: &Key) -> Result<(), Error> {
+        self.writes.set(self.writes.get() + 1);
+        self.rows
+            .retain(|(name, at, _)| !(name == entity && at == key));
+        Ok(())
+    }
+}
+
+/// A world assembled here rather than taken from the crate. The log is still the
+/// harness, because what is being proved is that the runner does not require a
+/// `Sandbox`, not that a second log is possible.
+#[derive(Default)]
+struct Elsewhere {
+    harness: Harness,
+    writes: Rc<Cell<usize>>,
+}
+
+impl World for Elsewhere {
+    type Host = Harness;
+    type Rows = Ledger;
+
+    fn given(&mut self, event: Event) -> Result<(), Error> {
+        self.harness.push(event);
+        Ok(())
+    }
+
+    fn respond(&mut self, url: &str, reply: Reply) -> Result<(), Error> {
+        self.harness.script(url, [reply]);
+        Ok(())
+    }
+
+    fn erased(&mut self, subject: &str, id: &str) -> Result<(), Error> {
+        self.harness.erase_subject(subject, id);
+        Ok(())
+    }
+
+    fn open(self) -> Result<(Harness, Ledger), Error> {
+        let writes = Rc::clone(&self.writes);
+        Ok((
+            self.harness,
+            Ledger {
+                rows: Vec::new(),
+                writes,
+            },
+        ))
+    }
+}
+
+const SUITE: &str = "test \"a sale lands on both entities\" {
+  given @plan.created { plan_id: 1, title: \"Pro\", price: 10.00 }
+  given @plan.sold { plan_id: 1, price: 10.00 }
+  project Plans
+  expect Plan[1] { title: \"Pro\", sold: 1 }
+  expect Sales[1] { revenue: 10.00 }
+}
+
+test \"a command still runs\" {
+  run RecordSync { plan_id: 4 }
+  expect @plan.synced { plan_id: 4 }
+}
+
+test \"a deleted plan is gone\" {
+  given @plan.created { plan_id: 1, title: \"Pro\", price: 10.00 }
+  given @plan.deleted { plan_id: 1 }
+  project Plans
+  expect no Plan[1]
+}
+";
+
+/// One definition of `expect`, two worlds: the same suite, the same verdicts, against
+/// read models the crate did not supply.
+#[test]
+fn a_suite_runs_against_a_world_the_crate_does_not_own() {
+    let program = parse(&format!("{PRELUDE}{SUITE}")).expect("parses");
+
+    let mine: Vec<TestResult> = run_tests(&program);
+    let theirs: Vec<TestResult> = run_tests_in(&program, &mut || Ok(Elsewhere::default()));
+
+    assert_eq!(mine.len(), theirs.len());
+    for (mine, theirs) in mine.iter().zip(&theirs) {
+        assert_eq!(mine.name, theirs.name);
+        assert!(
+            mine.passed() && theirs.passed(),
+            "{}: {mine} then {theirs}",
+            mine.name
+        );
+    }
+}
+
+/// The rows a projection wrote really went through the world's, rather than through an
+/// in-memory one the runner kept to itself.
+#[test]
+fn a_projection_writes_through_the_worlds_own_read_models() {
+    let program = parse(&format!("{PRELUDE}{SUITE}")).expect("parses");
+    let writes = Rc::new(Cell::new(0));
+
+    let results = run_tests_in(&program, &mut || {
+        Ok(Elsewhere {
+            harness: Harness::default(),
+            writes: Rc::clone(&writes),
+        })
+    });
+
+    assert!(results.iter().all(TestResult::passed));
+    assert!(writes.get() > 0, "no write reached the world's read models");
+}
+
+/// A world that cannot be built is not the program being wrong, so it reads as an error
+/// rather than as every expectation failing.
+#[test]
+fn a_world_that_cannot_be_built_errors_rather_than_fails() {
+    let program = parse(&format!("{PRELUDE}{SUITE}")).expect("parses");
+    let results = run_tests_in(&program, &mut || -> Result<Elsewhere, Error> {
+        Err(Error::new(heklang::ErrorKind::Host("no disk".to_string())))
+    });
+
+    assert!(!results.is_empty());
+    assert!(
+        results.iter().all(
+            |result| matches!(result.outcome, TestOutcome::Errored(ref why) if why == "no disk")
+        ),
+        "{results:?}"
     );
 }

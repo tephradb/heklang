@@ -10,8 +10,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::host::{
     AppendCondition, Attempt, Calls, Clock, Http, Keys, Log, Query, Recorded, Request,
 };
-use crate::interp::{Error, ErrorKind};
+use crate::interp::{Error, ErrorKind, Store};
 use crate::ir::Ident;
+use crate::testing::World;
 use crate::value::{Event, Json, Record};
 
 /// 2020-01-01T00:00:00Z, so a synthesised envelope timestamp reads as a plausible
@@ -210,5 +211,38 @@ impl Http for Harness {
             Reply::Body(status, body) => Attempt::Response { status, body },
             Reply::Transport(why) => Attempt::Transport(why),
         }
+    }
+}
+
+/// The harness as a world a test runs in: this log, these read models, these scripted
+/// replies. The in-memory answer to `docs/testing.md` section 3, and the one
+/// `run_tests` uses when an embedder does not bring its own.
+#[derive(Debug, Clone, Default)]
+pub struct Sandbox {
+    harness: Harness,
+    store: Store,
+}
+
+impl World for Sandbox {
+    type Host = Harness;
+    type Rows = Store;
+
+    fn given(&mut self, event: Event) -> Result<(), Error> {
+        self.harness.push(event);
+        Ok(())
+    }
+
+    fn respond(&mut self, url: &str, reply: Reply) -> Result<(), Error> {
+        self.harness.script(url, [reply]);
+        Ok(())
+    }
+
+    fn erased(&mut self, subject: &str, id: &str) -> Result<(), Error> {
+        self.harness.erase_subject(subject, id);
+        Ok(())
+    }
+
+    fn open(self) -> Result<(Harness, Store), Error> {
+        Ok((self.harness, self.store))
     }
 }
