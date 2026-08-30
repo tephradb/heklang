@@ -30,6 +30,20 @@ impl Predicate {
         filters.sort_by(|(one, _), (other, _)| one.cmp(other));
         Self { event, filters }
     }
+
+    /// Whether this event is in the slice.
+    ///
+    /// A filter naming a field the event does not carry answers `false`: the event is
+    /// outside the slice, which is a narrower answer than no answer at all. The fold's
+    /// own check is stricter and raises instead, because a log missing a declared field
+    /// is a broken host rather than a narrower read.
+    pub fn holds(&self, event: &Event) -> bool {
+        self.event == event.path
+            && self
+                .filters
+                .iter()
+                .all(|(name, want)| event.field(name) == Some(want))
+    }
 }
 
 /// What one fold reads: the union of its slices, bounded above.
@@ -61,6 +75,19 @@ pub struct AppendCondition {
     /// after this position is what makes the append stale.
     pub after: u64,
     pub slices: Vec<Predicate>,
+}
+
+impl AppendCondition {
+    /// Whether anything in the read set landed at or after `after`.
+    ///
+    /// This is the definition, written once. A host that can answer it from an index
+    /// should, and this is the question it would be answering.
+    pub fn conflicts(&self, records: &[Record]) -> bool {
+        records.iter().any(|record| {
+            record.position >= self.after
+                && self.slices.iter().any(|slice| slice.holds(&record.event))
+        })
+    }
 }
 
 /// The event log.

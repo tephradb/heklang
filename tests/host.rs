@@ -5,8 +5,8 @@
 use std::cell::RefCell;
 
 use heklang::{
-    AppendCondition, Attempt, Clock, Error, Event, EventPath, Http, Interpreter, Keys, Log,
-    Outcome, Predicate, Program, Query, Record, Request, Value, parse,
+    AppendCondition, Attempt, Clock, Error, Event, EventPath, Harness, Http, Interpreter, Keys,
+    Log, Outcome, Predicate, Program, Query, Record, Request, Value, parse,
 };
 
 const PRELUDE: &str = "event @order.placed {
@@ -203,4 +203,109 @@ fn a_second_run_folds_what_the_first_appended() {
         matches!(second.outcome, Outcome::Reject { ref code, .. } if code == "one_per_customer")
     );
     assert_eq!(second.condition.after, 1, "the head moved");
+}
+
+// ---------------------------------------------------------------------------------
+// The condition, as a question a host answers. Pure values, no interpreter: this is
+// the definition every host has to agree with.
+
+fn order(position: u64, customer: i64) -> Record {
+    Record::new(
+        format!("r{position}"),
+        position,
+        0,
+        Event::new(
+            EventPath::new(["order", "placed"]),
+            [
+                ("order_id".to_string(), Value::uuid(ORDER)),
+                ("customer_id".to_string(), Value::Int(customer)),
+                ("total".to_string(), Value::money(1, 2)),
+            ],
+        ),
+    )
+}
+
+fn narrowed_to(customer: i64) -> AppendCondition {
+    AppendCondition {
+        after: 2,
+        slices: vec![Predicate::new(
+            EventPath::new(["order", "placed"]),
+            vec![("customer_id".to_string(), Value::Int(customer))],
+        )],
+    }
+}
+
+#[test]
+fn a_slice_event_at_the_boundary_conflicts() {
+    assert!(
+        narrowed_to(7).conflicts(&[order(2, 7)]),
+        "`after` is the head the run folded, so an event there is one it did not see"
+    );
+}
+
+#[test]
+fn an_event_the_run_already_folded_does_not_conflict() {
+    assert!(!narrowed_to(7).conflicts(&[order(1, 7)]));
+}
+
+#[test]
+fn an_event_outside_the_filter_does_not_conflict() {
+    assert!(
+        !narrowed_to(7).conflicts(&[order(9, 8)]),
+        "another customer's order is not in this slice, however late it lands"
+    );
+}
+
+#[test]
+fn an_event_of_another_type_does_not_conflict() {
+    let elsewhere = Record::new(
+        "r9",
+        9,
+        0,
+        Event::new(
+            EventPath::new(["order", "cancelled"]),
+            [("order_id".to_string(), Value::uuid(ORDER))],
+        ),
+    );
+    assert!(!narrowed_to(7).conflicts(&[elsewhere]));
+}
+
+#[test]
+fn a_command_that_read_nothing_conflicts_with_nothing() {
+    let condition = AppendCondition {
+        after: 0,
+        slices: Vec::new(),
+    };
+    assert!(
+        !condition.conflicts(&[order(0, 7), order(1, 8)]),
+        "a command with no `state` declared no slice, so nothing can beat it to one"
+    );
+}
+
+/// The harness enforces it, which is what makes the condition a rule rather than a
+/// value nobody reads.
+#[test]
+fn a_stale_condition_is_refused() {
+    let mut harness = Harness::with_log([Event::new(
+        EventPath::new(["order", "placed"]),
+        [
+            ("order_id".to_string(), Value::uuid(ORDER)),
+            ("customer_id".to_string(), Value::Int(7)),
+            ("total".to_string(), Value::money(1, 2)),
+        ],
+    )]);
+    let stale = AppendCondition {
+        after: 0,
+        slices: vec![Predicate::new(
+            EventPath::new(["order", "placed"]),
+            vec![("customer_id".to_string(), Value::Int(7))],
+        )],
+    };
+    let refused = harness
+        .append(&[], &stale)
+        .expect_err("the log moved under it");
+    assert_eq!(
+        refused.to_string(),
+        "the log moved under this run: something it read landed at or after position 0"
+    );
 }

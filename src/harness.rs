@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::host::{AppendCondition, Attempt, Clock, Http, Keys, Log, Query, Request};
-use crate::interp::Error;
+use crate::interp::{Error, ErrorKind};
 use crate::ir::Ident;
 use crate::value::{Event, Json, Record};
 
@@ -117,7 +117,16 @@ impl Log for Harness {
         Ok(())
     }
 
-    fn append(&mut self, events: &[Event], _condition: &AppendCondition) -> Result<(), Error> {
+    /// Nothing single-threaded can trip the condition from inside a run, and it is
+    /// checked anyway: there is one definition of what the condition means, and a host
+    /// that has to implement it deserves somewhere to read it.
+    fn append(&mut self, events: &[Event], condition: &AppendCondition) -> Result<(), Error> {
+        if condition.conflicts(&self.records) {
+            return Err(ErrorKind::Conflict {
+                after: condition.after,
+            }
+            .into());
+        }
         for event in events {
             self.push(event.clone());
         }

@@ -46,6 +46,16 @@ pub enum ErrorKind {
     /// where it catches the direct `fail`, and reports the same thing.
     Failed(String),
     Unreachable(String),
+    /// The host could not do what was asked. Rendered as the host wrote it: heklang has
+    /// no vocabulary for a store's failures and should not invent one.
+    Host(String),
+    /// The host refused the append: something in the read set landed at or after
+    /// `after`. Not an `Outcome`, because the three outcomes are the command's own
+    /// answer and a conflict is the runtime's. `docs/host.md` has what an adapter
+    /// turns it into.
+    Conflict {
+        after: u64,
+    },
     BadSubject(Type),
     BadUuid(String),
     NoSuchField {
@@ -140,6 +150,11 @@ impl fmt::Display for ErrorKind {
             ErrorKind::Unreachable(url) => {
                 write!(f, "{url} did not answer; every attempt was retryable")
             }
+            ErrorKind::Host(why) => write!(f, "{why}"),
+            ErrorKind::Conflict { after } => write!(
+                f,
+                "the log moved under this run: something it read landed at or after position {after}"
+            ),
             ErrorKind::BadSubject(ty) => write!(f, "a {ty} cannot identify a subject"),
             ErrorKind::BadUuid(value) => write!(f, "`{value}` is not a uuid"),
             ErrorKind::NoSuchField { ty, field } => write!(f, "no field `{field}` on {ty}"),
