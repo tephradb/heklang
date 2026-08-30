@@ -22,6 +22,11 @@ interpreter.deliver("NotifyCustomer", position, &mut my_journal)?;
 `Interpreter<'a, H = Harness>`, so `Interpreter::new(&program)` still means the harness and nothing
 that was written against it has to say so.
 
+**A `Program` and the values it produces are `Send + Sync`**, so a host parses once at load and serves
+from as many threads as it likes. That is why the string inside a `Value` is an `Arc` and not an `Rc`,
+and `src/lib.rs` asserts it at compile time because nothing else would notice if it stopped being
+true. The interpreter itself is single-threaded: one per request, or one per invocation.
+
 ## 1. Four traits, and where the line is
 
 The cut is the one `docs/effects.md` rule 11 already makes with its journaled column. **Reading the

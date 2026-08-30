@@ -64,8 +64,8 @@ fn log(n: usize) -> Vec<Event> {
                 [
                     ("order_id".to_string(), Value::uuid(ORDER)),
                     ("customer_id".to_string(), Value::Int(7)),
-                    ("email".to_string(), Value::Str(format!("c{i}@example.com"))),
-                    ("sku".to_string(), Value::Str(format!("SKU-{i}"))),
+                    ("email".to_string(), Value::str(format!("c{i}@example.com"))),
+                    ("sku".to_string(), Value::str(format!("SKU-{i}"))),
                     ("total".to_string(), Value::money(2_599, 2)),
                 ],
             )
@@ -184,6 +184,25 @@ fn main() {
     measure(
         "bind a String, read it twice",
         "  state seen: Int = fold 0\n    on @order.placed(customer_id) { sku } => seen + sku.len() - sku.len() + 1",
+        &events,
+        rounds,
+    );
+
+    // A sealed field, which is what the port's credential folds bind. `seal` wraps the
+    // value with the field, the subject and the id, so this is the widest bind there is.
+    measure(
+        "bind a sealed String",
+        "  state seen: Int = fold 0\n    on @order.placed(customer_id) { email } => seen + 1",
+        &events,
+        rounds,
+    );
+
+    // The other side of sharing a string rather than owning it: building one costs an
+    // allocation for the text and another to share it. Reads outnumber constructions in
+    // a fold, but this is where the trade is paid rather than collected.
+    measure(
+        "build a String per event",
+        "  state s: String = fold \"\"\n    on @order.placed(customer_id) { sku } => \"{sku}-x\"",
         &events,
         rounds,
     );

@@ -240,7 +240,7 @@ impl Builder {
     }
 
     pub fn str(&mut self, value: &str) -> ExprId {
-        self.lit(Literal::Str(value.to_string()))
+        self.lit(Literal::Str(value.into()))
     }
 
     pub fn money(&mut self, units: i64, scale: u8) -> ExprId {

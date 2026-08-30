@@ -30,7 +30,7 @@ command Write(note_id: Uuid, {params}) {{
         .unwrap_or_else(|err| panic!("expected this to run: {err}"));
     match execution.outcome {
         Outcome::Ok(events) => match events[0].field("body") {
-            Some(Value::Str(text)) => text.clone(),
+            Some(Value::Str(text)) => text.to_string(),
             other => panic!("expected a string body, got {other:?}"),
         },
         other => panic!("expected an append, got {other:?}"),

@@ -31,3 +31,16 @@ pub use ir::{
 pub use parse::{check_files, parse, parse_files};
 pub use testing::{TestOutcome, TestResult, run_tests};
 pub use value::{Event, Invoked, Json, Key, Record, Value};
+
+/// A host parses a program once and serves from several threads, so the string a
+/// `Literal` and a `Value` share is an `Arc` rather than an `Rc`. Nothing else would
+/// fail if that stopped being true, so it is asserted here instead.
+const _: () = {
+    const fn shareable<T: Send + Sync>() {}
+    shareable::<Program>();
+    shareable::<Value>();
+    shareable::<Event>();
+    shareable::<Record>();
+    shareable::<Harness>();
+    shareable::<Diagnostic>();
+};

@@ -1223,7 +1223,7 @@ fn exec_stmt(
 fn subject_id(value: &Value, span: Span) -> Result<Option<String>, Error> {
     match value {
         Value::Int(id) => Ok(Some(id.to_string())),
-        Value::Str(id) | Value::Uuid(id) => Ok(Some(id.clone())),
+        Value::Str(id) | Value::Uuid(id) => Ok(Some(id.to_string())),
         Value::Opt {
             value: Some(id), ..
         } => subject_id(id, span),
@@ -1636,7 +1636,7 @@ fn eval(
                 let value = eval(program, exprs, frame, *part, ctx.as_deref_mut())?;
                 text.push_str(&value::text(&value));
             }
-            Ok(Value::Str(text))
+            Ok(Value::str(text))
         }
         Expr::Call { builtin, args } => {
             let mut values = Vec::new();
@@ -1649,7 +1649,7 @@ fn eval(
                 // encoded here and the same value in a request body cannot disagree.
                 Builtin::JsonEncode => {
                     let value = values.first().ok_or_else(|| at(ErrorKind::MalformedIr))?;
-                    return Ok(Value::Str(Json::from_value(value).to_string()));
+                    return Ok(Value::str(Json::from_value(value).to_string()));
                 }
                 Builtin::TimestampFromParts => {
                     let mut fields = [0i64; 6];
@@ -1907,7 +1907,7 @@ fn eval_string(
     ctx: Option<&mut Effects<'_>>,
 ) -> Result<String, Error> {
     match eval(program, exprs, frame, id, ctx)? {
-        Value::Str(value) => Ok(value),
+        Value::Str(value) => Ok(value.to_string()),
         other => Err(Error::at(
             ErrorKind::TypeMismatch {
                 expected: Type::String,
@@ -2060,7 +2060,7 @@ fn binary(op: BinOp, lhs: Value, rhs: Value) -> Result<Value, ErrorKind> {
                     scaled::mul_ratio_exact(*amount, *units, *rate).map_err(inexact(op, "mul"))?;
                 Ok(Value::money(units, *scale))
             }
-            (Value::Str(a), Value::Str(b)) if op == BinOp::Add => Ok(Value::Str(format!("{a}{b}"))),
+            (Value::Str(a), Value::Str(b)) if op == BinOp::Add => Ok(Value::str(format!("{a}{b}"))),
             _ => Err(ErrorKind::BadOperands {
                 op,
                 lhs: lhs.ty(),
@@ -2097,7 +2097,7 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
     match (&receiver, method) {
         (Value::Str(value), "trim") => {
             expect_arity(method, 0, &args)?;
-            Ok(Value::Str(value.trim().to_string()))
+            Ok(Value::str(value.trim()))
         }
         (Value::Str(value), "len") => {
             expect_arity(method, 0, &args)?;
@@ -2109,16 +2109,16 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
         }
         (Value::Str(value), "lower") => {
             expect_arity(method, 0, &args)?;
-            Ok(Value::Str(value.to_lowercase()))
+            Ok(Value::str(value.to_lowercase()))
         }
         (Value::Str(value), "upper") => {
             expect_arity(method, 0, &args)?;
-            Ok(Value::Str(value.to_uppercase()))
+            Ok(Value::str(value.to_uppercase()))
         }
         (Value::Str(value), "starts_with") => {
             expect_arity(method, 1, &args)?;
             match &args[0] {
-                Value::Str(prefix) => Ok(Value::Bool(value.starts_with(prefix.as_str()))),
+                Value::Str(prefix) => Ok(Value::Bool(value.starts_with(&**prefix))),
                 other => Err(ErrorKind::TypeMismatch {
                     expected: Type::String,
                     found: other.ty(),
@@ -2130,9 +2130,9 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
         (Value::Str(value), "strip_prefix") => {
             expect_arity(method, 1, &args)?;
             match &args[0] {
-                Value::Str(prefix) => Ok(Value::str(
-                    value.strip_prefix(prefix.as_str()).unwrap_or(value),
-                )),
+                Value::Str(prefix) => {
+                    Ok(Value::str(value.strip_prefix(&**prefix).unwrap_or(value)))
+                }
                 other => Err(ErrorKind::TypeMismatch {
                     expected: Type::String,
                     found: other.ty(),
@@ -2145,11 +2145,9 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
             expect_arity(method, 1, &args)?;
             match &args[0] {
                 Value::Str(sep) if !sep.is_empty() => Ok(Value::str(
-                    value
-                        .rsplit_once(sep.as_str())
-                        .map_or(value.as_str(), |(_, tail)| tail),
+                    value.rsplit_once(&**sep).map_or(&**value, |(_, tail)| tail),
                 )),
-                Value::Str(_) => Ok(Value::str(value)),
+                Value::Str(_) => Ok(Value::Str(value.clone())),
                 other => Err(ErrorKind::TypeMismatch {
                     expected: Type::String,
                     found: other.ty(),
@@ -2166,14 +2164,14 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
         (Value::Str(value), "to_uuid") => {
             expect_arity(method, 0, &args)?;
             Ok(match Uuid::parse_str(value) {
-                Ok(_) => Value::some(Value::uuid(value)),
+                Ok(_) => Value::some(Value::Uuid(value.clone())),
                 Err(_) => Value::none(Type::Uuid),
             })
         }
         (Value::Str(value), "contains") => {
             expect_arity(method, 1, &args)?;
             match &args[0] {
-                Value::Str(needle) => Ok(Value::Bool(value.contains(needle.as_str()))),
+                Value::Str(needle) => Ok(Value::Bool(value.contains(&**needle))),
                 other => Err(ErrorKind::TypeMismatch {
                     expected: Type::String,
                     found: other.ty(),
@@ -2436,7 +2434,7 @@ fn expect_arity(method: &str, expected: usize, args: &[Value]) -> Result<(), Err
 fn envelope_value(record: &Record, field: EnvField) -> Value {
     match field {
         EnvField::At => Value::Timestamp(record.at),
-        EnvField::Id => Value::Uuid(record.id.clone()),
+        EnvField::Id => Value::uuid(record.id.as_str()),
         EnvField::Position => Value::Int(record.position as i64),
     }
 }
@@ -2450,7 +2448,7 @@ fn json_field(json: &Json, method: &str, args: &[Value], want: Type) -> Result<V
         });
     };
     let found = json.get(key).and_then(|found| match (found, &want) {
-        (Json::Str(value), Type::String) => Some(Value::Str(value.clone())),
+        (Json::Str(value), Type::String) => Some(Value::str(value.as_str())),
         (Json::Int(value), Type::Int) => Some(Value::Int(*value)),
         (Json::Bool(value), Type::Bool) => Some(Value::Bool(*value)),
         (Json::Obj(_), Type::Json) => Some(Value::Json(found.clone())),
@@ -2512,7 +2510,7 @@ fn uuid_derive(args: &[Value]) -> Result<Value, ErrorKind> {
             found: args.first().map_or(Type::Uuid, Value::ty),
         });
     };
-    let parsed = Uuid::parse_str(seed).map_err(|_| ErrorKind::BadUuid(seed.clone()))?;
+    let parsed = Uuid::parse_str(seed).map_err(|_| ErrorKind::BadUuid(seed.to_string()))?;
     Ok(Value::uuid(
         Uuid::new_v5(&parsed, name.as_bytes()).to_string(),
     ))

@@ -69,7 +69,7 @@ fn items(event: &Event) -> Vec<i64> {
 
 fn label(event: &Event) -> String {
     match event.field("label") {
-        Some(Value::Str(text)) => text.clone(),
+        Some(Value::Str(text)) => text.to_string(),
         other => panic!("expected a string, got {other:?}"),
     }
 }

@@ -1,5 +1,6 @@
 use std::error;
 use std::fmt;
+use std::sync::Arc;
 
 use crate::scaled::{self, Rounding};
 
@@ -834,8 +835,8 @@ pub enum Literal {
         units: i64,
         scale: u8,
     },
-    Str(String),
-    Uuid(String),
+    Str(Arc<str>),
+    Uuid(Arc<str>),
     Timestamp(i64),
     None(Type),
     /// A present optional. It carries the inner type for the reason `None` does: a

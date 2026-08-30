@@ -914,7 +914,7 @@ fn short(key: &Key) -> String {
     match key {
         Key::Uuid(value) => value.rsplit('-').next().unwrap_or(value).to_string(),
         Key::Int(value) => value.to_string(),
-        Key::Str(value) => value.clone(),
+        Key::Str(value) => value.to_string(),
         Key::Timestamp(micros) => micros.to_string(),
         Key::Enum { variant, .. } => variant.clone(),
     }

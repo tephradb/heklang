@@ -1842,7 +1842,7 @@ impl Parser {
                 if uuid::Uuid::parse_str(&text).is_err() {
                     return Err(self.err(Code::BadLiteral, format!("`{text}` is not a Uuid"), at));
                 }
-                Literal::Uuid(text)
+                Literal::Uuid(text.into())
             }
             // A `Timestamp` is written the way a `Uuid` is, and for the same reason:
             // there is no token for one, so the target type is what makes this string
@@ -1854,7 +1854,7 @@ impl Parser {
                 };
                 Literal::Timestamp(micros)
             }
-            Token::Text(text) => Literal::Str(text),
+            Token::Text(text) => Literal::Str(text.into()),
             Token::Sym(Sym::LBracket) => {
                 let Type::List(inner) = target else {
                     return Err(self.err(Code::BadLiteral, bad("a list"), at));
@@ -4104,7 +4104,7 @@ impl Parser {
                         span,
                     ));
                 }
-                Ok(lower.b.lit(Literal::Uuid(text)))
+                Ok(lower.b.lit(Literal::Uuid(text.into())))
             }
             // The same rule for a `Timestamp`, in the expression half of it.
             Token::Text(text) if matches!(expect.as_ref().map(inner_of), Some(Type::Timestamp)) => {
@@ -4113,7 +4113,7 @@ impl Parser {
                 };
                 Ok(lower.b.lit(Literal::Timestamp(micros)))
             }
-            Token::Text(text) => Ok(lower.b.lit(Literal::Str(text))),
+            Token::Text(text) => Ok(lower.b.lit(Literal::Str(text.into()))),
             Token::Word(Keyword::True) => Ok(lower.b.bool(true)),
             Token::Word(Keyword::False) => Ok(lower.b.bool(false)),
             Token::Word(Keyword::If) => {

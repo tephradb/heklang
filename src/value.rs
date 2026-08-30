@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
+use std::sync::Arc;
 
 use crate::ir::{EntityField, EnumDef, EventPath, Ident, Literal, RecordDef, Type};
 use crate::scaled::{self, Rounding};
@@ -12,8 +13,12 @@ pub enum Value {
         units: i64,
         scale: u8,
     },
-    Str(String),
-    Uuid(String),
+    /// Shared rather than owned, because reading a variable copies the value out of
+    /// its slot and a fold does that once per event. `Arc` rather than `Rc` so a
+    /// `Program` and the values it produces stay `Send + Sync`: a host loads a program
+    /// once and serves requests from several threads.
+    Str(Arc<str>),
+    Uuid(Arc<str>),
     Timestamp(i64),
     Money {
         units: i64,
@@ -62,11 +67,11 @@ pub enum Value {
 }
 
 impl Value {
-    pub fn str(value: impl Into<String>) -> Self {
+    pub fn str(value: impl Into<Arc<str>>) -> Self {
         Value::Str(value.into())
     }
 
-    pub fn uuid(value: impl Into<String>) -> Self {
+    pub fn uuid(value: impl Into<Arc<str>>) -> Self {
         Value::Uuid(value.into())
     }
 
@@ -333,7 +338,7 @@ pub fn zero(ty: &Type, defs: Defs<'_>) -> Option<Value> {
         Type::Bool => Value::Bool(false),
         Type::Int => Value::Int(0),
         Type::Decimal(scale) => Value::decimal(0, *scale),
-        Type::String => Value::Str(String::new()),
+        Type::String => Value::Str("".into()),
         Type::Money(scale) => Value::money(0, *scale),
         Type::Enum(name) => {
             let def = defs.enum_def(name)?;
@@ -417,8 +422,8 @@ pub fn literal(lit: &Literal) -> Value {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Key {
     Int(i64),
-    Str(String),
-    Uuid(String),
+    Str(Arc<str>),
+    Uuid(Arc<str>),
     Timestamp(i64),
     Enum { ty: Ident, variant: Ident },
 }
@@ -529,7 +534,7 @@ impl Json {
             Value::Decimal { units, scale } | Value::Money { units, scale } => {
                 Json::Str(scaled::text(*units, *scale))
             }
-            Value::Str(value) | Value::Uuid(value) => Json::Str(value.clone()),
+            Value::Str(value) | Value::Uuid(value) => Json::Str(value.to_string()),
             Value::Timestamp(micros) => Json::Int(*micros),
             Value::Enum { variant, .. } => Json::Str(variant.clone()),
             Value::Record { fields, .. } => Json::Obj(
