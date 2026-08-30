@@ -322,7 +322,7 @@ fn a_const_takes_literals_and_literal_aggregates_only() {
         .text();
     assert_eq!(
         message,
-        "expected `enum`, `record`, `const`, `fn`, `event`, `command`, `projector`, `effect` or `test`, found `+`",
+        "expected `enum`, `record`, `const`, `fn`, `event`, `command`, `guard`, `projector`, `effect` or `test`, found `+`",
         "the literal ends the declaration, so what follows is read as the next item"
     );
 
@@ -414,7 +414,7 @@ fn a_const_still_ends_at_its_literal_when_another_const_names_it() {
         .text();
     assert_eq!(
         message,
-        "expected `enum`, `record`, `const`, `fn`, `event`, `command`, `projector`, `effect` or `test`, found `+`"
+        "expected `enum`, `record`, `const`, `fn`, `event`, `command`, `guard`, `projector`, `effect` or `test`, found `+`"
     );
 }
 

@@ -220,6 +220,8 @@ impl fmt::Display for EventPath {
 pub struct Program {
     pub events: Vec<EventDef>,
     pub commands: Vec<Command>,
+    /// Named propositions, in declaration order. See `docs/guards.md`.
+    pub guards: Vec<Guard>,
     pub projectors: Vec<Projector>,
     pub effects: Vec<Effect>,
     /// Module scope, shadowed inside a projector by one of its own.
@@ -238,6 +240,10 @@ impl Program {
 
     pub fn command(&self, name: &str) -> Option<&Command> {
         self.commands.iter().find(|command| command.name == name)
+    }
+
+    pub fn guard(&self, name: &str) -> Option<&Guard> {
+        self.guards.iter().find(|guard| guard.name == name)
     }
 
     pub fn projector(&self, name: &str) -> Option<&Projector> {
@@ -563,7 +569,40 @@ pub struct Command {
     pub prologue: Vec<Assign>,
     pub slices: Vec<Slice>,
     pub states: Vec<StateVar>,
+    /// The guards this command names, in the order written. Kept after they are spliced
+    /// in, so tooling can say what a command guards without re-deriving it.
+    pub calls: Vec<GuardCall>,
     pub body: Vec<Stmt>,
+}
+
+/// A named proposition about the log: folds, and one refusal when they do not hold.
+/// A command body with no `emit`, which is what lets it be spliced into one.
+/// See `docs/guards.md`.
+#[derive(Debug, Clone)]
+pub struct Guard {
+    pub name: Ident,
+    pub module: Option<Ident>,
+    pub params: Vec<Param>,
+    pub frame: usize,
+    pub exprs: Exprs,
+    pub prologue: Vec<Assign>,
+    pub slices: Vec<Slice>,
+    pub states: Vec<StateVar>,
+    /// Its own guards, spliced into it before it is spliced anywhere.
+    pub calls: Vec<GuardCall>,
+    pub body: Vec<Stmt>,
+    /// Where the guard is declared, so the cycle check can point at one. It runs after
+    /// every pass, by which time the cursor is at the end of the last module.
+    pub span: Span,
+}
+
+/// One `guard Name { args }`. The arguments are expressions in the *caller's* arena,
+/// because that is where they were written.
+#[derive(Debug, Clone)]
+pub struct GuardCall {
+    pub guard: Ident,
+    pub args: Vec<(Ident, ExprId)>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]

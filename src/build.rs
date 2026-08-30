@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ir::{
     Arm, Assign, BinOp, Bind, Command, EnvBind, EnvField, EventPath, Expr, ExprId, Exprs, Filter,
-    Function, Handler, Ident, Literal, Number, Param, Slice, SliceId, Slot, Span, StateVar, Stmt,
-    Type, UnOp, Update,
+    Function, Guard, GuardCall, Handler, Ident, Literal, Number, Param, Slice, SliceId, Slot, Span,
+    StateVar, Stmt, Type, UnOp, Update,
 };
 use crate::scaled::Rounding;
 
@@ -24,6 +24,7 @@ pub struct Builder {
     now: Option<Slot>,
     /// The slots a branch has proved present. A load of one lowers to an `Unwrap`.
     narrowed: HashSet<Slot>,
+    calls: Vec<GuardCall>,
 }
 
 impl Builder {
@@ -44,6 +45,7 @@ impl Builder {
             envelope: Vec::new(),
             now: None,
             narrowed: HashSet::new(),
+            calls: Vec::new(),
         }
     }
 
@@ -399,8 +401,42 @@ impl Builder {
             prologue: self.prologue,
             slices: self.slices,
             states: self.states,
+            calls: self.calls,
             body,
         }
+    }
+
+    /// A command's shape minus `now`, which a guard may not pin because it decides from
+    /// the log rather than from the clock. See `docs/guards.md`.
+    pub fn finish_guard(self, body: Vec<Stmt>, span: Span) -> Guard {
+        Guard {
+            name: self.name,
+            module: self.module,
+            params: self.params,
+            frame: self.frame as usize,
+            exprs: self.exprs,
+            prologue: self.prologue,
+            slices: self.slices,
+            states: self.states,
+            calls: self.calls,
+            body,
+            span,
+        }
+    }
+
+    /// One `guard Name { args }`, recorded where it was written so the splice keeps the
+    /// order the author put the refusals in.
+    pub fn call(&mut self, guard: &str, args: Vec<(Ident, ExprId)>, span: Span) {
+        self.calls.push(GuardCall {
+            guard: guard.into(),
+            args,
+            span,
+        });
+    }
+
+    /// Whether anything has been folded yet. A guard that folds nothing is a `fn`.
+    pub fn folds_nothing(&self) -> bool {
+        self.slices.is_empty()
     }
 }
 

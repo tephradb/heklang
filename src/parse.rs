@@ -7,8 +7,9 @@ use crate::diagnostic::{Code, Diagnostic, Related};
 use crate::ir::{
     Absent, Action, Arm, BinOp, Bind, Builtin, Command, ConstDef, Effect, EntityDef, EntityField,
     EnumDef, EnvField, EventDef, EventPath, Expect, Expr, ExprId, Exprs, FieldDef, Filter,
-    Function, Given, Handler, Ident, Index, Iter, Literal, Number, Param, Pos, Program, Projector,
-    RecordDef, RecordField, ReplySpec, Return, Setup, Slot, Span, Stmt, Test, Type, UnOp, Update,
+    Function, Given, Guard, Handler, Ident, Index, Iter, Literal, Number, Param, Pos, Program,
+    Projector, RecordDef, RecordField, ReplySpec, Return, Setup, Slot, Span, Stmt, Test, Type,
+    UnOp, Update,
 };
 use crate::lex::{Keyword, Spanned, Sym, Token, lex};
 use crate::scaled::{self, Rounding};
@@ -38,6 +39,7 @@ pub fn parse_files<'a>(
 #[derive(Default)]
 struct Bodies {
     commands: Vec<Command>,
+    guards: Vec<Guard>,
     effects: Vec<Effect>,
     functions: Vec<Function>,
     /// Where each `test` starts, for pass E to come back to.
@@ -102,6 +104,9 @@ struct Parser {
     /// Command signatures, collected before any body so an `invoke` can be checked
     /// against a command declared later or in another module (rule 7).
     commands: Vec<Signature>,
+    /// The same, for a guard, so a command may name one declared below it or in
+    /// another module. See `docs/guards.md`.
+    guards: Vec<Signature>,
     /// The same, for `fn`, so a helper may call one declared below it.
     functions: Vec<Signature>,
     /// The enclosing effect's own `fn` signatures; empty outside one. Two lists
@@ -188,6 +193,10 @@ enum Kind {
     /// A test's value position. Pure like a `fn`, but for a different reason: a test
     /// states inputs and expectations, so nothing in one may reach the world.
     Test,
+    /// A guard's body. It folds like a command and decides like one, and it is spliced
+    /// into a command, so everything a command may not do it may not do either.
+    /// See `docs/guards.md`.
+    Guard,
 }
 
 #[derive(Debug, Clone)]
@@ -232,6 +241,7 @@ impl Parser {
             command_end: 0,
             kind: Kind::Command,
             commands: Vec::new(),
+            guards: Vec::new(),
             functions: Vec::new(),
             local_fns: Vec::new(),
             in_effect: None,
@@ -673,6 +683,7 @@ impl Parser {
         let mut program = Program {
             events,
             commands: bodies.commands,
+            guards: bodies.guards,
             projectors,
             effects: bodies.effects,
             // Cloned rather than taken: pass E below resolves a test's values against the
@@ -879,6 +890,7 @@ impl Parser {
                 projectors.push(projector);
             }
             Token::Word(Keyword::Command) => self.command_signature()?,
+            Token::Word(Keyword::Guard) => self.guard_signature()?,
             Token::Word(Keyword::Fn) => self.fn_signature()?,
             Token::Word(Keyword::Effect) | Token::Word(Keyword::Test) => self.skip_item()?,
             other => return self.fail(Code::ExpectedToken, Self::expected_item(other)),
@@ -901,6 +913,10 @@ impl Parser {
             Token::Word(Keyword::Command) => {
                 let command = self.command_decl(events)?;
                 out.commands.push(command);
+            }
+            Token::Word(Keyword::Guard) => {
+                let guard = self.guard_item(events)?;
+                out.guards.push(guard);
             }
             Token::Word(Keyword::Fn) => out.functions.push(self.fn_decl(events, Kind::Function)?),
             Token::Word(Keyword::Projector) => {
@@ -956,6 +972,32 @@ impl Parser {
 
         let params = self.param_list(false)?;
         self.commands.push(Signature {
+            name,
+            params,
+            ret: None,
+        });
+        self.skip_braced()
+    }
+
+    /// The same, for a guard, so a command may name one declared later or in another
+    /// module. A guard declares no result: it refuses or it holds.
+    fn guard_signature(&mut self) -> Result<(), Diagnostic> {
+        self.expect_word(Keyword::Guard)?;
+        let named = self.pos;
+        let at = self.span_here();
+        let name = self.expect_ident()?;
+        if self.guards.iter().any(|other| other.name == name) {
+            return Err(self.declared_twice(
+                "guard",
+                &name,
+                format!("guard `{name}` is declared twice"),
+                at,
+            ));
+        }
+        self.declare("guard", &name, named);
+
+        let params = self.param_list(false)?;
+        self.guards.push(Signature {
             name,
             params,
             ret: None,
@@ -1194,7 +1236,7 @@ impl Parser {
 
     fn expected_item(found: &Token) -> String {
         format!(
-            "expected `enum`, `record`, `const`, `fn`, `event`, `command`, `projector`, `effect` or `test`, found {found}"
+            "expected `enum`, `record`, `const`, `fn`, `event`, `command`, `guard`, `projector`, `effect` or `test`, found {found}"
         )
     }
 
@@ -2356,7 +2398,52 @@ impl Parser {
             defaults: HashMap::new(),
         };
         lower.b.in_module(module.as_deref());
+        self.decl_params(&mut lower)?;
+        let body = self.decl_body(&mut lower, events)?;
+        self.expect_sym(Sym::RBrace)?;
+        Ok(lower.b.finish(body))
+    }
 
+    /// A guard declaration: the same shape as a command's, minus `emit` and everything
+    /// else `Kind::Guard` refuses. See `docs/guards.md`.
+    fn guard_item(&mut self, events: &[EventDef]) -> Result<Guard, Diagnostic> {
+        let module = self.module_at(self.pos).map(str::to_string);
+        self.expect_word(Keyword::Guard)?;
+        let at = self.span_here();
+        let name = self.expect_ident()?;
+        let mut lower = Lower {
+            b: Builder::new(&name),
+            defaults: HashMap::new(),
+        };
+        lower.b.in_module(module.as_deref());
+        self.decl_params(&mut lower)?;
+
+        self.kind = Kind::Guard;
+        let parsed = self.decl_body(&mut lower, events);
+        self.kind = Kind::Command;
+        let body = parsed?;
+        self.expect_sym(Sym::RBrace)?;
+
+        // A guard that reads no log is a `fn`: it decides from its arguments, and the
+        // whole reason a guard is a declaration rather than a call is that its slices
+        // join the caller's conflict boundary.
+        if lower.b.folds_nothing() {
+            return Err(self
+                .err(
+                    Code::EmptyDeclaration,
+                    format!("guard `{name}` folds nothing"),
+                    at,
+                )
+                .with_hint(
+                    "a guard is a proposition about the log, so it needs a `state`; a decision made from arguments alone is a `fn`",
+                ));
+        }
+        Ok(lower.b.finish_guard(body, at))
+    }
+
+    /// `(name: Type, ...)`, shared by a command and a guard because their inputs are
+    /// the same thing: values the caller supplies before anything is read.
+    fn decl_params(&mut self, lower: &mut Lower) -> Result<(), Diagnostic> {
         self.expect_sym(Sym::LParen)?;
         while !self.at_sym(Sym::RParen) {
             let param = self.expect_ident()?;
@@ -2370,16 +2457,27 @@ impl Parser {
         self.expect_sym(Sym::RParen)?;
         self.expect_sym(Sym::LBrace)?;
         self.command_end = self.command_end();
+        Ok(())
+    }
 
+    /// The declarations, then the statements. Shared by a command and a guard: a guard
+    /// is spliced into the command that names it, so anything true of the order here
+    /// has to be true of both. Leaves the closing brace for the caller.
+    fn decl_body(
+        &mut self,
+        lower: &mut Lower,
+        events: &[EventDef],
+    ) -> Result<Vec<Stmt>, Diagnostic> {
         self.prologue = true;
         let mut deferred: HashSet<Slot> = HashSet::new();
         let mut hoisted_body: Vec<Stmt> = Vec::new();
+        let mut named: Vec<(Ident, Vec<Token>)> = Vec::new();
         loop {
             match self.peek() {
-                Token::Word(Keyword::Guard) => self.guard_decl(&mut lower, events)?,
-                Token::Word(Keyword::State) => self.state_decl(&mut lower, events)?,
+                Token::Word(Keyword::Guard) => self.guard_decl(lower, events, &mut named)?,
+                Token::Word(Keyword::State) => self.state_decl(lower, events)?,
                 Token::Word(Keyword::Let) => {
-                    if let Some(stmt) = self.hoisted_let(&mut lower, &mut deferred)? {
+                    if let Some(stmt) = self.hoisted_let(lower, &mut deferred)? {
                         hoisted_body.push(stmt);
                     }
                 }
@@ -2402,15 +2500,25 @@ impl Parser {
                 ));
         }
 
-        let mut body = self.statements(&mut lower, events)?;
+        let mut body = self.statements(lower, events)?;
         // A `let` the prologue could not take runs first, in the order it was written.
         hoisted_body.append(&mut body);
-        self.expect_sym(Sym::RBrace)?;
-        Ok(lower.b.finish(hoisted_body))
+        Ok(hoisted_body)
     }
 
-    fn guard_decl(&mut self, lower: &mut Lower, events: &[EventDef]) -> Result<(), Diagnostic> {
+    /// `guard` has two shapes and the token after it decides. A path is the raw form:
+    /// slices nothing folds, added to the boundary and nothing else. A name is a call
+    /// to a declared guard.
+    fn guard_decl(
+        &mut self,
+        lower: &mut Lower,
+        events: &[EventDef],
+        named: &mut Vec<(Ident, Vec<Token>)>,
+    ) -> Result<(), Diagnostic> {
         self.expect_word(Keyword::Guard)?;
+        if matches!(self.peek(), Token::Ident(_)) {
+            return self.guard_call(lower, named);
+        }
         loop {
             let (path, filters) = self.slice_ref(lower, events)?;
             lower.b.guard(path, filters);
@@ -2418,6 +2526,99 @@ impl Parser {
                 return Ok(());
             }
         }
+    }
+
+    /// `guard Name { args }`. The signature comes from pass C, so a guard declared
+    /// below this one or in another module is nameable, and the arguments take the
+    /// bare-name shorthand every other named block in heklang takes.
+    fn guard_call(
+        &mut self,
+        lower: &mut Lower,
+        named: &mut Vec<(Ident, Vec<Token>)>,
+    ) -> Result<(), Diagnostic> {
+        let at = self.span_here();
+        let name = self.expect_ident()?;
+        let Some(signature) = self.guards.iter().find(|other| other.name == name).cloned() else {
+            return Err(self.err(
+                Code::NotDeclared,
+                format!("guard `{name}` is not declared"),
+                at,
+            ));
+        };
+
+        let opened = self.pos;
+        let mut args: Vec<(Ident, ExprId)> = Vec::new();
+        self.expect_sym(Sym::LBrace)?;
+        while !self.at_sym(Sym::RBrace) {
+            let at = self.span_here();
+            let field = self.expect_ident()?;
+            let Some((_, declared)) = signature.params.iter().find(|(param, _)| param == &field)
+            else {
+                return Err(self.err(
+                    Code::UnknownMember,
+                    format!("guard `{name}` has no parameter `{field}`"),
+                    at,
+                ));
+            };
+            if args.iter().any(|(seen, _)| seen == &field) {
+                return Err(self.err(
+                    Code::DuplicateField,
+                    format!("`{field}` is given twice"),
+                    at,
+                ));
+            }
+            let expected = declared.clone();
+            let value = if self.eat_sym(Sym::Colon) {
+                self.expr(lower, Some(expected))?
+            } else if lower.b.lookup(&field).is_none() {
+                return Err(self.not_in_scope(&field, at));
+            } else {
+                lower.b.at(at);
+                lower.b.load(&field)
+            };
+            args.push((field, value));
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RBrace)?;
+        for (param, _) in &signature.params {
+            if !args.iter().any(|(field, _)| field == param) {
+                return Err(self.err(
+                    Code::MissingField,
+                    format!("guard `{name}` needs `{param}`"),
+                    at,
+                ));
+            }
+        }
+
+        // The same guard on the same arguments decides the same thing twice, so the
+        // second one does nothing. A cycle is a different mistake and `check_guards`
+        // has it; this is the one that type-checks and runs and means nothing.
+        // Compared as written rather than as IR: two spellings of one value are two
+        // questions to the reader, and only an identical one is certainly a slip.
+        let written: Vec<Token> = self.tokens[opened..self.pos]
+            .iter()
+            .map(|spanned| spanned.token.clone())
+            .collect();
+        if named
+            .iter()
+            .any(|(seen, before)| seen == &name && before == &written)
+        {
+            return Err(self
+                .err(
+                    Code::DeclaredTwice,
+                    format!("guard `{name}` is named twice on the same arguments"),
+                    at,
+                )
+                .with_hint(
+                    "the second one decides what the first already decided; delete it, or give it the arguments you meant",
+                ));
+        }
+        named.push((name.clone(), written));
+
+        lower.b.call(&name, args, at);
+        Ok(())
     }
 
     fn state_decl(&mut self, lower: &mut Lower, events: &[EventDef]) -> Result<(), Diagnostic> {
@@ -3489,7 +3690,7 @@ impl Parser {
                     }),
                     Some(Type::Outcome)
                 );
-                if self.kind != Kind::Command
+                if !matches!(self.kind, Kind::Command | Kind::Guard)
                     && !decides
                     && (self.at_word(Keyword::Invalid) || self.at_word(Keyword::Reject))
                 {
@@ -3557,6 +3758,16 @@ impl Parser {
                     // the whole check, and it is the one that reports the mismatch:
                     // a second one here made `return label()` two diagnostics.
                     Return::Outcome(self.expr(lower, Some(Type::Outcome))?)
+                } else if self.kind == Kind::Guard {
+                    // A guard is spliced into the command that names it, so anything
+                    // that is not a refusal would read there as the command succeeding
+                    // and appending nothing. It holds by reaching its end instead.
+                    return self.fail_hint(
+                        Code::ReturnShape,
+                        "a guard holds by reaching its end, so this `return` says nothing"
+                            .to_string(),
+                        "write `return reject(...)` or `return invalid(...)`, or delete it",
+                    );
                 } else {
                     Return::Ok
                 };
@@ -3585,6 +3796,13 @@ impl Parser {
                         return self.fail(
                             Code::WrongContext,
                             "a test writes its log with `given`, which appends the event directly",
+                        );
+                    }
+                    Kind::Guard => {
+                        return self.fail_hint(
+                            Code::WrongContext,
+                            "a guard decides whether a command may run, so it appends nothing",
+                            "emit from the command that names this guard",
                         );
                     }
                 }
@@ -5324,7 +5542,9 @@ impl Parser {
     ) -> Result<(), Diagnostic> {
         match self.kind {
             Kind::Effect | Kind::EffectFn => Ok(()),
-            Kind::Command => Err(self.advised(Code::WrongContext, command, span)),
+            // A guard is spliced into a command, so it inherits the command's answer.
+            // Its own restriction is narrower and lives in `guard_only`.
+            Kind::Command | Kind::Guard => Err(self.advised(Code::WrongContext, command, span)),
             Kind::Projector => Err(self.advised(Code::WrongContext, projector, span)),
             Kind::Function => Err(self.purity_error(what, span)),
             Kind::Test => Err(self.err(
@@ -5374,6 +5594,16 @@ impl Parser {
                 // one would make `now()` mean something different inside a call.
                 if self.kind == Kind::EffectFn {
                     return Err(self.err(Code::ArmOnly, "an effect-local `fn` cannot read a clock", span).with_hint("`now()` is pinned once per invocation, so read it in the arm and pass it in"));
+                }
+                // A guard decides from the log. Its own slot would be a second clock
+                // beside the command's pinned one, and mapping it onto that one is a
+                // change with no user; see `docs/guards.md`.
+                if self.kind == Kind::Guard {
+                    return Err(self
+                        .err(Code::WrongContext, "a guard has no clock", span)
+                        .with_hint(
+                            "a guard decides from the log; take the moment as a parameter instead",
+                        ));
                 }
                 self.not_in_fn("read a clock", span)?;
                 self.not_in_fold("read a clock", span)?;
@@ -6091,7 +6321,7 @@ impl Parser {
             "invalid"
         };
         let why = match self.kind {
-            Kind::Command | Kind::Function => None,
+            Kind::Command | Kind::Function | Kind::Guard => None,
             Kind::Effect | Kind::EffectFn => Some("an effect's terminal outcome is `fail(...)`"),
             Kind::Projector => Some("a projector write cannot fail in a way the program observes"),
             Kind::Test => Some("a test states inputs and expectations rather than deciding"),
