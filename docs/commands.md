@@ -210,3 +210,4 @@ plain arm is not, and a transformed arm drops the seal.
 - `docs/declarations.md`: the separate name spaces, and the pass order that lets a command name an
   event declared below it.
 - `docs/testing.md`: `run`, which asserts a command's outcome and its emitted events.
+- `docs/host.md`: who answers the read, who enforces the condition, and what a conflict arrives as.

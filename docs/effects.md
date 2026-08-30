@@ -846,6 +846,9 @@ imply hekla can run the program is not doing its job.
 
 ## Where this diverges from the runtime
 
+These are places the *language* differs from hekla. `docs/host.md` is the other question, what the
+*seam* asks of a host: rules 3, 5, 10, 11 and 12 are all reasons it is cut where it is.
+
 | Topic | heklang | hekla today |
 | --- | --- | --- |
 | arms | one arm per event type (rule 1) | every matching arm runs, in declaration order |
@@ -922,6 +925,7 @@ it, because a narrowed load lowers differently.
 - **Retry configuration** (rule 13).
 - **Ciphertext at rest**: the log and the store hold plain values, because what rules 9 and 12 turn
   on is whether a key is alive. The decrypt **boundary** is enforced; the bytes are not modelled.
+  `Keys` in `docs/host.md` is the seam this would move through, and it is already shaped for it.
 - **The second erase rule** (rule 9), for an id that round-trips through an HTTP response. The
   `reveal` case is now checked where it can be written.
 - **Arrays** in a JSON body can be carried but not taken apart (rule 8).

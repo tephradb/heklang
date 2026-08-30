@@ -114,6 +114,10 @@ Replies are a queue per URL, taken in order, so scripting a 503 then a 200 is ho
 first attempt was absorbed". `erased` is the only way to write a shredded-key test, since a test
 cannot call `erase` itself.
 
+All three script the **harness**, which is the in-memory host `docs/host.md` describes. That is what
+keeps rule 8 honest from the other side too: a test writes a world with the same three levers an
+embedder has, and no more.
+
 ## 4. The action
 
 Exactly one, and it decides which expectations are legal:

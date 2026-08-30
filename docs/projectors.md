@@ -448,6 +448,9 @@ be static; this makes the interim version depend on the data, which the real one
 
 ## Where this diverges from the runtime
 
+These are places the *language* differs from hekla. `docs/host.md` is the other question, what the
+*seam* asks of a host, and a projector reaches it only through `Log::read`.
+
 Four of these rules describe behaviour hekla does not have today. Recorded so that a future change is
 an informed one rather than a rediscovery.
 
