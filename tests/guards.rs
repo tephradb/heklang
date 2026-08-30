@@ -541,3 +541,23 @@ guard Same(course: String) {{
     assert!(program.command("Same").is_some());
     assert!(program.guard("Same").is_some());
 }
+
+/// Pass C0 skips a `const`'s value by scanning ahead for the next item, so its notion of
+/// what starts one has to include `guard`. It did not, and a `const` immediately above a
+/// guard swallowed the guard: the item error then named `guard` in both halves of
+/// "expected ..., found `guard`", which is how it was found.
+#[test]
+fn a_const_above_a_guard_does_not_swallow_it() {
+    let source = format!(
+        "{EVENTS}const LIMIT: Int = 10
+guard CourseIsDefined(course: String) {{
+  state defined: Bool = fold false
+    on @course.defined(course) => true
+  if !defined {{ return reject(\"undefined_course\", \"no such course\") }}
+}}
+"
+    );
+    let program = program(&source);
+    assert!(program.guard("CourseIsDefined").is_some());
+    assert_eq!(program.consts.len(), 1);
+}

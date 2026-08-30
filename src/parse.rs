@@ -6851,6 +6851,7 @@ fn starts_item(word: Keyword) -> bool {
             | Keyword::Fn
             | Keyword::Event
             | Keyword::Command
+            | Keyword::Guard
             | Keyword::Projector
             | Keyword::Effect
             | Keyword::Test
