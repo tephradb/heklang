@@ -7,3 +7,10 @@ default-run = "heklang"
 
 [dependencies]
 uuid = { version = "1.26.0", default-features = false, features = ["std", "v5"] }
+
+# `harness = false` because this reports allocation counts rather than pass or fail,
+# and `test = false` so `cargo test` does not fold a hundred thousand events.
+[[bench]]
+name = "fold"
+harness = false
+test = false
