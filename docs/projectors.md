@@ -122,6 +122,9 @@ is an ordinary slot load by the time the expression layer sees it. That is why
 expression evaluator needs no new node for this feature. It is also why "only in a value position of
 one of those two" is structural rather than a check: nowhere else allocates a stored load.
 
+The row those slots are filled from is the host's, through `Rows::row` in `docs/host.md`. That is the
+whole reason the read-model seam reads as well as writes.
+
 ## 4. No general reads
 
 A handler cannot read entity state except through rule 3. It cannot read a different entity, cannot

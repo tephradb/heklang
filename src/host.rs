@@ -4,10 +4,13 @@
 //! between [`Log`] and the other three is the one `docs/effects.md` rule 11 already
 //! makes: reading the log is redone on every attempt and must be, while a side effect
 //! or an unrepeatable observation is done once and remembered.
+//!
+//! [`Calls`] and [`Rows`] sit beside the bundle rather than inside it, because a journal
+//! is per invocation and a read model is per projector, while a [`Host`] is per world.
 
-use crate::interp::Error;
+use crate::interp::{Error, Row};
 use crate::ir::{EventPath, Ident};
-use crate::value::{Event, Invoked, Json, Record, Value};
+use crate::value::{Event, Invoked, Json, Key, Record, Value};
 
 /// One resolved read: an event path and the values its filters narrowed it to.
 ///
@@ -171,6 +174,24 @@ pub enum Recorded {
 pub trait Calls {
     fn recorded(&self, call: &str, ordinal: u32) -> Result<Option<Recorded>, Error>;
     fn record(&mut self, call: &str, ordinal: u32, recorded: Recorded) -> Result<(), Error>;
+}
+
+/// One projector's read models, as the host stores them.
+///
+/// Separate from [`Host`] because it is per projector rather than per world, the way
+/// [`Calls`] is per invocation. `docs/projectors.md` rule 3 is why it reads as well as
+/// writes: a `patch` fills its stored loads from the row before it evaluates any of the
+/// write's value expressions, so a write-only stream could not carry one.
+///
+/// A `patch` arrives here as a whole row rather than as the fields it named. The delta
+/// is not lost, since `Stmt::Patch` still holds it, but it is deliberately not what
+/// crosses: a host taking a delta while [`Store`](crate::Store) took a whole row would
+/// be two write paths with nothing comparing them against each other.
+pub trait Rows {
+    /// The current row, including writes this projector has already made.
+    fn row(&self, entity: &str, key: &Key) -> Result<Option<Row>, Error>;
+    fn put(&mut self, entity: &Ident, key: Key, row: Row) -> Result<(), Error>;
+    fn delete(&mut self, entity: &Ident, key: &Key) -> Result<(), Error>;
 }
 
 /// Everything the interpreter needs from the world outside it, apart from the journal:

@@ -17,6 +17,7 @@ impl<T: Log + Clock + Keys + Http> Host for T {}
 let mut interpreter = Interpreter::with_host(&program, my_runtime);
 interpreter.run("PlaceOrder", args)?;
 interpreter.deliver("NotifyCustomer", position, &mut my_journal)?;
+interpreter.project_into("Orders", &mut my_rows)?;
 ```
 
 `Interpreter<'a, H = Harness>`, so `Interpreter::new(&program)` still means the harness and nothing
@@ -146,7 +147,46 @@ on the same entry or a replay re-sends the request it was written to suppress.
 `Journal` is the in-memory implementation and it is in `src/harness.rs`, where the other stand-ins
 live.
 
-## 7. What stays the language's
+## 7. Read models are a seam, and a narrow one
+
+```rust
+pub trait Rows {
+    fn row(&self, entity: &str, key: &Key) -> Result<Option<Row>, Error>;
+    fn put(&mut self, entity: &Ident, key: Key, row: Row) -> Result<(), Error>;
+    fn delete(&mut self, entity: &Ident, key: &Key) -> Result<(), Error>;
+}
+
+let projection = Projection::new(&program, "Orders")?;
+let query = projection.query();            // what to subscribe to
+projection.apply(&record, &mut my_rows)?;  // one record, handlers in declaration order
+```
+
+**Not part of `Host`.** A host is per world and a `Rows` is per projector, the way a `Calls` is per
+invocation. `Store` is one implementation and a persistent read model is another, so
+`Interpreter::project` is `project_into` against an in-memory `Store` and there are not two write
+paths to keep in step.
+
+**It reads as well as writes**, which is the only surprising line in it. `docs/projectors.md` rule 3
+fills a `patch`'s stored loads from the row before evaluating any of the write's value expressions,
+and rule 5 decides materialize-from-zeros on whether the row is there at all. A write-only stream
+could carry neither. `row` must also reflect writes this projection has already made, because two
+handlers may select one record and the second has to see the first's.
+
+**A `patch` crosses as a whole row**, not as the fields it named. The delta is still in the IR; it is
+deliberately not what a host sees, because a host taking a delta while `Store` took a whole row would
+be two write paths with nothing comparing them against each other. *Converting at the boundary* below
+has the `patch` and `update` rows.
+
+**`Projection` holds no host.** `docs/projectors.md` rule 4 gives a projector no general read and
+`docs/effects.md` rule 11 gives it no clock, so the program and the rows it writes through are the
+whole of what one needs. That is what lets a host project from a thread that never touches the log
+reader.
+
+**What is still not here**: where a row lands, what a column is called in a store, and what an index
+does. Rule 8 of `docs/projectors.md` still holds, and a host reads `Projection::projector()` for the
+entities and enums it needs to build a schema from.
+
+## 8. What stays the language's
 
 A host is not asked for these, and offering to supply them would break a rule the language is
 holding.
@@ -167,7 +207,7 @@ position; `deliver` is the host-facing primitive.
 **`log` output.** Rule 10 says it is not journaled. A host that wants the lines reads
 `Effectful::Log` out of the trace, which is ordered and complete.
 
-## 8. Converting at the boundary
+## 9. Converting at the boundary
 
 The traits speak heklang's model. A host whose model differs converts on the way in and out, rather
 than the language reshaping itself to match one runtime.
@@ -182,11 +222,8 @@ than the language reshaping itself to match one runtime.
 | `update` | the runtime's skipping partial write |
 | `patch` | a whole-row write plus the zero values |
 
-## 9. What this is not, yet
+## 10. What this is not, yet
 
-- **Read models are not a seam.** `project` still returns an in-memory `Store` and re-folds the whole
-  log. Nothing inside the language can observe where a row lands, so this is separable, and it is a
-  larger piece of work than this one.
 - **No cursor and no checkpoint.** Neither an effect's position nor a projector's watermark is
   persisted by anything here.
 - **Ciphertext is still not modelled.** `Keys` answers whether a subject is erased, which is what

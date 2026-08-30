@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::harness::{Harness, Journal, Reply};
 use crate::host::{
-    AppendCondition, Attempt, Calls, Host, Log, Predicate, Query, Recorded, Request,
+    AppendCondition, Attempt, Calls, Host, Log, Predicate, Query, Recorded, Request, Rows,
 };
 use crate::ir::{
     Absent, Assign, BinOp, Builtin, Command, Effect, EntityDef, EnvField, EventPath, Expr, ExprId,
@@ -51,6 +51,7 @@ pub enum ErrorKind {
     /// The host could not do what was asked. Rendered as the host wrote it: heklang has
     /// no vocabulary for a store's failures and should not invent one.
     Host(String),
+
     /// The host refused the append: something in the read set landed at or after
     /// `after`. Not an `Outcome`, because the three outcomes are the command's own
     /// answer and a conflict is the runtime's. `docs/host.md` has what an adapter
@@ -153,6 +154,7 @@ impl fmt::Display for ErrorKind {
                 write!(f, "{url} did not answer; every attempt was retryable")
             }
             ErrorKind::Host(why) => write!(f, "{why}"),
+
             ErrorKind::Conflict { after } => write!(
                 f,
                 "the log moved under this run: something it read landed at or after position {after}"
@@ -384,18 +386,100 @@ impl Store {
     pub fn is_empty(&self, entity: &str) -> bool {
         self.len(entity) == 0
     }
+}
 
-    fn put(&mut self, entity: &Ident, key: Key, row: Row) {
+/// The in-memory read models are one implementation of the seam a persistent store also
+/// implements, rather than a shape a host has to mirror.
+impl Rows for Store {
+    fn row(&self, entity: &str, key: &Key) -> Result<Option<Row>, Error> {
+        Ok(self.get(entity, key).cloned())
+    }
+
+    fn put(&mut self, entity: &Ident, key: Key, row: Row) -> Result<(), Error> {
         self.entities
             .entry(entity.clone())
             .or_default()
             .insert(key, row);
+        Ok(())
     }
 
-    fn remove(&mut self, entity: &str, key: &Key) {
+    fn delete(&mut self, entity: &Ident, key: &Key) -> Result<(), Error> {
         if let Some(rows) = self.entities.get_mut(entity) {
             rows.remove(key);
         }
+        Ok(())
+    }
+}
+
+/// One projector, ready to be applied to records a host supplies.
+///
+/// Holds no [`Host`]: `docs/projectors.md` rule 4 gives a projector no general read, and
+/// rule 11 of `docs/effects.md` gives it no clock, so the program and the rows it writes
+/// through are the whole of what it needs. That is what lets a host drive projections
+/// from a thread that never touches the log reader.
+pub struct Projection<'a> {
+    program: &'a Program,
+    projector: &'a Projector,
+}
+
+impl<'a> Projection<'a> {
+    pub fn new(program: &'a Program, name: &str) -> Result<Self, Error> {
+        let projector = program
+            .projector(name)
+            .ok_or_else(|| ErrorKind::UnknownProjector(name.to_string()))?;
+        Ok(Self { program, projector })
+    }
+
+    /// The definition a host builds its schema from: entities, enums and handlers.
+    pub fn projector(&self) -> &'a Projector {
+        self.projector
+    }
+
+    /// What this projector reads, which is a host's subscription. One predicate per
+    /// distinct handler path: two handlers may share a path, and a host looping slices
+    /// outer would otherwise visit one record twice.
+    pub fn query(&self) -> Query {
+        let mut slices: Vec<Predicate> = Vec::new();
+        for handler in &self.projector.handlers {
+            let slice = Predicate::new(handler.event.clone(), Vec::new());
+            if !slices.contains(&slice) {
+                slices.push(slice);
+            }
+        }
+        Query { slices, upto: None }
+    }
+
+    /// Applies every handler this record selects, in declaration order. Each gets a
+    /// fresh frame, which is what makes "handlers do not share state" structural.
+    pub fn apply(&self, record: &Record, rows: &mut dyn Rows) -> Result<(), Error> {
+        for handler in &self.projector.handlers {
+            if handler.event != record.event.path {
+                continue;
+            }
+
+            let mut frame = Frame::new(handler.frame);
+            for bind in &handler.binds {
+                let value = field(&record.event, &bind.field)?.clone();
+                let value = seal(self.program, &record.event, &bind.field, value)?;
+                frame.set(bind.slot, value)?;
+            }
+            for bind in &handler.envelope {
+                frame.set(bind.slot, envelope_value(record, bind.field))?;
+            }
+
+            let mut sink = Sink::Write {
+                projector: self.projector,
+                rows: &mut *rows,
+            };
+            exec_block(
+                &handler.exprs,
+                &handler.body,
+                &mut frame,
+                self.program,
+                &mut sink,
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -657,65 +741,24 @@ impl<'a, H: Host> Interpreter<'a, H> {
         Ok(counts)
     }
 
-    /// Folds the whole log into this projector's read models. Each handler gets a
-    /// fresh frame, which is what makes "handlers do not share state" structural.
+    /// Folds the whole log into this projector's read models, in memory.
     pub fn project(&self, name: &str) -> Result<Store, Error> {
-        let projector = self
-            .program
-            .projector(name)
-            .ok_or_else(|| ErrorKind::UnknownProjector(name.to_string()))?;
-        self.fold_into(projector)
-            .map_err(|err| err.in_module(projector.module.as_deref()))
+        let mut store = Store::default();
+        self.project_into(name, &mut store)?;
+        Ok(store)
     }
 
-    fn fold_into(&self, projector: &Projector) -> Result<Store, Error> {
-        let mut slices: Vec<Predicate> = Vec::new();
-        for handler in &projector.handlers {
-            let slice = Predicate::new(handler.event.clone(), Vec::new());
-            // Two handlers may share a path, and a host looping slices outer would
-            // otherwise visit one record twice.
-            if !slices.contains(&slice) {
-                slices.push(slice);
-            }
-        }
-        let query = Query { slices, upto: None };
-
-        let mut store = Store::default();
-        let mut records = Vec::new();
-        self.host.read(&query, &mut |record| {
-            records.push(record.clone());
-            Ok(())
-        })?;
-        for record in &records {
-            for handler in &projector.handlers {
-                if handler.event != record.event.path {
-                    continue;
-                }
-
-                let mut frame = Frame::new(handler.frame);
-                for bind in &handler.binds {
-                    let value = field(&record.event, &bind.field)?.clone();
-                    let value = seal(self.program, &record.event, &bind.field, value)?;
-                    frame.set(bind.slot, value)?;
-                }
-                for bind in &handler.envelope {
-                    frame.set(bind.slot, envelope_value(record, bind.field))?;
-                }
-
-                let mut sink = Sink::Write {
-                    projector,
-                    store: &mut store,
-                };
-                exec_block(
-                    &handler.exprs,
-                    &handler.body,
-                    &mut frame,
-                    self.program,
-                    &mut sink,
-                )?;
-            }
-        }
-        Ok(store)
+    /// The same fold, into read models the host keeps. A record is applied inside the
+    /// visitor rather than after it, so a projection's live heap does not have to hold
+    /// its whole boundary at once, which is what `docs/host.md` rule 4 hands a visitor
+    /// for in the first place.
+    pub fn project_into(&self, name: &str, rows: &mut dyn Rows) -> Result<(), Error> {
+        let projection = Projection::new(self.program, name)?;
+        let module = projection.projector.module.clone();
+        let query = projection.query();
+        self.host
+            .read(&query, &mut |record| projection.apply(record, rows))
+            .map_err(|err| err.in_module(module.as_deref()))
     }
 
     pub fn run(
@@ -945,7 +988,7 @@ enum Sink<'a> {
     Emit(&'a mut Vec<Event>),
     Write {
         projector: &'a Projector,
-        store: &'a mut Store,
+        rows: &'a mut dyn Rows,
     },
     Effect(Effects<'a>),
 }
@@ -1068,7 +1111,7 @@ fn exec_stmt(
             fields,
             span,
         } => {
-            let (projector, store) = write_sink(sink, *span)?;
+            let (projector, rows) = write_sink(sink, *span)?;
             let def = entity_def(projector, entity, *span)?;
 
             let mut row = Row::default();
@@ -1089,7 +1132,8 @@ fn exec_stmt(
             }
 
             let key = row_key(def, &row, *span)?;
-            store.put(entity, key, row);
+            rows.put(entity, key, row)
+                .map_err(|err| err.located(*span))?;
             Ok(Flow::Next)
         }
         Stmt::Patch {
@@ -1101,15 +1145,16 @@ fn exec_stmt(
             span,
         } => {
             let key_value = eval(program, exprs, frame, *key, None)?;
-            let (projector, store) = write_sink(sink, *span)?;
+            let (projector, rows) = write_sink(sink, *span)?;
             let def = entity_def(projector, entity, *span)?;
             let key = key_of(&key_value, exprs.span(*key))?;
 
             // Rule 5: a `patch` materializes from zeros, so it always has a prior value
             // for `.field` to read. An `update` drops the write instead, which is why a
             // stored load below can only ever come from a row that really exists.
-            let mut row = match (store.get(entity, &key), absent) {
-                (Some(row), _) => row.clone(),
+            let stored = rows.row(entity, &key).map_err(|err| err.located(*span))?;
+            let mut row = match (stored, absent) {
+                (Some(row), _) => row,
                 (None, Absent::Materialize) => materialize(def, projector, program, &key, *span)?,
                 (None, Absent::Skip) => return Ok(Flow::Next),
             };
@@ -1131,16 +1176,17 @@ fn exec_stmt(
                 row.0.insert(name.clone(), value);
             }
 
-            store.put(entity, key, row);
+            rows.put(entity, key, row)
+                .map_err(|err| err.located(*span))?;
             Ok(Flow::Next)
         }
         Stmt::Delete { entity, key } => {
             let span = exprs.span(*key);
             let key_value = eval(program, exprs, frame, *key, None)?;
-            let (projector, store) = write_sink(sink, span)?;
+            let (projector, rows) = write_sink(sink, span)?;
             entity_def(projector, entity, span)?;
             let key = key_of(&key_value, span)?;
-            store.remove(entity, &key);
+            rows.delete(entity, &key).map_err(|err| err.located(span))?;
             Ok(Flow::Next)
         }
         // Rule 4: `fail` is the author's terminal outcome, and only an effect has one.
@@ -1235,9 +1281,9 @@ fn subject_id(value: &Value, span: Span) -> Result<Option<String>, Error> {
 fn write_sink<'s, 'a>(
     sink: &'s mut Sink<'a>,
     span: Span,
-) -> Result<(&'a Projector, &'s mut Store), Error> {
+) -> Result<(&'a Projector, &'s mut (dyn Rows + 'a)), Error> {
     match sink {
-        Sink::Write { projector, store } => Ok((projector, store)),
+        Sink::Write { projector, rows } => Ok((projector, &mut **rows)),
         Sink::Emit(_) | Sink::Effect(_) | Sink::Pure => {
             Err(Error::at(ErrorKind::MalformedIr, span))
         }

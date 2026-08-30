@@ -5,8 +5,9 @@
 use std::cell::RefCell;
 
 use heklang::{
-    AppendCondition, Attempt, Calls, Clock, Error, Event, EventPath, Harness, Http, Interpreter,
-    Keys, Log, Outcome, Predicate, Program, Query, Record, Recorded, Reply, Request, Value, parse,
+    AppendCondition, Attempt, Calls, Clock, Error, ErrorKind, Event, EventPath, Harness, Http,
+    Ident, Interpreter, Key, Keys, Log, Outcome, Predicate, Program, Query, Record, Recorded,
+    Reply, Request, Row, Rows, Span, Value, parse,
 };
 
 const PRELUDE: &str = "event @order.placed {
@@ -371,5 +372,207 @@ fn a_stale_condition_is_refused() {
     assert_eq!(
         refused.to_string(),
         "the log moved under this run: something it read landed at or after position 0"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Read models, which are the seam a projector writes through
+// ---------------------------------------------------------------------------
+
+const TALLY: &str = "projector Orders {
+  entity Tally {
+    customer_id: Int @key,
+    orders: Int,
+    last: Money(2),
+  }
+
+  on @order.placed { customer_id, total } {
+    patch Tally[customer_id] {
+      orders: .orders + 1,
+      last: total,
+    }
+  }
+}
+
+projector Strict {
+  entity Running {
+    customer_id: Int @key,
+    orders: Int,
+  }
+
+  on @order.placed { customer_id } {
+    update Running[customer_id] { orders: .orders + 1 }
+  }
+}";
+
+const TWICE: &str = "projector Twice {
+  entity Count {
+    customer_id: Int @key,
+    hits: Int,
+  }
+
+  on @order.placed { customer_id } {
+    patch Count[customer_id] { hits: .hits + 1 }
+  }
+
+  on @order.placed { customer_id } {
+    patch Count[customer_id] { hits: .hits + 1 }
+  }
+}";
+
+/// Read models that are not a `Store`: a flat list, so nothing here can accidentally be
+/// the interpreter's own map.
+#[derive(Default)]
+struct Shelf {
+    rows: Vec<(String, Key, Row)>,
+    /// Fails every write, so a host's own failure can be watched arriving.
+    broken: bool,
+}
+
+impl Rows for Shelf {
+    fn row(&self, entity: &str, key: &Key) -> Result<Option<Row>, Error> {
+        Ok(self
+            .rows
+            .iter()
+            .find(|(name, at, _)| name == entity && at == key)
+            .map(|(_, _, row)| row.clone()))
+    }
+
+    fn put(&mut self, entity: &Ident, key: Key, row: Row) -> Result<(), Error> {
+        if self.broken {
+            return Err(Error::new(ErrorKind::Host(
+                "the shelf fell over".to_string(),
+            )));
+        }
+        self.rows
+            .retain(|(name, at, _)| !(name == entity && at == &key));
+        self.rows.push((entity.clone(), key, row));
+        Ok(())
+    }
+
+    fn delete(&mut self, entity: &Ident, key: &Key) -> Result<(), Error> {
+        self.rows
+            .retain(|(name, at, _)| !(name == entity && at == key));
+        Ok(())
+    }
+}
+
+/// One `@order.placed` per customer named, in the order named.
+fn logged(customers: &[i64]) -> Elsewhere {
+    let mut host = Elsewhere::default();
+    for (index, customer) in customers.iter().enumerate() {
+        let position = index as u64;
+        host.records.push(Record::new(
+            format!("elsewhere-{position}"),
+            position,
+            1_700_000_000_000_000 + position as i64,
+            Event::new(
+                EventPath::new(["order", "placed"]),
+                [
+                    ("order_id", Value::uuid(ORDER)),
+                    ("customer_id", Value::Int(*customer)),
+                    ("total", Value::money(2_599, 2)),
+                ],
+            ),
+        ));
+    }
+    host
+}
+
+#[test]
+fn a_projection_writes_into_read_models_the_crate_does_not_ship() {
+    let program = program(TALLY);
+    let interpreter = Interpreter::with_host(&program, logged(&[7, 7, 9]));
+    let mut shelf = Shelf::default();
+    interpreter
+        .project_into("Orders", &mut shelf)
+        .expect("projected");
+
+    assert_eq!(shelf.rows.len(), 2, "one row per customer");
+    let seven = shelf
+        .row("Tally", &Key::Int(7))
+        .expect("read")
+        .expect("row");
+    assert_eq!(seven.field("orders"), Some(&Value::Int(2)));
+    assert_eq!(seven.field("last"), Some(&Value::money(2_599, 2)));
+}
+
+#[test]
+fn the_query_a_projection_reads_with_is_one_predicate_per_path() {
+    let program = program(TALLY);
+    let host = logged(&[7]);
+    let interpreter = Interpreter::with_host(&program, host);
+    let mut shelf = Shelf::default();
+    interpreter
+        .project_into("Orders", &mut shelf)
+        .expect("projected");
+
+    let asked = interpreter.host().asked.borrow();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(
+        asked[0].slices,
+        vec![Predicate::new(
+            EventPath::new(["order", "placed"]),
+            Vec::new()
+        )]
+    );
+    assert_eq!(asked[0].upto, None, "a projector reads to the head");
+}
+
+#[test]
+fn patch_materializes_an_absent_row_and_update_drops_the_write() {
+    let program = program(TALLY);
+    let interpreter = Interpreter::with_host(&program, logged(&[7]));
+
+    let mut patched = Shelf::default();
+    interpreter
+        .project_into("Orders", &mut patched)
+        .expect("projected");
+    assert_eq!(patched.rows.len(), 1, "a patch materializes from zeros");
+
+    let mut updated = Shelf::default();
+    interpreter
+        .project_into("Strict", &mut updated)
+        .expect("projected");
+    assert!(updated.rows.is_empty(), "an update drops the write");
+}
+
+#[test]
+fn two_handlers_on_one_record_read_each_others_writes() {
+    let program = program(TWICE);
+    let interpreter = Interpreter::with_host(&program, logged(&[7]));
+    let mut shelf = Shelf::default();
+    interpreter
+        .project_into("Twice", &mut shelf)
+        .expect("projected");
+
+    let row = shelf
+        .row("Count", &Key::Int(7))
+        .expect("read")
+        .expect("row");
+    assert_eq!(
+        row.field("hits"),
+        Some(&Value::Int(2)),
+        "the second handler folded the first handler's write, not the zero row"
+    );
+}
+
+#[test]
+fn a_read_model_failure_arrives_as_a_host_error_at_the_statement() {
+    let program = program(TALLY);
+    let interpreter = Interpreter::with_host(&program, logged(&[7]));
+    let mut shelf = Shelf {
+        broken: true,
+        ..Shelf::default()
+    };
+    let err = interpreter
+        .project_into("Orders", &mut shelf)
+        .expect_err("the shelf fell over");
+
+    assert!(matches!(err.kind, ErrorKind::Host(ref why) if why == "the shelf fell over"));
+    assert_ne!(
+        err.span,
+        Span::default(),
+        "a host knows what went wrong and not where it was asked from, so the statement fills it in"
     );
 }
