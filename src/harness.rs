@@ -147,6 +147,11 @@ impl Log for Harness {
             if record.position > last {
                 break;
             }
+            // A real store seeks here. Scanning to the cursor is what makes this the
+            // stand-in it is, and it is still the same set of records.
+            if record.position < query.from {
+                continue;
+            }
             if query
                 .slices
                 .iter()

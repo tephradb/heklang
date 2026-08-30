@@ -329,7 +329,7 @@ fn a_const_takes_literals_and_literal_aggregates_only() {
     let message = parse("const N: Int = \"one\"\nevent @a.b { x: Int }\n")
         .expect_err("expected a rejection")
         .text();
-    assert_eq!(message, "a Int const cannot be a String");
+    assert_eq!(message, "an Int const cannot be a String");
 }
 
 /// Pass C0 exists for this: order is irrelevant for a const the way it is for every
@@ -401,7 +401,7 @@ fn a_const_of_the_wrong_type_names_the_const() {
     let message = parse("const A: Int = B\nconst B: String = \"x\"\nevent @a.b { x: Int }\n")
         .expect_err("expected a rejection")
         .text();
-    assert_eq!(message, "a Int const cannot be `B`, which is a String");
+    assert_eq!(message, "an Int const cannot be `B`, which is a String");
 }
 
 /// Resolution seeks to the value and seeks back, so nothing else is left looking at
@@ -569,7 +569,7 @@ fn the_optional_wrap_does_not_recurse() {
     let bad = parse("const N: Int? = \"x\"\nevent @a.b { x: Int }\n")
         .expect_err("expected a rejection")
         .text();
-    assert_eq!(bad, "a Int? const cannot be a String");
+    assert_eq!(bad, "an Int? const cannot be a String");
 }
 
 /// `Literal::EmptyJson` says in its own doc comment that it is a literal so it can be
@@ -587,7 +587,7 @@ fn an_empty_json_is_a_const() {
     let wrong = parse("const BLANK: Int = Json.empty\nevent @a.b { x: Int }\n")
         .expect_err("expected a rejection")
         .text();
-    assert_eq!(wrong, "a Int const cannot be a Json value");
+    assert_eq!(wrong, "an Int const cannot be a Json value");
 
     let member = parse("const BLANK: Json = Json.encode\nevent @a.b { x: Int }\n")
         .expect_err("expected a rejection")
@@ -602,7 +602,7 @@ fn none_needs_an_optional_target() {
     let message = parse("const N: Int = none\nevent @a.b { x: Int }\n")
         .expect_err("expected a rejection")
         .text();
-    assert_eq!(message, "a Int const cannot be `none`");
+    assert_eq!(message, "an Int const cannot be `none`");
 }
 
 /// Every shape resolves against the inner type, so a `Uuid` const stays spellable
@@ -862,15 +862,15 @@ fn max_on_something_with_no_length_is_rejected() {
     let cases = [
         (
             "record R { n: Int @max(3) }",
-            "`@max` bounds a length, so it applies to a String; `n` is a Int",
+            "`@max` bounds a length, so it applies to a String; `n` is an Int",
         ),
         (
             "event @a.b { n: Int @max(3) }",
-            "`@max` bounds a length, so it applies to a String; `n` is a Int",
+            "`@max` bounds a length, so it applies to a String; `n` is an Int",
         ),
         (
             "record Item { s: String }\nevent @a.b { n: Int }\nprojector P { entity R { n: Int @key, item: Item @max(3) }\n on @a.b { n } { patch R[n] { } } }",
-            "`@max` bounds a length, so it applies to a String; `item` is a Item",
+            "`@max` bounds a length, so it applies to a String; `item` is an Item",
         ),
     ];
     for (source, expected) in cases {

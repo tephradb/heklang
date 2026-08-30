@@ -82,13 +82,14 @@ store with that shape is a `map`, not a translation.
 ```rust
 pub struct Query {
     pub slices: Vec<Predicate>,
+    pub from: u64,
     pub upto: Option<u64>,
 }
 ```
 
 Three obligations, each load-bearing:
 
-- **Every record matching any predicate is visited**, or a fold silently loses events.
+- **Every record in range matching any predicate is visited**, or a fold silently loses events.
 - **Each is visited once**, or `open + 1` counts one event twice.
 - **In ascending position order**, because a fold is an order-dependent expression.
 
@@ -96,9 +97,17 @@ Three obligations, each load-bearing:
 store that can only narrow approximately is still correct, only slower. A store that narrows too far
 is wrong, and nothing will catch it.
 
-`upto` is inclusive and is what distinguishes the readers: `None` for a command and a projector,
-`Some(position)` for an effect arm, which folds to and including its own trigger (`docs/effects.md`
-rule 3).
+**The range is the exception to that latitude.** A slice is re-checked and a position is not, so a
+record handed to a resumed fold that already folded it is counted twice. Both bounds are inclusive.
+
+`upto` is what distinguishes the readers: `None` for a projector, `Some(after - 1)` for a command,
+which folds to the head it took `after` from and no further, and `Some(position)` for an effect arm,
+which folds to and including its own trigger (`docs/effects.md` rule 3).
+
+`from` is `0` for everything except a command's retry, where it is the position the previous attempt
+folded through. **A host answers it by seeking, not by filtering**, or the field buys nothing: the
+whole point is that a conflict on a boundary a hundred thousand events deep reads the handful that
+beat it. Section 5 has the rest of that argument.
 
 `read` takes a visitor rather than returning a collection, so a host can stream. A fold's live heap
 should not have to be linear in the size of its boundary, and a returned `Vec` would make that
@@ -113,9 +122,9 @@ pub struct AppendCondition {
 }
 ```
 
-The same resolved slices, bounded above when you read and below when you write. `Query` bounds them
-with `upto`; `AppendCondition` bounds them with `after`. `docs/commands.md` has the Dynamic
-Consistency Boundary argument: what you folded is what you conflict on.
+The same resolved slices, read up to `after - 1` and conditioned on from `after`. `docs/commands.md`
+has the Dynamic Consistency Boundary argument: what you folded is what you conflict on, and the two
+bounds meet exactly so that neither statement needs a footnote.
 
 `AppendCondition::conflicts` is the definition, written once, and `Harness` enforces it even though
 nothing single-threaded can trip it. There is one answer to what the condition means, and a host
@@ -123,8 +132,37 @@ implementing it deserves somewhere to read it rather than somewhere to guess.
 
 **A conflict is an error, not an outcome.** `Outcome` has three variants and they are the command's
 own answer: committed, the input was malformed, or the command refused on state grounds. Being beaten
-to the log is none of those, so it arrives as `ErrorKind::Conflict { after }`, and the loop that
-re-folds and re-runs belongs to the host. That is where every runtime already puts it.
+to the log is none of those, so it arrives as `ErrorKind::Conflict { after }`.
+
+### The retry policy is the host's; the carry is not
+
+```rust
+interpreter.run(name, args)                      // one attempt; a conflict is the error
+interpreter.run_retrying(name, args, &mut again) // `again(attempt) -> bool` decides
+```
+
+`again` is asked after each conflict, with the zero-based number of the attempt that just had one.
+The budget and the wait between attempts stay where they were, because how many attempts are worth
+spending and how long to sleep are decisions only a runtime can make. **What moved in is the carry.**
+
+A fold is a left fold over an append-only log, so folding `[0, a)` and then `[a, b)` is the state
+folding `[0, b)` would have given. A retry therefore never has to start over, and on a hot boundary
+that is not a marginal saving: it is the difference between a conflict costing the events that beat
+you and a conflict costing the boundary. A host cannot do it from outside, because the state lives in
+a frame it has no name for, so a host looping over `run` re-reads and re-folds everything every time.
+
+Three things follow, and each is a property `tests/host.rs` asserts:
+
+- A retry asks for `from = ` the position its last attempt folded through. Seeking to it is the
+  host's half of the bargain (section 4).
+- The delta is folded **onto the state that attempt built**, never onto the seed. Folding one rival
+  event onto `0` commits a third order against a cap of two.
+- The state is taken **before the body runs**, so a body that assigns into a `state` changes what it
+  decides on and cannot reach what the next attempt folds onto.
+
+What does not carry is everything a retry has no reason to redo: `now()` is pinned once for the whole
+request (rule 11), and so are the bound arguments, the hoisted prologue and the slices they resolve
+to, since all three read the arguments and each other and nothing else.
 
 ## 6. The journal is not part of the host
 

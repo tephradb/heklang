@@ -91,7 +91,7 @@ forgot. Deriving the condition from the folds themselves makes the drift unrepre
 Fixed, and worth knowing because it explains every scoping rule below:
 
 1. **parameters** are bound into the frame, each coerced to its declared type;
-2. **hoisted `let`s** run, in order;
+2. **hoisted `let`s** run, in order (which is those that do not read a `state`, see below);
 3. **filters** are evaluated once, so a filter may name a parameter or a hoisted `let`;
 4. **`state` seeds** are evaluated and coerced;
 5. `after` is taken: the log length *before* the fold;
@@ -101,6 +101,44 @@ Fixed, and worth knowing because it explains every scoping rule below:
 8. the outcome and the `AppendCondition` are returned together.
 
 One pass, not one per `state`: ten folds over a million events read the log once.
+
+**A `let` is hoisted only when it can be.** Step 2 runs before the fold, so a `let` whose initialiser
+reads a `state` has nothing to read, and that one stays an ordinary body statement at step 7 instead.
+It applies transitively: a `let` reading such a `let` stays with it.
+
+```
+state open: Int = fold 0
+  on @order.placed(customer_id) => open + 1
+state shut: Int = fold 0
+  on @order.cancelled(customer_id) => shut + 1
+
+let live = open - shut          // step 7, after the fold, because it reads a state
+```
+
+The two placements are indistinguishable except to a filter, because nothing between step 2 and step
+7 changes what the prologue could have read. So the rule costs an author nothing to not know, which
+is the point: writing `let live = open - shut` under the folds means what it looks like it means.
+
+**A seed may not read a `state` either**, and that one is rejected rather than deferred. Step 4 runs
+every seed before step 6 runs any fold, so `fold open` would read `open`'s own seed and never what it
+folds to:
+
+```
+state open: Int = fold 0
+  on @order.placed(customer_id) => open + 1
+state seen: Int = fold open      // rejected: `seen` is seeded from `open`
+```
+
+There is nothing to defer it to, because a seed has to exist before the fold it seeds. And unlike the
+`let`, this one used to **check clean and answer with the wrong number**: three matching events left
+`open` at 3 and `seen` seeded at 0, which is a plausible answer and a silent one. The way out is the
+`let` above, which the error names.
+
+What a filter cannot do is name one of them, and that **is** rejected for the same reason, since it
+asks the fold for the value that decides what the fold reads:
+
+> this filter on `customer_id` is folded from a `state`; filters are evaluated once, before the fold,
+> so they can name a parameter or a `let` above the declarations
 
 Step 3 is why the prologue exists at all, and why a `let` a filter names must be **above** it. The
 error says so rather than saying "not in scope":
@@ -157,6 +195,19 @@ sends it and whenever. A blocked customer is `reject`, because the same request 
 yesterday. The distinction matters to a caller deciding whether to fix the input or to give up, which
 is why `reject` carries a code and `invalid` does not: there is nothing to branch on when the answer
 is "you sent nonsense".
+
+**A command may return an outcome it did not spell.** `return reject("code", "why")` is unchanged,
+and beside it `return <expression>` takes anything of type `Outcome`, which is what a `fn` declared
+`-> Outcome?` produces. That is how two commands share one ladder without sharing a body:
+
+```
+let refusal = ladder(subscribed, taken, limit)
+if refusal.is_some() {
+  return refusal
+}
+```
+
+`docs/functions.md` has the rule and why the type is spellable in a `fn` signature and nowhere else.
 
 ## `guard` is rarely what you want
 

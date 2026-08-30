@@ -10,8 +10,37 @@
 //! `docs/types.md` is the contract and `tests/types.rs` is the same rules as executable
 //! tests. Change the doc, the tests and the code together.
 
+use std::fmt;
+
 use crate::ir::{BinOp, Ident, Literal, Number, Type};
 use crate::scaled;
+
+/// A type name with the article that belongs in front of it, so a diagnostic reads "an
+/// Int" rather than "a Int". Written as a `Display` rather than a function returning
+/// "a" or "an" because every one of these sites is inside a `format!` and wants one
+/// hole, not two.
+///
+/// Spelling decides it, with `U` deliberately not counted: `Uuid` is read "you-eye-dee"
+/// and takes "a", which is the case a plain vowel rule gets wrong and the only builtin
+/// where it matters. A record or an enum carries the author's own name, so "an User" is
+/// still reachable; that is a slip on a name the language did not choose, and inferring
+/// pronunciation to catch it would be a worse rule than the one it replaced.
+pub(crate) fn a(ty: &Type) -> Article<'_> {
+    Article(ty)
+}
+
+pub(crate) struct Article<'a>(&'a Type);
+
+impl fmt::Display for Article<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = self.0.to_string();
+        let article = match name.as_bytes().first() {
+            Some(b'A' | b'E' | b'I' | b'O') => "an",
+            _ => "a",
+        };
+        write!(f, "{article} {name}")
+    }
+}
 
 /// Looks through `T?` to the `T` a literal in that position is really making.
 pub fn inner_of(ty: &Type) -> &Type {
@@ -162,6 +191,9 @@ pub fn method_sig(receiver: &Type, method: &str) -> Option<Sig> {
         (Type::Json, "bool") => sig(vec![Type::String], Type::opt(Type::Bool)),
         (Type::Json, "json") => sig(vec![Type::String], Type::opt(Type::Json)),
         (Type::Json, "array") => sig(vec![Type::String], Type::opt(Type::list(Type::Json))),
+        // Text, not a number: a `Decimal` or a `Money` needs a scale, and the scale
+        // belongs to the target rather than to the digits on the wire.
+        (Type::Json, "number") => sig(vec![Type::String], Type::opt(Type::String)),
 
         (Type::Opt(inner), "unwrap_or") => {
             sig(vec![inner.as_ref().clone()], inner.as_ref().clone())

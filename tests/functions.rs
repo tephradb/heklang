@@ -193,13 +193,88 @@ fn a_fn_has_no_state() {
     );
 }
 
+/// A `fn` that did not declare an outcome still cannot write one, and the hint now names
+/// the way to: declaring `Outcome` is what makes the refusal the `fn`'s to decide.
 #[test]
 fn a_fn_returns_a_value_not_an_outcome() {
     let decls = "\nfn helper(p: Uuid) -> String {\n  return invalid(\"no\")\n}\n";
     assert_eq!(
         err(decls, EMIT),
-        "`invalid` is a command's outcome; a `fn` returns a value, so a caller decides what a bad one means"
+        "`invalid` is a command's outcome; declare it `-> Outcome` or `-> Outcome?` to decide a refusal the caller returns, or return a value the caller branches on"
     );
+}
+
+// ---------------------------------------------------------------------------------
+// A refusal is a decision, not data: an `Outcome` is spellable in a `fn` signature and
+// nowhere else, which is what lets two commands share one ladder.
+
+/// The shape this exists for. Without it the ladder is a `String` whose emptiness means
+/// "allowed", which is the sentinel the optional story exists to kill.
+#[test]
+fn a_fn_may_decide_a_refusal_and_a_command_may_return_it() {
+    let decls = "
+fn ladder(months: Int) -> Outcome? {
+  if months <= 0 { return invalid(\"months must be positive\") }
+  if months > 60 { return reject(\"too_long\", \"sixty months is the limit\") }
+  return none
+}
+";
+    let body =
+        "  let refusal = ladder(months)\n  if refusal.is_some() {\n    return refusal\n  }\n{EMIT}";
+    let source = source(decls, &body.replace("{EMIT}", EMIT));
+    let program = parse(&source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+
+    let run = |months: i64| {
+        let mut interpreter = Interpreter::new(&program);
+        interpreter
+            .run(
+                "Create",
+                vec![
+                    ("plan_id", Value::uuid(PLAN)),
+                    ("sku", Value::some(Value::str("S"))),
+                    ("months", Value::Int(months)),
+                ],
+            )
+            .expect("ran")
+            .outcome
+    };
+
+    assert!(matches!(run(24), Outcome::Ok(events) if events.len() == 1));
+    assert!(matches!(run(0), Outcome::Invalid(message) if message.contains("positive")));
+    match run(72) {
+        Outcome::Reject { code, .. } => assert_eq!(code, "too_long"),
+        other => panic!("expected a rejection, got {other:?}"),
+    }
+}
+
+/// The allowance sits above the general type parser, so it is a `fn` signature and not
+/// a type. `Response` has the same rule for the same reason.
+#[test]
+fn an_outcome_is_not_a_type_anywhere_else() {
+    for decls in [
+        "\nfn f() -> List(Outcome) { return [] }\n",
+        "\nfn f(o: Map(String, Outcome)) -> Int { return 0 }\n",
+    ] {
+        assert!(
+            err(decls, EMIT).contains("unknown type `Outcome`"),
+            "for {decls}: {}",
+            err(decls, EMIT)
+        );
+    }
+}
+
+/// An optional refusal has to be proved present before it is returned, the same way any
+/// other optional does. Nothing about `Outcome` bends the narrowing rule.
+#[test]
+fn an_unnarrowed_refusal_does_not_fill_a_return() {
+    let decls = "\nfn ladder(months: Int) -> Outcome? { return none }\n";
+    let body = "  let refusal = ladder(months)\n  return refusal";
+    let message = err(decls, body);
+    assert!(
+        message.starts_with("expected Outcome, found Outcome?"),
+        "got: {message}"
+    );
+    assert!(message.contains("proves it present"), "got: {message}");
 }
 
 /// Purity is what makes this need no rule of its own: a fold must reproduce without a
@@ -304,7 +379,7 @@ fn a_fn_must_return_on_every_path() {
     let decls = "\nfn pick(n: Int) -> Int {\n  if n > 0 {\n    return 1\n  }\n}\n";
     assert_eq!(
         err(decls, EMIT),
-        "`pick` can finish without returning a Int; every path out of a `fn` returns one"
+        "`pick` can finish without returning an Int; every path out of a `fn` returns one"
     );
 
     // An `if` with both branches returning does count.
@@ -319,7 +394,7 @@ fn a_for_body_does_not_count_as_returning() {
     let decls = "\nfn first(xs: List(Int)) -> Int {\n  for x in xs {\n    return x\n  }\n}\n";
     assert_eq!(
         err(decls, EMIT),
-        "`first` can finish without returning a Int; every path out of a `fn` returns one"
+        "`first` can finish without returning an Int; every path out of a `fn` returns one"
     );
 
     let with_fallback =

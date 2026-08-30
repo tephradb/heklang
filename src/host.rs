@@ -49,19 +49,28 @@ impl Predicate {
     }
 }
 
-/// What one fold reads: the union of its slices, bounded above.
+/// What one fold reads: the union of its slices, over a range of positions.
 ///
-/// Three obligations, each of them load-bearing. Every record matching any predicate is
-/// visited, or a fold silently loses events. Each is visited **once**, or `open + 1`
-/// counts one event twice. In ascending position order, because a fold is an
+/// Three obligations, each of them load-bearing. Every record in range matching any
+/// predicate is visited, or a fold silently loses events. Each is visited **once**, or
+/// `open + 1` counts one event twice. In ascending position order, because a fold is an
 /// order-dependent expression.
 ///
 /// Visiting a record that matches nothing is harmless, because the fold re-checks each
 /// slice itself. A store that can only narrow approximately is still correct, only
-/// slower: over-delivering is a cost and under-delivering is a bug.
+/// slower: over-delivering is a cost and under-delivering is a bug. **The range is not
+/// part of that latitude.** A slice is re-checked and a position is not, so a record
+/// handed to a resumed fold that already folded it is counted twice.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Query {
     pub slices: Vec<Predicate>,
+    /// The first position to visit, inclusive. `0` reads from the start of the log.
+    ///
+    /// A retry sets it to where its last attempt stopped, so a conflict costs the events
+    /// that beat it rather than the whole boundary again. A store whose reads take a
+    /// cursor answers this by seeking, which is the entire point of the field: a host
+    /// that filtered instead would still read every event it then threw away.
+    pub from: u64,
     /// The last position to visit, inclusive. `None` reads to the head.
     /// `docs/effects.md` rule 3: an effect's fold stops at the trigger's own position.
     pub upto: Option<u64>,

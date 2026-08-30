@@ -294,6 +294,39 @@ table, which is part of the contract because it decides what a remote service ac
 far side, which is the same reason they are scaled integers here. Neither carries a currency; a
 program that needs one sends the field it declared for it (`docs/money.md`).
 
+### A number the author typed is a JSON number
+
+The table above is about **a heklang value crossing the boundary**. It is not about what may appear
+inside a `Json`, which this rule separately calls unchecked passthrough in both directions. A numeric
+literal written straight into a body is the second thing, and it stays a JSON number:
+
+```
+{ "count": 7, "amount": 10.5, "rates": [0.1, 0.25], "owed": total }
+```
+
+```json
+{"amount":10.5,"count":7,"owed":"10.50","rates":[0.1,0.25]}
+```
+
+`total` is a `Money(2)`, so it is quoted by the table. `10.5` is not a heklang value being exported,
+it is a number the author typed into a foreign document, so it goes out as one. This holds inside
+arrays and nested objects, and for a negative literal.
+
+**This is a distinction, and it will surprise someone.** Replacing the literal `10.5` with a variable
+holding a `Money(2)` changes the wire form from `10.5` to `"10.50"`. That is intended, because the two
+are different things, but it is worth knowing before a refactor.
+
+Only a bare literal is affected. `{ "n": 1 + 2 }` is arithmetic that produces an `Int`, and an `Int`
+is a JSON number by the table anyway.
+
+**Before this, there was no way to send `{"amount": 10.5}` at all.** `Json` could hold an integer and
+could not hold anything else, so a fractional literal fell through to `Decimal(n)` and the table
+quoted it, while `7` went out bare. The boundary was not "numerics are quoted", it was "the ones the
+representation could not hold were", which is not a rule anyone chose.
+
+A `Json` number is carried as **the exact text**, never an `f64`. `0.30000000000000004` survives a
+round trip byte for byte, and no float arithmetic exists anywhere in the language.
+
 **Object keys are sorted.** That is rule 14's defined iteration order (see below), and it is why the
 same object built twice serialises byte-identically.
 
@@ -306,6 +339,23 @@ become a value of a declared type. One table met twice, rather than two kept in 
 **It takes the type rather than inferring one.** `"1.5"` is 1.50 at `Money(2)` and 1.500 at
 `Money(3)`, and only the declaration says which was written. A `Timestamp` and an `Int` are both
 numbers, and an enum variant is checked against its declaration rather than taken on trust.
+
+**A number read out of a response body comes back as text**, through `body.number("amount")`, and
+`Money.parse` or `Decimal.parse` finishes the job against a declared target:
+
+```
+invoke Record {
+  price: Money.parse(response.body.number("price").unwrap_or("0")).unwrap_or(0.00),
+  rate: Decimal.parse(response.body.number("rate").unwrap_or("0")).unwrap_or(0.0000),
+}
+```
+
+Text rather than a typed value for the reason above: the scale belongs to where it lands, and the
+digits on the wire do not know it. `19.99` reaches a `Money(2)` as exactly 19.99, with nothing
+rounded and no float in between.
+
+`body.int("n")` still answers for a whole number and answers `none` for `10.5`, which is the same
+`none` a missing key gives.
 
 **A `null` fills an optional and nothing else.** An absent object key reads as `null`, so a missing
 optional is absent and a missing required field is an error rather than a zero quietly standing in.

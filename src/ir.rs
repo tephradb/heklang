@@ -216,7 +216,7 @@ impl fmt::Display for EventPath {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Program {
     pub events: Vec<EventDef>,
     pub commands: Vec<Command>,
@@ -740,6 +740,13 @@ pub enum Expr {
     /// Rule 12. Nothing but the value: subject-ness is a property of the value now,
     /// so the field, the subject and its id all ride on it. See `docs/effects.md`.
     Reveal(ExprId),
+    /// `reject(code, message)` or, with no code, `invalid(message)`. An `Outcome` as a
+    /// value, so a `fn` can decide a refusal and a command can return what it decided.
+    /// See `docs/functions.md`.
+    Refusal {
+        code: Option<ExprId>,
+        message: ExprId,
+    },
     /// A value a semantic check rejected. Its type is unknown, so nothing downstream
     /// checks it and one mistake stays one diagnostic. It never reaches the
     /// interpreter: a program with one recorded is a program that failed to check.
@@ -777,6 +784,9 @@ pub enum Builtin {
     /// Carries the target scale, which comes from where the result lands rather than
     /// from the text: `"10.5"` is a different value at scale 2 and at scale 3.
     MoneyParse(u8),
+    /// The same, for a rate rather than an amount. `Decimal` and `Money` are distinct
+    /// types with distinct targets, so the scale each parses at is its own.
+    DecimalParse(u8),
 }
 
 impl Builtin {
@@ -823,6 +833,7 @@ impl Builtin {
             Builtin::TimestampParse => "Timestamp.parse",
             Builtin::TimestampFromParts => "Timestamp.from_parts",
             Builtin::MoneyParse(_) => "Money.parse",
+            Builtin::DecimalParse(_) => "Decimal.parse",
         }
     }
 }
@@ -865,6 +876,10 @@ pub enum Literal {
     /// `Json.empty`, an object with no members. A literal rather than an expression so
     /// it can be a seed, a default and a const.
     EmptyJson,
+    /// A number written straight into a JSON body, carried as the text it was written
+    /// as. Built only in that position: everywhere else a numeric literal is an `Int` or
+    /// a `Decimal`, and rule 8 quotes those on the way out. See `docs/effects.md`.
+    JsonNum(String),
     Record {
         ty: Ident,
         fields: Vec<(Ident, Literal)>,
@@ -886,6 +901,11 @@ impl Number {
     /// `Decimal(n)`: widening is exact, and more written places than the target holds
     /// is an error rather than a silent round.
     pub fn resolve(self, ty: &Type) -> Result<Literal, NumberError> {
+        // A seal is transparent to a literal. Writing `25.99` into a
+        // `Money(2) @subject(shop_id)` field is the encrypting direction, which rule 12
+        // says needs no ceremony, and the scale being resolved against is the
+        // content's rather than the seal's.
+        let ty = &ty.unsealed();
         let target = match ty {
             Type::Int => 0,
             Type::Decimal(scale) | Type::Money(scale) => *scale,
@@ -933,7 +953,7 @@ impl fmt::Display for NumberError {
             NumberError::NotNumeric(Type::Timestamp) => f.write_str(
                 "a number cannot be a Timestamp; one is written as a string, like \"2026-01-01T00:00:00Z\"",
             ),
-            NumberError::NotNumeric(ty) => write!(f, "a number cannot be a {ty}"),
+            NumberError::NotNumeric(ty) => write!(f, "a number cannot be {}", crate::types::a(ty)),
             NumberError::TooPrecise { written, target } => {
                 let places = if *written == 1 { "place" } else { "places" };
                 write!(f, "{written} decimal {places} is too precise for {target}")
@@ -1036,6 +1056,10 @@ pub enum Return {
     /// A `fn`'s result. Only a `fn` can produce one, and it always does: the parser
     /// rejects a body that can finish without returning.
     Value(ExprId),
+    /// A command returning an `Outcome` it computed rather than one it spelled, which
+    /// is what lets the decision live in a `fn`. `Invalid` and `Reject` above stay for
+    /// the written forms: they carry their parts, and this carries a value.
+    Outcome(ExprId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

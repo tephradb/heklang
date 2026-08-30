@@ -831,8 +831,10 @@ fn a_named_subject_checks_the_value_type() {
     erase(customer_id, e.order_id)
   }
 }");
+    // "an Int" and "a Uuid" in one sentence, which is the pair a plain vowel rule gets
+    // half right: `Uuid` is read "you-eye-dee".
     assert!(
-        message.contains("files its keys under a Int"),
+        message.contains("files its keys under an Int"),
         "got: {message}"
     );
     assert!(message.contains("cannot take a Uuid"), "got: {message}");
@@ -3040,6 +3042,26 @@ fn a_decimal_that_does_not_fit_its_scale_is_a_mismatch() {
     assert_eq!(err.expected, Type::Money(2));
 }
 
+/// A `Uuid` is checked, not merely typed. This is the one row of the table that reaches
+/// past the program: it becomes a tag a host indexes on, a read-model key it paginates
+/// by, and a seed `Uuid.derive` fails on, and it arrives from outside (a request body, a
+/// stored record) rather than from the parser, which checks a written literal already.
+#[test]
+fn text_that_is_not_a_uuid_is_a_mismatch() {
+    let program = shapes();
+    let defs = Defs::of(&program);
+
+    let err = Value::from_json(&Json::str("not-a-uuid"), &Type::Uuid, defs).expect_err("not one");
+    assert_eq!(err.expected, Type::Uuid);
+    assert_eq!(err.found, "text that is not a uuid");
+
+    let good = "11111111-1111-1111-1111-111111111111";
+    assert_eq!(
+        Value::from_json(&Json::str(good), &Type::Uuid, defs).expect("a real one"),
+        Value::uuid(good),
+    );
+}
+
 /// The case this exists for: a field that was an `Int` when the record was written and
 /// is read back under a program that has changed. The answer names where it was, so an
 /// operator can see which field moved.
@@ -3074,7 +3096,7 @@ fn an_absent_key_fills_an_optional_and_fails_a_required_field() {
 
     let complete = Json::obj([
         ("sku", Json::str("A1")),
-        ("qty", Json::Int(2)),
+        ("qty", Json::int(2)),
         ("price", Json::str("1.500")),
     ]);
     let value =
@@ -3113,4 +3135,91 @@ fn an_unknown_variant_is_a_mismatch() {
     let err = Value::from_json(&Json::str("Trial"), &Type::Enum("Tier".to_string()), defs)
         .expect_err("Trial is not a Tier");
     assert_eq!(err.found, "a variant it does not have");
+}
+
+// ---------------------------------------------------------------------------------
+// Rule 8: a number the author typed into a body is JSON's number, and a heklang value
+// crossing the boundary is still the table's string.
+
+/// Before this, `{ "amount": 10.5 }` went out as `{"amount":"10.5"}` while
+/// `{ "count": 7 }` went out as `{"count":7}`, so no expression in the language produced
+/// a fractional JSON number and `{"amount": 10.5}` was unreachable.
+#[test]
+fn a_numeric_literal_in_a_body_is_a_json_number() {
+    let program = program(
+        "effect E {
+  on @order.placed as e { total } {
+    let response = http.post(\"https://mail.example/confirm\", {
+      \"whole\": 7,
+      \"frac\": 10.5,
+      \"neg\": -0.25,
+      \"arr\": [1.5, 2],
+      \"nested\": { \"deep\": 0.001 },
+      \"arith\": 1 + 2,
+      \"from_money\": total,
+      \"quoted\": \"10.5\",
+    })
+    log(\"{response.status}\")
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let (interpreter, outcome) = deliver(
+        &program,
+        vec![placed(1, 7, 1050)],
+        vec![Reply::Status(200)],
+        &mut journal,
+    );
+    outcome.expect("delivered");
+
+    let body = interpreter.requests()[0]
+        .body
+        .clone()
+        .expect("a post has a body");
+    assert_eq!(
+        body.to_string(),
+        "{\"arith\":3,\"arr\":[1.5,2],\"frac\":10.5,\"from_money\":\"10.50\",\
+         \"neg\":-0.25,\"nested\":{\"deep\":0.001},\"quoted\":\"10.5\",\"whole\":7}"
+    );
+}
+
+/// The exact text, so nothing is rounded between the wire and a declared scale. A float
+/// would lose this on the way in and there is no float in the language to lose it with.
+#[test]
+fn a_body_number_reads_back_as_its_exact_text() {
+    let program = program(
+        "effect E {
+  on @order.placed as e {
+    let response = http.get(\"https://mail.example/confirm\")
+    log(\"{response.body.number(\"price\").unwrap_or(\"<none>\")}\")
+    log(\"{response.body.number(\"whole\").unwrap_or(\"<none>\")}\")
+    log(\"{response.body.int(\"price\").unwrap_or(-1)}\")
+    log(\"{response.body.number(\"missing\").unwrap_or(\"<none>\")}\")
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let body = Json::obj([
+        ("price", Json::num("0.30000000000000004")),
+        ("whole", Json::int(7)),
+    ]);
+    let (interpreter, outcome) = deliver(
+        &program,
+        vec![placed(1, 7, 100)],
+        vec![Reply::Body(200, body)],
+        &mut journal,
+    );
+    outcome.expect("delivered");
+
+    assert_eq!(
+        interpreter.lines(),
+        [
+            "0.30000000000000004",
+            "7",
+            // `int` answers only for a whole number, which is the `none` a missing key
+            // gives rather than a truncation.
+            "-1",
+            "<none>",
+        ]
+    );
 }

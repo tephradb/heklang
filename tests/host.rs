@@ -29,9 +29,15 @@ fn program(body: &str) -> Program {
 struct Elsewhere {
     records: Vec<Record>,
     /// Every query the interpreter asked with, so a test can assert that the predicate
-    /// reached the host rather than being applied after a full scan.
+    /// and the range reached the host rather than being applied after a full scan.
     asked: RefCell<Vec<Query>>,
     shredded: Vec<(String, String)>,
+    /// How many more appends to beat to the log before letting one through. Each one
+    /// lands a rival event inside the slice first, which is the shape a real store's
+    /// condition check produces rather than an error invented for the test.
+    beat: usize,
+    /// Whose order the rival places, so it falls inside the slice under test.
+    rival: i64,
 }
 
 impl Log for Elsewhere {
@@ -54,6 +60,9 @@ impl Log for Elsewhere {
             if record.position > last {
                 break;
             }
+            if record.position < query.from {
+                continue;
+            }
             if query
                 .slices
                 .iter()
@@ -65,7 +74,16 @@ impl Log for Elsewhere {
         Ok(())
     }
 
-    fn append(&mut self, events: &[Event], _condition: &AppendCondition) -> Result<(), Error> {
+    fn append(&mut self, events: &[Event], condition: &AppendCondition) -> Result<(), Error> {
+        if self.beat > 0 {
+            self.beat -= 1;
+            let position = self.records.len() as u64;
+            self.records.push(order(position, self.rival));
+            return Err(ErrorKind::Conflict {
+                after: condition.after,
+            }
+            .into());
+        }
         for event in events {
             let position = self.records.len() as u64;
             self.records.push(Record::new(
@@ -152,7 +170,11 @@ fn the_host_stamps_what_it_appended() {
 #[test]
 fn the_predicate_reaches_the_host() {
     let program = program(COUNTING);
-    let mut interpreter = Interpreter::with_host(&program, Elsewhere::default());
+    let seeded = Elsewhere {
+        records: vec![order(0, 7), order(1, 9)],
+        ..Elsewhere::default()
+    };
+    let mut interpreter = Interpreter::with_host(&program, seeded);
     interpreter.run("Place", placed(7)).expect("ran");
 
     let asked = interpreter.host().asked.borrow();
@@ -166,7 +188,29 @@ fn the_predicate_reaches_the_host() {
             vec![("customer_id".to_string(), Value::Int(7))],
         )]
     );
-    assert_eq!(query.upto, None, "a command folds to the head");
+    assert_eq!(query.from, 0, "a first attempt folds from the start");
+    assert_eq!(
+        query.upto,
+        Some(1),
+        "a command folds to the head it took `after` from, and no further: reading \
+         past it would decide on events the condition is about to refuse"
+    );
+}
+
+/// An empty log has nothing in any slice, so the read is not made at all. Worth
+/// asserting rather than leaving to chance: it is what the bounded range costs, and a
+/// host that counted its reads would otherwise see the number move for no reason.
+#[test]
+fn a_command_against_an_empty_log_does_not_read() {
+    let program = program(COUNTING);
+    let mut interpreter = Interpreter::with_host(&program, Elsewhere::default());
+    let execution = interpreter.run("Place", placed(7)).expect("ran");
+
+    assert!(matches!(execution.outcome, Outcome::Ok(_)));
+    assert!(
+        interpreter.host().asked.borrow().is_empty(),
+        "there is no position to visit"
+    );
 }
 
 /// A run that refuses still read the log, so a host that wants to cache or trace the
@@ -180,6 +224,84 @@ fn the_condition_comes_back_resolved() {
     assert_eq!(
         execution.condition.slices[0].filters,
         [("customer_id".to_string(), Value::Int(7))]
+    );
+}
+
+const CAPPED: &str = "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+  state open: Int = fold 0
+    on @order.placed(customer_id) => open + 1
+
+  if open >= 2 { return reject(\"at_capacity\", \"two is the limit\") }
+  emit @order.placed { order_id, customer_id, total }
+}";
+
+/// Section 5, the part a host cannot do for itself. One event is seeded and a rival
+/// lands a second one at the append, so the retry has exactly one event to catch up on.
+///
+/// Two properties, and both fail loudly rather than quietly:
+///
+/// - **The retry reads only the delta.** `from` is where the last attempt stopped, so a
+///   conflict on a boundary of any depth costs the events that beat it. A host looping
+///   over `run` would ask for `from: 0` twice.
+/// - **The delta lands on the state that attempt built, not on the seed.** Folding one
+///   rival event onto `0` gives `open = 1` and commits a third order past a cap of two.
+///   Folding it onto the `1` the first attempt reached gives `2` and refuses.
+#[test]
+fn a_retry_folds_the_delta_onto_what_the_last_attempt_built() {
+    let program = program(CAPPED);
+    let host = Elsewhere {
+        records: vec![order(0, 7)],
+        beat: 1,
+        rival: 7,
+        ..Elsewhere::default()
+    };
+    let mut interpreter = Interpreter::with_host(&program, host);
+    let mut conflicts = Vec::new();
+    let execution = interpreter
+        .run_retrying("Place", placed(7), &mut |attempt| {
+            conflicts.push(attempt);
+            true
+        })
+        .expect("ran");
+
+    assert_eq!(conflicts, [0], "one conflict, reported once, zero-based");
+    assert!(
+        matches!(&execution.outcome, Outcome::Reject { code, .. } if code == "at_capacity"),
+        "the retry decided on the event that beat it: {:?}",
+        execution.outcome
+    );
+    assert_eq!(
+        execution.condition.after, 2,
+        "and conditioned on the head it folded to, not the one the first attempt took"
+    );
+
+    let asked = interpreter.host().asked.borrow();
+    let [first, second] = &asked[..] else {
+        panic!("one read per attempt, got {}", asked.len());
+    };
+    assert_eq!((first.from, first.upto), (0, Some(0)));
+    assert_eq!(
+        (second.from, second.upto),
+        (1, Some(1)),
+        "the retry asks for what landed since and nothing it already folded"
+    );
+}
+
+/// The default is still one attempt. `run` is what every caller that has no retry policy
+/// uses, and a conflict is its error rather than something it silently absorbs.
+#[test]
+fn run_raises_a_conflict_rather_than_retrying_it() {
+    let program = program(CAPPED);
+    let host = Elsewhere {
+        beat: 1,
+        rival: 7,
+        ..Elsewhere::default()
+    };
+    let mut interpreter = Interpreter::with_host(&program, host);
+    let err = interpreter.run("Place", placed(7)).expect_err("conflicts");
+    assert!(
+        matches!(err.kind, ErrorKind::Conflict { after: 0 }),
+        "{err}"
     );
 }
 

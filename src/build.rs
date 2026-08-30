@@ -173,10 +173,93 @@ impl Builder {
         self.slice(event, filters, Vec::new(), Vec::new())
     }
 
+    /// The first filter reading something the prologue has not set, with the span to
+    /// point at. Filters resolve at step 3 and the fold runs at step 6, so such a
+    /// filter can never be satisfied and is a mistake rather than a slow path.
+    pub fn filter_past_prologue(&self, deferred: &HashSet<Slot>) -> Option<(Ident, Span)> {
+        self.slices
+            .iter()
+            .flat_map(|slice| &slice.filters)
+            .find_map(|filter| {
+                self.reads_past_prologue(filter.value, deferred)
+                    .then(|| (filter.field.clone(), self.exprs.span(filter.value)))
+            })
+    }
+
     pub fn hoist(&mut self, name: &str, value: ExprId, ty: Option<Type>) -> Slot {
         let slot = self.alloc(name, ty);
         self.prologue.push(Assign { slot, value });
         slot
+    }
+
+    /// Whether `value` reads a slot the prologue has not filled by the time it runs: a
+    /// `state`, which the fold sets at step 6, or a `let` already left in the body
+    /// because it read one. `docs/commands.md`'s execution order is the whole rule, and
+    /// a `let` this answers `true` for cannot be hoisted to step 2.
+    pub fn reads_past_prologue(&self, value: ExprId, deferred: &HashSet<Slot>) -> bool {
+        self.unset_read(value, deferred).is_some()
+    }
+
+    /// The `state` an expression reads, with the span of the read. A seed asks this,
+    /// because a seed is evaluated before the fold and so sees another `state`'s seed
+    /// rather than what it folds to: an answer that is wrong rather than late.
+    pub fn state_read(&self, value: ExprId) -> Option<(Ident, Span)> {
+        let (slot, at) = self.unset_read(value, &HashSet::new())?;
+        let state = self.state_of(slot)?;
+        Some((state.name.clone(), self.exprs.span(at)))
+    }
+
+    /// The first read of something the prologue has not filled, as the slot and the
+    /// load that reads it. Both callers above want a different half of this, and a
+    /// second walk over the same arena is the kind of thing that drifts.
+    fn unset_read(&self, value: ExprId, deferred: &HashSet<Slot>) -> Option<(Slot, ExprId)> {
+        let mut stack = vec![value];
+        while let Some(id) = stack.pop() {
+            let Some(expr) = self.exprs.get(id) else {
+                continue;
+            };
+            match expr {
+                Expr::Load(slot) => {
+                    if self.state_of(*slot).is_some() || deferred.contains(slot) {
+                        return Some((*slot, id));
+                    }
+                }
+                Expr::Lit(_) | Expr::Invalid => {}
+                Expr::Unary { operand, .. } => stack.push(*operand),
+                Expr::Unwrap(inner) | Expr::Reveal(inner) => stack.push(*inner),
+                Expr::Refusal { code, message } => {
+                    stack.extend(code);
+                    stack.push(*message);
+                }
+                Expr::Binary { lhs, rhs, .. } => stack.extend([*lhs, *rhs]),
+                Expr::Field { receiver, .. } => stack.push(*receiver),
+                Expr::Method { receiver, args, .. } => {
+                    stack.push(*receiver);
+                    stack.extend(args);
+                }
+                Expr::If {
+                    cond,
+                    then,
+                    otherwise,
+                } => stack.extend([*cond, *then, *otherwise]),
+                Expr::Object(fields)
+                | Expr::Record { fields, .. }
+                | Expr::Invoke { args: fields, .. } => {
+                    stack.extend(fields.iter().map(|(_, id)| *id));
+                }
+                Expr::Interp(parts) => stack.extend(parts),
+                Expr::List { items, .. } => stack.extend(items),
+                Expr::CallFn { args, .. } | Expr::Call { args, .. } => stack.extend(args),
+                Expr::Comp {
+                    iter, cond, yields, ..
+                } => {
+                    stack.push(iter.over);
+                    stack.extend(cond);
+                    stack.push(*yields);
+                }
+            }
+        }
+        None
     }
 
     pub fn at(&mut self, span: Span) {

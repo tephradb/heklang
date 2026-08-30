@@ -162,7 +162,9 @@ impl fmt::Display for ErrorKind {
                 f,
                 "the log moved under this run: something it read landed at or after position {after}"
             ),
-            ErrorKind::BadSubject(ty) => write!(f, "a {ty} cannot identify a subject"),
+            ErrorKind::BadSubject(ty) => {
+                write!(f, "{} cannot identify a subject", crate::types::a(ty))
+            }
             ErrorKind::BadUuid(value) => write!(f, "`{value}` is not a uuid"),
             ErrorKind::NoSuchField { ty, field } => write!(f, "no field `{field}` on {ty}"),
             // The tail rather than the whole slice: a walk deep enough to trip this has
@@ -314,7 +316,10 @@ impl From<scaled::Error> for ErrorKind {
     }
 }
 
-#[derive(Debug)]
+/// Cloneable so a command's attempt loop can keep the part that does not vary between
+/// attempts (the pinned clock, the arguments, the hoisted prologue) and re-run only what
+/// does. A slot holds a `Value`, which is itself cheap to clone.
+#[derive(Debug, Clone)]
 struct Frame {
     slots: Vec<Option<Value>>,
 }
@@ -455,7 +460,11 @@ impl<'a> Projection<'a> {
                 slices.push(slice);
             }
         }
-        Query { slices, upto: None }
+        Query {
+            slices,
+            from: 0,
+            upto: None,
+        }
     }
 
     /// Applies every handler this record selects, in declaration order. Each gets a
@@ -646,6 +655,7 @@ impl<'a, H: Host> Interpreter<'a, H> {
         // a pure function of the log prefix and that position, and counts the trigger.
         let query = Query {
             slices: predicates,
+            from: 0,
             upto: Some(position),
         };
         fold(
@@ -770,10 +780,34 @@ impl<'a, H: Host> Interpreter<'a, H> {
             .map_err(|err| err.in_module(module.as_deref()))
     }
 
+    /// One attempt: a DCB conflict leaves as [`ErrorKind::Conflict`] for the host to do
+    /// something about. See [`run_retrying`](Self::run_retrying) for doing it here.
     pub fn run(
         &mut self,
         name: &str,
         args: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
+    ) -> Result<Execution, Error> {
+        self.run_retrying(name, args, &mut |_| false)
+    }
+
+    /// The same run, with a DCB conflict retried in place.
+    ///
+    /// `again` is asked after each conflict, with the zero-based number of the attempt
+    /// that just had one, and a `true` decides again against the log as it now stands. A
+    /// `false`, which is what [`run`](Self::run) always answers, raises the conflict.
+    ///
+    /// **The policy is still the host's**, which is all `docs/host.md` section 5 ever
+    /// meant: how many attempts are worth spending and how long to wait between them are
+    /// decisions only a runtime can make, and they arrive through the callback. What
+    /// belongs on this side is the *carry*. A retry folds only what landed since its last
+    /// attempt, onto the state that attempt already built, and the state lives in a frame
+    /// that never leaves this module. A host looping over `run` cannot do that, and would
+    /// re-read and re-fold the whole boundary for every event that beat it.
+    pub fn run_retrying(
+        &mut self,
+        name: &str,
+        args: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
+        again: &mut dyn FnMut(u32) -> bool,
     ) -> Result<Execution, Error> {
         let program = self.program;
         let command = program
@@ -783,7 +817,8 @@ impl<'a, H: Host> Interpreter<'a, H> {
 
         // Every failure below is inside this command, so the module is stamped once here
         // rather than at each raise site.
-        execute(self.program, &mut self.host, command, args).map_err(|err| err.in_module(module))
+        execute(self.program, &mut self.host, command, args, again)
+            .map_err(|err| err.in_module(module))
     }
 }
 
@@ -792,79 +827,135 @@ fn execute(
     host: &mut dyn Host,
     command: &Command,
     args: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
+    again: &mut dyn FnMut(u32) -> bool,
 ) -> Result<Execution, Error> {
-    let mut frame = Frame::new(command.frame);
+    // Steps 1 to 3, which no retry repeats: they read the arguments and each other and
+    // nothing else, so a second attempt would derive the same frame and the same slices
+    // from the same inputs. Only the fold and the body see a log that moved.
+    let mut prepared = Frame::new(command.frame);
     // Rule 11: the request's append time, pinned once before anything runs, so it is
-    // well defined even for a command that goes on to append nothing.
+    // well defined even for a command that goes on to append nothing, and so a retry
+    // decides at the time the request arrived rather than the time it stopped losing.
     if let Some(slot) = command.now {
         let at = host.now();
-        frame.set(slot, Value::Timestamp(at))?;
+        prepared.set(slot, Value::Timestamp(at))?;
     }
 
     let mut args: BTreeMap<Ident, Value> = args
         .into_iter()
         .map(|(name, value)| (name.into(), value))
         .collect();
-    bind_params(command, &mut args, &mut frame)?;
-    run_assigns(program, &command.exprs, &command.prologue, &mut frame)?;
+    bind_params(command, &mut args, &mut prepared)?;
+    run_assigns(program, &command.exprs, &command.prologue, &mut prepared)?;
+    let slices = resolve(program, &command.exprs, &command.slices, &mut prepared)?;
 
-    let predicates = resolve(program, &command.exprs, &command.slices, &mut frame)?;
-    for state in &command.states {
-        let value = eval(program, &command.exprs, &mut frame, state.init, None)?;
-        let value = fitted_at(value, &state.ty, command.exprs.span(state.init))?;
-        frame.set(state.slot, value)?;
-    }
+    // What one attempt hands the next: the state it folded, and the position that state
+    // covers up to. A fold is a left fold over an append-only log, so folding `[0, a)`
+    // and then `[a, b)` is the state that folding `[0, b)` would have given, and a retry
+    // never has to start over. On a boundary tens of thousands of events deep that is the
+    // difference between paying for the events that beat you and paying for all of them.
+    let mut carried: Option<Vec<Value>> = None;
+    let mut folded_through = 0;
+    let mut attempt = 0;
 
-    let after = host.head()?;
-    let query = Query {
-        slices: predicates,
-        upto: None,
-    };
-    fold(
-        program,
-        &command.exprs,
-        host,
-        &query,
-        &command.slices,
-        &mut frame,
-    )?;
-
-    let mut emitted = Vec::new();
-    let ret = {
-        let mut sink = Sink::Emit(&mut emitted);
-        match exec_block(
-            &command.exprs,
-            &command.body,
-            &mut frame,
-            program,
-            &mut sink,
-        )? {
-            Flow::Return(ret) => ret,
-            Flow::Next => Ret::Ok,
+    loop {
+        let mut frame = prepared.clone();
+        match &carried {
+            // Step 4 on a first attempt: the seeds, evaluated and coerced.
+            None => {
+                for state in &command.states {
+                    let value = eval(program, &command.exprs, &mut frame, state.init, None)?;
+                    let value = fitted_at(value, &state.ty, command.exprs.span(state.init))?;
+                    frame.set(state.slot, value)?;
+                }
+            }
+            // On a retry the seed is not where the fold starts from. The state the last
+            // attempt folded is, and the delta below is what it has not seen.
+            Some(values) => {
+                for (state, value) in command.states.iter().zip(values) {
+                    frame.set(state.slot, value.clone())?;
+                }
+            }
         }
-    };
 
-    let condition = AppendCondition {
-        after,
-        slices: query.slices,
-    };
+        // Step 5, and the fold stops just below it rather than at whatever the head has
+        // become by the time the read gets there. Two reasons, and the second is the one
+        // that bites: a decision made on events the condition is about to call a conflict
+        // is wasted, and a carry whose upper bound only the store knows cannot be resumed
+        // from at all.
+        let after = host.head()?;
+        let query = Query {
+            slices: slices.clone(),
+            from: folded_through,
+            upto: after.checked_sub(1),
+        };
+        // Nothing landed since the last attempt read, so there is no delta to fold. The
+        // guard is also what keeps an empty log out of the `upto: None` case above.
+        if after > folded_through {
+            fold(
+                program,
+                &command.exprs,
+                host,
+                &query,
+                &command.slices,
+                &mut frame,
+            )?;
+        }
+        // Taken before the body, which is what makes the carry safe rather than merely
+        // fast: a body that assigns into a `state` changes what *it* decides on and
+        // cannot reach what the next attempt folds onto.
+        carried = Some(
+            command
+                .states
+                .iter()
+                .map(|state| frame.get(state.slot).cloned())
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        folded_through = after;
 
-    let outcome = match ret {
-        Ret::Ok => Outcome::Ok(emitted),
-        Ret::Invalid(message) => Outcome::Invalid(message),
-        Ret::Reject { code, message } => Outcome::Reject { code, message },
-        // The parser gates `fail` to an effect and a value return to a `fn`, so a
-        // command can never carry either.
-        Ret::Fail(_) | Ret::Value(_) => return Err(ErrorKind::MalformedIr.into()),
-    };
+        let mut emitted = Vec::new();
+        let ret = {
+            let mut sink = Sink::Emit(&mut emitted);
+            match exec_block(
+                &command.exprs,
+                &command.body,
+                &mut frame,
+                program,
+                &mut sink,
+            )? {
+                Flow::Return(ret) => ret,
+                Flow::Next => Ret::Ok,
+            }
+        };
 
-    // Emitted events are already validated at the emit site, where each field still
-    // has an expression to point a span at.
-    if let Outcome::Ok(events) = &outcome {
-        host.append(events, &condition)?;
+        let condition = AppendCondition {
+            after,
+            slices: query.slices,
+        };
+
+        let outcome = match ret {
+            Ret::Ok => Outcome::Ok(emitted),
+            Ret::Invalid(message) => Outcome::Invalid(message),
+            Ret::Reject { code, message } => Outcome::Reject { code, message },
+            // The parser gates `fail` to an effect and a value return to a `fn`, so a
+            // command can never carry either.
+            Ret::Fail(_) | Ret::Value(_) => return Err(ErrorKind::MalformedIr.into()),
+        };
+
+        // Emitted events are already validated at the emit site, where each field still
+        // has an expression to point a span at.
+        if let Outcome::Ok(events) = &outcome
+            && let Err(err) = host.append(events, &condition)
+        {
+            if matches!(err.kind, ErrorKind::Conflict { .. }) && again(attempt) {
+                attempt += 1;
+                continue;
+            }
+            return Err(err);
+        }
+
+        return Ok(Execution { outcome, condition });
     }
-
-    Ok(Execution { outcome, condition })
 }
 
 fn bind_params(
@@ -1265,6 +1356,27 @@ fn exec_stmt(
                 },
                 Return::Value(value) => {
                     Ret::Value(eval(program, exprs, frame, *value, effects(sink))?)
+                }
+                // The decision was computed rather than spelled. Unwrapping an optional
+                // here would be a second rule: the parser only builds this for an
+                // expression whose type is `Outcome`, so a `none` never reaches it.
+                Return::Outcome(value) => {
+                    match eval(program, exprs, frame, *value, effects(sink))? {
+                        Value::Invoked(Invoked::Ok) => Ret::Ok,
+                        Value::Invoked(Invoked::Invalid(message)) => Ret::Invalid(message),
+                        Value::Invoked(Invoked::Reject { code, message }) => {
+                            Ret::Reject { code, message }
+                        }
+                        other => {
+                            return Err(Error::at(
+                                ErrorKind::TypeMismatch {
+                                    expected: Type::Outcome,
+                                    found: other.ty(),
+                                },
+                                exprs.span(*value),
+                            ));
+                        }
+                    }
                 }
             };
             Ok(Flow::Return(ret))
@@ -1722,7 +1834,7 @@ fn eval(
                         },
                     );
                 }
-                Builtin::TimestampParse | Builtin::MoneyParse(_) => {
+                Builtin::TimestampParse | Builtin::MoneyParse(_) | Builtin::DecimalParse(_) => {
                     let Some(Value::Str(text)) = values.first() else {
                         return Err(at(ErrorKind::MalformedIr));
                     };
@@ -1735,6 +1847,12 @@ fn eval(
                             match value::parse_scaled(text, &Type::Money(*scale)) {
                                 Some(value) => Value::some(value),
                                 None => Value::none(Type::Money(*scale)),
+                            }
+                        }
+                        Builtin::DecimalParse(scale) => {
+                            match value::parse_scaled(text, &Type::Decimal(*scale)) {
+                                Some(value) => Value::some(value),
+                                None => Value::none(Type::Decimal(*scale)),
                             }
                         }
                         _ => return Err(at(ErrorKind::MalformedIr)),
@@ -1786,6 +1904,16 @@ fn eval(
                 return Err(at(ErrorKind::MalformedIr));
             };
             ctx.reveal(value, span)
+        }
+        Expr::Refusal { code, message } => {
+            let message = eval_string(program, exprs, frame, *message, ctx.as_deref_mut())?;
+            Ok(Value::Invoked(match code {
+                Some(code) => Invoked::Reject {
+                    code: eval_string(program, exprs, frame, *code, ctx)?,
+                    message,
+                },
+                None => Invoked::Invalid(message),
+            }))
         }
         // The parser's poison. `check_files` fails whenever one was recorded, so a
         // program holding one never gets this far.
@@ -2428,6 +2556,22 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
         // step down, and one step into an array.
         (Value::Json(json), "json") => json_field(json, method, &args, Type::Json),
         (Value::Json(json), "array") => json_field(json, method, &args, Type::list(Type::Json)),
+        // The exact text of a number, which is the only lossless way to hand one over:
+        // the scale a `10.5` should land at comes from where it is going, so this stops
+        // at the text and `Money.parse` finishes the job against a declared target.
+        (Value::Json(json), "number") => {
+            expect_arity(method, 1, &args)?;
+            let Value::Str(key) = &args[0] else {
+                return Err(ErrorKind::TypeMismatch {
+                    expected: Type::String,
+                    found: args[0].ty(),
+                });
+            };
+            Ok(match json.get(key) {
+                Some(Json::Num(text)) => Value::some(Value::str(text.as_str())),
+                _ => Value::none(Type::String),
+            })
+        }
         (Value::Timestamp(micros), "year" | "month" | "day" | "hour" | "minute" | "second") => {
             expect_arity(method, 0, &args)?;
             let (year, month, day, hour, minute, second) = value::parts(*micros);
@@ -2506,7 +2650,9 @@ fn json_field(json: &Json, method: &str, args: &[Value], want: Type) -> Result<V
     };
     let found = json.get(key).and_then(|found| match (found, &want) {
         (Json::Str(value), Type::String) => Some(Value::str(value.as_str())),
-        (Json::Int(value), Type::Int) => Some(Value::Int(*value)),
+        // `body.int("n")` answers only for a whole number. A fractional one is the same
+        // `none` a missing key gives, which is the rule every accessor here follows.
+        (Json::Num(text), Type::Int) => text.parse().ok().map(Value::Int),
         (Json::Bool(value), Type::Bool) => Some(Value::Bool(*value)),
         (Json::Obj(_), Type::Json) => Some(Value::Json(found.clone())),
         (Json::Arr(items), Type::List(_)) => Some(Value::list(
@@ -2723,7 +2869,10 @@ impl Effects<'_> {
             command: command.clone(),
             args: args.clone(),
         });
-        let execution = execute(self.program, self.host, target, args)?;
+        // One attempt, deliberately. A conflict here wedges the invocation, and rule 4
+        // replays it from the journal, so the retry that matters already exists one
+        // level up and is the one that also re-reads what the arm decided on.
+        let execution = execute(self.program, self.host, target, args, &mut |_| false)?;
         // The cut: `Conflict` and `Unavailable` are the runtime's, and
         // `AlreadyCommitted` is indistinguishable from `Ok` from here, as it should be.
         let outcome = match execution.outcome {

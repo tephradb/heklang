@@ -438,6 +438,7 @@ pub fn literal(lit: &Literal) -> Value {
         Literal::List { inner, items } => Value::list(inner.clone(), items.iter().map(literal)),
         Literal::EmptyMap(key, value) => Value::map(key.clone(), value.clone(), []),
         Literal::EmptyJson => Value::Json(Json::Obj(BTreeMap::new())),
+        Literal::JsonNum(text) => Value::Json(Json::Num(text.clone())),
         Literal::Record { ty, fields } => Value::Record {
             ty: ty.clone(),
             fields: fields
@@ -572,7 +573,7 @@ fn shape(json: &Json) -> &'static str {
     match json {
         Json::Null => "null",
         Json::Bool(_) => "a boolean",
-        Json::Int(_) => "a number",
+        Json::Num(_) => "a number",
         Json::Str(_) => "a string",
         Json::Arr(_) => "an array",
         Json::Obj(_) => "an object",
@@ -583,7 +584,10 @@ fn key_from_text(text: &str, ty: &Type, defs: Defs<'_>) -> Option<Key> {
     Some(match ty {
         Type::Int => Key::Int(text.parse().ok()?),
         Type::String => Key::Str(text.into()),
-        Type::Uuid => Key::Uuid(text.into()),
+        Type::Uuid => {
+            uuid::Uuid::parse_str(text).ok()?;
+            Key::Uuid(text.into())
+        }
         Type::Timestamp => Key::Timestamp(text.parse().ok()?),
         Type::Enum(name) => {
             let def = defs.enum_def(name)?;
@@ -626,12 +630,35 @@ fn read_json(
         },
 
         (Type::Bool, Json::Bool(value)) => Value::Bool(*value),
-        (Type::Int, Json::Int(value)) => Value::Int(*value),
+        // A JSON number is text now, so an `Int` column checks that the text is one.
+        // `10.5` stored where an `Int` is declared is a mismatch rather than a truncation.
+        (Type::Int, Json::Num(text)) => match text.parse::<i64>() {
+            Ok(value) => Value::Int(value),
+            Err(_) => return Err(wrong("a number that is not a whole one".into(), path)),
+        },
         (Type::String, Json::Str(value)) => Value::str(value.as_str()),
-        (Type::Uuid, Json::Str(value)) => Value::uuid(value.as_str()),
+        // Checked, not merely typed. Every other shaped type in this table validates
+        // (`parse_scaled` for a decimal, `def.has` for a variant), and a `Uuid` that
+        // is not one reaches further than either: it becomes a tag, a read-model key,
+        // and a seed `Uuid.derive` then fails on, from a value that entered through a
+        // host boundary rather than through the parser.
+        (Type::Uuid, Json::Str(value)) => {
+            if uuid::Uuid::parse_str(value).is_err() {
+                return Err(wrong("text that is not a uuid".into(), path));
+            }
+            Value::uuid(value.as_str())
+        }
         // Microseconds, which is what a `Timestamp` is and what `Json::from_value`
         // wrote. A host whose envelope holds RFC 3339 converts with `timestamp` first.
-        (Type::Timestamp, Json::Int(micros)) => Value::Timestamp(*micros),
+        (Type::Timestamp, Json::Num(micros)) => match micros.parse::<i64>() {
+            Ok(micros) => Value::Timestamp(micros),
+            Err(_) => {
+                return Err(wrong(
+                    "a number that is not whole microseconds".into(),
+                    path,
+                ));
+            }
+        },
         // A string at the target scale, so nothing was lost to a float on the way out
         // and nothing is lost coming back.
         (Type::Money(_) | Type::Decimal(_), Json::Str(text)) => {
@@ -704,7 +731,12 @@ fn read_json(
 pub enum Json {
     Null,
     Bool(bool),
-    Int(i64),
+    /// A JSON number, as the exact text it was written or received as. Not an `i64`
+    /// and never an `f64`: a body carries `10.5` and `0.30000000000000004` as often as
+    /// it carries `3`, and both have to survive a round trip byte for byte. One variant
+    /// rather than an integer one beside it, because two spellings of `3` that compare
+    /// unequal is what an `expect http.post(url, { .. })` would trip over.
+    Num(String),
     Str(String),
     Arr(Vec<Json>),
     Obj(BTreeMap<String, Json>),
@@ -713,6 +745,24 @@ pub enum Json {
 impl Json {
     pub fn str(value: impl Into<String>) -> Self {
         Json::Str(value.into())
+    }
+
+    /// A whole number, rendered once here so no call site has to remember that a
+    /// `Json::Num` holds text. Every integer reaches JSON through this, which is what
+    /// keeps one spelling of `3`.
+    pub fn int(value: i64) -> Self {
+        Json::Num(value.to_string())
+    }
+
+    /// The exact text of a number, for a host parsing a foreign body. Whatever the wire
+    /// said, unrounded and unreformatted: `10.50` stays `10.50`.
+    ///
+    /// **The caller owes it a valid JSON number.** Nothing checks, because the text is
+    /// here to be handed back byte for byte and a host that parsed a body has already
+    /// lexed one. Text that is not a number serialises as itself, which is invalid JSON
+    /// on the way out: the trade taken to stop `10.50` becoming `10.5`.
+    pub fn num(text: impl Into<String>) -> Self {
+        Json::Num(text.into())
     }
 
     pub fn obj(fields: impl IntoIterator<Item = (impl Into<String>, Json)>) -> Self {
@@ -745,12 +795,12 @@ impl Json {
             // the bug cannot become a leak.
             Value::Sealed { .. } => Json::Null,
             Value::Bool(value) => Json::Bool(*value),
-            Value::Int(value) => Json::Int(*value),
+            Value::Int(value) => Json::int(*value),
             Value::Decimal { units, scale } | Value::Money { units, scale } => {
                 Json::Str(scaled::text(*units, *scale))
             }
             Value::Str(value) | Value::Uuid(value) => Json::Str(value.to_string()),
-            Value::Timestamp(micros) => Json::Int(*micros),
+            Value::Timestamp(micros) => Json::int(*micros),
             Value::Enum { variant, .. } => Json::Str(variant.clone()),
             Value::Record { fields, .. } => Json::Obj(
                 fields
@@ -761,7 +811,7 @@ impl Json {
             Value::Rounding(mode) => Json::Str(mode.to_string()),
             Value::Json(json) => json.clone(),
             Value::Response { status, body } => {
-                Json::obj([("body", body.clone()), ("status", Json::Int(*status))])
+                Json::obj([("body", body.clone()), ("status", Json::int(*status))])
             }
             Value::Invoked(outcome) => Json::obj([
                 ("ok", Json::Bool(outcome.ok())),
@@ -800,7 +850,7 @@ impl fmt::Display for Json {
         match self {
             Json::Null => f.write_str("null"),
             Json::Bool(value) => write!(f, "{value}"),
-            Json::Int(value) => write!(f, "{value}"),
+            Json::Num(value) => f.write_str(value),
             Json::Str(value) => write_json_str(f, value),
             Json::Arr(items) => {
                 f.write_str("[")?;

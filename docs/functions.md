@@ -259,8 +259,58 @@ could take a `Json` instead, and it needs no language change. It does not genera
 read at twelve sites, five of them the same unauthorized check, and the first helper that wants one
 is back here.
 
-`Outcome`, which `invoke` returns, has the same shape and is deliberately left unspellable. Nothing
-in either tree names it, and the rule above would extend to it unchanged the day something does.
+## A `fn` may decide a refusal
+
+That day arrived, and the rule extended unchanged. `Outcome` is spellable in exactly the positions
+`Response` is, for a sentence with the same shape: **a refusal is a decision, not data.** Producing
+one is pure, so a helper may return one; storing one is not, so nothing else may name it.
+
+```
+fn ladder(subscribed: Bool, taken: Int, cap: Int) -> Outcome? {
+  if subscribed { return reject("already_subscribed", "already on the course") }
+  if cap == 0   { return invalid("this course has no capacity set") }
+  if taken >= cap { return reject("course_full", "the course is full") }
+  return none
+}
+
+command Subscribe(course: Uuid, student: Uuid) {
+  state subscribed: Bool = fold false
+    on @StudentSubscribed(course, student) => true
+  ...
+  let refusal = ladder(subscribed, taken, limit)
+  if refusal.is_some() {
+    return refusal
+  }
+  emit @StudentSubscribed { course, student }
+}
+```
+
+`none` is "no objection", so the `fn` returns `Outcome?` and the caller proves it present the way it
+proves any other optional present. Nothing about `Outcome` bends the narrowing rule.
+
+**What this replaces.** A check-then-do pair of commands shares a decision, and before this the only
+way to share it was a `String` whose emptiness meant "allowed", plus a second `fn` to turn a code
+into a message. That is a sentinel, in a language whose optional story exists to remove sentinels,
+and the caller had to evaluate the ladder twice because there was nothing to bind before the `if`.
+
+**`reject` and `invalid` are expressions now, not only statements.** The written forms in a command
+are unchanged and are still parsed as statements, so nothing about `return reject("code", "why")`
+moved. What is new is that the same two words produce a value where an `Outcome` is expected, which
+is what a `fn` returns and what a command's `return` accepts.
+
+**A `fn` that did not declare one still cannot write one**, and the error says how to:
+
+> `invalid` is a command's outcome; declare it `-> Outcome` or `-> Outcome?` to decide a refusal the
+> caller returns, or return a value the caller branches on
+
+**An effect is unaffected.** Rule 4 keeps `fail` as its terminal outcome, and `reject`/`invalid` in
+an effect or an effect-local `fn` still say so. A projector still cannot write either, because a
+projector write cannot fail in a way the program observes.
+
+**What this does not do.** Two commands can now share the decision; they still each declare their own
+`state`, because a `state` declares the append condition and that has to be the command's own. The
+duplication that remains is the fold block, not the logic, and a check-and-do pair is better served
+by the host running the real command without appending than by a second command that copies it.
 
 ## What a `fn` makes possible, and is therefore not in the language
 

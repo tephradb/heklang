@@ -296,6 +296,149 @@ fn a_filter_naming_a_later_let_says_to_move_it() {
     assert!(message.contains("move that `let` up"), "got: {message}");
 }
 
+/// The hoist exists for step 3 and for nothing else, so a `let` that reads a `state`
+/// stays in the body: at step 2 the fold has not run and the slot holds nothing. It used
+/// to be hoisted anyway, which `check` accepted and which failed at run time with "read
+/// before it was set" on a line that looked ordinary.
+#[test]
+fn a_let_reading_a_state_runs_after_the_fold() {
+    let program = program(
+        "command Count(order_id: Uuid, customer_id: Int, total: Money(2)) {
+  state open: Int = fold 0
+    on @order.placed(customer_id) => open + 1
+  state shut: Int = fold 0
+    on @order.cancelled(customer_id) => shut + 1
+
+  let live = open - shut
+  if live <= 0 {
+    return reject(\"none_live\", \"nothing open\")
+  }
+  emit @order.cancelled { order_id, customer_id }
+}",
+    );
+    let mut interpreter = Interpreter::with_log(&program, vec![placed(1, 7, 100)]);
+    let execution = interpreter
+        .run(
+            "Count",
+            [
+                ("order_id", Value::uuid(ORDER)),
+                ("customer_id", Value::Int(7)),
+                ("total", Value::money(100, 2)),
+            ],
+        )
+        .expect("ran");
+    assert!(matches!(execution.outcome, Outcome::Ok(_)));
+}
+
+/// And transitively: a `let` reading one of those cannot be hoisted either, or the same
+/// unset slot is read one level further along.
+#[test]
+fn a_let_reading_a_deferred_let_stays_with_it() {
+    let program = program(
+        "command Count(order_id: Uuid, customer_id: Int, total: Money(2)) {
+  state open: Int = fold 0
+    on @order.placed(customer_id) => open + 1
+
+  let live = open
+  let doubled = live * 2
+  if doubled != 2 {
+    return reject(\"unexpected\", \"{doubled}\")
+  }
+  emit @order.cancelled { order_id, customer_id }
+}",
+    );
+    let mut interpreter = Interpreter::with_log(&program, vec![placed(1, 7, 100)]);
+    let execution = interpreter
+        .run(
+            "Count",
+            [
+                ("order_id", Value::uuid(ORDER)),
+                ("customer_id", Value::Int(7)),
+                ("total", Value::money(100, 2)),
+            ],
+        )
+        .expect("ran");
+    assert!(matches!(execution.outcome, Outcome::Ok(_)));
+}
+
+/// The other half of step 4 running before step 6, and the worse half: this one used to
+/// check clean and answer with the wrong number. A seed reads another `state`'s *seed*,
+/// never what it folds to, so the answer was a plausible zero rather than a failure.
+#[test]
+fn a_seed_may_not_read_another_state() {
+    let message = err(
+        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+  state open: Int = fold 0
+    on @order.placed(customer_id) => open + 1
+  state seen: Int = fold open
+    on @order.cancelled(customer_id) => seen + 1
+
+  emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
+}",
+    );
+    assert!(
+        message.contains("`seen` is seeded from `open`, which has not folded yet"),
+        "got: {message}"
+    );
+    // The way out is the `let` that the hoisting fix above made mean what it looks like.
+    assert!(
+        message.contains("write a `let` below the declarations"),
+        "got: {message}"
+    );
+}
+
+/// A seed still reads everything the prologue did set, which is the whole of what a seed
+/// was ever able to use.
+#[test]
+fn a_seed_may_read_a_parameter_or_a_hoisted_let() {
+    let program = program(
+        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+  let base = customer_id * 2
+
+  state open: Int = fold base
+    on @order.placed(customer_id) => open + 1
+
+  if open != 14 {
+    return reject(\"unexpected\", \"{open}\")
+  }
+  emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
+}",
+    );
+    let mut interpreter = Interpreter::new(&program);
+    let execution = interpreter
+        .run(
+            "Place",
+            [
+                ("order_id", Value::uuid(ORDER)),
+                ("customer_id", Value::Int(7)),
+                ("total", Value::money(100, 2)),
+            ],
+        )
+        .expect("ran");
+    assert!(matches!(execution.outcome, Outcome::Ok(_)));
+}
+
+/// The one shape the deferral cannot rescue: a filter naming a `let` that reads a
+/// `state` asks the fold for the value that decides what the fold reads. It is rejected
+/// rather than left to fail at run time, which is what it did before.
+#[test]
+fn a_filter_naming_a_let_that_reads_a_state_is_rejected() {
+    let message = err(
+        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+  state open: Int = fold 0
+    on @order.placed(customer_id) => open + 1
+
+  let who = open
+  state blocked: Bool = fold false
+    on @customer.blocked(customer_id: who) => true
+
+  emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
+}",
+    );
+    assert!(message.contains("folded from a `state`"), "got: {message}");
+    assert!(message.contains("before the fold"), "got: {message}");
+}
+
 #[test]
 fn state_and_guard_must_precede_the_first_statement() {
     let message = err(

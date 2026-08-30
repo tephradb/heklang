@@ -261,7 +261,7 @@ fn an_if_expression_takes_both_arms() {
   emit @thing.touched { id }
 }");
     assert!(
-        message.contains("give a Int and a String") && message.contains("both arms are the value"),
+        message.contains("give an Int and a String") && message.contains("both arms are the value"),
         "got: {message}"
     );
 }

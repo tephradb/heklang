@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::mem;
 
 use crate::build::Builder;
@@ -11,8 +11,10 @@ use crate::ir::{
     RecordDef, RecordField, ReplySpec, Return, Setup, Slot, Span, Stmt, Test, Type, UnOp, Update,
 };
 use crate::lex::{Keyword, Spanned, Sym, Token, lex};
-use crate::scaled::Rounding;
-use crate::types::{self, default_type, fills, inner_of, method_sig, response_field, seal, wrap};
+use crate::scaled::{self, Rounding};
+use crate::types::{
+    self, a, default_type, fills, inner_of, method_sig, response_field, seal, wrap,
+};
 use crate::value;
 
 pub fn parse(source: &str) -> Result<Program, Diagnostic> {
@@ -963,19 +965,25 @@ impl Parser {
 
     /// Pass C. Parameters and the result type only, so a call can be checked against a
     /// `fn` declared later or in another module.
-    /// A `fn` parameter or return type. The one position that admits a `Response`,
-    /// because reading one is pure and storing one is not: see `docs/functions.md`.
-    /// It sits above `type_ref` rather than inside it, so `List(Response)` stays
-    /// rejected along with every other position.
+    /// A `fn` parameter or return type. The one position that admits a `Response` or an
+    /// `Outcome`, because reading one is pure and storing one is not: a response is
+    /// transport and a refusal is a decision, and neither is data. See
+    /// `docs/functions.md`. It sits above `type_ref` rather than inside it, so
+    /// `List(Response)` stays rejected along with every other position.
     fn fn_type(&mut self) -> Result<Type, Diagnostic> {
-        if !matches!(self.peek(), Token::Ident(name) if name == "Response") {
+        let Token::Ident(name) = self.peek() else {
             return self.type_ref();
-        }
+        };
+        let ty = match name.as_str() {
+            "Response" => Type::Response,
+            "Outcome" => Type::Outcome,
+            _ => return self.type_ref(),
+        };
         self.bump();
         if self.eat_sym(Sym::Question) {
-            return Ok(Type::opt(Type::Response));
+            return Ok(Type::opt(ty));
         }
-        Ok(Type::Response)
+        Ok(ty)
     }
 
     fn fn_signature(&mut self) -> Result<(), Diagnostic> {
@@ -1059,7 +1067,7 @@ impl Parser {
         {
             return self.fail_hint(
                 Code::ReturnShape,
-                format!("`{name}` can finish without returning a {ret}"),
+                format!("`{name}` can finish without returning {}", a(ret)),
                 "every path out of a `fn` returns one",
             );
         }
@@ -1233,7 +1241,7 @@ impl Parser {
                     "`@max` bounds a length, so it applies to a String",
                     at,
                 )
-                .with_hint(format!("`{field}` is a {ty}")));
+                .with_hint(format!("`{field}` is {}", a(ty))));
         }
         self.expect_sym(Sym::LParen)?;
         let number = self.expect_number()?;
@@ -1744,7 +1752,10 @@ impl Parser {
                 if !value::can_key(&ty) {
                     return Err(self.err(
                         Code::EntityShape,
-                        format!("`{field_name}` is a {ty}, which cannot be an entity key"),
+                        format!(
+                            "`{field_name}` is {}, which cannot be an entity key",
+                            a(&ty)
+                        ),
                         at,
                     ));
                 }
@@ -1817,7 +1828,7 @@ impl Parser {
         let negated = self.eat_sym(Sym::Minus);
         let spanned = self.bump();
         let at = spanned.span;
-        let bad = |found: &str| format!("a {ty} {what} cannot be {found}");
+        let bad = |found: &str| format!("{} {what} cannot be {found}", a(ty));
         // Every shape below resolves against the inner type, so a bare literal in an
         // optional position reads exactly as it does anywhere else. The wrap happens
         // once, at the end.
@@ -1945,7 +1956,11 @@ impl Parser {
                 if !fills(&declared, ty) {
                     return Err(self.err(
                         Code::BadLiteral,
-                        format!("a {ty} {what} cannot be `{name}`, which is a {declared}"),
+                        format!(
+                            "{} {what} cannot be `{name}`, which is {}",
+                            a(ty),
+                            a(&declared)
+                        ),
                         at,
                     ));
                 }
@@ -1977,7 +1992,7 @@ impl Parser {
         if !fills(&found, ty) {
             return Err(self.err(
                 Code::BadLiteral,
-                format!("a {ty} {what} cannot be a {found}"),
+                format!("{} {what} cannot be {}", a(ty), a(&found)),
                 at,
             ));
         }
@@ -2357,19 +2372,41 @@ impl Parser {
         self.command_end = self.command_end();
 
         self.prologue = true;
+        let mut deferred: HashSet<Slot> = HashSet::new();
+        let mut hoisted_body: Vec<Stmt> = Vec::new();
         loop {
             match self.peek() {
                 Token::Word(Keyword::Guard) => self.guard_decl(&mut lower, events)?,
                 Token::Word(Keyword::State) => self.state_decl(&mut lower, events)?,
-                Token::Word(Keyword::Let) => self.hoisted_let(&mut lower)?,
+                Token::Word(Keyword::Let) => {
+                    if let Some(stmt) = self.hoisted_let(&mut lower, &mut deferred)? {
+                        hoisted_body.push(stmt);
+                    }
+                }
                 _ => break,
             }
         }
         self.prologue = false;
 
-        let body = self.statements(&mut lower, events)?;
+        // Step 3 reads what step 2 set, and a `let` reading a `state` is neither. The
+        // author has asked the fold for a value that decides what the fold reads.
+        if let Some((field, at)) = lower.b.filter_past_prologue(&deferred) {
+            return Err(self
+                .err(
+                    Code::StateShape,
+                    format!("this filter on `{field}` is folded from a `state`"),
+                    at,
+                )
+                .with_hint(
+                    "filters are evaluated once, before the fold, so they can name a parameter or a `let` above the declarations; a `let` that reads a `state` is not available until the fold has already run",
+                ));
+        }
+
+        let mut body = self.statements(&mut lower, events)?;
+        // A `let` the prologue could not take runs first, in the order it was written.
+        hoisted_body.append(&mut body);
         self.expect_sym(Sym::RBrace)?;
-        Ok(lower.b.finish(body))
+        Ok(lower.b.finish(hoisted_body))
     }
 
     fn guard_decl(&mut self, lower: &mut Lower, events: &[EventDef]) -> Result<(), Diagnostic> {
@@ -2402,6 +2439,20 @@ impl Parser {
         self.folding = true;
         let init = self.expr(lower, Some(ty.clone()))?;
         self.folding = false;
+        // A seed runs before the fold, so it reads the other `state`'s seed rather than
+        // what it folds to. That answer is wrong rather than late, and it used to check
+        // clean: `state t: Int = fold s` returned 0 where the author meant 3.
+        if let Some((read, at)) = lower.b.state_read(init) {
+            return Err(self
+                .err(
+                    Code::StateShape,
+                    format!("`{name}` is seeded from `{read}`, which has not folded yet"),
+                    at,
+                )
+                .with_hint(format!(
+                    "every seed is evaluated before any fold runs, so this reads `{read}`'s own seed rather than what it folds to; to compute from a folded `state`, write a `let` below the declarations"
+                )));
+        }
         let slot = lower.b.state(&name, ty.clone(), init);
 
         // Rule 12: whether the variable is subject-bound is a property of every arm
@@ -2515,14 +2566,29 @@ impl Parser {
         )
     }
 
-    fn hoisted_let(&mut self, lower: &mut Lower) -> Result<(), Diagnostic> {
+    /// A `let` in the leading run of a command. It is hoisted into the prologue so a
+    /// filter can name it (`docs/commands.md`, step 3), but only when it can be: an
+    /// initialiser reading a `state` is not available until the fold has run, so that
+    /// one stays an ordinary body statement and `deferred` remembers its slot for the
+    /// `let`s below it. The two are indistinguishable to anything but a filter, since
+    /// nothing between step 2 and step 7 changes what the prologue could have read.
+    fn hoisted_let(
+        &mut self,
+        lower: &mut Lower,
+        deferred: &mut HashSet<Slot>,
+    ) -> Result<Option<Stmt>, Diagnostic> {
         self.expect_word(Keyword::Let)?;
         let name = self.expect_ident()?;
         self.expect_sym(Sym::Assign)?;
         let value = self.expr(lower, None)?;
         let ty = self.type_of(lower, value);
+        if lower.b.reads_past_prologue(value, deferred) {
+            let slot = lower.b.alloc(&name, ty);
+            deferred.insert(slot);
+            return Ok(Some(Stmt::Assign { slot, value }));
+        }
         lower.b.hoist(&name, value, ty);
-        Ok(())
+        Ok(None)
     }
 
     fn slice_ref(
@@ -2829,7 +2895,10 @@ impl Parser {
                 return Err(self.err(Code::DuplicateField, format!("`{name}` is given twice"), at));
             }
             self.expect_sym(Sym::Colon)?;
-            let value = self.expr(lower, Some(declared.ty.clone()))?;
+            // The unsealed type: a test writes the content, and the runtime is what
+            // seals it on the way into the log. Hinting the sealed type would ask an
+            // author to produce ciphertext, which nothing in the language can do.
+            let value = self.expr(lower, Some(declared.ty.unsealed()))?;
             fields.push((name, value));
             if !self.eat_sym(Sym::Comma) {
                 break;
@@ -3410,7 +3479,18 @@ impl Parser {
             }
             Token::Word(Keyword::Return) => {
                 self.bump();
+                // A `fn` that declares an `Outcome` is deciding a refusal on the
+                // command's behalf, so it may write one. Everything else that is not a
+                // command still cannot, and the reason differs per kind.
+                let decides = matches!(
+                    self.returns.as_ref().map(|ty| match ty {
+                        Type::Opt(inner) => inner.as_ref(),
+                        other => other,
+                    }),
+                    Some(Type::Outcome)
+                );
                 if self.kind != Kind::Command
+                    && !decides
                     && (self.at_word(Keyword::Invalid) || self.at_word(Keyword::Reject))
                 {
                     let outcome = if self.at_word(Keyword::Invalid) {
@@ -3423,7 +3503,7 @@ impl Parser {
                             "an effect's terminal outcome is `fail(...)`"
                         }
                         Kind::Function => {
-                            "a `fn` returns a value, so a caller decides what a bad one means"
+                            "declare it `-> Outcome` or `-> Outcome?` to decide a refusal the caller returns, or return a value the caller branches on"
                         }
                         _ => "a projector write cannot fail in a way the program observes",
                     };
@@ -3471,6 +3551,12 @@ impl Parser {
                     let message = self.expr(lower, Some(Type::String))?;
                     self.end_args()?;
                     Return::Reject { code, message }
+                } else if self.kind == Kind::Command && !self.ends_return() {
+                    // The decision came from somewhere else, which is the whole point:
+                    // a `fn` can hold the ladder two commands share. The target type is
+                    // the whole check, and it is the one that reports the mismatch:
+                    // a second one here made `return label()` two diagnostics.
+                    Return::Outcome(self.expr(lower, Some(Type::Outcome))?)
                 } else {
                     Return::Ok
                 };
@@ -3969,7 +4055,8 @@ impl Parser {
                         self.err(
                             Code::TypeMismatch,
                             format!(
-                                "`{name}` reads an optional, and the branch above already proved this one present, so it is a {ty} here"
+                                "`{name}` reads an optional, and the branch above already proved this one present, so it is {} here",
+                                a(ty)
                             ),
                             at,
                         )
@@ -4133,7 +4220,17 @@ impl Parser {
                     (self.type_of(lower, then), self.type_of(lower, otherwise))
                     && left != right
                 {
-                    return Err(self.err(Code::TypeMismatch, format!("these branches give a {left} and a {right}, so this `if` has no one type"), span).with_hint("both arms are the value"));
+                    return Err(self
+                        .err(
+                            Code::TypeMismatch,
+                            format!(
+                                "these branches give {} and {}, so this `if` has no one type",
+                                a(&left),
+                                a(&right)
+                            ),
+                            span,
+                        )
+                        .with_hint("both arms are the value"));
                 }
                 lower.b.at(span);
                 Ok(lower.b.if_expr(cond, then, otherwise))
@@ -4159,6 +4256,9 @@ impl Parser {
                 )),
             },
             Token::Word(Keyword::Invoke) => self.invoke_expr(lower, span),
+            Token::Word(word @ (Keyword::Reject | Keyword::Invalid)) => {
+                self.refusal_expr(lower, word, span)
+            }
             Token::Sym(Sym::LBrace) => self.object_literal(lower, expect.as_ref(), span),
             Token::Sym(Sym::LBracket) => self.bracketed(lower, expect, span),
             Token::TextOpen(head) => self.interpolation(lower, head, span),
@@ -4466,6 +4566,7 @@ impl Parser {
                 Builtin::TimestampParse => Type::opt(Type::Timestamp),
                 Builtin::TimestampFromParts => Type::opt(Type::Timestamp),
                 Builtin::MoneyParse(scale) => Type::opt(Type::Money(*scale)),
+                Builtin::DecimalParse(scale) => Type::opt(Type::Decimal(*scale)),
                 Builtin::HttpGet
                 | Builtin::HttpPost
                 | Builtin::HttpPut
@@ -4479,6 +4580,7 @@ impl Parser {
             // not be there still reads as one.
             // Rule 12: an optional in, an optional out, and the seal comes off.
             Expr::Reveal(value) => Some(self.type_of(lower, *value)?.unsealed()),
+            Expr::Refusal { .. } => Some(Type::Outcome),
             // The poison. `docs/types.md` says an unknown type is never checked, which
             // is what keeps one rejected value from becoming twenty diagnostics.
             Expr::Invalid => None,
@@ -4493,7 +4595,8 @@ impl Parser {
 fn mismatch(found: &Type, want: &Type) -> (String, Option<String>) {
     let fix = match (found, want) {
         (Type::Opt(inner), _) if fills(inner, want) => Some(format!(
-            "`unwrap_or` gives it a fallback, or a branch that proves it present makes it a {inner} without one"
+            "`unwrap_or` gives it a fallback, or a branch that proves it present makes it {} without one",
+            a(inner)
         )),
         (Type::Int | Type::String, Type::Timestamp) => {
             Some("a Timestamp is written as a string, like \"2026-01-01T00:00:00Z\"".to_string())
@@ -4521,7 +4624,8 @@ fn members_of(ty: &str) -> &'static str {
 fn no_method(receiver: &Type, name: &str) -> (String, Option<String>) {
     let instead = match (receiver, name) {
         (Type::Opt(inner), "is_empty") => Some(format!(
-            "an optional is asked `is_none()`. `is_empty()` is a question for a {inner}, and this may not be holding one"
+            "an optional is asked `is_none()`. `is_empty()` is a question for {}, and this may not be holding one",
+            a(inner)
         )),
         (Type::String, "is_none" | "is_some") => Some(
             "a String is always there, so `is_empty()` is the question. Absence is what a String? is for".to_string(),
@@ -5045,9 +5149,12 @@ impl Parser {
                 if let Some(found) = self.type_of(lower, value)
                     && &found != field
                 {
-                    return Err(self.err(Code::EraseSubject,
+                    return Err(self.err(
+                        Code::EraseSubject,
                         format!(
-                            "`{subject}` files its keys under a {field}, so `erase` cannot take a {found}"
+                            "`{subject}` files its keys under {}, so `erase` cannot take {}",
+                            a(field),
+                            a(&found)
                         ),
                         at,
                     ));
@@ -5138,7 +5245,7 @@ impl Parser {
         if want.subject() == Some(subject) {
             return;
         }
-        self.note(self.err(Code::SealBoundary, format!("this is content sealed under `{subject}` and a {want} is not"), at).with_hint("`reveal` it first, because writing it here takes it out from behind the decrypt boundary"))
+        self.note(self.err(Code::SealBoundary, format!("this is content sealed under `{subject}` and {} is not", a(want)), at).with_hint("`reveal` it first, because writing it here takes it out from behind the decrypt boundary"))
     }
 
     /// A value written where a type is declared has to fill it. `docs/types.md` is the
@@ -5243,7 +5350,7 @@ impl Parser {
             "Uuid" if self.at_sym(Sym::Dot) => self.uuid_call(lower, span).map(Some),
             "Map" if self.at_sym(Sym::Dot) => self.map_empty(lower, expect, span).map(Some),
             "Json" if self.at_sym(Sym::Dot) => self.json_member(lower, span).map(Some),
-            "Timestamp" | "Money" if self.at_sym(Sym::Dot) => {
+            "Timestamp" | "Money" | "Decimal" if self.at_sym(Sym::Dot) => {
                 self.parse_member(lower, name, expect, span).map(Some)
             }
             "reveal" if called => self.reveal_call(lower, span).map(Some),
@@ -5534,7 +5641,14 @@ impl Parser {
 
         let mut items = Vec::new();
         loop {
-            items.push(self.expr(lower, inner.clone())?);
+            let item = self.expr(lower, inner.clone())?;
+            // An array in a body is JSON too, so its numbers follow the same rule its
+            // sibling members do. Outside one `in_body` is false and a list of
+            // `Decimal(2)` stays a list of `Decimal(2)`.
+            if self.in_body {
+                self.as_json_number(lower, item);
+            }
+            items.push(item);
             if !self.eat_sym(Sym::Comma) || self.at_sym(Sym::RBracket) {
                 break;
             }
@@ -5691,21 +5805,27 @@ impl Parser {
                 .err(Code::UnknownMember, format!("`{ty}` has no `{member}`"), at)
                 .with_hint(format!("it has {}", members_of(ty))));
         }
-        let builtin = if ty == "Timestamp" {
-            Builtin::TimestampParse
-        } else {
-            // The scale is a property of where the amount lands, not of the text, so
-            // it comes from the target the way `Money.empty` would.
-            let Some(Type::Money(scale)) = expect.map(inner_of) else {
-                return Err(self
-                    .err(
-                        Code::NeedsTargetType,
-                        "`Money.parse` needs a target scale to know what it is parsing into",
-                        span,
-                    )
-                    .with_hint("that comes from the field, parameter or `state` it fills"));
-            };
-            Builtin::MoneyParse(*scale)
+        let builtin = match ty {
+            "Timestamp" => Builtin::TimestampParse,
+            // The scale is a property of where the value lands, not of the text, so it
+            // comes from the target. A `Money` target parses money and a `Decimal`
+            // target parses a decimal: the two are different types and the target is
+            // the only thing that knows which was meant.
+            _ => {
+                match expect.map(inner_of) {
+                    Some(Type::Money(scale)) if ty == "Money" => Builtin::MoneyParse(*scale),
+                    Some(Type::Decimal(scale)) if ty == "Decimal" => Builtin::DecimalParse(*scale),
+                    _ => {
+                        return Err(self
+                        .err(
+                            Code::NeedsTargetType,
+                            format!("`{ty}.parse` needs a target scale to know what it is parsing into"),
+                            span,
+                        )
+                        .with_hint("that comes from the field, parameter or `state` it fills"));
+                    }
+                }
+            }
         };
         self.expect_sym(Sym::LParen)?;
         let outer = mem::replace(&mut self.no_record_literal, false);
@@ -5863,6 +5983,35 @@ impl Parser {
         value
     }
 
+    /// A number written straight into a JSON body is JSON's number, not a heklang
+    /// `Decimal` that rule 8 then quotes. Without this, `{ "amount": 10.5 }` went out as
+    /// `{"amount":"10.5"}` while `{ "count": 7 }` went out as `{"count":7}`, so the
+    /// boundary was not "numerics are quoted" but "the ones `Json` could not hold were",
+    /// and no expression in the language produced a fractional JSON number at all.
+    ///
+    /// Only a bare literal is rewritten, which is what keeps `{ "n": 1 + 2 }` arithmetic
+    /// and a `Money` variable quoted: rule 8 governs a heklang value crossing the
+    /// boundary, and this governs a number the author typed into a foreign document.
+    fn as_json_number(&self, lower: &mut Lower, id: ExprId) {
+        let (sign, inner) = match lower.b.exprs().get(id) {
+            // `-10.5` lowers to a negation of a literal rather than to a negative one,
+            // so a body carrying one would otherwise keep the quotes.
+            Some(Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+            }) => ("-", lower.b.exprs().get(*operand)),
+            other => ("", other),
+        };
+        let text = match inner {
+            Some(Expr::Lit(Literal::Int(value))) => format!("{sign}{value}"),
+            Some(Expr::Lit(Literal::Decimal { units, scale })) => {
+                format!("{sign}{}", scaled::text(*units, *scale))
+            }
+            _ => return,
+        };
+        lower.b.patch(id, Expr::Lit(Literal::JsonNum(text)));
+    }
+
     fn object_literal(
         &mut self,
         lower: &mut Lower,
@@ -5910,6 +6059,7 @@ impl Parser {
             self.expect_sym(Sym::Colon)?;
             let at = self.span_here();
             let value = self.expr(lower, None)?;
+            self.as_json_number(lower, value);
             self.no_seal(lower, value, "be sent in a request body", at);
             fields.push((key, value));
             if !self.eat_sym(Sym::Comma) {
@@ -5921,6 +6071,52 @@ impl Parser {
         self.no_record_literal = outer;
         lower.b.at(span);
         Ok(lower.b.expr(Expr::Object(fields)))
+    }
+
+    /// `reject(code, message)` and `invalid(message)` as values, which is what lets a
+    /// `fn` decide a refusal and hand it back. The written statement forms in a command
+    /// are parsed before this is reached, so nothing about them changes.
+    ///
+    /// There is no check here that the position wants an `Outcome`: the type is
+    /// `Outcome`, so a `fn` returning a `String` reports the mismatch it always would.
+    fn refusal_expr(
+        &mut self,
+        lower: &mut Lower,
+        word: Keyword,
+        span: Span,
+    ) -> Result<ExprId, Diagnostic> {
+        let named = if word == Keyword::Reject {
+            "reject"
+        } else {
+            "invalid"
+        };
+        let why = match self.kind {
+            Kind::Command | Kind::Function => None,
+            Kind::Effect | Kind::EffectFn => Some("an effect's terminal outcome is `fail(...)`"),
+            Kind::Projector => Some("a projector write cannot fail in a way the program observes"),
+            Kind::Test => Some("a test states inputs and expectations rather than deciding"),
+        };
+        if let Some(why) = why {
+            return Err(self
+                .err(
+                    Code::ReturnShape,
+                    format!("`{named}` is a command's outcome"),
+                    span,
+                )
+                .with_hint(why));
+        }
+        self.expect_sym(Sym::LParen)?;
+        let code = if word == Keyword::Reject {
+            let code = self.expr(lower, Some(Type::String))?;
+            self.expect_sym(Sym::Comma)?;
+            Some(code)
+        } else {
+            None
+        };
+        let message = self.expr(lower, Some(Type::String))?;
+        self.end_args()?;
+        lower.b.at(span);
+        Ok(lower.b.expr(Expr::Refusal { code, message }))
     }
 
     fn invoke_expr(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, Diagnostic> {
@@ -6070,7 +6266,7 @@ impl Parser {
                                 .to_string(),
                         ),
                         _ => (
-                            format!("`{}` is a {ty} with no zero value", field.name),
+                            format!("`{}` is {} with no zero value", field.name, a(ty)),
                             format!("give it a default, make it `{ty}?`, or make this an `update`"),
                         ),
                     };
@@ -6310,7 +6506,9 @@ fn roots(stmt: &Stmt) -> Vec<ExprId> {
         Stmt::Erase { value, .. } | Stmt::Discard(value) => vec![*value],
         Stmt::Call { args, .. } => args.clone(),
         Stmt::Return(Return::Ok) => Vec::new(),
-        Stmt::Return(Return::Invalid(message) | Return::Value(message)) => vec![*message],
+        Stmt::Return(
+            Return::Invalid(message) | Return::Value(message) | Return::Outcome(message),
+        ) => vec![*message],
         Stmt::Return(Return::Reject { code, message }) => vec![*code, *message],
     }
 }
@@ -6347,6 +6545,11 @@ fn children(expr: &Expr) -> Vec<ExprId> {
         Expr::Call { args, .. } => args.clone(),
         Expr::Invoke { args, .. } => args.iter().map(|(_, id)| *id).collect(),
         Expr::Reveal(value) => vec![*value],
+        Expr::Refusal { code, message } => {
+            let mut ids = vec![*message];
+            ids.extend(code.iter().copied());
+            ids
+        }
         Expr::Invalid => Vec::new(),
     }
 }

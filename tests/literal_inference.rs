@@ -37,6 +37,7 @@ fn describe(lit: &Literal) -> String {
         Literal::List { inner, items } => format!("List({inner}, {})", items.len()),
         Literal::Record { ty, fields } => format!("{ty}({} fields)", fields.len()),
         Literal::EmptyJson => "EmptyJson".to_string(),
+        Literal::JsonNum(text) => format!("JsonNum({text})"),
         Literal::EmptyMap(key, value) => format!("EmptyMap({key}, {value})"),
     }
 }
