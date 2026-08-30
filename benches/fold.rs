@@ -9,6 +9,21 @@
 //! building them.
 //!
 //! Each case differs from its neighbour in one thing, so a difference has one cause.
+//!
+//! **Fewer allocations is not the same as faster, and this benchmark has the receipt.**
+//! Making `Ident` an `Arc<str>` so a name is shared rather than copied halves what
+//! `bind a sealed String` allocates, from four per event to two. It also makes that case
+//! *slower*, 17.9 ms to 18.7 ms, and costs about 38% on every case that allocates
+//! nothing at all: `accumulate Money(2)` goes 13.2 ms to 18.2 ms. The reason is that a
+//! fold's hot path is not allocation, it is **name comparison**: `seal` alone scans the
+//! event list and then the field list of the event it found, comparing names, once per
+//! record. An `Arc<str>` puts the text one dependent load further away, and the
+//! interpreter does that lookup often enough for the extra load to cost more than the
+//! copies it saves.
+//!
+//! So the way to make names cheap is to stop looking them up, not to make them cheaper
+//! to clone: resolve a field to an index at parse time, the way a variable already
+//! resolves to a `Slot`. Measure before assuming otherwise; that experiment has been run.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
