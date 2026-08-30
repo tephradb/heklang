@@ -144,12 +144,27 @@ impl Value {
     /// sealed one. The boundary it guards is a parse-time rule, which is what makes
     /// this safe to be lenient about. See `docs/effects.md` rule 12.
     pub fn has_type(&self, ty: &Type) -> bool {
-        // Unsealing both sides rather than matching on either, because a seal can sit
-        // under an `Opt` as well as at the top: an `Opt(String)` holding sealed content
-        // and an `Opt(Sealed(String, x))` are the same shape to a runtime that does not
-        // model ciphertext, and treating them as different made a folded credential
-        // fail to fit the `state` it was folded into.
-        self.ty().unsealed() == ty.unsealed()
+        // A seal can sit under an `Opt` as well as at the top: an `Opt(String)` holding
+        // sealed content and an `Opt(Sealed(String, x))` are the same shape to a runtime
+        // that does not model ciphertext, and treating them as different made a folded
+        // credential fail to fit the `state` it was folded into. `same_unsealed` is what
+        // reads through both sides.
+        //
+        // The variants carrying a type or a name are matched here rather than left to
+        // the fallback, because `ty()` builds one to answer with and that allocates.
+        // This is asked on every write, so in a fold it is asked once per event.
+        match (self, ty.peeled()) {
+            (Value::Sealed { inner, .. }, _) => inner.has_type(ty),
+            (Value::Opt { inner, .. }, Type::Opt(want)) => inner.same_unsealed(want),
+            (Value::List { inner, .. }, Type::List(want)) => inner.same_unsealed(want),
+            (Value::Map { key, value, .. }, Type::Map(want_key, want_value)) => {
+                key.same_unsealed(want_key) && value.same_unsealed(want_value)
+            }
+            (Value::Enum { ty: name, .. }, Type::Enum(want)) => name == want,
+            (Value::Record { ty: name, .. }, Type::Record(want)) => name == want,
+            // Everything left is a scalar, whose `ty()` is a variant with nothing in it.
+            _ => self.ty().same_unsealed(ty),
+        }
     }
 
     /// The value behind the seal, if there is one. A plain value is its own content,

@@ -127,6 +127,31 @@ impl Type {
 
     /// The same type with its seal removed, which is what `reveal` returns. Looks
     /// through `Opt`: `Opt(Sealed(String, x))` unseals to `Opt(String)`.
+    /// The type under any number of seals, borrowed rather than rebuilt.
+    pub(crate) fn peeled(&self) -> &Type {
+        match self {
+            Type::Sealed(inner, _) => inner.peeled(),
+            other => other,
+        }
+    }
+
+    /// Whether two types are the same once seals are ignored, without building either.
+    ///
+    /// [`Type::unsealed`] answers the same question by construction, and construction
+    /// allocates for every variant holding a `Box`. This is asked on every write, so a
+    /// fold over a log paid three `Box<Type>` allocations per optional per event to
+    /// compare two types it then threw away.
+    pub fn same_unsealed(&self, other: &Type) -> bool {
+        match (self.peeled(), other.peeled()) {
+            (Type::Opt(one), Type::Opt(two)) => one.same_unsealed(two),
+            (Type::List(one), Type::List(two)) => one.same_unsealed(two),
+            (Type::Map(one_key, one_value), Type::Map(two_key, two_value)) => {
+                one_key.same_unsealed(two_key) && one_value.same_unsealed(two_value)
+            }
+            (one, two) => one == two,
+        }
+    }
+
     pub fn unsealed(&self) -> Type {
         match self {
             Type::Sealed(inner, _) => inner.unsealed(),
