@@ -62,6 +62,7 @@ module.exports = grammar({
         $.function_declaration,
         $.event_declaration,
         $.command_declaration,
+        $.guard_definition,
         $.projector_declaration,
         $.effect_declaration,
         $.test_declaration,
@@ -145,6 +146,16 @@ module.exports = grammar({
     command_declaration: ($) =>
       seq(
         'command',
+        field('name', $._type_name),
+        field('parameters', $.parameters),
+        field('body', $.block),
+      ),
+
+    // A named proposition about the log. Parens declare and braces use, which is what
+    // tells this apart from the `guard Name { .. }` inside a body.
+    guard_definition: ($) =>
+      seq(
+        'guard',
         field('name', $._type_name),
         field('parameters', $.parameters),
         field('body', $.block),
@@ -303,7 +314,13 @@ module.exports = grammar({
         $.expression_statement,
       ),
 
-    guard_declaration: ($) => seq('guard', commaSep1($.slice_reference)),
+    // Two shapes, told apart by the token after `guard`: a path is raw slices added to
+    // the boundary, a name is a declared guard. See `docs/guards.md`.
+    guard_declaration: ($) =>
+      choice(
+        seq('guard', commaSep1($.slice_reference)),
+        seq('guard', field('guard', $._type_name), $.field_initializer_list),
+      ),
 
     state_declaration: ($) =>
       seq(

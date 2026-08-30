@@ -183,6 +183,7 @@
 (projector_declaration name: (type_identifier) @type)
 (effect_declaration name: (type_identifier) @type)
 (command_declaration name: (type_identifier) @function)
+(guard_definition name: (type_identifier) @function)
 (function_declaration name: (identifier) @function)
 (const_declaration name: (identifier) @constant)
 
@@ -193,6 +194,7 @@
 (row_expectation entity: (identifier) @type)
 (project_clause projector: (identifier) @type)
 (deliver_clause effect: (identifier) @type)
+(guard_declaration guard: (type_identifier) @function)
 
 ; ----------------------------------------------------------------- calls, builtins
 

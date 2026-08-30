@@ -7,6 +7,9 @@
 (command_declaration
   name: (type_identifier) @name) @definition.function
 
+(guard_definition
+  name: (type_identifier) @name) @definition.function
+
 (projector_declaration
   name: (type_identifier) @name) @definition.class
 

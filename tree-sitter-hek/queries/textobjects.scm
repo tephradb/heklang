@@ -7,6 +7,9 @@
 (command_declaration
   body: (block) @function.inside) @function.around
 
+(guard_definition
+  body: (block) @function.inside) @function.around
+
 (event_handler
   body: (block) @function.inside) @function.around
 

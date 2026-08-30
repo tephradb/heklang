@@ -1,0 +1,99 @@
+================================================================================
+a guard declares parameters and folds
+================================================================================
+
+guard ShopIsConnected(shop_id: Int) {
+  state connected: Bool = fold false
+    on @shop.connected(shop_id) => true
+
+  if !connected {
+    return reject("shop_not_found", "shop does not exist")
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (guard_definition
+    name: (type_identifier)
+    parameters: (parameters
+      (parameter
+        name: (identifier)
+        type: (type
+          (primitive_type))))
+    body: (block
+      (state_declaration
+        name: (identifier)
+        type: (type
+          (primitive_type))
+        seed: (boolean_literal)
+        (fold_arm
+          (slice_reference
+            path: (event_path)
+            (filter
+              field: (identifier)))
+          value: (boolean_literal)))
+      (if_statement
+        condition: (unary_expression
+          (identifier))
+        consequence: (block
+          (return_statement
+            (outcome_expression
+              arguments: (arguments
+                (string
+                  (string_content))
+                (string
+                  (string_content))))))))))
+
+================================================================================
+raw slices and named guards are told apart by the token after `guard`
+================================================================================
+
+command ArchivePlan(plan_id: Uuid, shop_id: Int) {
+  guard @plan.archived(plan_id)
+  guard ShopIsConnected { shop_id }
+  guard PlanExists { plan_id, shop_id: shop_id }
+
+  emit @plan.archived { plan_id, shop_id }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (command_declaration
+    name: (type_identifier)
+    parameters: (parameters
+      (parameter
+        name: (identifier)
+        type: (type
+          (primitive_type)))
+      (parameter
+        name: (identifier)
+        type: (type
+          (primitive_type))))
+    body: (block
+      (guard_declaration
+        (slice_reference
+          path: (event_path)
+          (filter
+            field: (identifier))))
+      (guard_declaration
+        guard: (type_identifier)
+        (field_initializer_list
+          (field_initializer
+            name: (identifier))))
+      (guard_declaration
+        guard: (type_identifier)
+        (field_initializer_list
+          (field_initializer
+            name: (identifier))
+          (field_initializer
+            name: (identifier)
+            value: (identifier))))
+      (emit_statement
+        path: (event_path)
+        (field_initializer_list
+          (field_initializer
+            name: (identifier))
+          (field_initializer
+            name: (identifier)))))))
