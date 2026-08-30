@@ -313,8 +313,8 @@ it is a number the author typed into a foreign document, so it goes out as one. 
 arrays and nested objects, and for a negative literal.
 
 **This is a distinction, and it will surprise someone.** Replacing the literal `10.5` with a variable
-holding a `Money(2)` changes the wire form from `10.5` to `"10.50"`. That is intended, because the two
-are different things, but it is worth knowing before a refactor.
+holding a `Money(2)` changes the wire form from `10.5` to `"10.50"`. That is intended, because the
+two are different things, but it is worth knowing before a refactor.
 
 Only a bare literal is affected. `{ "n": 1 + 2 }` is arithmetic that produces an `Int`, and an `Int`
 is a JSON number by the table anyway.
@@ -326,6 +326,13 @@ representation could not hold were", which is not a rule anyone chose.
 
 A `Json` number is carried as **the exact text**, never an `f64`. `0.30000000000000004` survives a
 round trip byte for byte, and no float arithmetic exists anywhere in the language.
+
+**So two numbers are equal when they are spelled the same, not when they are worth the same.** `3`
+and `3.0` are both three and they do not compare equal, because collapsing them is the same operation
+that would collapse `10.50` to `10.5`. Fidelity is the point, and it does not get to apply only to
+the digits that matter. Where an author meets this is a test: `expect http.post(url, { "n": 3 })` against
+a body that passed `3.0` through from a response fails with `expected 3, got 3.0`, which says what to
+write.
 
 **Object keys are sorted.** That is rule 14's defined iteration order (see below), and it is why the
 same object built twice serialises byte-identically.

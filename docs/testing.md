@@ -209,6 +209,11 @@ document, and the assertion an author wants is "it carried this id", not a copy 
 `invoke` arguments are matched exactly, because a command's arguments **are** its whole input, so
 there is nothing there to be uninterested in.
 
+**A number in a body is compared by its spelling.** `3` and `3.0` are the same number and not the
+same JSON, so an expectation writes what the wire carries. That is `docs/effects.md` rule 8's byte
+fidelity met from the test side: the rule that keeps `10.50` from becoming `10.5` is the same rule
+that keeps `3.0` from becoming `3`. The failure names both, so it says what to write.
+
 **`erase` reads the same here as in an arm.** The expectation names the subject and the id, and so
 does the statement's named form (`erase(customer_id, id)` in `docs/effects.md` rule 9), so the two
 are one spelling met twice rather than two spellings met once.
