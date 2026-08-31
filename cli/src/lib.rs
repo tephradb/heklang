@@ -3,4 +3,5 @@
 //! The binary is `src/main.rs`. Everything with a shape worth testing on its own lives
 //! here instead, because an integration test in `tests/` can only link the library target.
 
+pub mod fmt;
 pub mod grammar;
