@@ -1024,8 +1024,10 @@ The other five live in the parser only because nothing else exists yet:
 4. **The decrypt boundary** (rule 12): sealed content may only be moved, asked about, or revealed.
    This one is a type rule rather than an analysis, so it is the one with the best claim to stay
    where it is; it fires wherever a type meets a value, which is everywhere the parser already looks.
-5. **The `@max` invariant** (`docs/projectors.md`). Needs the whole program, because the event and
-   the entity it compares are two declarations in any two files, so it moves with check 2.
+5. **The `@max` invariant** (`docs/projectors.md`), over an entity column and over an `emit`. Needs
+   the whole program, because the two declarations it compares can be in any two files, so it moves
+   with check 2. The `emit` half is the one rule 12 makes load-bearing: a seal holds what a host
+   stored, so a bound on moved content has no runtime left to check it.
 
 The projector half of check 3 landed with it, so `docs/projectors.md` rule 9 no longer records a
 no-op.

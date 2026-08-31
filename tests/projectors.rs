@@ -1300,6 +1300,104 @@ fn a_computed_value_is_not_two_declarations_disagreeing() {
     }
 }
 
+/// A command folding a bounded field and emitting it into a narrower one, where both
+/// declarations are event fields. `sealed` puts `@subject` on both, which is the case
+/// that has no other check at all.
+fn emitted(source: &str, target: &str, sealed: bool) -> Result<(), String> {
+    let subject = if sealed { " @subject(customer_id)" } else { "" };
+    let source = format!(
+        "event @order.placed {{ order_id: Uuid, customer_id: Int, note: String{subject}{source} }}
+event @order.copied {{ order_id: Uuid, customer_id: Int, note: String{subject}{target} }}
+
+command Copy(order_id: Uuid, customer_id: Int) {{
+  state note: String? = fold none
+    on @order.placed(customer_id) {{ note }} => note
+
+  if note.is_none() {{
+    return reject(\"nothing\", \"nothing to copy\")
+  }}
+  emit @order.copied {{ order_id, customer_id, note }}
+}}
+"
+    );
+    parse(&source).map(|_| ()).map_err(|err| err.text())
+}
+
+/// The `emit` half of the invariant, and the reason it is not optional: a command has a
+/// validation channel a projector has not got, but a **sealed** value cannot be measured
+/// through it. `bounded` reads a `Value::Str` and a seal holds ciphertext, so a bound on
+/// moved content is checked here or nowhere.
+#[test]
+fn an_event_field_may_not_bound_tighter_than_the_one_folded_into_it() {
+    for sealed in [false, true] {
+        let message = emitted(" @max(200)", " @max(5)", sealed).expect_err("200 into 5");
+        assert!(
+            message.contains(
+                "this emit narrows `note`: @order.placed declares `@max(200)` and @order.copied's `note` is `@max(5)`"
+            ),
+            "sealed={sealed}: {message}"
+        );
+    }
+
+    let message = emitted("", " @max(5)", true).expect_err("unbounded into 5");
+    assert!(
+        message.contains("@order.placed declares no bound"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn emitting_into_a_looser_or_equal_field_is_fine() {
+    for (source, target) in [
+        (" @max(5)", " @max(5)"),
+        (" @max(5)", " @max(200)"),
+        (" @max(5)", ""),
+        ("", ""),
+    ] {
+        emitted(source, target, false)
+            .unwrap_or_else(|err| panic!("for source{source} into target{target}: {err}"));
+    }
+}
+
+/// A command holds two kinds of value and only one has a declaration behind it. A
+/// parameter carries no bound, so there is nothing to compare and nothing to say; only a
+/// fold reaches a field that declared one.
+#[test]
+fn a_parameter_is_not_a_declaration_to_compare_against() {
+    parse(
+        "event @order.copied { order_id: Uuid, note: String @max(5) }
+command Copy(order_id: Uuid, note: String) {
+  emit @order.copied { order_id, note }
+}
+",
+    )
+    .unwrap_or_else(|err| panic!("a parameter has no `@max` to disagree with: {err}"));
+}
+
+/// An arm that transforms what it folds makes the whole state unknown rather than
+/// partly known, because which arm ran last decides what the `emit` holds.
+#[test]
+fn one_transforming_arm_makes_the_fold_unknown() {
+    parse(
+        "event @order.placed { order_id: Uuid, customer_id: Int, note: String @max(200) }
+event @order.trimmed { order_id: Uuid, customer_id: Int, note: String @max(200) }
+event @order.copied { order_id: Uuid, customer_id: Int, note: String @max(5) }
+
+command Copy(order_id: Uuid, customer_id: Int) {
+  state note: String? = fold none
+    on @order.placed(customer_id) { note } => note
+    on @order.trimmed(customer_id) { note } => note.trim()
+
+  if note.is_none() {
+    return reject(\"nothing\", \"nothing to copy\")
+  }
+  emit @order.copied { order_id, customer_id, note }
+}
+",
+    )
+    .unwrap_or_else(|err| panic!("one transforming arm stands the check down: {err}"));
+}
+
 // Spans: a write-time failure points at the expression that produced the value.
 
 #[test]

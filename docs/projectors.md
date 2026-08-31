@@ -433,10 +433,10 @@ rather than a rule: each handler has its own frame and its own expression arena.
   observable failure channel to route it through.
 
 That asymmetry is only defensible if the projector error is unreachable in a well-formed program.
-The invariant that makes it so:
+The invariant that makes it so, stated over any bounded position rather than only a column:
 
-> An entity field's `@max` must be no tighter than the `@max` of every event field written into it.
-> A field with no `@max` on the event side may not be written into an entity field that has one.
+> A bounded position's `@max` must be no tighter than the `@max` of every field written into it.
+> A field with no `@max` may not be written into a position that has one.
 
 A command already rejects an over-length value at `emit`, so the only way a projector can observe one
 is if the entity's constraint is tighter than the event's, which is a schema bug rather than a data
@@ -445,12 +445,28 @@ reports as `max-tightening`:
 
 > this write narrows `notes`: @order.placed declares no bound and `Note.note` is `@max(8)`
 
-It reaches a **plain read of an event field**, written either way a handler can spell one, into a
-`put`, a `patch` or an `update`. That is the whole of what the invariant is about: two declarations
-that can disagree, with the write naming both of them. A computed value has no second declaration to
-compare against, so `note: "note: {notes}"` is not this defect and the runtime error is still what
-covers it. Widening the check to reason about the length of an expression would be a different
-question with a different answer.
+**It holds at an `emit` too**, where both declarations are event fields:
+
+> this emit narrows `note`: @order.placed declares `@max(200)` and @order.copied's `note` is `@max(5)`
+
+That half is not about which channel the failure lands in, because a command has one. It is that a
+**sealed** field cannot be measured at all: the runtime bound reads a `String` and a seal holds
+whatever a host stored (`docs/effects.md` rule 12), so a bound on content that was moved rather than
+freshly written is checked here or nowhere. On a plain field it turns a schema bug that surfaces only
+on the inputs that happen to be long into one that surfaces at `hek check`.
+
+The two sides reach a source differently, because a command has no event binding. A projector writes
+a **plain read of an event field**, spelled either way a handler can. A command emits a `state`, and
+the sources are the fields its arms fold, one per arm, since the invariant is about *every* field
+written into a position. A parameter is not one: it carries no bound, so there is nothing to
+disagree with.
+
+**All or nothing on a fold.** An arm that transforms what it folds makes the whole state unknown
+rather than partly known, because which arm ran last decides what the `emit` holds. That is the same
+line the projector side draws: a computed value has no second declaration to compare against, so
+`note: "note: {notes}"` is not this defect and the runtime error is still what covers it. Widening
+the check to reason about the length of an expression would be a different question with a different
+answer.
 
 **The check crosses two declarations, so it cannot run during either one's pass.** An event is
 declared in pass B and an entity inside a projector in pass D, in any file and any order

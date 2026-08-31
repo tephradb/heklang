@@ -178,6 +178,12 @@ omitted a field checked clean and failed at the append, so a branch no test reac
 The shorthand is `{ order_id }` for `{ order_id: order_id }`, so writing every field is usually
 writing every name.
 
+**A field with a `@max` is checked against where its value came from**, when that is a `state` folded
+off another event field: emitting into a field bounded tighter than the one folded into it is
+`max-tightening`, and `docs/projectors.md` has the invariant. An over-length *value* is still
+`Outcome::Invalid` at run time, which is a different thing: one is a bad input and this is two
+declarations disagreeing.
+
 ## Three outcomes, and the condition comes back with all of them
 
 `return` with no value, or falling off the end, is `Ok` with whatever was emitted.

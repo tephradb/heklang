@@ -6617,6 +6617,64 @@ impl Parser {
                 }
             }
         }
+
+        // The same invariant at an `emit`, where the two declarations are both event
+        // fields. A command has a channel a projector has not got, so this is not about
+        // where the failure lands: it is that a **sealed** field cannot be measured at
+        // all. `bounded` reads a `Value::Str` and a seal holds ciphertext, so a bound on
+        // moved content is checked here or nowhere. On a plain field it turns a schema
+        // bug that fails on the long inputs into one that fails at `hek check`.
+        for command in &program.commands {
+            let mut emits: Vec<(&EventPath, &[(Ident, ExprId)])> = Vec::new();
+            walk_stmts(&command.body, &mut |stmt| {
+                if let Stmt::Emit { event, fields, .. } = stmt {
+                    emits.push((event, fields));
+                }
+            });
+
+            for (path, fields) in emits {
+                let Some(target) = program.event(path) else {
+                    continue;
+                };
+                for (name, value) in fields {
+                    let Some(bound) = target.field(name).and_then(|field| field.max_len) else {
+                        continue;
+                    };
+                    for (source, from) in folded_from(program, command, *value) {
+                        let (declared, fix) = match source.max_len {
+                            Some(len) if len <= bound => continue,
+                            Some(len) => (
+                                format!("`@max({len})`"),
+                                format!(
+                                    "widen `{name}` to `@max({len})`, or tighten the field it is folded from to `@max({bound})`"
+                                ),
+                            ),
+                            None => (
+                                "no bound".to_string(),
+                                format!(
+                                    "give the field it is folded from `@max({bound})`, or drop `{name}`'s"
+                                ),
+                            ),
+                        };
+                        let error = Diagnostic::new(
+                            Code::MaxTightening,
+                            format!(
+                                "this emit narrows `{}`: {from} declares {declared} and {path}'s `{name}` is `@max({bound})`",
+                                source.name
+                            ),
+                            command.exprs.span(*value),
+                        )
+                        .with_hint(format!(
+                            "sealed content cannot be measured at all, and a plain value only fails on the inputs that happen to be long, so a bound that narrows is checked here or nowhere; {fix}"
+                        ));
+                        return Err(match &command.module {
+                            Some(module) => error.in_file(module),
+                            None => error,
+                        });
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -6822,6 +6880,64 @@ fn invoked(exprs: &Exprs, body: &[Stmt]) -> Vec<Ident> {
         }
     });
     found
+}
+
+/// Where an emitted value comes from, when that is a declaration with a bound on it.
+///
+/// A command has no event binding of its own: what it holds came from a parameter or
+/// from folding the log, and only the second has a declaration to compare against. So
+/// this walks the fold. The value loads a `state`, and every arm writing that state is a
+/// plain read of a field it destructured; those fields are the sources, one per arm,
+/// because the invariant is about *every* field written into a position.
+///
+/// **All or nothing.** An arm that transforms what it folds is not one of two
+/// declarations disagreeing, and one such arm makes the whole state unknown rather than
+/// partly known: what the state holds at the `emit` depends on which arm ran last.
+fn folded_from<'a>(
+    program: &'a Program,
+    command: &'a Command,
+    value: ExprId,
+) -> Vec<(&'a FieldDef, &'a EventPath)> {
+    let Some(slot) = loaded_slot(&command.exprs, value) else {
+        return Vec::new();
+    };
+    if !command.states.iter().any(|state| state.slot == slot) {
+        return Vec::new();
+    }
+
+    let mut sources = Vec::new();
+    for slice in &command.slices {
+        for update in &slice.updates {
+            if update.slot != slot {
+                continue;
+            }
+            let read = loaded_slot(&command.exprs, update.value)
+                .and_then(|from| slice.binds.iter().find(|bind| bind.slot == from))
+                .and_then(|bind| {
+                    program
+                        .event(&slice.event)
+                        .and_then(|def| def.field(&bind.field))
+                });
+            match read {
+                Some(field) => sources.push((field, &slice.event)),
+                None => return Vec::new(),
+            }
+        }
+    }
+    sources
+}
+
+/// The frame slot an expression loads, if it is exactly a load. A narrowed load is
+/// still that load, the same reason `trigger_field` peels one.
+fn loaded_slot(exprs: &Exprs, value: ExprId) -> Option<Slot> {
+    let value = match exprs.get(value) {
+        Some(Expr::Unwrap(inner)) => *inner,
+        _ => value,
+    };
+    match exprs.get(value) {
+        Some(Expr::Load(slot)) => Some(*slot),
+        _ => None,
+    }
 }
 
 /// The triggering event's field this expression loads, if it is exactly that. The
