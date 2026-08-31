@@ -85,11 +85,7 @@ command PlaceOrder(
     return invalid("address must not be blank")
   }
 
-  let discounted = if lifetime_spend > 1000.00 {
-    total.mul(0.9, HalfUp)
-  } else {
-    total
-  }
+  let discounted = if lifetime_spend > 1000.00 { total.mul(0.9, HalfUp) } else { total }
 
   emit @order.placed {
     order_id,

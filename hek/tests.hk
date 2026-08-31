@@ -185,10 +185,10 @@ test "confirming an order reveals the address and records the notification" {
 
   deliver NotifyCustomer
 
-  expect http.post("https://mail.example/confirm", {
-    "to": "ada@example.com",
-    "first_order": true,
-  })
+  expect http.post(
+    "https://mail.example/confirm",
+    { "to": "ada@example.com", "first_order": true },
+  )
   expect log("confirmed an order")
   expect invoke RecordNotified {
     order_id: ADA,

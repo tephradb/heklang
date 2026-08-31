@@ -13,7 +13,7 @@ projector Orders {
     tracking: String?,
     placed_at: Timestamp?,
 
-    index (customer_id, status)
+    index (customer_id, status),
   }
 
   entity Customer {
@@ -25,7 +25,10 @@ projector Orders {
 
   on @order.placed as e { order_id, customer_id, email, total } {
     put Order {
-      order_id, customer_id, email, total,
+      order_id,
+      customer_id,
+      email,
+      total,
       previous_total: total,
       status: Placed,
       tracking: none,
@@ -39,10 +42,7 @@ projector Orders {
 
   // `total` is the event's new price; `.total` is the one already stored.
   on @order.repriced { order_id, total } {
-    patch Order[order_id] {
-      total,
-      previous_total: .total,
-    }
+    patch Order[order_id] { total, previous_total: .total }
   }
 
   on @order.shipped { order_id, tracking } {

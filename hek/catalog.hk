@@ -107,12 +107,7 @@ command ListItem(
     return reject("free_limit", "the free tier lists {FREE_LIMIT} items")
   }
 
-  emit @item.listed {
-    item_id,
-    seller_id,
-    item: Item { sku: wanted, price, tags },
-    tier,
-  }
+  emit @item.listed { item_id, seller_id, item: Item { sku: wanted, price, tags }, tier }
 }
 
 // projectors/catalog.hk
@@ -157,10 +152,7 @@ effect AuditCatalog {
   // Three event types onto one body. They share `item_id` and `seller_id` and nothing
   // else, and that is exactly what the binding may name: `reason` is on the flag alone
   // and `item` on the listing alone, so neither is reachable here.
-  on @item.listed,
-     @item.delisted,
-     @item.flagged as e { item_id, seller_id } {
-
+  on @item.listed, @item.delisted, @item.flagged as e { item_id, seller_id } {
     state listed: Int = fold 0
       on @item.listed(seller_id) => listed + 1
       on @item.delisted(seller_id) => listed - 1
@@ -171,11 +163,7 @@ effect AuditCatalog {
 
     let response = http.post(
       "https://audit.example/catalog",
-      {
-        "seller": seller_id,
-        "listed": listed,
-        "house": tagged(house, HOUSE_TAG),
-      },
+      { "seller": seller_id, "listed": listed, "house": tagged(house, HOUSE_TAG) },
       // What stops a second audit across a replay, and the reason the journal key
       // leaves headers out.
       headers = { "Idempotency-Key": "{audit_id(seller_id, e.position)}" },

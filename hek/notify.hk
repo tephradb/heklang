@@ -7,11 +7,10 @@ effect NotifyCustomer {
     state orders: Int = fold 0
       on @order.placed(customer_id: e.customer_id) => orders + 1
 
-    let response = http.post("https://mail.example/confirm", {
-      "to": reveal(e.email),
-      "order_id": e.order_id,
-      "first_order": orders == 1,
-    })
+    let response = http.post(
+      "https://mail.example/confirm",
+      { "to": reveal(e.email), "order_id": e.order_id, "first_order": orders == 1 },
+    )
 
     // Every retryable status was absorbed by the runtime, so a 4xx here is a real
     // decision rather than something to re-implement.
@@ -43,11 +42,7 @@ command RecordNotified(order_id: Uuid, notification_id: Uuid) {
     return reject("already_notified", "this order was already confirmed")
   }
 
-  emit @order.notified {
-    order_id,
-    notification_id,
-    at: now(),
-  }
+  emit @order.notified { order_id, notification_id, at: now() }
 }
 
 // events/notified.hk

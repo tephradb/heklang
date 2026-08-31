@@ -271,3 +271,16 @@ fn nesting_breaks_outside_in() {
     let source = "effect E {\n  on @a.b as e { id } {\n    log(\"{id}\")\n  }\n}\n";
     assert_eq!(fmt(source), source);
 }
+
+/// The acceptance fixtures are the formatter's own output, so a change to the printer shows
+/// up as a diff in the repository rather than only in whatever someone happens to run it on.
+#[test]
+fn the_fixtures_are_their_own_formatters_output() {
+    for (name, source) in fixtures() {
+        assert_eq!(
+            fmt(&source),
+            source,
+            "{name} is not formatted; `cargo run -p hek -- fmt hek/` fixes it"
+        );
+    }
+}
