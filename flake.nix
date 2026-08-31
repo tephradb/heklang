@@ -13,7 +13,7 @@
         "x86_64-darwin"
       ];
       forEachSystem = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
-      version = (builtins.fromTOML (builtins.readFile ./cli/Cargo.toml)).package.version;
+      version = (fromTOML (builtins.readFile ./cli/Cargo.toml)).package.version;
     in
     {
       packages = forEachSystem (pkgs: rec {

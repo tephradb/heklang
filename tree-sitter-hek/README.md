@@ -57,8 +57,9 @@ tree-sitter parse ../hek/*.hk --quiet --stat   # must be 100%, and it is
 tree-sitter build -o hek.so     # the shared object an editor loads
 ```
 
-`--abi 14` is deliberate: it is the ABI Helix 25.07 loads, and the version the other
-grammars in this setup are generated at.
+`--abi 14` is deliberate: it is the ABI Helix 25.07 loads. Bare `generate` uses whatever the
+installed CLI defaults to, which is newer, and the mismatch is only found when the editor
+declines to load the parser.
 
 `src/` is **committed**, because `pkgs.tree-sitter.buildGrammar` compiles `src/parser.c`
 and does not run `tree-sitter generate`. Regenerate and commit it with any grammar
@@ -71,77 +72,78 @@ program and produce a "declared twice" error naming two paths. The corpus is
 
 ## Helix
 
-Wired up in `~/dev/tqwewe/config`, following the `bsn` grammar already there.
+Two halves: the compiled grammar and the queries beside it. `hek fmt` is worth wiring at the
+same time, since it reads the same grammar.
 
-`flake.nix`:
+`languages.toml`:
 
-```nix
-tree-sitter-hek = {
-  url = "path:/home/ari/dev/tephradb/heklang/tree-sitter-hek";
-  flake = false;
-};
-```
+```toml
+[[language]]
+name = "hek"
+scope = "source.hek"
+injection-regex = "hek"
+file-types = ["hk"]
+roots = []
+comment-token = "//"
+indent = { tab-width = 2, unit = "  " }
+formatter = { command = "hek", args = ["fmt", "-"] }
+auto-format = true
 
-A `path:` input rather than the `git+file:` shape `tree-sitter-bsn` uses, because `path:`
-reads the working tree: a grammar change reaches Helix after a `nix flake update`, with no
-commit in between. That is worth more than the consistency while the language is still
-moving. `git+file:///home/ari/dev/tephradb/heklang`, with `src` gaining
-`/tree-sitter-hek`, is the alternative once the grammar settles.
-
-`home/modules/helix.nix`, in the `let` block:
-
-```nix
-hek-grammar = pkgs.tree-sitter.buildGrammar {
-  language = "hek";
-  version = "unstable";
-  src = inputs.tree-sitter-hek;
-};
-```
-
-in `programs.helix.settings.language`:
-
-```nix
-{
-  name = "hek";
-  scope = "source.hek";
-  injection-regex = "hek";
-  file-types = [ "hk" ];
-  roots = [ ];
-  auto-format = false;
-  comment-token = "//";
-  indent = {
-    tab-width = 2;
-    unit = "  ";
-  };
-  grammar = "hek";
-}
+[[grammar]]
+name = "hek"
+source = { path = "/path/to/heklang/tree-sitter-hek" }
 ```
 
 hek has no block comment form, so there is no `block-comment-tokens` entry.
 
-and beside the other `xdg.configFile` entries:
+Then `hx --grammar build`, and put this directory's `queries/` at
+`runtime/queries/hek/` under Helix's configuration directory.
+
+**`auto-format` is safe because of how `hek fmt -` fails.** It reads one module on stdin and
+writes it back on stdout, and on a module that does not parse it exits non-zero with **stdout
+empty**. Helix replaces the buffer with what a formatter writes, so a formatter that printed
+nothing and succeeded would empty a file the moment it stopped parsing mid-edit. Instead the
+error is reported and the buffer is left alone.
+
+### With nix
+
+The repository is a flake, so the binary and the grammar come from one commit and cannot
+drift apart:
 
 ```nix
-xdg.configFile."helix/runtime/grammars/hek.so" = {
-  source = "${hek-grammar}/parser";
-  force = true;
-};
-xdg.configFile."helix/runtime/queries/hek" = {
-  source = "${inputs.tree-sitter-hek}/queries";
-  force = true;
-};
+inputs.heklang.url = "github:owner/heklang";
 ```
+
+```nix
+hek = inputs.heklang.packages.${pkgs.system}.hek;
+hek-grammar = inputs.heklang.packages.${pkgs.system}.tree-sitter-hek;
+```
+
+The grammar derivation carries the queries with it, so both linked into Helix's runtime is:
+
+```nix
+"helix/runtime/grammars/hek.so".source = "${hek-grammar}/parser";
+"helix/runtime/queries/hek".source = "${hek-grammar}/queries";
+```
+
+and the formatter is `"${hek}/bin/hek"` with `[ "fmt" "-" ]`.
+
+**A `path:` input rather than `github:` or `git+file:` is worth it while the language is
+moving**: `path:` reads the working tree, so a grammar change reaches Helix after a
+`nix flake update` with no commit in between. Point it at this directory rather than the
+repository root, which carries a multi-gigabyte `target/` that a `path:` input would copy.
+A flake input excludes it for free, which is the trade the two shapes are between.
 
 ### After changing the grammar
 
 ```sh
-cd tree-sitter-hek && tree-sitter generate --abi 14 && tree-sitter test
-cd ~/dev/tqwewe/config && nix flake update tree-sitter-hek && ./update-home.sh
+tree-sitter generate --abi 14 && tree-sitter test
 ```
 
-The input is content-locked, so the `nix flake update` is what makes Helix see the
-change. `hx --health hek` should show six ticks. A local `hek.so` built here is for
-`tree-sitter` command-line use only; Helix loads the `buildGrammar` output.
+then rebuild whatever installed the grammar; a content-locked input needs its lock refreshed
+before the change is visible. `hx --health hek` should show six ticks. An `hek.so` built in
+this directory is for `tree-sitter` command-line use only, and goes stale silently: it is not
+what Helix loads.
 
 ## Queries
 
