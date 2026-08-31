@@ -16,12 +16,13 @@ event @plan.sold { plan_id: Int, price: Money(2) }
 event @plan.deleted { plan_id: Int }
 event @plan.synced { plan_id: Int }
 
+refusal Already \"already synced\"
 command RecordSync(plan_id: Int) {
   guard @plan.synced(plan_id)
   state synced: Bool = fold false
     on @plan.synced(plan_id) => true
   if synced {
-    return reject(\"already\", \"already synced\")
+    return reject Already
   }
   if plan_id < 0 {
     return invalid(\"a plan id is not negative\")
@@ -312,7 +313,7 @@ fn expect_nothing_passes_when_the_command_appended_none() {
         "test \"a repeat sync is a no-op\" {
   given @plan.synced { plan_id: 1 }
   run RecordSync { plan_id: 1 }
-  expect reject(\"already\", \"already synced\")
+  expect reject Already
 }",
     );
     assert!(only(&results).passed(), "{}", only(&results));
@@ -525,7 +526,7 @@ fn tests_do_not_share_state() {
         "test \"first\" {
   given @plan.synced { plan_id: 1 }
   run RecordSync { plan_id: 1 }
-  expect reject(\"already\", \"already synced\")
+  expect reject Already
 }
 
 test \"second\" {

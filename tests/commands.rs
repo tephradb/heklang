@@ -12,6 +12,9 @@ const PRELUDE: &str = "event @order.placed {
 }
 event @order.cancelled { order_id: Uuid, customer_id: Int }
 event @customer.blocked { customer_id: Int, reason: String }
+refusal Blocked \"this customer cannot place orders\"
+refusal NoneLive \"nothing open\"
+refusal Unexpected(saw: String) \"{saw}\"
 ";
 
 const ORDER: &str = "0190d1a1-0000-7000-8000-000000000001";
@@ -172,7 +175,7 @@ fn the_condition_comes_back_for_every_outcome() {
     return invalid(\"a total must be positive\")
   }
   if blocked {
-    return reject(\"blocked\", \"this customer cannot place orders\")
+    return reject Blocked
   }
 
   emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
@@ -311,7 +314,7 @@ fn a_let_reading_a_state_runs_after_the_fold() {
 
   let live = open - shut
   if live <= 0 {
-    return reject(\"none_live\", \"nothing open\")
+    return reject NoneLive
   }
   emit @order.cancelled { order_id, customer_id }
 }",
@@ -342,7 +345,7 @@ fn a_let_reading_a_deferred_let_stays_with_it() {
   let live = open
   let doubled = live * 2
   if doubled != 2 {
-    return reject(\"unexpected\", \"{doubled}\")
+    return reject Unexpected { saw: \"{doubled}\" }
   }
   emit @order.cancelled { order_id, customer_id }
 }",
@@ -399,7 +402,7 @@ fn a_seed_may_read_a_parameter_or_a_hoisted_let() {
     on @order.placed(customer_id) => open + 1
 
   if open != 14 {
-    return reject(\"unexpected\", \"{open}\")
+    return reject Unexpected { saw: \"{open}\" }
   }
   emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
 }",
@@ -470,7 +473,7 @@ fn a_destructure_reads_the_event_where_a_filter_reads_the_command() {
     on @order.placed(customer_id) { total } => spend + total
 
   if spend != 8.00 {
-    return reject(\"unexpected\", \"{spend}\")
+    return reject Unexpected { saw: \"{spend}\" }
   }
   emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
 }",

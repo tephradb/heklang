@@ -7,7 +7,7 @@ guard ShopIsConnected(shop_id: Int) {
     on @shop.connected(shop_id) => true
 
   if !connected {
-    return reject("shop_not_found", "shop does not exist")
+    return reject ShopNotFound
   }
 }
 
@@ -38,12 +38,8 @@ guard ShopIsConnected(shop_id: Int) {
           (identifier))
         consequence: (block
           (return_statement
-            (outcome_expression
-              arguments: (arguments
-                (string
-                  (string_content))
-                (string
-                  (string_content))))))))))
+            (refusal_expression
+              name: (type_identifier))))))))
 
 ================================================================================
 raw slices and named guards are told apart by the token after `guard`

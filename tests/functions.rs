@@ -213,9 +213,10 @@ fn a_fn_returns_a_value_not_an_outcome() {
 #[test]
 fn a_fn_may_decide_a_refusal_and_a_command_may_return_it() {
     let decls = "
+refusal TooLong \"sixty months is the limit\"
 fn ladder(months: Int) -> Outcome? {
   if months <= 0 { return invalid(\"months must be positive\") }
-  if months > 60 { return reject(\"too_long\", \"sixty months is the limit\") }
+  if months > 60 { return reject TooLong }
   return none
 }
 ";
@@ -425,11 +426,7 @@ fn a_fn_is_declared_once() {
 #[test]
 fn a_trailing_comma_closes_an_argument_list() {
     let cases = [
-        (
-            "reject",
-            "  return reject(\n    \"code\",\n    \"a long message\",\n  )",
-        ),
-        ("invalid", "  return invalid(\"m\",)"),
+        ("invalid", "  return invalid(\n    \"a long message\",\n  )"),
         (
             "fn call",
             "  emit @plan.created { plan_id, sku: effective_sku(sku, plan_id,), months }",
@@ -474,9 +471,12 @@ fn a_trailing_comma_needs_a_last_argument() {
     .text();
     assert_eq!(bare, "expected `)`, found `,`");
 
-    let short = parse(&source("", "  return reject(\"code\",)"))
-        .expect_err("a missing argument is still missing")
-        .text();
+    let short = parse(&source(
+        "",
+        "  let u = Uuid.derive(plan_id,)\n  emit @plan.created { plan_id, sku, months }",
+    ))
+    .expect_err("a missing argument is still missing")
+    .text();
     assert_eq!(short, "expected a value, found `)`");
 }
 

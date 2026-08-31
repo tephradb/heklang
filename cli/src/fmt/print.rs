@@ -477,7 +477,8 @@ impl<'a> Printer<'a> {
     // --------------------------------------------------------------- expressions
 
     /// A prefix operator or keyword that the grammar leaves anonymous: `!x`, `-x`,
-    /// `reject(..)`, `invalid(..)`.
+    /// `invalid(..)`. `reject` is no longer one of them: it names a declaration, so it
+    /// prints through `keyed` beside `emit` and `put`.
     fn prefixed(&self, node: Node<'a>) -> Doc<'a> {
         Doc::concat([Doc::text(self.leading_token(node)), self.spaced(node)])
     }

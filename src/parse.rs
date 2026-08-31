@@ -3569,13 +3569,13 @@ impl Parser {
     ) -> Result<Expect, Diagnostic> {
         if self.at_word(Keyword::Invalid) {
             self.bump();
-            let (_, message) = self.refusal_args(lower, Keyword::Invalid)?;
+            let message = self.refusal_args(lower)?;
             return Ok(Expect::Invalid { message, span });
         }
         if self.at_word(Keyword::Reject) {
+            let at = self.span_here();
             self.bump();
-            let (code, message) = self.refusal_args(lower, Keyword::Reject)?;
-            let code = code.expect("`reject` reads a code");
+            let (code, message) = self.reject_use(lower, at)?;
             return Ok(Expect::Reject {
                 code,
                 message,
@@ -3962,11 +3962,11 @@ impl Parser {
                     return Ok(Stmt::Return(Return::Ok));
                 }
                 let ret = if self.eat_word(Keyword::Invalid) {
-                    let (_, message) = self.refusal_args(lower, Keyword::Invalid)?;
-                    Return::Invalid(message)
-                } else if self.eat_word(Keyword::Reject) {
-                    let (code, message) = self.refusal_args(lower, Keyword::Reject)?;
-                    let code = code.expect("`reject` reads a code");
+                    Return::Invalid(self.refusal_args(lower)?)
+                } else if self.at_word(Keyword::Reject) {
+                    let at = self.span_here();
+                    self.bump();
+                    let (code, message) = self.reject_use(lower, at)?;
                     Return::Reject { code, message }
                 } else if self.kind == Kind::Command && !self.ends_return() {
                     // The decision came from somewhere else, which is the whole point:
@@ -4809,11 +4809,26 @@ impl Parser {
                     let ty = enum_name.clone();
                     return Ok(lower.b.lit(Literal::Enum { ty, variant: name }));
                 }
+                // A refusal in a `String` position is its code, which is what makes
+                // `result.code().unwrap_or("") == ShopNotFound` a checked comparison
+                // where the string it replaces was checked by nobody. The target
+                // decides, exactly as it does for an enum variant just above.
+                if expect.as_ref().map(inner_of) == Some(&Type::String)
+                    && let Some(def) = self.refusals.iter().find(|def| def.name == name)
+                {
+                    let code = def.code.clone();
+                    return Ok(lower.b.str(&code));
+                }
                 if let Some(mode) = rounding_mode(&name) {
                     return Ok(lower.b.rounding(mode));
                 }
+                let refusal = self
+                    .refusals
+                    .iter()
+                    .find(|def| def.name == name)
+                    .map(|def| def.code.clone());
                 match self.visible_enums().filter(|def| def.has(&name)).count() {
-                    1 => {
+                    1 if refusal.is_none() => {
                         let ty = self
                             .visible_enums()
                             .find(|def| def.has(&name))
@@ -4822,9 +4837,22 @@ impl Parser {
                             .clone();
                         Ok(lower.b.lit(Literal::Enum { ty, variant: name }))
                     }
+                    0 if refusal.is_some() => {
+                        let code = refusal.expect("matched some");
+                        Ok(lower.b.str(&code))
+                    }
                     // A name nothing declares is one mistake. The poison has no type,
                     // so whatever this was written into does not report a second.
                     0 => Ok(self.record(lower, self.not_in_scope(&name, spanned.span))),
+                    _ if refusal.is_some() => Err(self
+                        .err(
+                            Code::NeedsTargetType,
+                            format!(
+                                "`{name}` is both a refusal and an enum variant, so it is ambiguous here"
+                            ),
+                            spanned.span,
+                        )
+                        .with_hint("the target type would decide it: a refusal fills a `String`")),
                     _ => {
                         let candidates: Vec<&str> = self
                             .visible_enums()
@@ -6588,31 +6616,177 @@ impl Parser {
                 )
                 .with_hint(why));
         }
-        let (code, message) = self.refusal_args(lower, word)?;
+        let (code, message) = if word == Keyword::Reject {
+            let (code, message) = self.reject_use(lower, span)?;
+            (Some(code), message)
+        } else {
+            (None, self.refusal_args(lower)?)
+        };
         lower.b.at(span);
         Ok(lower.b.expr(Expr::Refusal { code, message }))
     }
 
-    /// The arguments of `reject(code, message)` or `invalid(message)`, which the
-    /// keyword decides between. Written out three times before this: as a value here,
-    /// as a `return`, and as a test's `expect`. They are one shape, and a change that
-    /// reached two of the three would be silent in the one it missed.
-    fn refusal_args(
-        &mut self,
-        lower: &mut Lower,
-        word: Keyword,
-    ) -> Result<(Option<ExprId>, ExprId), Diagnostic> {
+    /// The argument of `invalid(message)`. `reject` used to share this shape and no
+    /// longer does: it names a declaration instead, and `reject_use` reads that.
+    fn refusal_args(&mut self, lower: &mut Lower) -> Result<ExprId, Diagnostic> {
         self.expect_sym(Sym::LParen)?;
-        let code = if word == Keyword::Reject {
-            let code = self.expr(lower, Some(Type::String))?;
-            self.expect_sym(Sym::Comma)?;
-            Some(code)
-        } else {
-            None
-        };
         let message = self.expr(lower, Some(Type::String))?;
         self.end_args()?;
+        Ok(message)
+    }
+
+    /// `reject Name`, or `reject Name { field: value }`, as the code and message pair
+    /// every one of the three refusal sites wants.
+    ///
+    /// The IR is exactly what `reject("code", "message")` used to build: the code as a
+    /// literal and the declaration's message with the caller's arguments spliced into
+    /// the holes it wrote. A refusal is a spelling, not a runtime idea, which is why
+    /// nothing below the parser knows the word.
+    fn reject_use(
+        &mut self,
+        lower: &mut Lower,
+        span: Span,
+    ) -> Result<(ExprId, ExprId), Diagnostic> {
+        if self.at_sym(Sym::LParen) {
+            return Err(self.rejected_call(span));
+        }
+        let at = self.span_here();
+        let name = self.expect_ident()?;
+        let Some(def) = self.refusals.iter().find(|def| def.name == name).cloned() else {
+            return Err(self
+                .err(
+                    Code::NotDeclared,
+                    format!("refusal `{name}` is not declared"),
+                    at,
+                )
+                .with_hint(format!(
+                    "declare it at module scope: `refusal {name} \"<message>\"`"
+                )));
+        };
+
+        let mut args: Vec<Option<ExprId>> = vec![None; def.params.len()];
+        if def.params.is_empty() {
+            if self.at_sym(Sym::LBrace) {
+                return Err(self
+                    .err(
+                        Code::Arity,
+                        format!("refusal `{name}` has no fields, so it takes no braces"),
+                        self.span_here(),
+                    )
+                    .with_hint(format!("write `reject {name}`")));
+            }
+        } else {
+            // These braces are a field list, so the flag that makes `if plan { .. }` a
+            // block has to be off while they are read. A refusal is never a header's
+            // condition, so there is no block here for the list to be confused with.
+            let outer = mem::replace(&mut self.no_record_literal, false);
+            let read = self.reject_fields(lower, &def, &mut args, at);
+            self.no_record_literal = outer;
+            read?;
+        }
+
+        lower.b.at(span);
+        let code = lower.b.str(&def.code);
+        let message = match def.message.as_slice() {
+            [MessagePart::Text(text)] => lower.b.str(text),
+            parts => {
+                let parts: Vec<ExprId> = parts
+                    .iter()
+                    .map(|part| match part {
+                        MessagePart::Text(text) => lower.b.str(text),
+                        // Every parameter is named by the message and every one the
+                        // message names was just filled, both checked above.
+                        MessagePart::Param(index) => args[*index].expect("a filled field"),
+                    })
+                    .collect();
+                lower.b.expr(Expr::Interp(parts))
+            }
+        };
         Ok((code, message))
+    }
+
+    /// `{ field: value, ... }` against a refusal's declared fields. The same checks a
+    /// guard's arguments take, minus the one about reading a `state`: a refusal's
+    /// arguments are ordinary expressions in the body, not prologue assignments.
+    fn reject_fields(
+        &mut self,
+        lower: &mut Lower,
+        def: &RefusalDef,
+        args: &mut [Option<ExprId>],
+        at: Span,
+    ) -> Result<(), Diagnostic> {
+        self.expect_sym(Sym::LBrace)?;
+        while !self.at_sym(Sym::RBrace) {
+            let field_at = self.span_here();
+            let field = self.expect_ident()?;
+            let Some((index, param)) = def.param(&field) else {
+                return Err(self.err(
+                    Code::UnknownMember,
+                    format!("refusal `{}` has no field `{field}`", def.name),
+                    field_at,
+                ));
+            };
+            if args[index].is_some() {
+                return Err(self.err(
+                    Code::DuplicateField,
+                    format!("`{field}` is given twice"),
+                    field_at,
+                ));
+            }
+            let expected = param.ty.clone();
+            let value = if self.eat_sym(Sym::Colon) {
+                self.expr(lower, Some(expected))?
+            } else if lower.b.lookup(&field).is_none() {
+                return Err(self.not_in_scope(&field, field_at));
+            } else {
+                lower.b.at(field_at);
+                lower.b.load(&field)
+            };
+            args[index] = Some(value);
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RBrace)?;
+        for (index, param) in def.params.iter().enumerate() {
+            if args[index].is_none() {
+                return Err(self.err(
+                    Code::MissingField,
+                    format!("refusal `{}` needs `{}`", def.name, param.name),
+                    at,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The removed `reject(code, message)`. People will type it, so the message says
+    /// what to write instead, and reads the literals it was given to say it concretely.
+    fn rejected_call(&mut self, span: Span) -> Diagnostic {
+        let literal = |at: usize| match self.tokens.get(at).map(|spanned| &spanned.token) {
+            Some(Token::Text(text)) => Some(text.clone()),
+            _ => None,
+        };
+        let hint = match (literal(self.pos + 1), literal(self.pos + 3)) {
+            (Some(code), Some(message)) => {
+                let name = pascal_case(&code);
+                format!(
+                    "declare `refusal {name} {message:?}` at module scope, then write `reject {name}`"
+                )
+            }
+            _ => {
+                "declare `refusal <Name> \"<message>\"` at module scope, then write `reject <Name>`"
+                    .to_string()
+            }
+        };
+        self.err(
+            Code::ExpectedToken,
+            "`reject` names a declared refusal, so it takes no code and no message",
+            span,
+        )
+        .with_hint(format!(
+            "{hint}; the message lives on the declaration so that two `reject`s of it cannot disagree"
+        ))
     }
 
     fn invoke_expr(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, Diagnostic> {
@@ -7299,6 +7473,13 @@ fn children(expr: &Expr) -> Vec<ExprId> {
 /// Whether every path out of a body returns. An `if` counts only when it has an
 /// `else` and both branches return; a `for` body never counts, because the container
 /// it walks can be empty and the loop can run zero times.
+/// The name a snake_case code was derived from, which is what `refusal_code` undoes.
+/// Only for the diagnostic that rewrites a removed `reject("code", "message")` into the
+/// declaration it should have been.
+fn pascal_case(code: &str) -> String {
+    code.split('_').map(upper_first).collect()
+}
+
 /// A name with its first character in upper case, for a diagnostic that shows what the
 /// author probably meant to write.
 fn upper_first(name: &str) -> String {

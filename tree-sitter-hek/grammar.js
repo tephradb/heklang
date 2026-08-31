@@ -401,8 +401,7 @@ module.exports = grammar({
         seq('return', optional(choice($.outcome_expression, $._expression))),
       ),
 
-    outcome_expression: ($) =>
-      seq(choice('invalid', 'reject'), field('arguments', $.arguments)),
+    outcome_expression: ($) => seq('invalid', field('arguments', $.arguments)),
 
     // `reject Name`, or `reject Name { field: value }`. The token after `reject` is
     // what tells this from `outcome_expression`: a `(` opens arguments and a name

@@ -41,6 +41,10 @@ event @tenant.member.joined {
   secret: String @subject(member_id),
 }
 
+refusal AlreadyNotified \"this order was already confirmed\"
+refusal No \"not today\"
+refusal Unknown \"no orders\"
+
 command RecordNotified(order_id: Uuid, notification_id: Uuid) {
   guard @order.notified(order_id)
 
@@ -48,7 +52,7 @@ command RecordNotified(order_id: Uuid, notification_id: Uuid) {
     on @order.notified(order_id) => true
 
   if notified {
-    return reject(\"already_notified\", \"this order was already confirmed\")
+    return reject AlreadyNotified
   }
 
   emit @order.notified { order_id, notification_id }
@@ -1162,9 +1166,10 @@ command Stamp() {
 fn a_command_that_appends_nothing_still_reads_a_clock() {
     let program = parse(
         "event @a.b { id: Uuid }
+refusal No \"not today\"
 command Give() {
   let at = now()
-  return reject(\"no\", \"not today\")
+  return reject No
 }
 ",
     )
@@ -1533,7 +1538,7 @@ fn the_fold_rules_hold_in_a_command_too() {
     on @order.placed(customer_id) { email } => email
 
   if secret.is_none() {
-    return reject(\"unknown\", \"no orders\")
+    return reject Unknown
   }
   return
 }",
@@ -1929,7 +1934,7 @@ fn an_effect_has_no_guard() {
 fn a_command_outcome_is_not_an_effect_outcome() {
     let message = err("effect E {
   on @order.placed as e {
-    return reject(\"no\", \"not today\")
+    return reject No
   }
 }");
     assert_eq!(

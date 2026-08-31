@@ -206,7 +206,7 @@
 (invoke_expression command: (identifier) @function)
 (run_clause command: (identifier) @function)
 
-(outcome_expression ["invalid" "reject"] @function.builtin)
+(outcome_expression "invalid" @function.builtin)
 
 ; `reject <Name>` is a keyword and a declared name, not a call: the name resolves to a
 ; `refusal` declaration, so it takes the colour a type takes rather than an argument.

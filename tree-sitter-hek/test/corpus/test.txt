@@ -60,7 +60,7 @@ test "a blank address is the caller's mistake" {
   run PlaceOrder { address: "   " }
 
   expect invalid("address must not be blank")
-  expect reject("email_taken", "that email has already placed an order")
+  expect reject EmailTaken
   expect nothing
 }
 
@@ -84,12 +84,8 @@ test "a blank address is the caller's mistake" {
             (string
               (string_content)))))
       (expect_clause
-        (outcome_expression
-          (arguments
-            (string
-              (string_content))
-            (string
-              (string_content)))))
+        (refusal_expression
+          (type_identifier)))
       (expect_clause))))
 
 ================================================================================

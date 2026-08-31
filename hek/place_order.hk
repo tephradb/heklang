@@ -21,6 +21,16 @@ event @customer.blocked {
   reason: String,
 }
 
+// refusals/order.hk
+//
+// One home for each refusal this module can answer with, so no two sites can disagree
+// about what one means. The code a caller sees is the name in snake_case, which is how
+// `CustomerBlocked` reaches a client as "customer_blocked".
+
+refusal CustomerBlocked "this customer cannot place orders"
+refusal EmailTaken "that email has already placed an order"
+refusal TooManyOpen "too many open orders"
+
 // guards/order.hk
 //
 // Each of these is a proposition about the log with one refusal, named for what it
@@ -35,7 +45,7 @@ guard CustomerIsNotBlocked(customer_id: Int) {
     on @customer.blocked(customer_id: customer) => true
 
   if blocked {
-    return reject("customer_blocked", "this customer cannot place orders")
+    return reject CustomerBlocked
   }
 }
 
@@ -44,7 +54,7 @@ guard EmailIsUnused(email: String) {
     on @order.placed(email) => true
 
   if taken {
-    return reject("email_taken", "that email has already placed an order")
+    return reject EmailTaken
   }
 }
 
@@ -54,7 +64,7 @@ guard UnderOpenOrderLimit(customer_id: Int) {
     on @order.cancelled(customer_id) => open_orders - 1
 
   if open_orders >= 10 {
-    return reject("too_many_open", "too many open orders")
+    return reject TooManyOpen
   }
 }
 

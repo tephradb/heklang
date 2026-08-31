@@ -2019,17 +2019,8 @@
       "type": "SEQ",
       "members": [
         {
-          "type": "CHOICE",
-          "members": [
-            {
-              "type": "STRING",
-              "value": "invalid"
-            },
-            {
-              "type": "STRING",
-              "value": "reject"
-            }
-          ]
+          "type": "STRING",
+          "value": "invalid"
         },
         {
           "type": "FIELD",

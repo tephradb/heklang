@@ -8,12 +8,13 @@ use std::process::{Command, Output, Stdio};
 
 const EVENTS: &str = "event @order.placed { order_id: Int, total: Money(2) }\n";
 
-const COMMAND: &str = "command Place(order_id: Int, total: Money(2)) {
+const COMMAND: &str = "refusal Duplicate \"already placed\"
+command Place(order_id: Int, total: Money(2)) {
   guard @order.placed(order_id)
   state placed: Bool = fold false
     on @order.placed(order_id) => true
   if placed {
-    return reject(\"duplicate\", \"already placed\")
+    return reject Duplicate
   }
   emit @order.placed { order_id, total }
 }
@@ -83,7 +84,10 @@ fn files_across_directories_are_one_program() {
     assert!(output.status.success(), "{}", stdout(&output));
     let text = stdout(&output);
     assert!(text.contains("checked 3 files"), "{text}");
-    assert!(text.contains("1 event, 1 command, 1 test"), "{text}");
+    assert!(
+        text.contains("1 event, 1 command, 1 refusal, 1 test"),
+        "{text}"
+    );
     assert!(text.contains("pass   a first order is appended"), "{text}");
     assert!(text.contains("1 passed, 0 failed"), "{text}");
 }
@@ -499,12 +503,14 @@ fn check_names_what_a_command_guards() {
 event @shop.connected { shop_id: Int }
 event @plan.created { plan_id: Int, shop_id: Int }
 event @plan.archived { plan_id: Int, shop_id: Int }
+refusal ShopNotFound \"shop does not exist\"
+refusal PlanNotFound \"no such plan\"
 
 guard ShopIsConnected(shop_id: Int) {
   state connected: Bool = fold false
     on @shop.connected(shop_id) => true
   if !connected {
-    return reject(\"shop_not_found\", \"shop does not exist\")
+    return reject ShopNotFound
   }
 }
 
@@ -513,7 +519,7 @@ guard PlanExists(plan_id: Int, shop_id: Int) {
   state exists: Bool = fold false
     on @plan.created(plan_id, shop_id) => true
   if !exists {
-    return reject(\"plan_not_found\", \"no such plan\")
+    return reject PlanNotFound
   }
 }
 
@@ -543,12 +549,13 @@ fn check_says_nothing_about_boundaries_unless_asked() {
     let source = "\
 event @shop.connected { shop_id: Int }
 event @shop.renamed { shop_id: Int }
+refusal ShopNotFound \"shop does not exist\"
 
 guard ShopIsConnected(shop_id: Int) {
   state connected: Bool = fold false
     on @shop.connected(shop_id) => true
   if !connected {
-    return reject(\"shop_not_found\", \"shop does not exist\")
+    return reject ShopNotFound
   }
 }
 

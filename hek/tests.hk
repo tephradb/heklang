@@ -86,7 +86,7 @@ test "an email that already placed an order is refused" {
     tax_rate: 0.2000,
   }
 
-  expect reject("email_taken", "that email has already placed an order")
+  expect reject EmailTaken
 }
 
 test "a blocked customer is refused before anything else is checked" {
@@ -101,7 +101,7 @@ test "a blocked customer is refused before anything else is checked" {
     tax_rate: 0.2000,
   }
 
-  expect reject("customer_blocked", "this customer cannot place orders")
+  expect reject CustomerBlocked
 }
 
 test "a customer past a thousand gets a tenth off" {

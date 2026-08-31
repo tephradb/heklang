@@ -1309,12 +1309,13 @@ fn emitted(source: &str, target: &str, sealed: bool) -> Result<(), String> {
         "event @order.placed {{ order_id: Uuid, customer_id: Int, note: String{subject}{source} }}
 event @order.copied {{ order_id: Uuid, customer_id: Int, note: String{subject}{target} }}
 
+refusal Nothing \"nothing to copy\"
 command Copy(order_id: Uuid, customer_id: Int) {{
   state note: String? = fold none
     on @order.placed(customer_id) {{ note }} => note
 
   if note.is_none() {{
-    return reject(\"nothing\", \"nothing to copy\")
+    return reject Nothing
   }}
   emit @order.copied {{ order_id, customer_id, note }}
 }}
@@ -1383,13 +1384,14 @@ fn one_transforming_arm_makes_the_fold_unknown() {
 event @order.trimmed { order_id: Uuid, customer_id: Int, note: String @max(200) }
 event @order.copied { order_id: Uuid, customer_id: Int, note: String @max(5) }
 
+refusal Nothing \"nothing to copy\"
 command Copy(order_id: Uuid, customer_id: Int) {
   state note: String? = fold none
     on @order.placed(customer_id) { note } => note
     on @order.trimmed(customer_id) { note } => note.trim()
 
   if note.is_none() {
-    return reject(\"nothing\", \"nothing to copy\")
+    return reject Nothing
   }
   emit @order.copied { order_id, customer_id, note }
 }

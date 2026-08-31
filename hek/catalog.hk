@@ -16,6 +16,11 @@ record Item {
 const HOUSE_TAG: String = "house"
 const FREE_LIMIT: Int = 2
 
+// A refusal names its fields, and its message may name those and nothing else, so what
+// it says is settled here rather than at each site that answers with it.
+refusal SkuTaken(sku: String, item: Uuid) "sku {sku} already belongs to item {item}"
+refusal FreeLimit(limit: Int) "the free tier lists {limit} items"
+
 // A const may name another const, above it, below it or in another file. What lands at
 // the use site is still a literal, so this is not a runtime lookup.
 const HOUSE_ITEM: Item = Item { sku: HOUSE_TAG, price: 0.00, tags: [HOUSE_TAG] }
@@ -99,12 +104,12 @@ command ListItem(
 
   for other_id, other in items {
     if other_id != item_id && other.sku == wanted {
-      return reject("sku_taken", "sku {wanted} already belongs to item {other_id}")
+      return reject SkuTaken { sku: wanted, item: other_id }
     }
   }
 
   if tier == Free && items.len() >= FREE_LIMIT {
-    return reject("free_limit", "the free tier lists {FREE_LIMIT} items")
+    return reject FreeLimit { limit: FREE_LIMIT }
   }
 
   emit @item.listed { item_id, seller_id, item: Item { sku: wanted, price, tags }, tier }

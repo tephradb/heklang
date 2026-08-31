@@ -36,6 +36,10 @@ const EVENTS: &str = "\
 event @course.defined { course: String, capacity: Int }
 event @student.registered { student: String }
 event @student.subscribed { course: String, student: String }
+refusal UndefinedCourse \"no such course\"
+refusal UnregisteredStudent \"no such student\"
+refusal CourseFull \"that course is full\"
+refusal No \"no\"
 ";
 
 const GUARDS: &str = "\
@@ -44,7 +48,7 @@ guard CourseIsDefined(course: String) {
     on @course.defined(course) => true
 
   if !defined {
-    return reject(\"undefined_course\", \"no such course\")
+    return reject UndefinedCourse
   }
 }
 
@@ -53,7 +57,7 @@ guard StudentIsRegistered(student: String) {
     on @student.registered(student) => true
 
   if !registered {
-    return reject(\"unregistered_student\", \"no such student\")
+    return reject UnregisteredStudent
   }
 }
 
@@ -65,7 +69,7 @@ guard CourseHasSeats(course: String) {
     on @student.subscribed(course) => enrolled + 1
 
   if enrolled >= seats {
-    return reject(\"course_full\", \"that course is full\")
+    return reject CourseFull
   }
 }
 
@@ -256,13 +260,15 @@ const NESTED: &str = "\
 event @shop.connected { shop_id: Int }
 event @plan.created { plan_id: Int, shop_id: Int }
 event @plan.archived { plan_id: Int, shop_id: Int }
+refusal ShopNotFound \"shop does not exist\"
+refusal PlanNotFound \"no such plan\"
 
 guard ShopIsConnected(shop_id: Int) {
   state connected: Bool = fold false
     on @shop.connected(shop_id) => true
 
   if !connected {
-    return reject(\"shop_not_found\", \"shop does not exist\")
+    return reject ShopNotFound
   }
 }
 
@@ -273,7 +279,7 @@ guard PlanExists(plan_id: Int, shop_id: Int) {
     on @plan.created(plan_id, shop_id) => true
 
   if !exists {
-    return reject(\"plan_not_found\", \"no such plan\")
+    return reject PlanNotFound
   }
 }
 
@@ -377,7 +383,7 @@ fn a_guard_returns_only_a_refusal() {
 fn a_guard_that_folds_nothing_is_a_fn() {
     let message = error(&format!(
         "{EVENTS}guard G(course: String) {{
-  if course == \"\" {{ return reject(\"no\", \"no\") }}
+  if course == \"\" {{ return reject No }}
 }}
 "
     ));
@@ -390,7 +396,8 @@ fn a_guard_has_no_clock() {
         "{EVENTS}guard G(course: String) {{
   state d: Bool = fold false
     on @course.defined(course) => true
-  if !d {{ return reject(\"{{now()}}\", \"no\") }}
+  let at = now()
+  if !d {{ return reject No }}
 }}
 "
     ));
@@ -468,7 +475,7 @@ fn a_guard_cannot_name_itself() {
   guard G {{ course }}
   state d: Bool = fold false
     on @course.defined(course) => true
-  if !d {{ return reject(\"no\", \"no\") }}
+  if !d {{ return reject No }}
 }}
 "
     ));
@@ -485,13 +492,13 @@ fn a_cycle_through_another_guard_is_refused() {
   guard B {{ course }}
   state d: Bool = fold false
     on @course.defined(course) => true
-  if !d {{ return reject(\"no\", \"no\") }}
+  if !d {{ return reject No }}
 }}
 guard B(course: String) {{
   guard A {{ course }}
   state e: Bool = fold false
     on @course.defined(course) => true
-  if !e {{ return reject(\"no\", \"no\") }}
+  if !e {{ return reject No }}
 }}
 "
     ));
@@ -533,7 +540,7 @@ fn a_command_and_a_guard_may_share_a_name() {
 guard Same(course: String) {{
   state d: Bool = fold false
     on @course.defined(course) => true
-  if !d {{ return reject(\"undefined_course\", \"no such course\") }}
+  if !d {{ return reject UndefinedCourse }}
 }}
 "
     );
@@ -553,7 +560,7 @@ fn a_const_above_a_guard_does_not_swallow_it() {
 guard CourseIsDefined(course: String) {{
   state defined: Bool = fold false
     on @course.defined(course) => true
-  if !defined {{ return reject(\"undefined_course\", \"no such course\") }}
+  if !defined {{ return reject UndefinedCourse }}
 }}
 "
     );

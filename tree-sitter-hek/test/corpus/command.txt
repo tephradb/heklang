@@ -17,7 +17,7 @@ command PlaceOrder(order_id: Uuid, customer_id: Int, notes: String?) {
     on @customer.blocked(customer_id: customer) => true
 
   if blocked {
-    return reject("customer_blocked", "this customer cannot place orders")
+    return reject CustomerBlocked
   } else if email_taken {
     return invalid("that email has already placed an order")
   } else {
@@ -109,12 +109,8 @@ command PlaceOrder(order_id: Uuid, customer_id: Int, notes: String?) {
         (identifier)
         (block
           (return_statement
-            (outcome_expression
-              (arguments
-                (string
-                  (string_content))
-                (string
-                  (string_content))))))
+            (refusal_expression
+              (type_identifier))))
         (if_statement
           (identifier)
           (block
@@ -133,7 +129,7 @@ for over a map, emit with shorthand fields
 command ListItem(item_id: Uuid, tier: Tier) {
   for other_id, other in items {
     if other_id != item_id && other.sku == wanted {
-      return reject("sku_taken", "taken")
+      return reject SkuTaken { sku }
     }
   }
 
@@ -177,12 +173,11 @@ command ListItem(item_id: Uuid, tier: Tier) {
                 (identifier)))
             (block
               (return_statement
-                (outcome_expression
-                  (arguments
-                    (string
-                      (string_content))
-                    (string
-                      (string_content)))))))))
+                (refusal_expression
+                  (type_identifier)
+                  (field_initializer_list
+                    (field_initializer
+                      (identifier)))))))))
       (emit_statement
         (event_path)
         (field_initializer_list

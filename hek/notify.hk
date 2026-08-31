@@ -27,6 +27,8 @@ effect NotifyCustomer {
   }
 }
 
+refusal AlreadyNotified "this order was already confirmed"
+
 // commands/internal/record_notified.hk
 //
 // Internal: an effect writes back to the log by calling a command, never by appending,
@@ -39,7 +41,7 @@ command RecordNotified(order_id: Uuid, notification_id: Uuid) {
     on @order.notified(order_id) => true
 
   if notified {
-    return reject("already_notified", "this order was already confirmed")
+    return reject AlreadyNotified
   }
 
   emit @order.notified { order_id, notification_id, at: now() }

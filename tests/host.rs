@@ -246,11 +246,12 @@ fn the_condition_comes_back_resolved() {
     );
 }
 
-const CAPPED: &str = "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+const CAPPED: &str = "refusal AtCapacity \"two is the limit\"
+command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
   state open: Int = fold 0
     on @order.placed(customer_id) => open + 1
 
-  if open >= 2 { return reject(\"at_capacity\", \"two is the limit\") }
+  if open >= 2 { return reject AtCapacity }
   emit @order.placed { order_id, customer_id, total }
 }";
 
@@ -329,11 +330,12 @@ fn run_raises_a_conflict_rather_than_retrying_it() {
 #[test]
 fn a_second_run_folds_what_the_first_appended() {
     let program = program(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "refusal OnePerCustomer \"already ordered\"
+command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
   state open: Int = fold 0
     on @order.placed(customer_id) => open + 1
 
-  if open > 0 { return reject(\"one_per_customer\", \"already ordered\") }
+  if open > 0 { return reject OnePerCustomer }
   emit @order.placed { order_id, customer_id, total }
 }",
     );

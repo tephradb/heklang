@@ -172,6 +172,7 @@ event @order.recorded { order_id: Uuid }
 #[test]
 fn else_if_chains_without_nesting() {
     let source = "event @order.placed { order_id: Uuid, kind: Int }
+refusal Three \"no\"
 
 command Route(order_id: Uuid, kind: Int) {
   if kind == 1 {
@@ -179,7 +180,7 @@ command Route(order_id: Uuid, kind: Int) {
   } else if kind == 2 {
     return invalid(\"two\")
   } else if kind == 3 {
-    return reject(\"three\", \"no\")
+    return reject Three
   } else {
     emit @order.placed { order_id, kind }
   }

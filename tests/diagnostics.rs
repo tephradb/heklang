@@ -403,11 +403,12 @@ fn cases() -> Vec<(Code, String)> {
             Code::RecursiveGuard,
             concat!(
                 "event @a.b { x: Int }\n",
+                "refusal No \"no\"\n",
                 "guard G(x: Int) {\n",
                 "  guard G { x }\n",
                 "  state s: Bool = fold false\n",
                 "    on @a.b(x) => true\n",
-                "  if !s { return reject(\"no\", \"no\") }\n",
+                "  if !s { return reject No }\n",
                 "}\n",
             ),
         ),
