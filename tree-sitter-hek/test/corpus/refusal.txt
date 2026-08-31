@@ -1,0 +1,118 @@
+================================================================================
+a refusal declares a name and a message
+================================================================================
+
+// Every refusal the module can reach.
+refusal ShopNotFound "shop does not exist"
+
+refusal SkuTaken(sku: String, item: Uuid)
+  "sku {sku} already belongs to item {item}"
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (comment)
+  (refusal_declaration
+    (type_identifier)
+    (string
+      (string_content)))
+  (refusal_declaration
+    (type_identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (type
+          (primitive_type)))
+      (parameter
+        (identifier)
+        (type
+          (primitive_type))))
+    (string
+      (string_content)
+      (interpolation
+        (identifier))
+      (string_content)
+      (interpolation
+        (identifier)))))
+
+================================================================================
+reject names a refusal, with fields only when it has them
+================================================================================
+
+command ListItem(item_id: Uuid, sku: String) {
+  if taken {
+    return reject ShopNotFound
+  }
+
+  return reject SkuTaken { sku, item: item_id }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (command_declaration
+    (type_identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (type
+          (primitive_type)))
+      (parameter
+        (identifier)
+        (type
+          (primitive_type))))
+    (block
+      (if_statement
+        (identifier)
+        (block
+          (return_statement
+            (refusal_expression
+              (type_identifier)))))
+      (return_statement
+        (refusal_expression
+          (type_identifier)
+          (field_initializer_list
+            (field_initializer
+              (identifier))
+            (field_initializer
+              (identifier)
+              (identifier))))))))
+
+================================================================================
+a test expects a refusal by name
+================================================================================
+
+test "a taken sku is refused" {
+  run ListItem { item_id: ADA, sku: "a" }
+
+  expect reject SkuTaken { sku: "a", item: ADA }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (test_declaration
+    (string
+      (string_content))
+    (test_body
+      (run_clause
+        (identifier)
+        (field_initializer_list
+          (field_initializer
+            (identifier)
+            (identifier))
+          (field_initializer
+            (identifier)
+            (string
+              (string_content)))))
+      (expect_clause
+        (refusal_expression
+          (type_identifier)
+          (field_initializer_list
+            (field_initializer
+              (identifier)
+              (string
+                (string_content)))
+            (field_initializer
+              (identifier)
+              (identifier))))))))

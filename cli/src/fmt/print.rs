@@ -66,6 +66,7 @@ impl<'a> Printer<'a> {
             "record_field" | "event_field" | "entity_field" => self.field_decl(node),
             "index_clause" => self.index_clause(node),
             "const_declaration" => self.const_decl(node),
+            "refusal_declaration" => self.refusal(node),
             "function_declaration" => self.function(node),
             "command_declaration" => self.callable("command", node),
             "guard_definition" => self.callable("guard", node),
@@ -103,6 +104,7 @@ impl<'a> Printer<'a> {
             "iter_bindings" => self.iter_bindings(node),
             "return_statement" => self.returned(node),
             "outcome_expression" => self.prefixed(node),
+            "refusal_expression" => self.keyed("reject", node),
             "emit_statement" => self.keyed("emit", node),
             "put_statement" => self.keyed("put", node),
             "patch_statement" => self.keyed_row(node, true),
@@ -201,6 +203,23 @@ impl<'a> Printer<'a> {
             Doc::text(" = "),
             self.node(kids[2]),
         ])
+    }
+
+    /// `refusal Name "message"`, or `refusal Name(field: Type) "message"`. Parens
+    /// declare, so the list hugs the name the way a command's does, and the message
+    /// takes a space after whichever came before it. `callable` cannot serve: it
+    /// indexes three children unconditionally and a refusal has two or three, with no
+    /// block among them.
+    fn refusal(&self, node: Node<'a>) -> Doc<'a> {
+        let kids = self.kids(node);
+        let mut parts = vec![Doc::text("refusal "), self.node(kids[0])];
+        for &rest in &kids[1..] {
+            if rest.kind() != "parameters" {
+                parts.push(Doc::text(" "));
+            }
+            parts.push(self.node(rest));
+        }
+        Doc::concat(parts)
     }
 
     /// `name: Type @annotation` and, for an entity column, `= default`.

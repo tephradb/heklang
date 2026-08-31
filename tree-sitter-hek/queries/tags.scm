@@ -28,6 +28,9 @@
 (event_declaration
   path: (event_path) @name) @definition.type
 
+(refusal_declaration
+  name: (type_identifier) @name) @definition.type
+
 (const_declaration
   name: (identifier) @name) @definition.constant
 

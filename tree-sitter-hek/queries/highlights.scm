@@ -79,6 +79,7 @@
   "event"
   "entity"
   "const"
+  "refusal"
   "test"
 ] @keyword.storage.type
 
@@ -182,6 +183,7 @@
 (entity_declaration name: (type_identifier) @type)
 (projector_declaration name: (type_identifier) @type)
 (effect_declaration name: (type_identifier) @type)
+(refusal_declaration name: (type_identifier) @type)
 (command_declaration name: (type_identifier) @function)
 (guard_definition name: (type_identifier) @function)
 (function_declaration name: (identifier) @function)
@@ -205,6 +207,11 @@
 (run_clause command: (identifier) @function)
 
 (outcome_expression ["invalid" "reject"] @function.builtin)
+
+; `reject <Name>` is a keyword and a declared name, not a call: the name resolves to a
+; `refusal` declaration, so it takes the colour a type takes rather than an argument.
+(refusal_expression "reject" @keyword)
+(refusal_expression name: (type_identifier) @type)
 
 ; The closed global namespace: actions with no natural receiver. After the generic call
 ; rules above, so these override them.

@@ -20,6 +20,7 @@
   (enum_declaration)
   (entity_declaration)
   (event_declaration)
+  (refusal_declaration)
   (projector_declaration)
   (effect_declaration)
 ] @class.around

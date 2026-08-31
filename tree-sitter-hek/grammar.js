@@ -61,6 +61,7 @@ module.exports = grammar({
         $.const_declaration,
         $.function_declaration,
         $.event_declaration,
+        $.refusal_declaration,
         $.command_declaration,
         $.guard_definition,
         $.projector_declaration,
@@ -159,6 +160,17 @@ module.exports = grammar({
         field('name', $._type_name),
         field('parameters', $.parameters),
         field('body', $.block),
+      ),
+
+    // A named refusal and the one message it carries. Parens declare and braces use,
+    // the same split `guard` has; a refusal with no fields declares no parens and is
+    // named with no braces, which is what lets `return reject Name` end a block.
+    refusal_declaration: ($) =>
+      seq(
+        'refusal',
+        field('name', $._type_name),
+        optional(field('parameters', $.parameters)),
+        field('message', choice($.string, $.raw_string)),
       ),
 
     projector_declaration: ($) =>
@@ -276,6 +288,7 @@ module.exports = grammar({
         $.event_expectation,
         $.row_expectation,
         $.outcome_expression,
+        $.refusal_expression,
         $.invoke_expression,
         $.call_expression,
         $.method_call,
@@ -391,6 +404,21 @@ module.exports = grammar({
     outcome_expression: ($) =>
       seq(choice('invalid', 'reject'), field('arguments', $.arguments)),
 
+    // `reject Name`, or `reject Name { field: value }`. The token after `reject` is
+    // what tells this from `outcome_expression`: a `(` opens arguments and a name
+    // opens this, the same one-token lookahead `guard` uses for a path against a name.
+    // `prec.right` because a `{` after the name is always the fields: unlike a record
+    // literal, which loses to a block in a header (`no_record_literal` in parse.rs),
+    // a refusal is never a header's condition, so there is no block for it to lose to.
+    refusal_expression: ($) =>
+      prec.right(
+        seq(
+          'reject',
+          field('name', $._type_name),
+          optional(field('fields', $.field_initializer_list)),
+        ),
+      ),
+
     emit_statement: ($) =>
       seq('emit', field('path', $.event_path), $.field_initializer_list),
 
@@ -473,6 +501,7 @@ module.exports = grammar({
         $.list,
         $.comprehension,
         $.invoke_expression,
+        $.refusal_expression,
         $.if_expression,
         $.parenthesized_expression,
       ),

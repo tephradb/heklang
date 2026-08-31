@@ -4,6 +4,7 @@
   (function_declaration)
   (command_declaration)
   (guard_definition)
+  (refusal_declaration)
   (event_handler)
   (fold_arm)
   (for_statement)

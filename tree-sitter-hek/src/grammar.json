@@ -51,6 +51,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "refusal_declaration"
+        },
+        {
+          "type": "SYMBOL",
           "name": "command_declaration"
         },
         {
@@ -598,6 +602,56 @@
           "content": {
             "type": "SYMBOL",
             "name": "block"
+          }
+        }
+      ]
+    },
+    "refusal_declaration": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "refusal"
+        },
+        {
+          "type": "FIELD",
+          "name": "name",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_type_name"
+          }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "FIELD",
+              "name": "parameters",
+              "content": {
+                "type": "SYMBOL",
+                "name": "parameters"
+              }
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "FIELD",
+          "name": "message",
+          "content": {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "SYMBOL",
+                "name": "string"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "raw_string"
+              }
+            ]
           }
         }
       ]
@@ -1340,6 +1394,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "refusal_expression"
+        },
+        {
+          "type": "SYMBOL",
           "name": "invoke_expression"
         },
         {
@@ -1983,6 +2041,43 @@
         }
       ]
     },
+    "refusal_expression": {
+      "type": "PREC_RIGHT",
+      "value": 0,
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "reject"
+          },
+          {
+            "type": "FIELD",
+            "name": "name",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_type_name"
+            }
+          },
+          {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "FIELD",
+                "name": "fields",
+                "content": {
+                  "type": "SYMBOL",
+                  "name": "field_initializer_list"
+                }
+              },
+              {
+                "type": "BLANK"
+              }
+            ]
+          }
+        ]
+      }
+    },
     "emit_statement": {
       "type": "SEQ",
       "members": [
@@ -2372,6 +2467,10 @@
         {
           "type": "SYMBOL",
           "name": "invoke_expression"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "refusal_expression"
         },
         {
           "type": "SYMBOL",
