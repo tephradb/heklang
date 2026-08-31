@@ -31,6 +31,15 @@ pub enum Doc<'a> {
     /// Verbatim. Never contains a newline: a construct that must break says so with
     /// `Hardline` instead, so that the width algorithm can see it.
     Text(&'a str),
+    /// Source reproduced exactly, newlines and all, and never re-indented. A `"""` body
+    /// holds someone else's language at whatever column they wrote it (fifteen of them
+    /// hold GraphQL starting at column 0), so the one safe thing to do with it is nothing.
+    /// A multi-line one breaks every group around it, because it has already left the line.
+    Verbatim(&'a str),
+    /// Nothing at all, except that every group containing one is broken. What a trailing
+    /// comment needs: the comment itself is held back to the end of the line, so it cannot
+    /// use a `Hardline` to say that the line is now spoken for.
+    BreakParent,
     /// A space when flat, a newline when broken. The separator between list items.
     Line,
     /// Nothing when flat, a newline when broken. What sits just inside a delimiter, so
@@ -113,9 +122,16 @@ impl<'a> Doc<'a> {
         }
     }
 
+    /// Source reproduced exactly. Use it for anything that may span lines; `text` is for
+    /// everything else, and asserts that it does not.
+    pub fn verbatim(text: &'a str) -> Self {
+        Doc::Verbatim(text)
+    }
+
     fn contains_hardline(&self) -> bool {
         match self {
-            Doc::Hardline => true,
+            Doc::Hardline | Doc::BreakParent => true,
+            Doc::Verbatim(text) => text.contains('\n'),
             Doc::Text(_) | Doc::Line | Doc::Softline | Doc::LineSuffix(_) => false,
             Doc::IfBreak { broken, flat } => broken.contains_hardline() || flat.contains_hardline(),
             Doc::Concat(parts) => parts.iter().any(Doc::contains_hardline),
@@ -144,6 +160,16 @@ pub fn render(doc: &Doc<'_>, width: usize) -> String {
                 out.push_str(text);
                 column += columns(text);
             }
+            Doc::Verbatim(text) => {
+                out.push_str(text);
+                // A line the source ended is a line this is not still on, so the column
+                // restarts from whatever followed the last newline rather than accumulating.
+                column = match text.rsplit_once('\n') {
+                    Some((_, tail)) => columns(tail),
+                    None => column + columns(text),
+                };
+            }
+            Doc::BreakParent => {}
             Doc::Concat(parts) => {
                 stack.extend(parts.iter().rev().map(|part| (indent, mode, part)));
             }
@@ -218,6 +244,18 @@ fn fits(mut remaining: usize, next: &Doc<'_>, queued: &[(usize, Mode, &Doc<'_>)]
                 }
                 remaining -= taken;
             }
+            Doc::Verbatim(text) => match text.split_once('\n') {
+                // It ends the line itself, so whatever came before it fitted.
+                Some(_) => return true,
+                None => {
+                    let taken = columns(text);
+                    if taken > remaining {
+                        return false;
+                    }
+                    remaining -= taken;
+                }
+            },
+            Doc::BreakParent => {}
             Doc::Concat(parts) => work.extend(parts.iter().rev().map(|part| (mode, part))),
             Doc::Indent(inner) => work.push((mode, inner.as_ref())),
             Doc::Group { doc, must_break } => {
