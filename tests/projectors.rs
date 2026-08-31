@@ -1593,3 +1593,38 @@ fn a_write_gives_each_column_once() {
     let err = parse(&source).expect_err("`total` is written twice");
     assert_eq!(err.text(), "`total` is given twice");
 }
+
+/// Rule 5 again, from the side an author gets it wrong on: `put` writes a whole row, so
+/// the key is a column it fills like any other. Reaching for `patch`'s bracketed shape is
+/// the commonest way to write one wrong, and the generic ``expected `{` `` names the token
+/// that is there rather than the rule that is broken.
+#[test]
+fn a_put_with_a_key_says_a_put_takes_none() {
+    let message = err("  on @order.placed { order_id } {
+    put Order[order_id] { order_id }
+  }
+");
+    assert!(
+        message.contains("`put` writes a whole row, so it takes no key"),
+        "{message}"
+    );
+    assert!(
+        message.contains("marked `@key`"),
+        "the hint should say where the key comes from: {message}"
+    );
+}
+
+/// And the same confusion the other way, since a `patch` without a key is the mirror
+/// mistake and `expected `[`` is no more use than `expected `{`` was.
+#[test]
+fn a_patch_without_a_key_says_it_needs_one() {
+    let message = err("  on @order.placed { order_id } {
+    patch Order { tracking: \"x\" }
+  }
+");
+    assert!(
+        message.contains("`patch` changes one row, so it needs the key of the row"),
+        "{message}"
+    );
+    assert!(message.contains("patch Order[key]"), "{message}");
+}

@@ -487,6 +487,29 @@ impl Parser {
 
     /// The same, with the advice the message used to carry after its `;`. Separate so a
     /// reader can show one without the other; `Diagnostic::text` puts them back together.
+    /// From the `[` under the cursor through its matching `]`, so a diagnostic about a key
+    /// that should not be there can draw the whole key rather than one bracket. Falls back
+    /// to the bracket alone if the pair never closes, which is a different error's to
+    /// report.
+    fn through_brackets(&self) -> Span {
+        let start = self.span_here();
+        let mut depth = 0usize;
+        for spanned in &self.tokens[self.pos..] {
+            match spanned.token {
+                Token::Sym(Sym::LBracket) => depth += 1,
+                Token::Sym(Sym::RBracket) => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Span::new(start.start, spanned.span.end);
+                    }
+                }
+                Token::End => break,
+                _ => {}
+            }
+        }
+        start
+    }
+
     fn fail_hint<T>(
         &self,
         code: Code,
@@ -3928,6 +3951,22 @@ impl Parser {
                 let span = self.span_here();
                 self.bump();
                 let (name, def) = self.entity_ref()?;
+                // Reaching for `patch`'s shape is the commonest way to write a `put`
+                // wrong, and `expect_sym` below would answer it with `expected `{`, found
+                // `[``: the token that is there rather than the rule that is broken.
+                if self.at_sym(Sym::LBracket) {
+                    return Err(self
+                        .err(
+                            Code::ExpectedToken,
+                            "`put` writes a whole row, so it takes no key",
+                            self.through_brackets(),
+                        )
+                        .with_hint(
+                            "the key is the column marked `@key`, which a `put` fills like \
+                             any other field; `patch` and `update` are the statements that \
+                             address a row already there",
+                        ));
+                }
                 let brace = self.here();
                 self.expect_sym(Sym::LBrace)?;
                 let fields = self.write_fields(lower, &def, Some(brace))?;
@@ -3960,6 +3999,19 @@ impl Parser {
                 self.bump();
                 let (name, def) = self.entity_ref()?;
 
+                // The other direction of the same confusion, answered the same way.
+                if self.at_sym(Sym::LBrace) {
+                    return Err(self
+                        .err(
+                            Code::ExpectedToken,
+                            format!("`{text}` changes one row, so it needs the key of the row"),
+                            self.span_here(),
+                        )
+                        .with_hint(format!(
+                            "write `{text} {name}[key]`; `put` is the statement that writes a \
+                             whole row and takes no key"
+                        )));
+                }
                 self.expect_sym(Sym::LBracket)?;
                 let key = self.expr(lower, Some(def.key_field().ty.clone()))?;
                 self.expect_sym(Sym::RBracket)?;

@@ -74,6 +74,13 @@ envelope, by design: the envelope is available exactly when the author asked for
 | `update Entity[key] { ... }` | writes the listed fields, dropping the write if the row is absent |
 | `delete Entity[key]` | removes the row |
 
+**Only `put` takes no key**, because it writes the row whole and the key is a column it fills like
+any other. The other three address a row that may already be there, so they name it. Writing
+`put Entity[key]` is the commonest way to get this wrong, and it is worth a diagnostic of its own:
+the generic ``expected `{`, found `[` `` names the token in the way rather than the rule, which
+leaves an author suspecting their editor. Both directions are caught, and both name the statement
+that does what they were reaching for.
+
 All four are unconditional write instructions from the language's point of view. They cannot fail in
 a way the program observes, so they return nothing and there is no error an author can catch.
 
