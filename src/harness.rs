@@ -189,8 +189,21 @@ impl Clock for Harness {
 }
 
 impl Keys for Harness {
-    fn erased(&self, subject: &str, id: &str) -> Result<bool, Error> {
-        Ok(self.keys.contains(&(subject.to_string(), id.to_string())))
+    /// The harness's ciphertext is its plaintext. It models the key lifecycle and not
+    /// crypto, so "decrypt" is the lifecycle question and nothing else: content behind
+    /// a live key reads back as it was stored, and content behind a destroyed one does
+    /// not read back at all.
+    fn decrypt(
+        &self,
+        subject: &str,
+        id: &str,
+        _field: &str,
+        content: &str,
+    ) -> Result<Option<String>, Error> {
+        if self.keys.contains(&(subject.to_string(), id.to_string())) {
+            return Ok(None);
+        }
+        Ok(Some(content.to_string()))
     }
 
     fn erase(&mut self, subject: &str, id: &str) -> Result<(), Error> {

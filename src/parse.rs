@@ -4817,7 +4817,7 @@ impl Parser {
             // Rule 12: an optional in, an optional out, so a `reveal` of a field that may
             // not be there still reads as one.
             // Rule 12: an optional in, an optional out, and the seal comes off.
-            Expr::Reveal(value) => Some(self.type_of(lower, *value)?.unsealed()),
+            Expr::Reveal { value, .. } => Some(self.type_of(lower, *value)?.unsealed()),
             Expr::Refusal { .. } => Some(Type::Outcome),
             // The poison. `docs/types.md` says an unknown type is never checked, which
             // is what keeps one rejected value from becoming twenty diagnostics.
@@ -5769,16 +5769,24 @@ impl Parser {
         // its id and the field name ride on the value at run time, which is what lets
         // a `let` keep the seal instead of laundering it.
         let ty = self.type_of(lower, value);
-        if ty.as_ref().and_then(Type::subject).is_none() {
+        let Some(ty) = ty.clone().filter(|ty| Type::subject(ty).is_some()) else {
             let found = match &ty {
                 Some(ty) => format!("this is a plain {ty}"),
                 None => "this is not one".to_string(),
             };
             return Err(self.err(Code::SealBoundary, format!("`reveal` takes subject-bound content and {found}"), at).with_hint("it decrypts a field declared `@subject(...)`, or a `state` folded from one. An arm that transforms what it folds drops the seal, because the key belongs to the field's content rather than to whatever is computed from it"));
-        }
+        };
+
+        // The content type, recorded here because it is the same at every run: a seal
+        // holds text, so this is the only thing that says what that text was. An
+        // optional is peeled because a `reveal` of one reveals what it holds.
+        let held = match ty.unsealed() {
+            Type::Opt(inner) => *inner,
+            other => other,
+        };
 
         lower.b.at(span);
-        Ok(lower.b.expr(Expr::Reveal(value)))
+        Ok(lower.b.expr(Expr::Reveal { value, ty: held }))
     }
 
     /// The triggering event's field this expression loads, if it is one. The only
@@ -6924,7 +6932,7 @@ fn children(expr: &Expr) -> Vec<ExprId> {
         }
         Expr::Call { args, .. } => args.clone(),
         Expr::Invoke { args, .. } => args.iter().map(|(_, id)| *id).collect(),
-        Expr::Reveal(value) => vec![*value],
+        Expr::Reveal { value, .. } => vec![*value],
         Expr::Refusal { code, message } => {
             let mut ids = vec![*message];
             ids.extend(code.iter().copied());

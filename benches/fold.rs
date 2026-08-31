@@ -204,7 +204,11 @@ fn main() {
     );
 
     // A sealed field, which is what the port's credential folds bind. `seal` wraps the
-    // value with the field, the subject and the id, so this is the widest bind there is.
+    // stored text with the field, the subject and the id, so this is the widest bind
+    // there is. It was four allocations and 123 B while a seal held a `Box<Value>` of
+    // the plaintext; carrying the stored text instead makes the common bind a refcount
+    // bump, and the content type moved to `Expr::Reveal` rather than sitting on every
+    // value (which cost `Value` a third of its size, and every move with it).
     measure(
         "bind a sealed String",
         "  state seen: Int = fold 0\n    on @order.placed(customer_id) { email } => seen + 1",

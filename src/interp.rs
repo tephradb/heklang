@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::error;
 use std::fmt;
+use std::sync::Arc;
 
 use uuid::Uuid;
 
@@ -1459,7 +1460,14 @@ fn eval_field(
 /// rather than to a second copy of it.
 pub fn coerce(value: Value, ty: &Type) -> Value {
     match ty {
-        Type::Opt(inner) if value.has_type(inner) => Value::some(value),
+        // Built by hand rather than through `Value::some`, so the declared element type
+        // survives rather than being rebuilt from the value. A seal cannot say what it
+        // holds, so `Value::some` around one would answer `String` and lose what the
+        // declaration knew. `read_json` is built this way for the same reason.
+        Type::Opt(inner) if value.has_type(inner) => Value::Opt {
+            inner: inner.as_ref().clone(),
+            value: Some(Box::new(value)),
+        },
         // Writing a plain value into a sealed position is the encrypting direction and
         // needs no ceremony; reading content back out is what `reveal` is for.
         Type::Sealed(inner, _) => coerce(value, inner),
@@ -1898,12 +1906,12 @@ fn eval(
             Value::Opt { .. } => Err(at(ErrorKind::MalformedIr)),
             other => Ok(other),
         },
-        Expr::Reveal(inner) => {
-            let value = eval(program, exprs, frame, *inner, ctx.as_deref_mut())?;
+        Expr::Reveal { value, ty } => {
+            let value = eval(program, exprs, frame, *value, ctx.as_deref_mut())?;
             let Some(ctx) = ctx else {
                 return Err(at(ErrorKind::MalformedIr));
             };
-            ctx.reveal(value, span)
+            ctx.reveal(value, ty, span)
         }
         Expr::Refusal { code, message } => {
             let message = eval_string(program, exprs, frame, *message, ctx.as_deref_mut())?;
@@ -1989,15 +1997,18 @@ fn call_void(
     }
 }
 /// Wraps a subject-bound field in its seal as it enters a frame, so `reveal` can find
-/// the subject and the id on the value rather than through a side channel. This is the
-/// only place a seal is made, and the writing paths take it off again: heklang models
-/// the key lifecycle, not ciphertext at rest. See `docs/effects.md` rule 12.
+/// the subject and the id on the value rather than through a side channel.
+///
+/// This is the only place a seal is made, because it is the only place that has the
+/// whole event: the id lives in a sibling field, so a value alone can never say what
+/// key it is filed under. Nothing takes a seal off again; a seal reaches the host as it
+/// is, and `Keys::decrypt` at a `reveal` is the only thing that opens one. See
+/// `docs/effects.md` rule 12.
 fn seal(program: &Program, event: &Event, name: &Ident, value: Value) -> Result<Value, Error> {
-    let Some(subject) = program
-        .event(&event.path)
-        .and_then(|def| def.field(name))
-        .and_then(|def| def.subject.clone())
-    else {
+    let Some(declared) = program.event(&event.path).and_then(|def| def.field(name)) else {
+        return Ok(value);
+    };
+    let Some(subject) = declared.subject.clone() else {
         return Ok(value);
     };
     let span = Span::default();
@@ -2013,23 +2024,36 @@ fn seal(program: &Program, event: &Event, name: &Ident, value: Value) -> Result<
         },
         Value::Opt {
             inner,
-            value: Some(held),
+            value: Some(stored),
         } => Value::Opt {
             inner: Type::sealed(inner, subject.clone()),
             value: Some(Box::new(Value::Sealed {
                 field: name.clone(),
                 subject,
                 id,
-                inner: held,
+                content: stored_text(&stored),
             })),
         },
-        plain => Value::Sealed {
+        stored => Value::Sealed {
             field: name.clone(),
             subject,
             id,
-            inner: Box::new(plain),
+            content: stored_text(&stored),
         },
     })
+}
+
+/// The text form of what a host stored, which for a real one is its ciphertext and for
+/// the harness is the content as it was given (`docs/host.md`).
+///
+/// Text is already the shape a stored seal has, so the common case is a refcount bump
+/// rather than a copy. This runs once per record a fold binds, which is the reason it
+/// is worth the arm.
+fn stored_text(stored: &Value) -> Arc<str> {
+    match stored {
+        Value::Str(text) => text.clone(),
+        other => value::text(other).into(),
+    }
 }
 
 /// The (index, item) pairs a `for` or a comprehension walks. A map yields its key
@@ -2886,29 +2910,35 @@ impl Effects<'_> {
 
     /// Rule 12. Not journaled, so it re-runs on every attempt, which is exactly why
     /// rule 9 forbids reaching one after an `erase`.
-    /// Rule 12. The field, the subject and the id all ride on the value, so this needs
-    /// nothing but the value. An absent optional comes back as it went in **without**
-    /// consulting the key store: it was never encrypted, and "never set" and "key
-    /// destroyed" are different facts that must not collapse.
-    fn reveal(&mut self, value: Value, span: Span) -> Result<Value, Error> {
+    /// Rule 12. The field, the subject and the id ride on the value; `ty` comes from the
+    /// `reveal` node, because a seal holds text and only the declaration says what that
+    /// text was.
+    ///
+    /// An absent optional comes back as it went in **without** consulting the key store:
+    /// it was never encrypted, and "never set" and "key destroyed" are different facts
+    /// that must not collapse.
+    fn reveal(&mut self, value: Value, ty: &Type, span: Span) -> Result<Value, Error> {
         match value {
             Value::Sealed {
                 field,
                 subject,
                 id,
-                inner,
+                content,
             } => {
-                if self.host.erased(&subject, &id)? {
+                // The one call, and the one place a key is used. `None` is the key being
+                // gone, which is an outcome rule 12 names rather than a host failure.
+                let Some(plaintext) = self.host.decrypt(&subject, &id, &field, &content)? else {
                     return Err(Error::at(ErrorKind::Erased { field, subject, id }, span));
-                }
-                Ok(*inner)
+                };
+                Value::from_sealed(&plaintext, ty, value::Defs::of(self.program))
+                    .map_err(|why| Error::at(ErrorKind::Mismatch(why), span))
             }
             Value::Opt {
                 inner,
                 value: Some(held),
             } => Ok(Value::Opt {
                 inner: inner.unsealed(),
-                value: Some(Box::new(self.reveal(*held, span)?)),
+                value: Some(Box::new(self.reveal(*held, ty, span)?)),
             }),
             // Not sealed at all. The parser rejects that, so this is a pass-through
             // rather than a case with meaning.

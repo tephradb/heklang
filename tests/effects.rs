@@ -2899,6 +2899,68 @@ fn a_cycle_between_void_helpers_is_rejected() {
     );
 }
 
+/// A seal flattens whatever it holds to text, because that is what a key store takes,
+/// so `reveal` reads the plaintext back at the type the declaration gave it. A `String`
+/// is the case that would pass whether or not the type were carried, so every other
+/// scalar is here: these are what break if the seal loses track of what it held.
+#[test]
+fn reveal_reads_a_seal_back_at_its_declared_type() {
+    let program = program(
+        "event @vault.filled {
+  owner: Int,
+  count: Int @subject(owner),
+  owed: Money(2) @subject(owner),
+  ok: Bool @subject(owner),
+  ref: Uuid @subject(owner),
+}
+effect E {
+  on @order.placed as e {
+    state n: Int? = fold none
+      on @vault.filled(owner: e.customer_id) { count } => count
+    state amount: Money(2)? = fold none
+      on @vault.filled(owner: e.customer_id) { owed } => owed
+    state flag: Bool? = fold none
+      on @vault.filled(owner: e.customer_id) { ok } => ok
+    state reference: Uuid? = fold none
+      on @vault.filled(owner: e.customer_id) { ref } => ref
+
+    if n.is_some() && amount.is_some() && flag.is_some() && reference.is_some() {
+      log(\"{reveal(n)}\")
+      log(\"{reveal(amount)}\")
+      log(\"{reveal(flag)}\")
+      log(\"{reveal(reference)}\")
+    }
+  }
+}",
+    );
+    let filled = Event::new(
+        EventPath::new(["vault", "filled"]),
+        [
+            ("owner", Value::Int(7)),
+            ("count", Value::Int(42)),
+            ("owed", Value::money(2_599, 2)),
+            ("ok", Value::Bool(true)),
+            ("ref", Value::uuid("0190d1a1-0000-7000-8000-000000000009")),
+        ],
+    );
+    // Position 1, because rule 3 folds up to and including the trigger: the vault has
+    // to be filled before the order that reads it.
+    let mut journal = Journal::default();
+    let mut interpreter = Interpreter::with_log(&program, vec![filled, placed(1, 7, 100)]);
+    interpreter
+        .deliver("E", 1, &mut journal)
+        .expect("delivered");
+    assert_eq!(
+        interpreter.lines(),
+        [
+            "42",
+            "25.99",
+            "true",
+            "0190d1a1-0000-7000-8000-000000000009"
+        ]
+    );
+}
+
 // ---------------------------------------------------------------------------------
 // Rule 12: the seal is in the type. `@subject(...)` is the authored form and
 // `Type::Sealed` is what propagates from it. See `docs/effects.md`.
@@ -3238,16 +3300,45 @@ fn an_absent_key_fills_an_optional_and_fails_a_required_field() {
 }
 
 /// A seal carries the subject's id, which lives in a sibling field rather than in this
-/// value, so it cannot come back out of the JSON. A host rebuilds it, and this reads the
-/// content the seal was around.
+/// value, so it cannot come back out of the JSON alone. `seal` rebuilds it where the
+/// whole event is in hand, and this reads only what a host stored.
+///
+/// **A sealed position reads as text whatever it is declared to hold**, because what a
+/// host stored is a seal's content and heklang cannot open it. The declared inner type
+/// is used at the `reveal`, not here.
 #[test]
-fn a_seal_is_not_in_the_json() {
+fn a_sealed_position_reads_as_text() {
     let program = shapes();
     let defs = Defs::of(&program);
-    let ty = Type::Sealed(Box::new(Type::String), "customer_id".to_string());
 
-    let value = Value::from_json(&Json::str("ada@example.com"), &ty, defs).expect("reads");
-    assert_eq!(value, Value::str("ada@example.com"));
+    for inner in [Type::String, Type::Int, Type::Money(2)] {
+        let ty = Type::Sealed(Box::new(inner.clone()), "customer_id".to_string());
+        let value = Value::from_json(&Json::str("+kFq9w=="), &ty, defs).expect("reads");
+        assert_eq!(
+            value,
+            Value::str("+kFq9w=="),
+            "a seal declared to hold {inner} still reads as its stored text"
+        );
+    }
+
+    // And a host that stored something other than text has not stored a seal.
+    let ty = Type::Sealed(Box::new(Type::Int), "customer_id".to_string());
+    let err = Value::from_json(&Json::int(42), &ty, defs).expect_err("not a seal");
+    assert_eq!(err.found, "a seal that is not text");
+}
+
+/// The other direction, and the reason it is not `null`: a seal's stored form is what a
+/// host wrote and what it takes back, so the writing paths get it verbatim. The
+/// plaintext is not heklang's to hand over and it has not got one.
+#[test]
+fn a_seal_crosses_out_as_what_was_stored() {
+    let sealed = Value::Sealed {
+        field: "email".into(),
+        subject: "customer_id".into(),
+        id: "7".to_string(),
+        content: "+kFq9w==".into(),
+    };
+    assert_eq!(Json::from_value(&sealed), Json::str("+kFq9w=="));
 }
 
 /// An enum is checked against its declaration, so a variant that was removed is a

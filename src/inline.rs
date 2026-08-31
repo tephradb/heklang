@@ -337,7 +337,8 @@ fn shift_expr(expr: &mut Expr, expr_off: u32, slot_off: u32) {
         }
         Expr::Call { builtin: _, args } => args.iter_mut().for_each(one),
         Expr::Invoke { command: _, args } => args.iter_mut().for_each(|(_, value)| one(value)),
-        Expr::Unwrap(inner) | Expr::Reveal(inner) => one(inner),
+        Expr::Unwrap(inner) => one(inner),
+        Expr::Reveal { value, .. } => one(value),
         Expr::Refusal { code, message } => {
             if let Some(code) = code {
                 one(code);

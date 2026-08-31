@@ -228,7 +228,8 @@ impl Builder {
                 }
                 Expr::Lit(_) | Expr::Invalid => {}
                 Expr::Unary { operand, .. } => stack.push(*operand),
-                Expr::Unwrap(inner) | Expr::Reveal(inner) => stack.push(*inner),
+                Expr::Unwrap(inner) => stack.push(*inner),
+                Expr::Reveal { value, .. } => stack.push(*value),
                 Expr::Refusal { code, message } => {
                     stack.extend(code);
                     stack.push(*message);

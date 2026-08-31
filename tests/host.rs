@@ -32,6 +32,9 @@ struct Elsewhere {
     /// and the range reached the host rather than being applied after a full scan.
     asked: RefCell<Vec<Query>>,
     shredded: Vec<(String, String)>,
+    /// Every seal this host was asked to open, so a test can assert that a key is used
+    /// once per `reveal` rather than once per record a fold walks.
+    opened: RefCell<Vec<(String, String)>>,
     /// How many more appends to beat to the log before letting one through. Each one
     /// lands a rival event inside the slice first, which is the shape a real store's
     /// condition check produces rather than an error invented for the test.
@@ -104,11 +107,27 @@ impl Clock for Elsewhere {
 }
 
 impl Keys for Elsewhere {
-    fn erased(&self, subject: &str, id: &str) -> Result<bool, Error> {
-        Ok(self
+    /// A store that really does keep something other than the plaintext. The transform
+    /// is a reversal rather than a cipher, which is enough to prove the seam: heklang
+    /// hands back what this returns, so it cannot have been reading the stored form.
+    fn decrypt(
+        &self,
+        subject: &str,
+        id: &str,
+        _field: &str,
+        content: &str,
+    ) -> Result<Option<String>, Error> {
+        self.opened
+            .borrow_mut()
+            .push((subject.to_string(), id.to_string()));
+        if self
             .shredded
             .iter()
-            .any(|(one, other)| one == subject && other == id))
+            .any(|(one, other)| one == subject && other == id)
+        {
+            return Ok(None);
+        }
+        Ok(Some(content.chars().rev().collect()))
     }
 
     fn erase(&mut self, subject: &str, id: &str) -> Result<(), Error> {
@@ -326,6 +345,130 @@ fn a_second_run_folds_what_the_first_appended() {
         matches!(second.outcome, Outcome::Reject { ref code, .. } if code == "one_per_customer")
     );
     assert_eq!(second.condition.after, 1, "the head moved");
+}
+
+// ---------------------------------------------------------------------------------
+// `Keys`, and the one thing a seal is for.
+
+const SEALED: &str = "event @shop.connected {
+  shop_id: Int,
+  token: String @subject(shop_id),
+}
+effect Use {
+  on @order.placed as e {
+    state token: String? = fold none
+      on @shop.connected(shop_id: e.customer_id) { token } => token
+
+    log(reveal(token).unwrap_or(\"nothing\"))
+  }
+}";
+
+/// A seal is opaque, and the proof is that heklang hands back what the host said rather
+/// than what the log held. `Elsewhere` reverses its content, which no plaintext path
+/// could produce.
+#[test]
+fn a_seal_is_read_through_the_host_and_not_off_the_value() {
+    let program = program(SEALED);
+    let host = Elsewhere {
+        records: vec![connected(0, 7, "s3cret"), order(1, 7)],
+        ..Elsewhere::default()
+    };
+    let mut interpreter = Interpreter::with_host(&program, host);
+    let mut journal = heklang::Journal::default();
+    interpreter.deliver("Use", 1, &mut journal).expect("ran");
+
+    assert_eq!(
+        interpreter.lines(),
+        ["terc3s"],
+        "the host's answer, reversed, rather than the stored text"
+    );
+}
+
+/// The whole point of the change. A fold walks every record in its boundary and a
+/// key is used once, for the one `reveal` that asked: eager decryption cost a key use
+/// per record, for content nothing read.
+#[test]
+fn a_fold_opens_only_the_seal_it_reveals() {
+    let program = program(SEALED);
+    let mut records = vec![];
+    for position in 0..20 {
+        records.push(connected(position, 7, "s3cret"));
+    }
+    records.push(order(20, 7));
+    let host = Elsewhere {
+        records,
+        ..Elsewhere::default()
+    };
+    let mut interpreter = Interpreter::with_host(&program, host);
+    let mut journal = heklang::Journal::default();
+    interpreter.deliver("Use", 20, &mut journal).expect("ran");
+
+    let opened = interpreter.host().opened.borrow();
+    assert_eq!(
+        opened.len(),
+        1,
+        "twenty records folded, one `reveal`, one key used: {opened:?}"
+    );
+    assert_eq!(opened[0], ("shop_id".to_string(), "7".to_string()));
+}
+
+/// An absent optional does not consult the key store at all (`docs/effects.md` rule
+/// 12): it was never sealed, so there is nothing to open and no key that could be
+/// missing for it.
+#[test]
+fn an_absent_optional_opens_nothing() {
+    let program = program(SEALED);
+    let host = Elsewhere {
+        records: vec![order(0, 7)],
+        ..Elsewhere::default()
+    };
+    let mut interpreter = Interpreter::with_host(&program, host);
+    let mut journal = heklang::Journal::default();
+    interpreter.deliver("Use", 0, &mut journal).expect("ran");
+
+    assert_eq!(interpreter.lines(), ["nothing"]);
+    assert!(
+        interpreter.host().opened.borrow().is_empty(),
+        "no seal, so no key"
+    );
+}
+
+/// A destroyed key is `None` from the host and a terminal skip in the program, which is
+/// the row rule 12's table keeps apart from the absent one above. The host is still
+/// asked, because only it can tell the two apart.
+#[test]
+fn a_destroyed_key_is_terminal_rather_than_absent() {
+    let program = program(SEALED);
+    let host = Elsewhere {
+        records: vec![connected(0, 7, "s3cret"), order(1, 7)],
+        shredded: vec![("shop_id".to_string(), "7".to_string())],
+        ..Elsewhere::default()
+    };
+    let mut interpreter = Interpreter::with_host(&program, host);
+    let mut journal = heklang::Journal::default();
+    let outcome = interpreter.deliver("Use", 1, &mut journal).expect("ran");
+
+    let heklang::Invocation::Skipped(why) = outcome else {
+        panic!("expected a terminal skip, got {outcome:?}");
+    };
+    assert!(why.contains("has been erased"), "got: {why}");
+    assert_eq!(
+        interpreter.host().opened.borrow().len(),
+        1,
+        "the host is what knows the key is gone, so it is still asked"
+    );
+}
+
+fn connected(position: u64, shop: i64, token: &str) -> Record {
+    Record::new(
+        format!("r{position}"),
+        position,
+        0,
+        Event::new(
+            EventPath::new(["shop", "connected"]),
+            [("shop_id", Value::Int(shop)), ("token", Value::str(token))],
+        ),
+    )
 }
 
 // ---------------------------------------------------------------------------------

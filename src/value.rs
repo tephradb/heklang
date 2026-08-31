@@ -56,15 +56,22 @@ pub enum Value {
         inner: Type,
         value: Option<Box<Value>>,
     },
-    /// Content behind the decrypt boundary, carrying the subject and the id its key is
-    /// filed under so `reveal` needs no side channel to find them. Lives only in a
-    /// frame: a value is unsealed on its way into the log or the store, because
-    /// heklang models the key lifecycle rather than ciphertext at rest.
+    /// Content behind the decrypt boundary: the stored form as a host keeps it, plus
+    /// the subject and the id its key is filed under, so `reveal` needs no side channel
+    /// to find them. Opaque to everything but `Keys::decrypt`.
     Sealed {
+        /// The field the content was sealed under. A host binds its ciphertext to this
+        /// name, so content moved elsewhere still decrypts under the name it was sealed
+        /// with rather than under wherever it now sits.
         field: Ident,
         subject: Ident,
         id: String,
-        inner: Box<Value>,
+        /// Whatever the host stored. heklang never reads it.
+        ///
+        /// Text, because that is what a key store takes: the content type is not here
+        /// but on `Expr::Reveal`, since it is the same at every run and putting a
+        /// `Type` on every sealed value made `Value` a third larger for everything.
+        content: Arc<str>,
     },
 }
 
@@ -134,6 +141,27 @@ impl Value {
         read_json(json, ty, defs, &mut Vec::new())
     }
 
+    /// The plaintext behind a seal, read back as the type the declaration gave it.
+    ///
+    /// The same table again, entered from text rather than from JSON, because a key
+    /// store encrypts bytes: a seal flattens whatever it held to its text form, so
+    /// nothing but the declaration says whether that text was a number, a boolean or a
+    /// decimal at a scale. This is the reading half of what a host does storing one,
+    /// and it lives here so the two halves cannot drift apart.
+    ///
+    /// `ty` is the seal's content type, which `Value::Sealed` carries for this.
+    pub fn from_sealed(text: &str, ty: &Type, defs: Defs<'_>) -> Result<Value, Mismatch> {
+        let json = match ty {
+            Type::Bool if text == "true" => Json::Bool(true),
+            Type::Bool if text == "false" => Json::Bool(false),
+            Type::Int | Type::Timestamp => Json::num(text),
+            // A `String`, a `Uuid`, an enum variant and a scaled decimal are all text
+            // already, so the seal held exactly what goes back.
+            _ => Json::str(text),
+        };
+        Value::from_json(&json, ty, defs)
+    }
+
     pub fn ty(&self) -> Type {
         match self {
             Value::Bool(_) => Type::Bool,
@@ -152,7 +180,10 @@ impl Value {
             Value::List { inner, .. } => Type::list(inner.clone()),
             Value::Map { key, value, .. } => Type::map(key.clone(), value.clone()),
             Value::Opt { inner, .. } => Type::opt(inner.clone()),
-            Value::Sealed { subject, inner, .. } => Type::sealed(inner.ty(), subject.clone()),
+            // A stored seal is text, whatever the declaration says it means. Rule 12
+            // keeps one out of every position that asks this, so it is reached by error
+            // paths rather than by a program.
+            Value::Sealed { subject, .. } => Type::sealed(Type::String, subject.clone()),
         }
     }
 
@@ -171,7 +202,11 @@ impl Value {
         // the fallback, because `ty()` builds one to answer with and that allocates.
         // This is asked on every write, so in a fold it is asked once per event.
         match (self, ty.peeled()) {
-            (Value::Sealed { inner, .. }, _) => inner.has_type(ty),
+            // A seal is opaque: heklang holds the stored form and no key, so there is no
+            // content type here to check one against. Rule 12's propagation checked it
+            // where the write was written, which is what makes this safe to wave through
+            // rather than merely convenient.
+            (Value::Sealed { .. }, _) => true,
             (Value::Opt { inner, .. }, Type::Opt(want)) => inner.same_unsealed(want),
             (Value::List { inner, .. }, Type::List(want)) => inner.same_unsealed(want),
             (Value::Map { key, value, .. }, Type::Map(want_key, want_value)) => {
@@ -184,36 +219,7 @@ impl Value {
         }
     }
 
-    /// The value behind the seal, if there is one. A plain value is its own content,
-    /// which is what lets the writing paths call this unconditionally.
-    pub fn unsealed(self) -> Value {
-        match self {
-            Value::Sealed { inner, .. } => inner.unsealed(),
-            Value::Opt { inner, value } => Value::Opt {
-                inner: inner.unsealed(),
-                value: value.map(|value| Box::new(value.unsealed())),
-            },
-            Value::List { inner, items } => Value::List {
-                inner: inner.unsealed(),
-                items: items.into_iter().map(Value::unsealed).collect(),
-            },
-            Value::Map {
-                key,
-                value,
-                entries,
-            } => Value::Map {
-                key,
-                value: value.unsealed(),
-                entries: entries
-                    .into_iter()
-                    .map(|(at, held)| (at, held.unsealed()))
-                    .collect(),
-            },
-            other => other,
-        }
-    }
-
-    /// Whether two values hold the same content, with the decrypt boundary off both. This
+    /// Whether two values hold the same content, reading a seal by what it stores. This
     /// is the question a test asks and the only place that asks it: `expect Shop[1] {
     /// shop_name: "Test Shop" }` names what was put in, and the column holds it sealed
     /// under the shop.
@@ -223,12 +229,37 @@ impl Value {
     /// and nothing about the key lifecycle is in the question. `has_type` already answers
     /// the type half of it the same way.
     ///
+    /// **A seal compares by its stored text.** heklang cannot read one without a key, so
+    /// this is the only comparison available to it, and it is the right one: the harness
+    /// stores content as it was given (`docs/host.md`), so a test still names what it put
+    /// in. Against a real host's ciphertext it would answer false, which is what a test
+    /// running there should get rather than a decrypt nothing asked for.
+    ///
     /// The absent optional is why this is not only about content. An `Opt` carries its
     /// element type, and sealing one seals that type while leaving the value `None`
     /// (`docs/effects.md` rule 12: there was never a key). Two absent optionals then
     /// differed by a type nobody wrote, and both printed as `none`.
     pub fn same(&self, other: &Value) -> bool {
-        self.clone().unsealed() == other.clone().unsealed()
+        match (self, other) {
+            (Value::Sealed { content: left, .. }, Value::Sealed { content: right, .. }) => {
+                left == right
+            }
+            (Value::Sealed { content, .. }, plain) | (plain, Value::Sealed { content, .. }) => {
+                content.as_ref() == text(plain)
+            }
+            // Both absent, so only the element types could differ, and one of them may
+            // carry a seal nobody wrote.
+            (Value::Opt { value: None, .. }, Value::Opt { value: None, .. }) => true,
+            (
+                Value::Opt {
+                    value: Some(left), ..
+                },
+                Value::Opt {
+                    value: Some(right), ..
+                },
+            ) => left.same(right),
+            (left, right) => left == right,
+        }
     }
 }
 
@@ -615,10 +646,18 @@ fn read_json(
         found,
     };
     Ok(match (ty, json) {
-        // A seal is not in the JSON, and cannot be: it carries the subject's id, which
-        // lives in a sibling field rather than in this value. A host that stores sealed
-        // content rebuilds it, and `Value::Sealed` is public for exactly that.
-        (Type::Sealed(inner, _), _) => read_json(json, inner, defs, path)?,
+        // A sealed position reads as text, whatever it is declared to hold. What a host
+        // stored is a seal's content and heklang cannot open it, so the declared inner
+        // type is carried rather than applied: `reveal` is where it is used, against the
+        // plaintext `Keys::decrypt` hands back.
+        //
+        // The seal itself is not in the JSON and cannot be, because it carries the
+        // subject's id and that lives in a sibling field. `seal` rebuilds it as the
+        // value enters a frame, which is the one place that has the whole event.
+        (Type::Sealed(_, _), Json::Str(content)) => Value::str(content.as_str()),
+        (Type::Sealed(_, _), _) => {
+            return Err(wrong("a seal that is not text".into(), path));
+        }
 
         // The one place `null` means something rather than being the wrong shape.
         (Type::Opt(inner), Json::Null) => Value::none(inner.as_ref().clone()),
@@ -790,10 +829,11 @@ impl Json {
     /// precision is lost to a float on the far side.
     pub fn from_value(value: &Value) -> Json {
         match value {
-            // Rule 12 rejects sealed content in a body at parse time, so reaching this
-            // is a bug rather than a program error. Null rather than the content, so
-            // the bug cannot become a leak.
-            Value::Sealed { .. } => Json::Null,
+            // The stored form, which is what a host wrote and what it takes back. Rule
+            // 12 rejects sealed content in a request body at parse time, so the only
+            // things that reach this are the writing paths and a leak that could not
+            // have been checked, and neither wants the plaintext heklang has not got.
+            Value::Sealed { content, .. } => Json::Str(content.to_string()),
             Value::Bool(value) => Json::Bool(*value),
             Value::Int(value) => Json::int(*value),
             Value::Decimal { units, scale } | Value::Money { units, scale } => {

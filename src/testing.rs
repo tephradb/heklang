@@ -263,11 +263,11 @@ fn check_run(
             match actual.fields.get(name) {
                 Some(found) if found.same(&wanted) => {}
                 Some(found) => {
-                    // The content, not `<sealed under ...>`: the comparison above took the
-                    // seal off both sides, so a report that puts it back describes a
+                    // The stored content, not `<sealed under ...>`: the comparison above
+                    // read through the seal, so a report that puts it back describes a
                     // question nobody asked. A test names what it put in and is owed
                     // what came out.
-                    let found = found.clone().unsealed();
+                    let found = shown(found);
                     return Ok(Some(format!(
                         "{path}.{name}: expected {wanted}, got {found}"
                     )));
@@ -349,7 +349,7 @@ fn mismatch(
         match row.field(name) {
             Some(found) if found.same(&wanted) => {}
             Some(found) => {
-                let found = found.clone().unsealed();
+                let found = shown(found);
                 return Ok(Some(format!(
                     "{entity}[{}].{name}: expected {wanted}, got {found}",
                     show(key)
@@ -572,6 +572,22 @@ fn key_of(value: Value) -> Result<Key, String> {
 
 fn show(key: &Key) -> String {
     crate::value::text(&crate::interp::key_as_value(key))
+}
+
+/// What a mismatch shows for a value that may be sealed.
+///
+/// `Display` prints `<sealed under ...>` and never the content, which is right
+/// everywhere a program can reach and useless here: a test names what it put in and is
+/// owed what came out. The stored form is the only thing heklang has without a key, and
+/// under the harness that is exactly what the test wrote (`docs/host.md`).
+fn shown(value: &Value) -> String {
+    match value {
+        Value::Sealed { content, .. } => format!("{content:?}"),
+        Value::Opt {
+            value: Some(held), ..
+        } => shown(held),
+        other => other.to_string(),
+    }
 }
 
 fn args_of(args: &BTreeMap<Ident, Value>) -> String {

@@ -132,7 +132,24 @@ pub trait Clock {
 /// The key store, as a lifecycle rather than as ciphertext. `docs/effects.md` rule 12:
 /// a subject is erased or it is not, and that is the whole of what heklang models.
 pub trait Keys {
-    fn erased(&self, subject: &str, id: &str) -> Result<bool, Error>;
+    /// The plaintext behind a seal, or `None` when it cannot be read because the
+    /// subject's key is gone.
+    ///
+    /// `None` rather than `Err`: an erased subject is an outcome `docs/effects.md`
+    /// rule 12 names and a program meets, not a host that failed. `field` is the name
+    /// the content was sealed under rather than where it now sits, because a host
+    /// binds its ciphertext to that name and sealed content may be moved.
+    ///
+    /// Called once per `reveal` and never otherwise, so a fold pays for the content it
+    /// reads rather than for every record it walks.
+    fn decrypt(
+        &self,
+        subject: &str,
+        id: &str,
+        field: &str,
+        content: &str,
+    ) -> Result<Option<String>, Error>;
+
     fn erase(&mut self, subject: &str, id: &str) -> Result<(), Error>;
 }
 

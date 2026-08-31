@@ -796,9 +796,15 @@ pub enum Expr {
     /// nothing else: no source token spells it, so an absent value here is malformed
     /// IR rather than a runtime case. See `docs/optionals.md`.
     Unwrap(ExprId),
-    /// Rule 12. Nothing but the value: subject-ness is a property of the value now,
-    /// so the field, the subject and its id all ride on it. See `docs/effects.md`.
-    Reveal(ExprId),
+    /// Rule 12. The field, the subject and its id ride on the value, so subject-ness
+    /// travels with a `let`; `ty` does not, because it is the same at every run and a
+    /// `Type` on every sealed value grew `Value` by a third. It is the seal's **content**
+    /// type, which a seal cannot carry itself: what it holds is text, and only the
+    /// declaration says whether that text was a number. See `docs/effects.md`.
+    Reveal {
+        value: ExprId,
+        ty: Type,
+    },
     /// `reject(code, message)` or, with no code, `invalid(message)`. An `Outcome` as a
     /// value, so a `fn` can decide a refusal and a command can return what it decided.
     /// See `docs/functions.md`.
