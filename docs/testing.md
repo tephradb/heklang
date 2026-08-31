@@ -169,18 +169,24 @@ difference between it and `patch` is precisely whether a row is there.
 ### A subject-bound value is matched on its content
 
 A column or an event field bound by `@subject` holds sealed content (`docs/projectors.md`: writing
-sealed content into a column seals the column). A test writes the plaintext and the two meet with the
-seal off both sides:
+sealed content into a column seals the column). A test writes the plaintext and the two meet on what
+the seal stores:
 
 ```
 expect Shop[1] { shop_name: "Test Shop" }
 ```
 
+**Which works because the harness stores content as it was given.** A seal is opaque and a test has
+no key, so its stored form is the only thing available to compare, and under the harness that is
+exactly what the test wrote. Against a host that really encrypts, this comparison answers false,
+which is the right answer there: a test asserting on content it cannot read would be asserting on
+nothing. `docs/host.md` is where the harness's key store is described.
+
 **This is not a hole in rule 12's boundary.** That rule is about what a *program* may read, and it is
 a parse-time rule enforced on programs. A test states an input and asks whether that is what came
 out, which is a question about content and never about the key; and it sees nothing an embedder does
-not, since `Row::field` hands back the value either way. A mismatch reports both sides in the clear,
-because a report that said `got <sealed under shop_id>` would describe a question nobody asked.
+not, since `Row::field` hands back the value either way. A mismatch reports the stored form rather
+than `got <sealed under shop_id>`, because the latter describes a question nobody asked.
 
 The absent optional is the case that made this necessary rather than merely nice. An optional carries
 its element type; sealing one seals that type and leaves the value absent, because there was never a

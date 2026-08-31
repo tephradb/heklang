@@ -389,6 +389,13 @@ That is why a projector can store a credential it may never read: only an effect
 boundary, and a projector never `reveal`s, yet storing personal data into a read model is most of
 what a real port's projectors do. Moving sealed content is not reading it.
 
+**And it never was reading it.** A seal holds what a host stored rather than the plaintext
+(`docs/effects.md` rule 12), so a projector writing one moves bytes it has no key for. What reaches
+`Rows::put` is the `Value::Sealed` itself, carrying the field it was sealed under, which is what
+lets a host store it without opening it. The type check at the write is correspondingly lenient:
+heklang cannot type-check content it cannot read, and the propagation above is what checked it,
+statically, where the write was written.
+
 **Both checks over it are now implemented**, where the second used to be the literal empty function
 `fn check_subject(_target: &EntityField, _incoming: &Ident) {}`:
 

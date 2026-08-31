@@ -38,11 +38,22 @@ side effect, or an unrepeatable observation, is done once and remembered.
 | --- | --- | --- |
 | `Log` | `head`, `record`, `read`, `append` | the only one that is not journaled |
 | `Clock` | `now` | no state and no failure mode; three lines to implement |
-| `Keys` | `erased`, `erase` | a lifecycle, and in a real host a key management service |
+| `Keys` | `decrypt`, `erase` | a lifecycle, and in a real host a key management service |
 | `Http` | `send` | one attempt, and the only place bytes leave |
 
 They bundle into `Host` because `Effects` holds one trait object and Rust has no `dyn A + B`. The
 bundle is the plumbing; the four are the meaning.
+
+**`Keys` is asked one question and it is a lifecycle one.** `decrypt` answers with the plaintext or
+with `None`, and `None` is the key being gone. It is not an `Err`: an erased subject is an outcome
+`docs/effects.md` rule 12 names and a program meets, not a host that failed. A host that also wants
+to distinguish a tampered ciphertext from a shredded key has nowhere to say so, deliberately: both
+are unreadable and terminal, and rule 12's distinction is between absent and unreadable, which
+survives because an absent optional never reaches here at all.
+
+**It is called once per `reveal`.** A seal is opaque and heklang keeps it that way, so a fold walks
+its whole boundary without asking for a key: only the content a handler actually reveals costs one.
+A host that decrypts on the way in instead pays per record for content nothing reads.
 
 **State is deliberately not among them.** An effect reads state by folding its boundary off the log
 (`docs/effects.md` rule 3), and a projector's rows are its output rather than anyone's input
@@ -54,8 +65,9 @@ Not a style choice. `Interpreter::project` is a `&self` method and stays one, so
 be `&self` too. It also matches what a real store can supply: tephra's own read runs on the caller's
 thread and never touches the writer.
 
-`Clock::now` is `&self` for the same reason a clock has no state to advance. `Keys::erase` and
-`Http::send` are `&mut self`, because destroying a key and sending a request both change the world.
+`Clock::now` is `&self` for the same reason a clock has no state to advance, and so is
+`Keys::decrypt`: reading a key does not spend it. `Keys::erase` and `Http::send` are `&mut self`,
+because destroying a key and sending a request both change the world.
 
 ## 3. A slice is a predicate, resolved
 
@@ -264,8 +276,10 @@ than the language reshaping itself to match one runtime.
 
 - **No cursor and no checkpoint.** Neither an effect's position nor a projector's watermark is
   persisted by anything here.
-- **Ciphertext is still not modelled.** `Keys` answers whether a subject is erased, which is what
-  rules 9 and 12 turn on. `docs/effects.md` records the rest as a known gap.
+- **Nothing writes a seal.** `Keys::decrypt` reads one, and a plain value emitted into a
+  `@subject(...)` field crosses as plaintext for a host to seal, because that is the direction where
+  the content is in hand. A host therefore sees two shapes at a write for one field: fresh plaintext
+  to seal, and a `Value::Sealed` that was moved and is already sealed under the name it carries.
 - **`head` and `read` are not atomic together.** A host whose log grows between them hands the fold a
   longer prefix than `after` claims. That is exactly what the append condition catches, which is why
   it is the one thing here that a host must implement rather than approximate.

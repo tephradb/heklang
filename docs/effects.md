@@ -667,22 +667,33 @@ further down that used to suffer from it.
 
 ### The subject rides on the value
 
-A sealed value carries the field, the subject and the **id** its key is filed under. That is what
-`reveal` reads, and it is why nothing has to be recovered from the parse tree:
+A sealed value carries the field, the subject and the **id** its key is filed under, beside the
+content as a host stored it. That is what `reveal` reads, and it is why nothing has to be recovered
+from the parse tree:
 
 ```rust
-Value::Sealed { field, subject, id, inner }
+Value::Sealed { field, subject, id, content }
 ```
 
-It is made in one place, where an event field enters a frame, and taken off again on the way into
-the log or the store. heklang models the key lifecycle rather than ciphertext at rest, so storage
-holds plain values; the seal exists to carry the id, not to encrypt.
+It is made in one place, where an event field enters a frame, because that is the only place with
+the whole event: the id lives in a sibling field, so a value alone can never say what key it is
+filed under. **Nothing takes it off again.** A seal crosses into the log and the store as it is, and
+`Keys::decrypt` at a `reveal` is the only thing that opens one.
+
+**`content` is text, and heklang never reads it.** That is what a key store encrypts, and it is why
+the content *type* is not here but on the `reveal` node: a seal cannot say whether its text was a
+number, only the declaration can, and a `Type` on every sealed value cost `Value` a third of its
+size for something identical at every run.
+
+**`field` is where it was sealed, not where it now sits.** A host binds its ciphertext to that name,
+so content moved into another position still decrypts under the name it was sealed with. Moving it
+is the one thing rule 12 allows without a key, and this is what makes that safe rather than lucky.
 
 **This replaced a companion fold.** Each subject-bound variable used to get a second, hidden state
 variable that folded the subject id alongside the value, because the id could not come from the
 slice's filter: a fold of `customer_name @subject(customer_id)` filtered on `warranty_id` is an
 ordinary shape. Carrying the id on the value deletes that machinery, along with `FoldSubject`,
-`StateVar.subject`, `Parser::subject_source` and three of `Expr::Reveal`'s four fields.
+`StateVar.subject` and `Parser::subject_source`.
 
 **One thing changed shape in the error.** A terminal reveal now names the **field** whose content is
 unreadable rather than the local the source happened to reveal, because the field is what the value
@@ -925,9 +936,20 @@ The interpreter models the **key lifecycle**: a subject is erased or it is not, 
 way, and `reveal` fails once it has moved. That is what rules 9 and 12 actually turn on, and it is
 enough to test both honestly.
 
-It does not model ciphertext at rest, and does not need to. A sealed value is an ordinary value
-behind a wrapper that carries its subject and id; the log and the store hold plain values, because
-what rules 9 and 12 turn on is whether a key is alive, not what the bytes look like.
+**It holds no key and reads no content.** A sealed value is whatever a host stored, and `reveal` is
+one call to `Keys::decrypt` with the coordinates the value carries. So heklang can say what a
+program is allowed to do with content it cannot read, which is the whole of rules 9 and 12, without
+being able to read any.
+
+That is also why a fold costs nothing to walk. **A key is used once per `reveal`, not once per
+record.** A boundary of twenty thousand events with a subject-bound field on every one asks a host
+for one key, for the one value the handler actually revealed. hekla measured the other way round
+before this: eager decryption at the read cost 3.5µs a record and made a fold four times its own
+cost, for content nothing looked at.
+
+The harness's own key store is the lifecycle and nothing else: content behind a live key reads back
+as it was stored, and content behind a destroyed one does not read back at all. Opacity is a
+property of a real host, which is where the bytes are.
 
 What **is** enforced now is the boundary itself: content behind a seal cannot be read without
 `reveal`, so a program that would hand a `CipherHandle` to hekla and expect a `String` no longer
@@ -1017,9 +1039,10 @@ it, because a narrowed load lowers differently.
 - **Response headers.** Request headers are `http.post(url, body, headers = { ... })`; nothing reads
   the response's yet.
 - **Retry configuration** (rule 13).
-- **Ciphertext at rest**: the log and the store hold plain values, because what rules 9 and 12 turn
-  on is whether a key is alive. The decrypt **boundary** is enforced; the bytes are not modelled.
-  `Keys` in `docs/host.md` is the seam this would move through, and it is already shaped for it.
+- **Encrypting.** `Keys::decrypt` reads a seal and nothing writes one: a plain value emitted into a
+  `@subject(...)` field crosses as plaintext and a host seals it, because that is the direction
+  where the content is in hand. heklang holds no key in either direction, so this is a seam
+  question rather than an absence.
 - **The second erase rule** (rule 9), for an id that round-trips through an HTTP response. The
   `reveal` case is now checked where it can be written.
 - **The journal key is a readable description**, not a content hash. It is stable and it prints,
