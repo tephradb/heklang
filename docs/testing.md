@@ -51,7 +51,7 @@ exists for nothing else.
 
 ### An expectation is spelled like the thing it asserts
 
-`expect reject("sku_taken", "...")` beside the `return reject("sku_taken", "...")` it is about;
+`expect reject SkuTaken` beside the `return reject SkuTaken` it is about;
 `expect invoke RecordSync { shop_id: 1 }` beside the `invoke RecordSync { shop_id: shop_id }`;
 `expect log("...")` beside the `log("...")`. Nothing here is a second dialect for describing a call,
 so the vocabulary is one line long: write the call.
@@ -140,7 +140,7 @@ from the surface that an author would otherwise have to keep in step with the `g
 | `expect @path { field: value, ... }` | one appended event, in order |
 | `expect nothing` | the command appended no events |
 | `expect invalid("<message>")` | `Outcome::Invalid` |
-| `expect reject("<code>", "<message>")` | `Outcome::Reject` |
+| `expect reject <Name>`, `expect reject <Name> { field: value }` | `Outcome::Reject` |
 
 The appended events must match the `expect @path` lines **one for one and in order**. An event the
 test did not write is a failure, which is what makes "this command appends exactly this" checkable

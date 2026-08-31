@@ -1,6 +1,8 @@
 # Commands
 
 ```
+refusal TooManyOpen "too many open orders"
+
 command PlaceOrder(order_id: Uuid, customer_id: Int, email: String, total: Money(2)) {
   guard @order.placed(order_id), @order.cancelled(order_id)
 
@@ -9,7 +11,7 @@ command PlaceOrder(order_id: Uuid, customer_id: Int, email: String, total: Money
     on @order.cancelled(customer_id) => open_orders - 1
 
   if open_orders >= 10 {
-    return reject("too_many_open", "too many open orders")
+    return reject TooManyOpen
   }
 
   emit @order.placed { order_id, customer_id, email, total }
@@ -208,7 +210,7 @@ yesterday. The distinction matters to a caller deciding whether to fix the input
 is why `reject` carries a code and `invalid` does not: there is nothing to branch on when the answer
 is "you sent nonsense".
 
-**A command may return an outcome it did not spell.** `return reject("code", "why")` is unchanged,
+**A command may return an outcome it did not spell.** `return reject <Name>` is unchanged,
 and beside it `return <expression>` takes anything of type `Outcome`, which is what a `fn` declared
 `-> Outcome?` produces. That is how two commands share one ladder without sharing a body:
 

@@ -143,8 +143,9 @@ What an `invoke` answers with, and what a `fn` declared `-> Outcome?` produces. 
 (`docs/effects.md` rule 6), and these three methods read them without a match form.
 
 `Outcome` is spellable in a `fn` parameter and return type and nowhere else, the same allowance
-`Response` has: a refusal is a decision, not data. `reject(code, message)` and `invalid(message)`
-construct one wherever an `Outcome` is expected. `docs/functions.md` has the rule.
+`Response` has: a refusal is a decision, not data. `reject <Name>` and `invalid(message)` construct
+one wherever an `Outcome` is expected. `docs/functions.md` has the rule, and `docs/refusals.md`
+has the declaration the name resolves to.
 
 ### `Response`
 
@@ -160,7 +161,7 @@ hiding in it; anything that makes a value out of nothing is qualified by the typ
 | Call | Returns | |
 | --- | --- | --- |
 | `Uuid.derive(seed, name)` | `Uuid` | a v5 UUID, a pure function of both arguments |
-| `reject(code, message)` | `Outcome` | a command's refusal, as a value |
+| `reject <Name>` | `Outcome` | a declared refusal (`docs/refusals.md`), as a value |
 | `invalid(message)` | `Outcome` | the same, for a malformed request |
 | `Json.empty` | `Json` | |
 | `Json.encode(value)` | `String` | rule 8's table pointed at a string instead of a socket |

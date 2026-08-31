@@ -3,12 +3,14 @@
 A `guard` is a named proposition about the log, and one refusal for when it does not hold:
 
 ```
+refusal UndefinedCourse "no such course"
+
 guard CourseIsDefined(course: String) {
   state defined: Bool = fold false
     on @course.defined(course) => true
 
   if !defined {
-    return reject("undefined_course", "no such course")
+    return reject UndefinedCourse
   }
 }
 
@@ -137,7 +139,7 @@ guard PlanExists(plan_id: Uuid, shop_id: Int) {
     on @plan.created(plan_id, shop_id) => true
 
   if !exists {
-    return reject("plan_not_found", "no such plan")
+    return reject PlanNotFound
   }
 }
 ```
@@ -176,11 +178,11 @@ interpreter sees either, so a command reaches the fold with one arena, one frame
 | a bare `return`, or `return <value>` | see below |
 | fold nothing | a decision made from arguments alone is a `fn` |
 
-**A guard returns only a refusal.** `return reject(...)` and `return invalid(...)`, and nothing
+**A guard returns only a refusal.** `return reject <Name>` and `return invalid(...)`, and nothing
 else. A guard is spliced into the command that names it, where a bare `return` would read as *the
 command succeeded and appended nothing*, which is the opposite of what the author wrote:
 
-> a guard holds by reaching its end, so this `return` says nothing; write `return reject(...)` or
+> a guard holds by reaching its end, so this `return` says nothing; write `return reject <Name>` or
 > `return invalid(...)`, or delete it
 
 So an early exit meaning "this holds" is spelled by not writing one: `if !defined { return reject

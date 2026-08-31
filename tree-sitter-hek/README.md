@@ -32,12 +32,15 @@ and a `fn` is not a statement. That asymmetry is real rather than an oversight, 
 grammar keeps it: `effect_decl` sweeps for `fn` and `on`, `projector_shell` for `enum`,
 `entity` and `on`.
 
-Two things are decided by lookahead the way the parser decides them with a flag:
+Three things are decided by lookahead the way the parser decides them with a flag:
 
 - `on @p { a, b } { ... }` against `on @p { ... }` — a destructure is a block with
   another block after it (`parse.rs` `has_destructure`).
 - `if plan { ... }` against `Item { ... }` — a record literal loses to a block wherever
   both would parse, which is what `no_record_literal` does in `parse.rs` `header_expr`.
+- `reject Name { ... }` — the braces are always the refusal's fields, so this one goes the
+  other way and takes `prec.right`. A refusal is never a header's condition, so there is no
+  block for the list to lose to.
 
 ## Building
 

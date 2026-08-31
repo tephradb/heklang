@@ -266,10 +266,13 @@ That day arrived, and the rule extended unchanged. `Outcome` is spellable in exa
 one is pure, so a helper may return one; storing one is not, so nothing else may name it.
 
 ```
+refusal AlreadySubscribed "already on the course"
+refusal CourseFull "the course is full"
+
 fn ladder(subscribed: Bool, taken: Int, cap: Int) -> Outcome? {
-  if subscribed { return reject("already_subscribed", "already on the course") }
+  if subscribed { return reject AlreadySubscribed }
   if cap == 0   { return invalid("this course has no capacity set") }
-  if taken >= cap { return reject("course_full", "the course is full") }
+  if taken >= cap { return reject CourseFull }
   return none
 }
 
@@ -294,7 +297,7 @@ into a message. That is a sentinel, in a language whose optional story exists to
 and the caller had to evaluate the ladder twice because there was nothing to bind before the `if`.
 
 **`reject` and `invalid` are expressions now, not only statements.** The written forms in a command
-are unchanged and are still parsed as statements, so nothing about `return reject("code", "why")`
+are unchanged and are still parsed as statements, so nothing about `return reject <Name>`
 moved. What is new is that the same two words produce a value where an `Outcome` is expected, which
 is what a `fn` returns and what a command's `return` accepts.
 

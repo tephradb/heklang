@@ -3,10 +3,11 @@
 A small, **total** language for event-sourced application logic. It is the module language for
 [hekla], a single-app event-sourcing runtime over the Dynamic Consistency Boundary.
 
-Four kinds of declaration do the work. A **command** replays the history its decision depends on
+Five kinds of declaration do the work. A **command** replays the history its decision depends on
 and appends events. A **projector** consumes events into a read model. An **effect** reacts to
 appended events with durable side effects, and is the only one that reaches the network. A
-**guard** is a named proposition about the log that several commands can share.
+**guard** is a named proposition about the log that several commands can share, and a **refusal**
+is a named reason one said no.
 
 **The restrictions are the point.** A command cannot call out, read a clock or decrypt; a
 projector has no failure channel; a fold cannot observe anything but the log. Each is true because
@@ -35,6 +36,8 @@ event @order.cancelled {
   customer_id: Int,
 }
 
+refusal TooManyOpen "this customer has too many open orders"
+
 command PlaceOrder(order_id: Uuid, customer_id: Int, email: String, total: Money(2)) {
   // What this folds is what it conflicts on: if another writer lands in the same
   // slice first, the append is rejected and the whole command retries.
@@ -43,7 +46,7 @@ command PlaceOrder(order_id: Uuid, customer_id: Int, email: String, total: Money
     on @order.cancelled(customer_id) => open_orders - 1
 
   if open_orders >= 10 {
-    return reject("too_many_open", "this customer has too many open orders")
+    return reject TooManyOpen
   }
 
   emit @order.placed { order_id, customer_id, email, total }
@@ -95,12 +98,13 @@ the Helix wiring for both.
 - **[docs/]** is the specification, one document per idea, each paired with a test file of the same
   name that is the same rules made executable.
 - [docs/commands.md] is the best place to start, then [docs/effects.md] for the rules a handler
-  that reaches outside has to keep.
+  that reaches outside has to keep, and [docs/refusals.md] for the shape of a refusal.
 - [hekla] is what runs it, and does not repeat the language.
 
 [docs/]: docs/
 [docs/commands.md]: docs/commands.md
 [docs/effects.md]: docs/effects.md
+[docs/refusals.md]: docs/refusals.md
 
 ## License
 

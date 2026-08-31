@@ -2,7 +2,7 @@
 //! its message have exactly one home: the drift this replaces was one code carrying two
 //! different messages in one application, which nothing could catch.
 
-use heklang::{MessagePart, Program, parse};
+use heklang::{Interpreter, MessagePart, Outcome, Program, Value, parse};
 
 fn program(source: &str) -> Program {
     parse(source).unwrap_or_else(|err| panic!("expected this to parse: {err}"))
@@ -205,4 +205,157 @@ refusal ShopNotFound \"gone\"
     );
     assert!(program.refusal("ShopNotFound").is_some());
     assert_eq!(program.commands.len(), 1);
+}
+
+// ---------------------------------------------------------------------------------
+// Using. `reject <Name>` is the only way to refuse, and the code and message it lands
+// with are the declaration's.
+
+const USED: &str = "refusal ShopNotFound \"shop does not exist\"
+refusal SkuTaken(sku: String, item: Uuid) \"sku {sku} already belongs to item {item}\"
+event @item.listed { item_id: Uuid, seller_id: Int, sku: String }
+";
+
+fn used(body: &str) -> String {
+    format!("{USED}command List(item_id: Uuid, seller_id: Int, sku: String) {{\n{body}\n}}\n")
+}
+
+const ITEM: &str = "0190d1a1-0000-7000-8000-000000000001";
+
+fn refused(body: &str) -> Outcome {
+    let program = program(&used(body));
+    let mut interpreter = Interpreter::new(&program);
+    interpreter
+        .run(
+            "List",
+            [
+                ("item_id", Value::uuid(ITEM)),
+                ("seller_id", Value::Int(1)),
+                ("sku", Value::str("a")),
+            ],
+        )
+        .expect("ran")
+        .outcome
+}
+
+/// The wire code is the derivation, not the name. Every code in the two applications
+/// ported so far already had this shape, so nothing a caller switches on moved.
+#[test]
+fn the_code_that_reaches_a_caller_is_the_derived_one() {
+    let outcome = refused("  return reject ShopNotFound");
+    let Outcome::Reject { code, message } = outcome else {
+        panic!("expected a refusal, got {outcome:?}");
+    };
+    assert_eq!(code, "shop_not_found");
+    assert_eq!(message, "shop does not exist");
+}
+
+/// Braces use, so the fields are written the way `emit` and `invoke` write them, and the
+/// message is built from what the caller passed rather than restated at the site.
+#[test]
+fn the_message_is_built_from_the_fields_the_caller_gave() {
+    let outcome = refused("  return reject SkuTaken { sku, item: item_id }");
+    let Outcome::Reject { code, message } = outcome else {
+        panic!("expected a refusal, got {outcome:?}");
+    };
+    assert_eq!(code, "sku_taken");
+    assert_eq!(message, format!("sku a already belongs to item {ITEM}"));
+}
+
+#[test]
+fn a_refusal_must_be_declared() {
+    let message = err(&used("  return reject Nmae"));
+    assert!(
+        message.contains("refusal `Nmae` is not declared"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn a_refusal_takes_every_field_and_no_others() {
+    let missing = err(&used("  return reject SkuTaken { sku }"));
+    assert!(
+        missing.contains("refusal `SkuTaken` needs `item`"),
+        "got: {missing}"
+    );
+
+    let unknown = err(&used(
+        "  return reject SkuTaken { sku, item: item_id, nope: 1 }",
+    ));
+    assert!(
+        unknown.contains("refusal `SkuTaken` has no field `nope`"),
+        "got: {unknown}"
+    );
+
+    let twice = err(&used(
+        "  return reject SkuTaken { sku, sku: \"b\", item: item_id }",
+    ));
+    assert!(twice.contains("`sku` is given twice"), "got: {twice}");
+}
+
+/// A refusal with no fields takes no braces, which is also what lets `return reject Name`
+/// be the last statement in a block without the closing `}` being read as its fields.
+#[test]
+fn a_refusal_with_no_fields_takes_no_braces() {
+    let message = err(&used("  return reject ShopNotFound { x: 1 }"));
+    assert!(
+        message.contains("refusal `ShopNotFound` has no fields, so it takes no braces"),
+        "got: {message}"
+    );
+    assert!(matches!(
+        refused("  if true {\n    return reject ShopNotFound\n  }\n  return"),
+        Outcome::Reject { .. }
+    ));
+}
+
+/// The form this replaces. People will type it, so the message names the declaration to
+/// write, reading the literals it was given to say it concretely.
+#[test]
+fn the_old_call_form_says_what_to_write_instead() {
+    let message = err(&used(
+        "  return reject(\"customer_blocked\", \"this customer cannot place orders\")",
+    ));
+    assert!(
+        message.contains("`reject` names a declared refusal, so it takes no code and no message"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains(
+            "declare `refusal CustomerBlocked \"this customer cannot place orders\"` at module scope"
+        ),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("then write `reject CustomerBlocked`"),
+        "got: {message}"
+    );
+}
+
+/// The reason a refusal is worth declaring on the consuming side too: a bare name in a
+/// `String` position is the code, so a comparison against one is checked where the string
+/// it replaces was checked by nobody.
+#[test]
+fn a_name_in_a_string_position_is_the_code() {
+    let source = "refusal ShopNotFound \"shop does not exist\"
+event @order.placed { order_id: Uuid, customer_id: Int }
+command Inner(order_id: Uuid, customer_id: Int) {
+  return reject ShopNotFound
+}
+effect E {
+  on @order.placed as e { order_id, customer_id } {
+    let r = invoke Inner { order_id, customer_id }
+    if r.code().unwrap_or(\"\") == ShopNotFound {
+      log(\"refused\")
+    }
+  }
+}
+";
+    program(source);
+
+    let typo = source.replace("== ShopNotFound", "== ShopNotFund");
+    let message = err(&typo);
+    assert!(
+        message.contains("`ShopNotFund` is not in scope"),
+        "got: {message}"
+    );
 }

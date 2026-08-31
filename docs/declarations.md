@@ -16,6 +16,7 @@ up in exactly one kind, or in none.**
 | --- | --- |
 | `invoke Name { .. }` | a command, and only a command |
 | `guard Name { .. }` | a guard, and only a guard |
+| `reject Name` | a refusal, and only a refusal |
 | an event path | an event, never a handler |
 | a projector's name | nothing in the language; it names a read model to a host |
 | an effect's name | nothing in the language; it names a subscription to a host |
@@ -36,6 +37,11 @@ a module `fn`, which is in scope inside every effect. See `docs/functions.md`.
 A `guard` is in a fifth, and it is the second one reachable from source. `guard Name { .. }` resolves
 to a guard and nothing else, so a command and a guard may share a name for the same reason a command
 and an effect may. See `docs/guards.md`.
+
+A `refusal` is in a sixth, and the third reachable from source. `reject Name` resolves to a refusal
+and nothing else. It is also the only declared name whose spelling leaves the program, since the
+code a caller switches on is derived from it, which is why it is the only one whose shape is
+constrained. See `docs/refusals.md`.
 
 **Rejected: one flat space for all three.** The argument for it is that a reader seeing `Same` should
 not have to ask which kind it is. But a reader never sees a bare `Same`: they see `invoke Same`, or a
@@ -281,7 +287,7 @@ than two. Each does only what the pass before it made possible:
 | A | `enum` bodies, `record` names | a record field may name an enum, and a record may name a record |
 | B | `record` fields | every type they might name now has a name |
 | C0 | `const` names and types, and where each value starts | a const value may name a const declared later |
-| C | `event`, `projector` shells, `command` and `guard` signatures | these name enums, records and consts |
+| C | `event`, `refusal`, `projector` shells, `command` and `guard` signatures | these name enums, records and consts |
 | D | `command`, `guard` and `projector` bodies, `effect` helpers and arms | these name everything |
 | E | `test` bodies | a test names commands, projectors and effects rather than declaring any |
 

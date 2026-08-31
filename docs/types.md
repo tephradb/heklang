@@ -47,8 +47,10 @@ Three more exist and **cannot be written in a type position**:
 
 - `Response`, spellable in a `fn` signature and nowhere else (`docs/functions.md`), because a
   transport result is not data an event or a column may hold.
-- `Outcome`, the result of an `invoke`. It has no spelling at all; it is only ever consumed by
-  `.ok()`, `.code()` and `.message()` on the expression that produced it.
+- `Outcome`, the result of an `invoke`. It has no spelling outside a `fn` signature; it is
+  otherwise only consumed by `.ok()`, `.code()` and `.message()` on the expression that produced
+  it. `.code()` is a `String?`, and a declared refusal name is that code, so
+  `r.code().unwrap_or("") == ShopNotFound` is checked (`docs/refusals.md`).
 - `Rounding`, the mode a `mul` or `div` takes. Its values are the bare words `HalfUp`, `HalfEven`
   and `Down`.
 

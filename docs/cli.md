@@ -41,7 +41,7 @@ part the page cannot show, which is what a guard reaches *through* another guard
 ```
 $ hek check --boundaries
 checked 9 files
-  5 events, 6 commands, 9 guards, 3 consts, 21 tests
+  5 events, 6 commands, 9 guards, 12 refusals, 3 consts, 21 tests
 
   Subscribe guards CourseIsDefined, StudentIsRegistered, CourseHasSeats
   Unsubscribe guards SubscriptionIsActive

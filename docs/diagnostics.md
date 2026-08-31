@@ -200,6 +200,7 @@ be the whole of it:
 | `empty-declaration` | a declaration whose body would be empty |
 | `entity-shape` | an entity with no `@key`, or an index on a field it has not got |
 | `event-shape` | an arm over event types with nothing in common |
+| `refusal-shape` | a refusal named or written in a way its derived code could not survive |
 | `state-shape` | a `state` or `guard` written where or how it does not go |
 | `no-zero-value` | a `patch` that would materialise a row it cannot fill |
 | `wrong-context` | a statement in a declaration kind that does not have it |

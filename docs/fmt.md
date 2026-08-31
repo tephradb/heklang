@@ -60,6 +60,7 @@ and not by delimiter.
 | | behaviour | where |
 | --- | --- | --- |
 | **sequence** | always breaks; an authored blank line between children is kept | a module, a `block`, a `test` body, a `projector`, an `effect`, a `record`, an `event`, an `entity`, and a fold's arms |
+| **one line** | never breaks and holds no list of its own | a `const`, and a `refusal` (whose parameter list is still a list) |
 | **list** | fits or breaks; a trailing comma only when broken | `enum` variants, parameters, arguments, annotations, field initializers, object literals, list literals, slice filters, a destructure |
 | **flat** | never breaks, and overflows instead | `for` bindings, `Map(K, V)`, `Money(2)`, and the raw `guard` slice list |
 
