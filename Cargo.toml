@@ -2,8 +2,13 @@
 name = "heklang"
 version = "0.1.0"
 edition = "2024"
-# `cargo run` stays the demo; the checker is `cargo run --bin hek`.
-default-run = "heklang"
+
+# `cli` is the `hek` binary. It is not a default member, so bare `cargo run` stays the
+# demo rather than becoming ambiguous across two packages holding a binary each; the
+# checker is `cargo run -p hek`. Testing everything is `cargo test --workspace`.
+[workspace]
+members = ["cli"]
+default-members = ["."]
 
 [dependencies]
 uuid = { version = "1.26.0", default-features = false, features = ["std", "v5"] }

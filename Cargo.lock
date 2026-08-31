@@ -39,6 +39,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hek"
+version = "0.1.0"
+dependencies = [
+ "heklang",
+]
+
+[[package]]
 name = "heklang"
 version = "0.1.0"
 dependencies = [
