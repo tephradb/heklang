@@ -216,7 +216,8 @@ have **no variant in the type at all**, so "retryable outcomes never reach the h
 unrepresentable rather than filtered.
 
 Read the outcome with `.ok()`, `.code()` and `.message()`. `.code()` and `.message()` are optionals
-for the same reason rule 8's accessors are: every read is a branch anyway.
+for the same reason rule 8's accessors are: every read is a branch anyway. `.refused(<Name>)` asks
+the common question directly against a declared refusal (`docs/refusals.md`).
 
 ## 7. `invoke` input is a typed struct
 

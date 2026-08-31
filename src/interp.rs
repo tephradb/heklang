@@ -2620,6 +2620,18 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
             expect_arity(method, 0, &args)?;
             Ok(optional_str(outcome.message()))
         }
+        // `invalid` carries no code, so it is refused by nothing: the question is
+        // "did it refuse with this one", and a malformed request did not refuse at all.
+        (Value::Invoked(outcome), "refused") => {
+            expect_arity(method, 1, &args)?;
+            match &args[0] {
+                Value::Str(code) => Ok(Value::Bool(outcome.code() == Some(&**code))),
+                other => Err(ErrorKind::TypeMismatch {
+                    expected: Type::String,
+                    found: other.ty(),
+                }),
+            }
+        }
         _ => Err(ErrorKind::UnknownMethod {
             ty: receiver.ty(),
             method: method.to_string(),

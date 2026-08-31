@@ -138,7 +138,26 @@ if r.code().unwrap_or("") == ShopNotFound {
 }
 ```
 
-A typo is now `` `ShopNotFund` is not in scope `` where the string form was checked by nobody.
+Or, asking the question directly:
+
+```
+if r.refused(ShopNotFound) {
+  log("the shop went away")
+}
+```
+
+Either way a typo is now `` `ShopNotFund` is not in scope ``, where the string form was checked
+by nobody.
+
+`refused` declares a `String` parameter, and that is the whole mechanism: the method table's
+parameter type is the hint every argument is parsed against, so a bare refusal name resolves to
+its code there exactly as it does in a comparison, and nothing in the parser knows this method
+exists. It also means a literal is still accepted and still unchecked. What the name buys is that
+a misspelled one is a parse error rather than a branch that never runs.
+
+**`invalid` is refused by nothing.** It carries no code, and the question `refused` asks is "did
+it refuse with this one"; a malformed request did not refuse at all, so the answer is `false`
+whichever refusal is named.
 
 `.code()` is a `String?` and `T?` does not fill a `T` (`docs/types.md`), so the `unwrap_or` is
 load-bearing rather than habit: `r.code() == ShopNotFound` is
@@ -153,9 +172,6 @@ before this existed. Nothing about refusals bends the optional rule.
 - **It does not touch `invalid`.** `docs/commands.md` argues that it carries no code because
   there is nothing to branch on when the answer is "you sent nonsense", and the asymmetry
   stays: `invalid(message)` is still a message and nothing else.
-- **It adds no `.rejected(Name)` shorthand.** `r.code().unwrap_or("") == Name` is wordy, and a
-  one-argument method taking a `String` would read better. It is a ten-line addition with no
-  new syntax, and it is deliberately not bundled with a change this size.
 
 ## Related
 

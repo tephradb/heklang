@@ -138,9 +138,12 @@ no duration type and no `format`.
 | --- | --- |
 | `ok()` | `Bool` |
 | `code()`, `message()` | `String?` |
+| `refused(<Name>)` | `Bool` |
 
 What an `invoke` answers with, and what a `fn` declared `-> Outcome?` produces. Three variants
-(`docs/effects.md` rule 6), and these three methods read them without a match form.
+(`docs/effects.md` rule 6), and these methods read them without a match form. `refused` takes a
+declared refusal and answers whether this is it (`docs/refusals.md`); an `invalid` carries no code,
+so it is refused by nothing.
 
 `Outcome` is spellable in a `fn` parameter and return type and nowhere else, the same allowance
 `Response` has: a refusal is a decision, not data. `reject <Name>` and `invalid(message)` construct

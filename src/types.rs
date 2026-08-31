@@ -245,6 +245,11 @@ pub fn method_sig(receiver: &Type, method: &str) -> Option<Sig> {
 
         (Type::Outcome, "ok") => sig(Vec::new(), Type::Bool),
         (Type::Outcome, "code" | "message") => sig(Vec::new(), Type::opt(Type::String)),
+        // The argument is declared `String`, which is what makes a bare refusal name
+        // resolve to its code here: the table's parameter type is the hint every
+        // argument is parsed against. So `r.refused(ShopNotFound)` is checked with
+        // nothing in the parser knowing about this method. See `docs/refusals.md`.
+        (Type::Outcome, "refused") => sig(vec![Type::String], Type::Bool),
 
         _ => None,
     }

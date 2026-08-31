@@ -359,3 +359,113 @@ effect E {
         "got: {message}"
     );
 }
+
+/// Asking the question directly, rather than unwrapping the code and comparing it. The
+/// argument is declared `String` in the method table, so a bare refusal name resolves to
+/// its code through the same path the comparison uses and nothing in the parser knows
+/// this method exists.
+#[test]
+fn refused_answers_which_refusal_came_back() {
+    let program = program(
+        "refusal TooLong \"sixty months is the limit\"
+refusal Unset \"no capacity set\"
+event @plan.created { plan_id: Uuid, months: Int }
+fn ladder(months: Int) -> Outcome {
+  if months > 60 { return reject TooLong }
+  return reject Unset
+}
+command Create(plan_id: Uuid, months: Int) {
+  let decision = ladder(months)
+  if decision.refused(TooLong) {
+    return reject TooLong
+  }
+  emit @plan.created { plan_id, months }
+}
+",
+    );
+    let mut interpreter = Interpreter::new(&program);
+    let long = interpreter
+        .run(
+            "Create",
+            [("plan_id", Value::uuid(ITEM)), ("months", Value::Int(72))],
+        )
+        .expect("ran")
+        .outcome;
+    assert!(
+        matches!(&long, Outcome::Reject { code, .. } if code == "too_long"),
+        "got: {long:?}"
+    );
+
+    // The other refusal is not this one, so the branch is not taken and the body runs.
+    let short = interpreter
+        .run(
+            "Create",
+            [("plan_id", Value::uuid(ITEM)), ("months", Value::Int(12))],
+        )
+        .expect("ran")
+        .outcome;
+    assert!(matches!(short, Outcome::Ok(_)), "got: {short:?}");
+}
+
+/// `invalid` carries no code, so nothing refused it. The question is "did it refuse with
+/// this one", and a malformed request did not refuse at all.
+#[test]
+fn an_invalid_outcome_is_refused_by_nothing() {
+    let program = program(
+        "refusal TooLong \"sixty months is the limit\"
+event @plan.created { plan_id: Uuid, months: Int }
+fn ladder(months: Int) -> Outcome {
+  return invalid(\"months must be positive\")
+}
+command Create(plan_id: Uuid, months: Int) {
+  let decision = ladder(months)
+  if decision.refused(TooLong) {
+    return reject TooLong
+  }
+  emit @plan.created { plan_id, months }
+}
+",
+    );
+    let mut interpreter = Interpreter::new(&program);
+    let outcome = interpreter
+        .run(
+            "Create",
+            [("plan_id", Value::uuid(ITEM)), ("months", Value::Int(12))],
+        )
+        .expect("ran")
+        .outcome;
+    assert!(matches!(outcome, Outcome::Ok(_)), "got: {outcome:?}");
+}
+
+/// The check the string comparison could not do. `refused` declares a `String`, so a
+/// literal is still accepted and still unchecked; what the name buys is that a misspelled
+/// one is a parse error rather than a branch that never runs.
+#[test]
+fn a_misspelled_refusal_does_not_reach_refused() {
+    let asking = "refusal ShopNotFound \"shop does not exist\"
+event @a.b { id: Uuid }
+fn ladder() -> Outcome {
+  return reject ShopNotFound
+}
+command C(id: Uuid) {
+  let decision = ladder()
+  if decision.refused(ShopNotFound) {
+    return reject ShopNotFound
+  }
+  emit @a.b { id }
+}
+";
+    program(asking);
+
+    let typo = err(&asking.replace("refused(ShopNotFound)", "refused(ShopNotFund)"));
+    assert!(
+        typo.contains("`ShopNotFund` is not in scope"),
+        "got: {typo}"
+    );
+
+    let arity = err(&asking.replace("refused(ShopNotFound)", "refused()"));
+    assert!(
+        arity.contains("`refused` takes 1 argument, and this gives 0"),
+        "got: {arity}"
+    );
+}
