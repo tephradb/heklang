@@ -55,8 +55,8 @@ against it can also index on it.
 The filters are sorted by field name, so one slice is one predicate however it was written: two
 filters in either order narrow the same events and have no business comparing unequal.
 
-A `let` compiles to an assignment in the prologue. It produces no slice and contributes nothing to
-the condition. So the two keywords are not two spellings of one idea:
+A `let` compiles to an assignment. It produces no slice and contributes nothing to the condition. So
+the two keywords are not two spellings of one idea:
 
 | | `state x = fold ...` | `let x = ...` |
 | --- | --- | --- |
@@ -64,7 +64,7 @@ the condition. So the two keywords are not two spellings of one idea:
 | re-runs on a retry | yes, re-folded against the new log | yes, but from the same inputs |
 | may read a clock | no | yes, the pinned one |
 | may call out | no | no in a command; yes in an effect arm |
-| position | before the first statement | before the first statement, or anywhere in the body |
+| position | anywhere in the body, and a run of them is one read | anywhere in the body |
 
 Naming both `let` would leave the thing that decides whether concurrent appends conflict looking
 exactly like the thing that shortens an expression. The cost of keeping them apart is one word.
@@ -83,7 +83,7 @@ pub fn guard(&mut self, event: EventPath, filters: Vec<Filter>) -> SliceId {
 
 **Rejected: `let name = fold ...`.** It is one keyword instead of two, and it hides the append
 condition inside the same syntax as arithmetic. A reader scanning for what a command conflicts on
-would have to read every binding in the prologue and know which right-hand sides were folds.
+would have to read every binding in the body and know which right-hand sides were folds.
 
 **Rejected: an explicit `reads @order.placed(id)` list.** It separates the declaration of the read
 set from the value that comes out of it, so the two can drift: a fold could name a slice the list
@@ -91,28 +91,45 @@ forgot. Deriving the condition from the folds themselves makes the drift unrepre
 
 ## Execution order
 
-Fixed, and worth knowing because it explains every scoping rule below:
+A run of `state` and `guard` declarations is a **stage**: one read of the log, folded in one pass.
+A statement written below a stage's declarations closes it, so the next run is a stage of its own.
+A command is a sequence of stages, and the order is fixed:
 
 1. **parameters** are bound into the frame, each coerced to its declared type;
-2. **hoisted `let`s** run, in order (which is those that do not read a `state`, see below);
-3. **filters** are evaluated once, so a filter may name a parameter or a hoisted `let`;
-4. **`state` seeds** are evaluated and coerced;
-5. `after` is taken: the log length *before* the fold;
-6. **the fold** runs, one pass over the log, applying every matching slice per record in declaration
-   order;
-7. **the guards' decisions** run, in the order the guards are written (`docs/guards.md`);
-8. **the body** runs, appending into an emit buffer;
-9. the outcome and the `AppendCondition` are returned together.
+2. then, for each **stage** in the order written:
+   1. the statements above its declarations run, and one that returns is the command's outcome;
+   2. its **filters** are evaluated once, so a filter may name a parameter, a `let` above it, or a
+      `state` an *earlier* stage folded;
+   3. its **`state` seeds** are evaluated and coerced;
+   4. `after` is taken, on the first stage that reads, and every later stage reads to it;
+   5. its **fold** runs, one pass over the log, applying every matching slice per record in
+      declaration order;
+   6. the statements below its declarations run, the guards' decisions first;
+3. the outcome and the `AppendCondition` are returned together, the condition naming what the
+   stages that actually ran read.
 
-One pass, not one per `state`: ten folds over a million events read the log once, and a guard adds
-folds rather than reads.
+One pass per stage, not one per `state`: ten folds in one run read the log once, and a guard adds
+folds rather than reads. A command whose declarations are all at the top -- which is most of them --
+is one stage and one read.
 
-Step 7 is why a `guard` is a declaration rather than a statement. A guard's folds happen at step 6
-with every other, its decision at step 7, and neither straddles the two.
+**`after` is pinned once and every stage reads to it.** This is the rule that keeps staging off the
+host's contract. Were each stage to take its own head, the append would have to assert two things at
+two positions, and one `AppendCondition` cannot say that. Reading every stage to the head the first
+one took makes the stages one consistent view of the log, so the condition stays a single `after`
+and a flat slice list. It is rule 11 applied to the log rather than to the clock, and `docs/host.md`
+section 5 has what it costs.
 
-**A `let` is hoisted only when it can be.** Step 2 runs before the fold, so a `let` whose initialiser
-reads a `state` has nothing to read, and that one stays an ordinary body statement at step 8 instead.
-It applies transitively: a `let` reading such a `let` stays with it.
+**A stage is unconditional.** A `state` or a `guard` may not be written inside an `if` or a `for`,
+because a read that may or may not happen has nothing to say in an append condition:
+
+> `state` and `guard` must come before the first statement
+
+Step 2.6 is why a `guard` is a declaration rather than a statement. A guard's folds happen at its
+stage's step 2.5 with every other in that run, its decision at 2.6, and neither straddles the two.
+
+**A `let` runs where it is written.** One above a declaration run is in that stage's first half, so
+a filter can name it; one below the declarations is in the second half, so it can read what they
+folded.
 
 ```
 state open: Int = fold 0
@@ -120,16 +137,11 @@ state open: Int = fold 0
 state shut: Int = fold 0
   on @order.cancelled(customer_id) => shut + 1
 
-let live = open - shut          // step 8, after the fold, because it reads a state
+let live = open - shut          // below the declarations, so after the fold
 ```
 
-The two placements are indistinguishable except to a filter, because nothing between step 2 and step
-8 changes what the prologue could have read. So the rule costs an author nothing to not know, which
-is the point: writing `let live = open - shut` under the folds means what it looks like it means.
-
-**A seed may not read a `state` either**, and that one is rejected rather than deferred. Step 4 runs
-every seed before step 6 runs any fold, so `fold open` would read `open`'s own seed and never what it
-folds to:
+**A seed may not read a `state` in its own stage**, because every seed in a run is evaluated before
+that run folds, so `fold open` would read `open`'s own seed and never what it folds to:
 
 ```
 state open: Int = fold 0
@@ -137,28 +149,44 @@ state open: Int = fold 0
 state seen: Int = fold open      // rejected: `seen` is seeded from `open`
 ```
 
-There is nothing to defer it to, because a seed has to exist before the fold it seeds. And unlike the
-`let`, this one used to **check clean and answer with the wrong number**: three matching events left
-`open` at 3 and `seen` seeded at 0, which is a plausible answer and a silent one. The way out is the
-`let` above, which the error names.
+There is nothing to defer it to, because a seed has to exist before the fold it seeds. And this one
+used to **check clean and answer with the wrong number**: three matching events left `open` at 3 and
+`seen` seeded at 0, which is a plausible answer and a silent one.
 
-What a filter cannot do is name one of them, and that **is** rejected for the same reason, since it
-asks the fold for the value that decides what the fold reads:
+The way out is a statement between them, which is also the general answer to everything in this
+section: it closes the first stage, so the second reads a log the first has already folded.
 
-> this filter on `customer_id` is folded from a `state`; filters are evaluated once, before the fold,
-> so they can name a parameter or a `let` above the declarations
+```
+state open: Int = fold 0
+  on @order.placed(customer_id) => open + 1
 
-Step 3 is why the prologue exists at all, and why a `let` a filter names must be **above** it. The
-error says so rather than saying "not in scope":
+let so_far = open                // closes the stage above
 
-> `customer` is defined below the declarations; `guard` and `state` run before the body, so they can
-> only use names bound above them; move that `let` up
+state seen: Int = fold so_far    // a second stage, reading what the first folded
+  on @order.cancelled(customer_id) => seen + 1
+```
 
-The definition site is a related location rather than a position written into the sentence, so an
-editor can go to it. `docs/diagnostics.md` section 9 has why.
+The same rule and the same escape apply to a filter, which is the case that pays for staging:
 
-Step 5 is subtle and load-bearing: `after` is taken before the fold, so the condition means "nothing
-new in these slices since the position I started reading at".
+```
+state open: Int = fold 0
+  on @order.placed(customer_id) => open + 1
+
+let who = open
+
+state blocked: Bool = fold false
+  on @customer.blocked(customer_id: who) => true
+```
+
+Written without the `let` between them, both folds are one stage and the filter asks that stage for
+a value it has not produced, which is refused:
+
+> this filter on `customer_id` is folded from a `state` beside it; a stage's filters are evaluated
+> once, before it folds, so they can name a parameter, a `let`, or a `state` an earlier declaration
+> run has already folded
+
+`after` is subtle and load-bearing: it is taken before any fold, so the condition means "nothing new
+in these slices since the position I started reading at".
 
 ## `emit` writes an event whole
 
@@ -203,6 +231,22 @@ all.
 **The `AppendCondition` is returned even for `Invalid` and `Reject`.** A refusal still read the log,
 and a host that wants to cache or trace the decision needs to know what it depended on. It is
 computed after the body rather than as part of the success path for exactly that reason.
+
+**A decision that read nothing comes back with an empty condition**, and `after` at zero rather than
+at a head it never asked for. That is every command with no `state`, and now also any path that
+returns above the first declaration run. It is not a hole: `AppendCondition::conflicts` is false for
+every record when there are no slices, which is correct, because a decision that depended on nothing
+cannot be invalidated by anything. `after` is meaningful only alongside a non-empty `slices`.
+
+**So an `emit` on a path that returns before any declaration is appended unconditionally.** A
+command may do that deliberately -- answering from its arguments and appending without consulting
+the world -- and the `emit` sits visibly above the `guard` lines when it does. What it does not get
+is the protection of the guards below it, because they did not run.
+
+**An emitted event is not in the log a later stage folds.** Emits go to a buffer and the append
+happens once, at the end, so a `state` in a second stage counting `.placed` counts everything
+but the one this command is about to write. It cannot self-conflict either, since the condition is
+checked against the records already there.
 
 **`invalid` is about the request; `reject` is about the world.** A blank address is `invalid` whoever
 sends it and whenever. A blocked customer is `reject`, because the same request would have succeeded
@@ -291,9 +335,9 @@ The long form is for when the two sides do not share a name:
 on @customer.blocked(customer_id: customer) => true
 ```
 
-Because it runs once and before anything folds, a filter may not name a `state` or a `let` that
-reads one, and a `let` it does name has to be above the declarations. "Execution order" above has
-both errors.
+Because it runs once and before its own stage folds, a filter may not name a `state` declared beside
+it, and a `let` it does name has to be above the declarations of its stage. It may name a `state` an
+earlier stage folded. "Execution order" above has the errors and the escape.
 
 **A destructure binds the event's own fields under their own names.** It is optional, and an arm
 needing only the fact that an event happened leaves it off:

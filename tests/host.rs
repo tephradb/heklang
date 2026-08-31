@@ -843,3 +843,86 @@ fn a_read_model_failure_arrives_as_a_host_error_at_the_statement() {
         "a host knows what went wrong and not where it was asked from, so the statement fills it in"
     );
 }
+
+/// A command that folds nothing decided from its arguments alone, so it depended on no
+/// position in the log and its condition says so: no slices, and `after` at zero rather
+/// than at a head it never asked for. `conflicts` is false either way, since there is no
+/// slice for a record to land in, but the pair is what a host caching or tracing the
+/// decision reads, and "read nothing" is the honest answer.
+#[test]
+fn a_command_that_folds_nothing_asks_the_host_for_no_position() {
+    let program = program(
+        "command Note(order_id: Uuid, customer_id: Int, total: Money(2)) {
+  emit @order.placed { order_id, customer_id, total }
+}",
+    );
+    let seeded = Elsewhere {
+        records: vec![order(0, 7), order(1, 9)],
+        ..Elsewhere::default()
+    };
+    let mut interpreter = Interpreter::with_host(&program, seeded);
+    let execution = interpreter.run("Note", placed(7)).expect("ran");
+
+    assert!(matches!(execution.outcome, Outcome::Ok(ref events) if events.len() == 1));
+    assert!(execution.condition.slices.is_empty());
+    assert_eq!(
+        execution.condition.after, 0,
+        "a decision that read nothing names no position"
+    );
+    assert!(
+        interpreter.host().asked.borrow().is_empty(),
+        "and asks for no read"
+    );
+}
+
+/// Two declaration runs with a statement between them are two reads, and the point of
+/// pinning: both are bounded by the head the first one took, so the stages fold one
+/// prefix of the log rather than each seeing a log that moved under the one before it.
+/// That is what lets the condition stay a single `after` and a flat slice list, and so
+/// what keeps this off the host's contract entirely.
+#[test]
+fn two_stages_read_twice_against_one_pinned_head() {
+    let program = program(
+        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+  state open: Int = fold 0
+    on @order.placed(customer_id) => open + 1
+
+  let seen = open
+
+  state again: Int = fold 0
+    on @order.placed(customer_id: seen) => again + 1
+
+  emit @order.placed { order_id, customer_id, total }
+}",
+    );
+    assert_eq!(program.commands[0].stages.len(), 2);
+
+    let seeded = Elsewhere {
+        records: vec![order(0, 7), order(1, 9)],
+        ..Elsewhere::default()
+    };
+    let mut interpreter = Interpreter::with_host(&program, seeded);
+    let execution = interpreter.run("Place", placed(7)).expect("ran");
+
+    let asked = interpreter.host().asked.borrow();
+    let [first, second] = &asked[..] else {
+        panic!("one read per stage, got {}", asked.len());
+    };
+    assert_eq!(
+        (first.upto, second.upto),
+        (Some(1), Some(1)),
+        "both stages fold to the head the first one pinned"
+    );
+    assert_eq!(execution.condition.after, 2);
+    assert_eq!(
+        execution.condition.slices.len(),
+        2,
+        "the condition is what every stage that ran read, in order"
+    );
+    // The second stage's filter was resolved from what the first folded: one order for
+    // customer 7, so it narrows to `customer_id: 1` rather than to the seed.
+    assert_eq!(
+        second.slices[0].filters,
+        vec![("customer_id".to_string(), Value::Int(1))]
+    );
+}

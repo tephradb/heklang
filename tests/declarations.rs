@@ -1,4 +1,10 @@
-use heklang::{Pos, parse};
+use heklang::{Command, Pos, parse};
+
+/// Every slice a command declares, across its stages. A command whose declarations are
+/// all at the top is one stage, which is every command in this file.
+fn slice_count(command: &Command) -> usize {
+    command.stages.iter().map(|stage| stage.slices.len()).sum()
+}
 
 #[test]
 fn a_command_may_precede_the_events_it_uses() {
@@ -18,7 +24,7 @@ event @order.placed {
 ";
     let program = parse(source).expect("events are collected before command bodies are parsed");
     assert_eq!(program.commands.len(), 1);
-    assert_eq!(program.commands[0].slices.len(), 2);
+    assert_eq!(slice_count(&program.commands[0]), 2);
 }
 
 #[test]
@@ -39,7 +45,7 @@ command C(order_id: Uuid, customer_id: Int) {
 ";
     for source in [customer_first, order_first] {
         let program = parse(source).expect("file ordering must not matter");
-        assert_eq!(program.commands[0].slices.len(), 2);
+        assert_eq!(slice_count(&program.commands[0]), 2);
     }
 }
 
@@ -56,13 +62,14 @@ command C(customer_id: Int) {
 ";
     let err = parse(source).expect_err("`customer` is defined below the declarations");
     assert!(
-        err.text().contains("is defined below the declarations"),
+        err.text().contains("is defined below these declarations"),
         "expected the rule, got: {}",
         err.text()
     );
     assert!(
-        err.text().contains("run before the body"),
-        "expected the prologue rule to be explained, got: {}",
+        err.text()
+            .contains("reads the log before the statements below it"),
+        "expected the staging rule to be explained, got: {}",
         err.text()
     );
     // The definition site is a place rather than a sentence, so it is a related
@@ -188,7 +195,17 @@ command Route(order_id: Uuid, kind: Int) {
 ";
     let program = parse(source).expect("`else if` continues the chain");
     let command = &program.commands[0];
-    assert_eq!(command.body.len(), 1, "the whole dispatch is one statement");
+    assert_eq!(
+        command.stages.len(),
+        1,
+        "no statement splits the declarations, so this is one staged read"
+    );
+    let statements: usize = command
+        .stages
+        .iter()
+        .map(|stage| stage.pre.len() + stage.post.len())
+        .sum();
+    assert_eq!(statements, 1, "the whole dispatch is one statement");
 }
 
 /// The three declaration kinds are separate name spaces. `invoke` reaches only commands

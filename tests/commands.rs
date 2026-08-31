@@ -245,10 +245,11 @@ fn after_is_the_log_length_before_the_fold() {
 }
 
 // ---------------------------------------------------------------------------------
-// Execution order: filters resolve before the fold, so they see the prologue only.
+// Execution order: a stage's filters resolve before it folds, so they see what is bound
+// above its declarations.
 
 #[test]
-fn a_filter_may_name_a_hoisted_let() {
+fn a_filter_may_name_a_let_above_the_declarations() {
     let program = program(
         "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
   let who = customer_id
@@ -295,13 +296,16 @@ fn a_filter_naming_a_later_let_says_to_move_it() {
   emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
 }",
     );
-    assert!(message.contains("below the declarations"), "got: {message}");
+    assert!(
+        message.contains("below these declarations"),
+        "got: {message}"
+    );
     assert!(message.contains("move that `let` up"), "got: {message}");
 }
 
-/// The hoist exists for step 3 and for nothing else, so a `let` that reads a `state`
-/// stays in the body: at step 2 the fold has not run and the slot holds nothing. It used
-/// to be hoisted anyway, which `check` accepted and which failed at run time with "read
+/// A `let` that reads a `state`
+/// stays below them: above the declarations the fold has not run and the slot holds
+/// nothing. It used to be lifted anyway, which `check` accepted and which failed with "read
 /// before it was set" on a line that looked ordinary.
 #[test]
 fn a_let_reading_a_state_runs_after_the_fold() {
@@ -333,10 +337,10 @@ fn a_let_reading_a_state_runs_after_the_fold() {
     assert!(matches!(execution.outcome, Outcome::Ok(_)));
 }
 
-/// And transitively: a `let` reading one of those cannot be hoisted either, or the same
+/// And transitively: a `let` reading one of those stays below too, or the same
 /// unset slot is read one level further along.
 #[test]
-fn a_let_reading_a_deferred_let_stays_with_it() {
+fn a_let_reading_a_folded_let_stays_with_it() {
     let program = program(
         "command Count(order_id: Uuid, customer_id: Int, total: Money(2)) {
   state open: Int = fold 0
@@ -364,7 +368,7 @@ fn a_let_reading_a_deferred_let_stays_with_it() {
     assert!(matches!(execution.outcome, Outcome::Ok(_)));
 }
 
-/// The other half of step 4 running before step 6, and the worse half: this one used to
+/// The other half of a seed running before its own stage folds, and the worse half: this one used to
 /// check clean and answer with the wrong number. A seed reads another `state`'s *seed*,
 /// never what it folds to, so the answer was a plausible zero rather than a failure.
 #[test]
@@ -383,17 +387,17 @@ fn a_seed_may_not_read_another_state() {
         message.contains("`seen` is seeded from `open`, which has not folded yet"),
         "got: {message}"
     );
-    // The way out is the `let` that the hoisting fix above made mean what it looks like.
+    // The way out is a statement between the two, which closes the first stage.
     assert!(
         message.contains("write a `let` below the declarations"),
         "got: {message}"
     );
 }
 
-/// A seed still reads everything the prologue did set, which is the whole of what a seed
+/// A seed still reads everything bound above the declarations, which is the whole of what a seed
 /// was ever able to use.
 #[test]
-fn a_seed_may_read_a_parameter_or_a_hoisted_let() {
+fn a_seed_may_read_a_parameter_or_a_let_above_it() {
     let program = program(
         "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
   let base = customer_id * 2
@@ -421,12 +425,14 @@ fn a_seed_may_read_a_parameter_or_a_hoisted_let() {
     assert!(matches!(execution.outcome, Outcome::Ok(_)));
 }
 
-/// The one shape the deferral cannot rescue: a filter naming a `let` that reads a
-/// `state` asks the fold for the value that decides what the fold reads. It is rejected
-/// rather than left to fail at run time, which is what it did before.
+/// The shape the old model could not express at all: a filter naming a `let` that
+/// reads a `state`. It used to be rejected, because everything folded at once and the
+/// filter would have asked the fold for the value deciding what the fold reads. A
+/// statement between the two declarations now splits them, so the first folds, the `let`
+/// reads what it folded, and the second resolves its filter against that.
 #[test]
-fn a_filter_naming_a_let_that_reads_a_state_is_rejected() {
-    let message = err(
+fn a_filter_may_name_a_let_that_reads_an_earlier_stage() {
+    let program = program(
         "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
   state open: Int = fold 0
     on @order.placed(customer_id) => open + 1
@@ -435,21 +441,56 @@ fn a_filter_naming_a_let_that_reads_a_state_is_rejected() {
   state blocked: Bool = fold false
     on @customer.blocked(customer_id: who) => true
 
+  if blocked {
+    return reject Blocked
+  }
+
   emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
 }",
     );
-    assert!(message.contains("folded from a `state`"), "got: {message}");
-    assert!(message.contains("before the fold"), "got: {message}");
+    let command = &program.commands[0];
+    assert_eq!(command.stages.len(), 2, "the `let` splits the declarations");
+
+    // Two orders are on the log, so `open` folds to 2 and the second stage's filter
+    // resolves to `customer_id: 2` rather than to the seed.
+    let mut interpreter = Interpreter::new(&program);
+    interpreter.append(placed(1, 7, 100));
+    interpreter.append(placed(2, 7, 100));
+    interpreter.append(Event::new(
+        EventPath::new(["customer", "blocked"]),
+        [("customer_id", Value::Int(2)), ("reason", Value::str("no"))],
+    ));
+
+    let execution = interpreter
+        .run(
+            "Place",
+            [
+                ("order_id", Value::uuid(ORDER)),
+                ("customer_id", Value::Int(7)),
+                ("total", Value::money(2_599, 2)),
+            ],
+        )
+        .expect("ran");
+    assert!(
+        matches!(&execution.outcome, Outcome::Reject { code, .. } if code == "blocked"),
+        "the second filter was resolved from what the first stage folded: {:?}",
+        execution.outcome
+    );
 }
 
+/// A stage is unconditional, so a declaration inside a branch has nowhere to live: the
+/// read either happens or it does not, and the append condition cannot say "maybe".
+/// Interleaving is a top-level shape only.
 #[test]
-fn state_and_guard_must_precede_the_first_statement() {
+fn state_and_guard_may_not_be_declared_inside_a_block() {
     let message = err(
         "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-  emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
+  if customer_id > 0 {
+    state open: Int = fold 0
+      on @order.placed(customer_id) => open + 1
+  }
 
-  state open: Int = fold 0
-    on @order.placed(customer_id) => open + 1
+  emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
 }",
     );
     assert_eq!(

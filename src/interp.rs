@@ -10,8 +10,8 @@ use crate::host::{
     AppendCondition, Attempt, Calls, Host, Log, Predicate, Query, Recorded, Request, Rows,
 };
 use crate::ir::{
-    Absent, Assign, BinOp, Builtin, Command, Effect, EntityDef, EnvField, EventPath, Expr, ExprId,
-    Exprs, Function, Ident, Iter, Program, Projector, Return, Slice, Slot, Span, Stmt, Type, UnOp,
+    Absent, BinOp, Builtin, Command, Effect, EntityDef, EnvField, EventPath, Expr, ExprId, Exprs,
+    Function, Ident, Iter, Program, Projector, Return, Slice, Slot, Span, Stmt, Type, UnOp,
 };
 use crate::scaled::{self, Rounding};
 use crate::value::{self, Event, Invoked, Json, Key, Record, Value};
@@ -318,7 +318,7 @@ impl From<scaled::Error> for ErrorKind {
 }
 
 /// Cloneable so a command's attempt loop can keep the part that does not vary between
-/// attempts (the pinned clock, the arguments, the hoisted prologue) and re-run only what
+/// attempts (the pinned clock and the arguments) and re-run only what
 /// does. A slot holds a `Value`, which is itself cheap to clone.
 #[derive(Debug, Clone)]
 struct Frame {
@@ -645,46 +645,79 @@ impl<'a, H: Host> Interpreter<'a, H> {
             frame.set(bind.slot, envelope_value(&record, bind.field))?;
         }
 
-        run_assigns(program, &arm.exprs, &arm.prologue, &mut frame)?;
-        let predicates = resolve(program, &arm.exprs, &arm.slices, &mut frame)?;
-        for state in &arm.states {
-            let value = eval(program, &arm.exprs, &mut frame, state.init, None)?;
-            let value = fitted_at(value, &state.ty, arm.exprs.span(state.init))?;
-            frame.set(state.slot, value)?;
-        }
-        // Rule 3: the fold stops at the trigger's own position, inclusive, so state is
-        // a pure function of the log prefix and that position, and counts the trigger.
-        let query = Query {
-            slices: predicates,
-            from: 0,
-            upto: Some(position),
-        };
-        fold(
-            program,
-            &arm.exprs,
-            &self.host,
-            &query,
-            &arm.slices,
-            &mut frame,
-        )?;
-
         let mut used = BTreeMap::new();
-        let mut ctx = Effects {
-            program: self.program,
-            host: &mut self.host,
-            journal,
-            traffic: &mut self.traffic,
-            lines: &mut self.lines,
-            trace: &mut self.trace,
-            used: &mut used,
-        };
+        // Rule 11: pinned once, before anything in the arm runs, so a stage boundary
+        // cannot move it and two calls in one body are two reads of one value. Unlike a
+        // command's head this is journalled, which is why it is taken through `Effects`.
         if let Some(slot) = arm.now {
+            let mut ctx = Effects {
+                program: self.program,
+                host: &mut self.host,
+                journal: &mut *journal,
+                traffic: &mut self.traffic,
+                lines: &mut self.lines,
+                trace: &mut self.trace,
+                used: &mut used,
+            };
             let at = ctx.now()?;
             frame.set(slot, Value::Timestamp(at))?;
         }
 
-        let mut sink = Sink::Effect(ctx);
-        let flow = exec_block(&arm.exprs, &arm.body, &mut frame, self.program, &mut sink);
+        // An arm's stages are a command's, minus everything about appending: rule 3
+        // folds every one of them to the trigger's own position, so a later stage reads
+        // the same prefix the first did and there is no head to pin and no condition to
+        // build. `Effects` is rebuilt around each half because it holds the host
+        // mutably and a fold wants it shared.
+        let mut flow: Result<Flow, Error> = Ok(Flow::Next);
+        'stages: for stage in &arm.stages {
+            for half in [Half::Pre, Half::Post] {
+                if half == Half::Post && (!stage.states.is_empty() || stage.reads()) {
+                    let predicates = resolve(program, &arm.exprs, &stage.slices, &mut frame)?;
+                    for state in &stage.states {
+                        let value = eval(program, &arm.exprs, &mut frame, state.init, None)?;
+                        let value = fitted_at(value, &state.ty, arm.exprs.span(state.init))?;
+                        frame.set(state.slot, value)?;
+                    }
+                    if stage.reads() {
+                        // Rule 3: the fold stops at the trigger's own position,
+                        // inclusive, so state is a pure function of the log prefix and
+                        // that position, and counts the trigger.
+                        let query = Query {
+                            slices: predicates,
+                            from: 0,
+                            upto: Some(position),
+                        };
+                        fold(
+                            program,
+                            &arm.exprs,
+                            &self.host,
+                            &query,
+                            &stage.slices,
+                            &mut frame,
+                        )?;
+                    }
+                }
+
+                let part = match half {
+                    Half::Pre => &stage.pre,
+                    Half::Post => &stage.post,
+                };
+                let ctx = Effects {
+                    program: self.program,
+                    host: &mut self.host,
+                    journal: &mut *journal,
+                    traffic: &mut self.traffic,
+                    lines: &mut self.lines,
+                    trace: &mut self.trace,
+                    used: &mut used,
+                };
+                let mut sink = Sink::Effect(ctx);
+                flow = exec_block(&arm.exprs, part, &mut frame, self.program, &mut sink);
+                if !matches!(flow, Ok(Flow::Next)) {
+                    break 'stages;
+                }
+            }
+        }
         match flow {
             // Rule 4's terminal outcome, whether the `fail` was written in the arm or
             // in an effect-local `fn` it called. A call is an expression, so a helper's
@@ -823,6 +856,14 @@ impl<'a, H: Host> Interpreter<'a, H> {
     }
 }
 
+/// The two halves of a stage: the statements above its declarations and the ones below.
+/// Named rather than a bool so the fold sits visibly between them.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Half {
+    Pre,
+    Post,
+}
+
 fn execute(
     program: &Program,
     host: &mut dyn Host,
@@ -830,9 +871,9 @@ fn execute(
     args: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
     again: &mut dyn FnMut(u32) -> bool,
 ) -> Result<Execution, Error> {
-    // Steps 1 to 3, which no retry repeats: they read the arguments and each other and
-    // nothing else, so a second attempt would derive the same frame and the same slices
-    // from the same inputs. Only the fold and the body see a log that moved.
+    // Step 1, which no retry repeats: the arguments and the pinned clock read the
+    // request and nothing else. Everything downstream of a fold can move between
+    // attempts now, so it lives inside the loop.
     let mut prepared = Frame::new(command.frame);
     // Rule 11: the request's append time, pinned once before anything runs, so it is
     // well defined even for a command that goes on to append nothing, and so a retry
@@ -847,91 +888,160 @@ fn execute(
         .map(|(name, value)| (name.into(), value))
         .collect();
     bind_params(command, &mut args, &mut prepared)?;
-    run_assigns(program, &command.exprs, &command.prologue, &mut prepared)?;
-    let slices = resolve(program, &command.exprs, &command.slices, &mut prepared)?;
 
-    // What one attempt hands the next: the state it folded, and the position that state
-    // covers up to. A fold is a left fold over an append-only log, so folding `[0, a)`
-    // and then `[a, b)` is the state that folding `[0, b)` would have given, and a retry
-    // never has to start over. On a boundary tens of thousands of events deep that is the
-    // difference between paying for the events that beat you and paying for all of them.
-    let mut carried: Option<Vec<Value>> = None;
-    let mut folded_through = 0;
+    // What one attempt hands the next: the state the first reading stage folded, the
+    // predicates it folded with, and the position it folded through. A fold is a left
+    // fold over an append-only log, so folding `[0, a)` and then `[a, b)` is the state
+    // that folding `[0, b)` would have given, and a retry never has to start over. On a
+    // boundary tens of thousands of events deep that is the difference between paying
+    // for the events that beat you and paying for the boundary.
+    //
+    // Only the *first* reading stage carries, and that is not a simplification to be
+    // tidied away later. A fold is a function of its predicates, its range, its seeds
+    // and every other slot its seeds and arm expressions read. For the first stage that
+    // last part comes from `prepared` alone, so it cannot move between attempts. For a
+    // later one it can: `let bump = a` between two folds puts a value the first stage
+    // folded into the second stage's arm, and `resolve` never sees it, so no comparison
+    // of predicates could tell that the answer went stale. A later stage re-seeds and
+    // folds the whole range instead, which is what it would have cost without a carry
+    // at all.
+    let mut carried: Option<Carry> = None;
     let mut attempt = 0;
 
     loop {
         let mut frame = prepared.clone();
-        match &carried {
-            // Step 4 on a first attempt: the seeds, evaluated and coerced.
-            None => {
-                for state in &command.states {
-                    let value = eval(program, &command.exprs, &mut frame, state.init, None)?;
-                    let value = fitted_at(value, &state.ty, command.exprs.span(state.init))?;
-                    frame.set(state.slot, value)?;
-                }
-            }
-            // On a retry the seed is not where the fold starts from. The state the last
-            // attempt folded is, and the delta below is what it has not seen.
-            Some(values) => {
-                for (state, value) in command.states.iter().zip(values) {
-                    frame.set(state.slot, value.clone())?;
-                }
-            }
-        }
-
-        // Step 5, and the fold stops just below it rather than at whatever the head has
-        // become by the time the read gets there. Two reasons, and the second is the one
-        // that bites: a decision made on events the condition is about to call a conflict
-        // is wasted, and a carry whose upper bound only the store knows cannot be resumed
-        // from at all.
-        let after = host.head()?;
-        let query = Query {
-            slices: slices.clone(),
-            from: folded_through,
-            upto: after.checked_sub(1),
-        };
-        // Nothing landed since the last attempt read, so there is no delta to fold. The
-        // guard is also what keeps an empty log out of the `upto: None` case above.
-        if after > folded_through {
-            fold(
-                program,
-                &command.exprs,
-                host,
-                &query,
-                &command.slices,
-                &mut frame,
-            )?;
-        }
-        // Taken before the body, which is what makes the carry safe rather than merely
-        // fast: a body that assigns into a `state` changes what *it* decides on and
-        // cannot reach what the next attempt folds onto.
-        carried = Some(
-            command
-                .states
-                .iter()
-                .map(|state| frame.get(state.slot).cloned())
-                .collect::<Result<Vec<_>, _>>()?,
-        );
-        folded_through = after;
-
+        // The head every stage of this attempt reads to. Taken lazily, at the first
+        // stage that reads, so a command answering from the request alone asks the host
+        // nothing; and taken once, so every stage folds the same prefix rather than each
+        // seeing a log that moved under the one before it.
+        let mut after: Option<u64> = None;
+        let mut read: Vec<Predicate> = Vec::new();
         let mut emitted = Vec::new();
-        let ret = {
-            let mut sink = Sink::Emit(&mut emitted);
-            match exec_block(
-                &command.exprs,
-                &command.body,
-                &mut frame,
-                program,
-                &mut sink,
-            )? {
-                Flow::Return(ret) => ret,
-                Flow::Next => Ret::Ok,
-            }
-        };
+        let mut ret = Ret::Ok;
+        // Whether the stage about to fold is the first one this attempt reads with, and
+        // so the only one whose carry is sound.
+        let mut leading = true;
+        let mut folded: Option<Carry> = None;
 
+        'stages: for stage in &command.stages {
+            {
+                let mut sink = Sink::Emit(&mut emitted);
+                if let Flow::Return(got) =
+                    exec_block(&command.exprs, &stage.pre, &mut frame, program, &mut sink)?
+                {
+                    ret = got;
+                    break 'stages;
+                }
+            }
+
+            if !stage.states.is_empty() || stage.reads() {
+                // Resolved per stage and per attempt, rather than once for the command,
+                // because a filter may now name a `state` an earlier stage folded.
+                let predicates = resolve(program, &command.exprs, &stage.slices, &mut frame)?;
+                // A stage whose filters moved since the last attempt folded a different
+                // slice, so its carry answers a different question.
+                let resume = match (leading, &carried) {
+                    (true, Some(carry)) if carry.predicates == predicates => Some(carry),
+                    _ => None,
+                };
+                match resume {
+                    // On a retry the seed is not where the fold starts from. The state
+                    // the last attempt folded is, and the delta below is what it has
+                    // not seen.
+                    Some(carry) => {
+                        for (state, value) in stage.states.iter().zip(&carry.states) {
+                            frame.set(state.slot, value.clone())?;
+                        }
+                    }
+                    None => {
+                        for state in &stage.states {
+                            let value =
+                                eval(program, &command.exprs, &mut frame, state.init, None)?;
+                            let value =
+                                fitted_at(value, &state.ty, command.exprs.span(state.init))?;
+                            frame.set(state.slot, value)?;
+                        }
+                    }
+                }
+                let from = resume.map_or(0, |carry| carry.through);
+
+                if stage.reads() {
+                    // The fold stops just below the pinned head rather than at whatever
+                    // the head has become by the time the read gets there. Two reasons,
+                    // and the second is the one that bites: a decision made on events the
+                    // condition is about to call a conflict is wasted, and a carry whose
+                    // upper bound only the store knows cannot be resumed from at all.
+                    let at = match after {
+                        Some(at) => at,
+                        None => {
+                            let at = host.head()?;
+                            after = Some(at);
+                            at
+                        }
+                    };
+                    // Nothing landed since the last attempt read, so there is no delta
+                    // to fold. The guard is also what keeps an empty log out of the
+                    // `upto: None` case, which means read to the head.
+                    if at > from {
+                        let query = Query {
+                            slices: predicates.clone(),
+                            from,
+                            upto: at.checked_sub(1),
+                        };
+                        fold(
+                            program,
+                            &command.exprs,
+                            host,
+                            &query,
+                            &stage.slices,
+                            &mut frame,
+                        )?;
+                    }
+                    read.extend(predicates.iter().cloned());
+
+                    if leading {
+                        // Taken before the statements below the declarations, which is
+                        // what makes the carry safe rather than merely fast: one that
+                        // assigns into a `state` changes what *it* decides on and cannot
+                        // reach what the next attempt folds onto.
+                        folded = Some(Carry {
+                            through: at,
+                            predicates,
+                            states: stage
+                                .states
+                                .iter()
+                                .map(|state| frame.get(state.slot).cloned())
+                                .collect::<Result<Vec<_>, _>>()?,
+                        });
+                    }
+                    leading = false;
+                }
+            }
+
+            {
+                let mut sink = Sink::Emit(&mut emitted);
+                if let Flow::Return(got) =
+                    exec_block(&command.exprs, &stage.post, &mut frame, program, &mut sink)?
+                {
+                    ret = got;
+                    break 'stages;
+                }
+            }
+        }
+
+        // Only replaced when this attempt reached the leading stage's fold. A path that
+        // returned above it carries nothing forward, so the next attempt starts over
+        // rather than resuming a range it never read.
+        if folded.is_some() {
+            carried = folded;
+        }
+
+        // A command that returned before any stage read depended on nothing, and an
+        // empty condition is what says so: `AppendCondition::conflicts` is false for
+        // every record, because there is no slice for one to land in.
         let condition = AppendCondition {
-            after,
-            slices: query.slices,
+            after: after.unwrap_or(0),
+            slices: read,
         };
 
         let outcome = match ret {
@@ -957,6 +1067,20 @@ fn execute(
 
         return Ok(Execution { outcome, condition });
     }
+}
+
+/// What one attempt hands the next for one stage: the state it folded, and the
+/// predicates it folded with. The predicates travel beside the values because a later
+/// stage's filter may read an earlier stage's folded state, so unlike the pinned head
+/// they are not fixed for the run: a stage whose filters moved folded a different slice
+/// and has nothing to carry onto.
+#[derive(Clone)]
+struct Carry {
+    /// The position the states below are folded through, exclusive. A retry folds
+    /// `[through, after)` onto them rather than starting at the seed.
+    through: u64,
+    predicates: Vec<Predicate>,
+    states: Vec<Value>,
 }
 
 fn bind_params(
@@ -985,19 +1109,6 @@ fn bind_params(
         Some(extra) => Err(ErrorKind::UnexpectedArgument(extra.clone()).into()),
         None => Ok(()),
     }
-}
-
-fn run_assigns(
-    program: &Program,
-    exprs: &Exprs,
-    assigns: &[Assign],
-    frame: &mut Frame,
-) -> Result<(), Error> {
-    for assign in assigns {
-        let value = eval(program, exprs, frame, assign.value, None)?;
-        frame.set(assign.slot, value)?;
-    }
-    Ok(())
 }
 
 /// Every slice with its filters evaluated. This runs before the fold, so what a run
@@ -1036,6 +1147,14 @@ fn fold(
     slices: &[Slice],
     frame: &mut Frame,
 ) -> Result<(), Error> {
+    // `zip` below truncates, so a query built from more slices than it is folding with
+    // would match a stage against another stage's predicates and bind the wrong events
+    // into its slots. Silent, and only visible once a command has more than one stage.
+    debug_assert_eq!(
+        query.slices.len(),
+        slices.len(),
+        "a fold's query and its slices are one per slice, in order"
+    );
     log.read(query, &mut |record| {
         let event = &record.event;
         for (slice, predicate) in slices.iter().zip(&query.slices) {

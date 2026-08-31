@@ -172,9 +172,25 @@ Three things follow, and each is a property `tests/host.rs` asserts:
 - The state is taken **before the body runs**, so a body that assigns into a `state` changes what it
   decides on and cannot reach what the next attempt folds onto.
 
-What does not carry is everything a retry has no reason to redo: `now()` is pinned once for the whole
-request (rule 11), and so are the bound arguments, the hoisted prologue and the slices they resolve
-to, since all three read the arguments and each other and nothing else.
+What does not carry is what a retry has no reason to redo: `now()` is pinned once for the whole
+request (rule 11), and so are the bound arguments.
+
+**The slices are not among them, and that is what staging changed.** A command reads once per
+declaration run (`docs/commands.md`), and a later run's filter may name a `state` an earlier one
+folded, so its predicates are not the same on every attempt. Two things follow. The head is pinned
+once per attempt, at the first run that reads, and every later run reads to it, so the runs are one
+consistent view of the log and the condition stays a single `after` over a flat slice list. And only
+the **first** run carries: its fold reads nothing but the arguments, so it cannot move between
+attempts, while a later one can, through a `let` between the runs that no comparison of predicates
+would notice. A later run re-seeds and folds the whole range, which is what it would have cost with
+no carry at all.
+
+**`after` is meaningful only alongside a non-empty `slices`.** A command that read nothing -- one
+with no `state`, or one that returned above its first declaration -- comes back with no slices and
+`after` at zero rather than at a head it never asked for. `conflicts` is false for every record
+either way, which is correct: a decision that depended on nothing cannot be invalidated. A host that
+reads `after` as an expected version rather than as half of the predicate has to check `slices`
+first.
 
 ## 6. The journal is not part of the host
 

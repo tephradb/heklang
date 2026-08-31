@@ -16,6 +16,10 @@ record Item {
 const HOUSE_TAG: String = "house"
 const FREE_LIMIT: Int = 2
 
+// The prefix a derived sku is built from, named once so the rule that rejects it and the
+// rule that produces it cannot drift apart.
+const RESERVED: String = "CATALOG:"
+
 // A refusal names its fields, and its message may name those and nothing else, so what
 // it says is settled here rather than at each site that answers with it.
 refusal SkuTaken(sku: String, item: Uuid) "sku {sku} already belongs to item {item}"
@@ -42,9 +46,19 @@ const NAMESPACE: Uuid = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
 fn effective_sku(sku: String?, item_id: Uuid) -> String {
   let given = sku.unwrap_or("").trim()
   if given.is_empty() {
-    return "CATALOG:{item_id}"
+    return "{RESERVED}{item_id}"
   }
   return given
+}
+
+// A `fn` returning `Outcome?` decides a refusal on the command's behalf, and `none` is
+// "no objection". Nothing here reads the log, which is why the command can ask it above
+// its first fold.
+fn sku_error(sku: String?) -> Outcome? {
+  if sku.unwrap_or("").trim().starts_with(RESERVED) {
+    return invalid("a sku may not start with {RESERVED}")
+  }
+  return none
 }
 
 fn tagged(items: Map(Uuid, Item), tag: String) -> List(String) {
@@ -94,6 +108,15 @@ command ListItem(
   tags: List(String),
   tier: Tier,
 ) {
+  // Decided from the request alone, so it is written above the declarations and answers
+  // without reading anything. A caller who sends the derived prefix gets `invalid` here
+  // rather than a refusal about whichever item happens to hold that sku, which is what
+  // it got when this check sat below the fold.
+  let objection = sku_error(sku)
+  if objection.is_some() {
+    return objection
+  }
+
   // The seller's live catalogue, keyed by item. Uniqueness is a rule about all of it,
   // so the boundary is every listing this seller has.
   state items: Map(Uuid, Item) = fold Map.empty
@@ -184,4 +207,35 @@ effect AuditCatalog {
 
     log("seller {seller_id} now lists {listed}, house: {tagged(house, HOUSE_TAG)}")
   }
+}
+
+// tests/catalog.hk
+
+// The defect that put the declarations after the statements. `CATALOG:` is the prefix a
+// derived sku is built from, so before `sku_error` ran above the fold, a caller pasting
+// `CATALOG:{some_uuid}` learned whether an item with that id existed: `sku_taken` when it
+// did and `ok` when it did not, from a value the validator exists to reject. The world
+// here would refuse too, which is the half no `expect invalid` test used to cover.
+test "a reserved-prefix sku is the caller's mistake, not an answer from the log" {
+  given @item.listed {
+    item_id: "0190d1a1-0000-7000-8000-000000000031",
+    seller_id: 1,
+    item: Item {
+      sku: "CATALOG:0190d1a1-0000-7000-8000-000000000031",
+      price: 5.00,
+      tags: [],
+    },
+    tier: Free,
+  }
+
+  run ListItem {
+    item_id: "0190d1a1-0000-7000-8000-000000000032",
+    seller_id: 1,
+    sku: "CATALOG:0190d1a1-0000-7000-8000-000000000031",
+    price: 9.99,
+    tags: [],
+    tier: Free,
+  }
+
+  expect invalid("a sku may not start with CATALOG:")
 }

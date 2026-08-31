@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::mem;
 
 use crate::build::Builder;
@@ -10,7 +10,7 @@ use crate::ir::{
     EnumDef, EnvField, EventDef, EventPath, Expect, Expr, ExprId, Exprs, FieldDef, Filter,
     Function, Given, Guard, Handler, Ident, Index, Iter, Literal, MessagePart, Number, Param, Pos,
     Program, Projector, RecordDef, RecordField, RefusalDef, RefusalParam, ReplySpec, Return, Setup,
-    Slot, Span, Stmt, Test, Type, UnOp, Update,
+    Slot, Span, Stage, Stmt, Test, Type, UnOp, Update,
 };
 use crate::lex::{Keyword, Spanned, Sym, Token, lex};
 use crate::scaled::{self, Rounding};
@@ -439,10 +439,10 @@ impl Parser {
         let later = self.later_let(name);
         let (message, hint) = match (later, self.prologue) {
             (Some(_), true) => (
-                format!("`{name}` is defined below the declarations"),
+                format!("`{name}` is defined below these declarations"),
                 Some(
-                    "`guard` and `state` run before the body, so they can only use names \
-                     bound above them; move that `let` up"
+                    "a run of `guard` and `state` reads the log before the statements below \
+                     it, so it can only use names bound above it; move that `let` up"
                         .to_string(),
                 ),
             ),
@@ -2611,9 +2611,9 @@ impl Parser {
         };
         lower.b.in_module(module.as_deref());
         self.decl_params(&mut lower)?;
-        let body = self.decl_body(&mut lower, events)?;
+        self.decl_body(&mut lower, events, false)?;
         self.expect_sym(Sym::RBrace)?;
-        Ok(lower.b.finish(body))
+        Ok(lower.b.finish())
     }
 
     /// A guard declaration: the same shape as a command's, minus `emit` and everything
@@ -2631,9 +2631,9 @@ impl Parser {
         self.decl_params(&mut lower)?;
 
         self.kind = Kind::Guard;
-        let parsed = self.decl_body(&mut lower, events);
+        let parsed = self.decl_body(&mut lower, events, true);
         self.kind = Kind::Command;
-        let body = parsed?;
+        parsed?;
         self.expect_sym(Sym::RBrace)?;
 
         // A guard that reads no log is a `fn`: it decides from its arguments, and the
@@ -2650,7 +2650,7 @@ impl Parser {
                     "a guard is a proposition about the log, so it needs a `state`; a decision made from arguments alone is a `fn`",
                 ));
         }
-        Ok(lower.b.finish_guard(body, at))
+        Ok(lower.b.finish_guard(at))
     }
 
     /// `(name: Type, ...)`, shared by a command and a guard because their inputs are
@@ -2672,50 +2672,91 @@ impl Parser {
         Ok(())
     }
 
-    /// The declarations, then the statements. Shared by a command and a guard: a guard
-    /// is spliced into the command that names it, so anything true of the order here
-    /// has to be true of both. Leaves the closing brace for the caller.
+    /// Declarations and statements, in the order written. A run of `state` and `guard`
+    /// is one stage and one read of the log; a statement below one closes it, so the
+    /// next run reads again, to the head the first stage pinned. Shared by a command and
+    /// a guard: a guard is spliced into the command that names it, so anything true of
+    /// the order here has to be true of both.
+    ///
+    /// Leaves the closing brace for the caller. `docs/commands.md` has the order.
     fn decl_body(
         &mut self,
         lower: &mut Lower,
         events: &[EventDef],
-    ) -> Result<Vec<Stmt>, Diagnostic> {
-        self.prologue = true;
-        let mut deferred: HashSet<Slot> = HashSet::new();
-        let mut hoisted_body: Vec<Stmt> = Vec::new();
+        one_stage: bool,
+    ) -> Result<(), Diagnostic> {
         let mut named: Vec<(Ident, Vec<Token>)> = Vec::new();
         loop {
             match self.peek() {
-                Token::Word(Keyword::Guard) => self.guard_decl(lower, events, &mut named)?,
-                Token::Word(Keyword::State) => self.state_decl(lower, events)?,
-                Token::Word(Keyword::Let) => {
-                    if let Some(stmt) = self.hoisted_let(lower, &mut deferred)? {
-                        hoisted_body.push(stmt);
-                    }
+                Token::Word(Keyword::Guard) if self.kind == Kind::Effect => {
+                    return self.fail_hint(
+                        Code::StateShape,
+                        "an effect has no `guard`",
+                        "it appends nothing, so there is no append condition to build",
+                    );
                 }
-                _ => break,
+                Token::Word(Keyword::Guard | Keyword::State) => {
+                    // A guard is copied into what names it, at the stage it was written
+                    // in, so it cannot carry a second read across the splice.
+                    if one_stage && lower.b.would_stage() {
+                        let at = self.span_here();
+                        let word = if self.at_word(Keyword::State) {
+                            "state"
+                        } else {
+                            "guard"
+                        };
+                        return Err(self
+                            .err(
+                                Code::StateShape,
+                                format!("this `{word}` would be a second read of the log"),
+                                at,
+                            )
+                            .with_hint(
+                                "a guard is one read: its declarations come before its first statement, and a proposition that needs a second read is two guards",
+                            ));
+                    }
+                    // The stage above is done, so what it folded is available to what
+                    // follows, and its filters are checked against what it declared.
+                    if lower.b.would_stage() {
+                        self.stage_check(lower)?;
+                        lower.b.stage_break();
+                    }
+                    self.prologue = true;
+                    let parsed = match self.peek() {
+                        Token::Word(Keyword::Guard) => self.guard_decl(lower, events, &mut named),
+                        _ => self.state_decl(lower, events),
+                    };
+                    self.prologue = false;
+                    parsed?;
+                }
+                Token::Sym(Sym::RBrace) | Token::End => break,
+                _ => {
+                    let stmt = self.statement(lower, events)?;
+                    lower.b.stmt(stmt);
+                }
             }
         }
-        self.prologue = false;
+        // The last stage stays open for the finisher to seal, so this only checks it.
+        self.stage_check(lower)
+    }
 
-        // Step 3 reads what step 2 set, and a `let` reading a `state` is neither. The
-        // author has asked the fold for a value that decides what the fold reads.
-        if let Some((field, at)) = lower.b.filter_past_prologue(&deferred) {
+    /// The filters of the stage now closing, checked against the states that stage
+    /// itself declares. It has to happen here rather than once at the end: by then the
+    /// open stage is the last one, and a filter reading its own stage's `state` would go
+    /// unnoticed and answer with the seed.
+    fn stage_check(&mut self, lower: &mut Lower) -> Result<(), Diagnostic> {
+        if let Some((field, at)) = lower.b.filter_past_fold() {
             return Err(self
                 .err(
                     Code::StateShape,
-                    format!("this filter on `{field}` is folded from a `state`"),
+                    format!("this filter on `{field}` is folded from a `state` beside it"),
                     at,
                 )
                 .with_hint(
-                    "filters are evaluated once, before the fold, so they can name a parameter or a `let` above the declarations; a `let` that reads a `state` is not available until the fold has already run",
+                    "a stage's filters are evaluated once, before it folds, so they can name a parameter, a `let`, or a `state` an earlier declaration run has already folded",
                 ));
         }
-
-        let mut body = self.statements(lower, events)?;
-        // A `let` the prologue could not take runs first, in the order it was written.
-        hoisted_body.append(&mut body);
-        Ok(hoisted_body)
+        Ok(())
     }
 
     /// `guard` has two shapes and the token after it decides. A path is the raw form:
@@ -2991,31 +3032,6 @@ impl Parser {
                     .to_string(),
             ),
         )
-    }
-
-    /// A `let` in the leading run of a command. It is hoisted into the prologue so a
-    /// filter can name it (`docs/commands.md`, step 3), but only when it can be: an
-    /// initialiser reading a `state` is not available until the fold has run, so that
-    /// one stays an ordinary body statement and `deferred` remembers its slot for the
-    /// `let`s below it. The two are indistinguishable to anything but a filter, since
-    /// nothing between step 2 and step 8 changes what the prologue could have read.
-    fn hoisted_let(
-        &mut self,
-        lower: &mut Lower,
-        deferred: &mut HashSet<Slot>,
-    ) -> Result<Option<Stmt>, Diagnostic> {
-        self.expect_word(Keyword::Let)?;
-        let name = self.expect_ident()?;
-        self.expect_sym(Sym::Assign)?;
-        let value = self.expr(lower, None)?;
-        let ty = self.type_of(lower, value);
-        if lower.b.reads_past_prologue(value, deferred) {
-            let slot = lower.b.alloc(&name, ty);
-            deferred.insert(slot);
-            return Ok(Some(Stmt::Assign { slot, value }));
-        }
-        lower.b.hoist(&name, value, ty);
-        Ok(None)
     }
 
     fn slice_ref(
@@ -5391,34 +5407,19 @@ impl Parser {
         self.expect_sym(Sym::LBrace)?;
         self.command_end = self.command_end();
 
-        // An arm's prologue is `state` alone. A command hoists a leading `let` so a
-        // filter can name it; rule 2 gives an arm's filters the trigger binding
-        // instead, so a `let` here is an ordinary body statement and can call out.
-        self.prologue = true;
-        loop {
-            match self.peek() {
-                Token::Word(Keyword::State) => self.state_decl(&mut lower, events)?,
-                Token::Word(Keyword::Guard) => {
-                    return self.fail_hint(
-                        Code::StateShape,
-                        "an effect has no `guard`",
-                        "it appends nothing, so there is no append condition to build",
-                    );
-                }
-                _ => break,
-            }
-        }
-        self.prologue = false;
-
-        let body = self.statements(&mut lower, events)?;
+        // An arm stages like a command, and rule 3 folds every stage to the trigger's
+        // own position, so a second read sees the prefix the first did. Rule 2 gives an
+        // arm's filters the trigger binding, so a `let` here is an ordinary statement
+        // and can call out.
+        self.decl_body(&mut lower, events, false)?;
         self.expect_sym(Sym::RBrace)?;
         self.event = None;
         self.envelope = None;
         self.kind = Kind::Command;
 
         self.triggers.clear();
-        let arm = lower.b.finish_arm(paths, span, body);
-        if let Err((erase, reveal)) = erase_last(&arm.exprs, &arm.body) {
+        let arm = lower.b.finish_arm(paths, span);
+        if let Err((erase, reveal)) = erase_last_in(&arm.exprs, &arm.stages) {
             return Err(self
                 .err(
                     Code::EraseOrder,
@@ -7038,11 +7039,13 @@ impl Parser {
         // bug that fails on the long inputs into one that fails at `hek check`.
         for command in &program.commands {
             let mut emits: Vec<(&EventPath, &[(Ident, ExprId)])> = Vec::new();
-            walk_stmts(&command.body, &mut |stmt| {
-                if let Stmt::Emit { event, fields, .. } = stmt {
-                    emits.push((event, fields));
-                }
-            });
+            for part in command.stages.iter().flat_map(Stage::halves) {
+                walk_stmts(part, &mut |stmt| {
+                    if let Stmt::Emit { event, fields, .. } = stmt {
+                        emits.push((event, fields));
+                    }
+                });
+            }
 
             for (path, fields) in emits {
                 let Some(target) = program.event(path) else {
@@ -7167,12 +7170,14 @@ impl Parser {
         let mut edges: Vec<Edge> = Vec::new();
         for effect in &program.effects {
             for arm in &effect.arms {
-                for command in invoked(&arm.exprs, &arm.body) {
+                for command in invoked_in(&arm.exprs, &arm.stages) {
                     let Some(target) = program.command(&command) else {
                         continue;
                     };
                     for (trigger, event) in arm.events.iter().flat_map(|trigger| {
-                        emitted(&target.body).into_iter().map(move |e| (trigger, e))
+                        emitted_in(&target.stages)
+                            .into_iter()
+                            .map(move |e| (trigger, e))
                     }) {
                         edges.push(Edge {
                             from: trigger.clone(),
@@ -7270,6 +7275,41 @@ fn descend<'a>(
     None
 }
 
+/// Every command an arm invokes, across every stage. A declaration's statements live in
+/// two lists per stage, so anything that has to see all of them goes through this rather
+/// than reaching for one.
+fn invoked_in(exprs: &Exprs, stages: &[Stage]) -> Vec<Ident> {
+    stages
+        .iter()
+        .flat_map(Stage::halves)
+        .flat_map(|part| invoked(exprs, part))
+        .collect()
+}
+
+/// Every event a command emits, across every stage.
+fn emitted_in(stages: &[Stage]) -> Vec<EventPath> {
+    stages
+        .iter()
+        .flat_map(Stage::halves)
+        .flat_map(|part| emitted(part))
+        .collect()
+}
+
+/// Rule 9 over a whole declaration. `scan` already threads the `erase` it carries in and
+/// hands back the one it carries out, so every stage reads as the one sequence it runs
+/// as: an `erase` above a fold and a `reveal` below it are still the pair rule 9 refuses.
+fn erase_last_in(exprs: &Exprs, stages: &[Stage]) -> Result<(), (Span, Span)> {
+    let mut erased = None;
+    for part in stages.iter().flat_map(Stage::halves) {
+        let reach = scan(exprs, part, erased)?;
+        if !reach.falls_through {
+            return Ok(());
+        }
+        erased = reach.erased;
+    }
+    Ok(())
+}
+
 fn emitted(body: &[Stmt]) -> Vec<EventPath> {
     let mut found = Vec::new();
     walk_stmts(body, &mut |stmt| {
@@ -7313,12 +7353,20 @@ fn folded_from<'a>(
     let Some(slot) = loaded_slot(&command.exprs, value) else {
         return Vec::new();
     };
-    if !command.states.iter().any(|state| state.slot == slot) {
+    // Across every stage: a `state` folded before one statement and emitted after
+    // another is still the same slot, and rule 12's bound is about where the value came
+    // from rather than when.
+    if !command
+        .stages
+        .iter()
+        .flat_map(|stage| &stage.states)
+        .any(|state| state.slot == slot)
+    {
         return Vec::new();
     }
 
     let mut sources = Vec::new();
-    for slice in &command.slices {
+    for slice in command.stages.iter().flat_map(|stage| &stage.slices) {
         for update in &slice.updates {
             if update.slot != slot {
                 continue;
@@ -7614,10 +7662,6 @@ fn reaches_itself(
 /// Rule 9. `Err((erase, reveal))` names the erase that may already have run and the
 /// reveal that is still reachable from it. Reachability rather than lexical order, so
 /// an erase on a path that ends in `fail` does not poison what follows the `if`.
-fn erase_last(exprs: &Exprs, body: &[Stmt]) -> Result<(), (Span, Span)> {
-    scan(exprs, body, None).map(|_| ())
-}
-
 struct Reach {
     erased: Option<Span>,
     falls_through: bool,

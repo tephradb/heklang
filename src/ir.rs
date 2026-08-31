@@ -284,7 +284,7 @@ impl Program {
 }
 
 /// A pure helper. It has a command's frame and arena and none of its machinery: no
-/// prologue, no slices, no state, because none of those can be pure.
+/// stages, no slices, no state, because none of those can be pure.
 #[derive(Debug, Clone)]
 pub struct Function {
     pub name: Ident,
@@ -584,8 +584,7 @@ impl Effect {
 }
 
 /// One `on @path[, @path]* [as name] [{ destructure }] { body }` of an effect. A
-/// command minus its params, plus a trigger binding: the same prologue, slices and
-/// arena. Several paths may share one arm; the binding then names only what they have
+/// command minus its params, plus a trigger binding: the same stages and arena. Several paths may share one arm; the binding then names only what they have
 /// in common.
 #[derive(Debug, Clone)]
 pub struct Arm {
@@ -594,13 +593,13 @@ pub struct Arm {
     pub envelope: Vec<EnvBind>,
     pub frame: usize,
     pub exprs: Exprs,
-    pub prologue: Vec<Assign>,
-    pub slices: Vec<Slice>,
-    pub states: Vec<StateVar>,
     /// Rule 11: `now()` is one slot filled before the body runs, so two calls in one
     /// body are two reads of one value.
     pub now: Option<Slot>,
-    pub body: Vec<Stmt>,
+    /// The staged reads, as a command has them. An arm folds to its trigger's own
+    /// position rather than to the head (`docs/effects.md` rule 3), so a second stage
+    /// reads the same prefix the first did and there is no condition to build.
+    pub stages: Vec<Stage>,
     pub span: Span,
 }
 
@@ -614,13 +613,13 @@ pub struct Command {
     pub exprs: Exprs,
     /// Rule 11: the request's append time, pinned once. See [`Arm::now`].
     pub now: Option<Slot>,
-    pub prologue: Vec<Assign>,
-    pub slices: Vec<Slice>,
-    pub states: Vec<StateVar>,
+    /// The staged reads, in the order written. A command whose declarations are all at
+    /// the top is one stage and one read of the log; a statement between two declaration
+    /// runs splits them, and the second run reads to the head the first pinned.
+    pub stages: Vec<Stage>,
     /// The guards this command names, in the order written. Kept after they are spliced
     /// in, so tooling can say what a command guards without re-deriving it.
     pub calls: Vec<GuardCall>,
-    pub body: Vec<Stmt>,
 }
 
 /// A named proposition about the log: folds, and one refusal when they do not hold.
@@ -633,12 +632,12 @@ pub struct Guard {
     pub params: Vec<Param>,
     pub frame: usize,
     pub exprs: Exprs,
-    pub prologue: Vec<Assign>,
-    pub slices: Vec<Slice>,
-    pub states: Vec<StateVar>,
+    /// One stage, because a guard is one read. A proposition that needs a second is
+    /// two guards (`docs/guards.md` rule 6), which is also what keeps a guard splicing
+    /// into a caller's stage rather than splitting it.
+    pub stage: Stage,
     /// Its own guards, spliced into it before it is spliced anywhere.
     pub calls: Vec<GuardCall>,
-    pub body: Vec<Stmt>,
     /// Where the guard is declared, so the cycle check can point at one. It runs after
     /// every pass, by which time the cursor is at the end of the last module.
     pub span: Span,
@@ -650,6 +649,9 @@ pub struct Guard {
 pub struct GuardCall {
     pub guard: Ident,
     pub args: Vec<(Ident, ExprId)>,
+    /// Which stage of the caller the guard was written in. A guard is one read, so it
+    /// joins the declaration run it sits in rather than opening one of its own.
+    pub at_stage: usize,
     /// How many slices and states the caller had declared when this was written, so the
     /// splice puts the guard's own where the author put the guard. Source order is the
     /// decision order, and it costs nothing to make the IR agree with it.
@@ -671,6 +673,38 @@ pub struct StateVar {
     pub ty: Type,
     pub slot: Slot,
     pub init: ExprId,
+}
+
+/// One staged read and the statements around it. A declaration run is folded in a single
+/// pass, so a command is a sequence of these: `pre` runs, the slices are resolved and
+/// folded, then `post` runs. A stage that declares nothing is a run of statements that
+/// reads no log at all, which is how a command answers before it has read anything.
+///
+/// `docs/commands.md` has the execution order this shape is.
+#[derive(Debug, Clone, Default)]
+pub struct Stage {
+    /// Runs before the filters resolve, so a filter may name what it binds: the author's
+    /// statements above the declarations, and a guard's arguments, which its own filters
+    /// read.
+    pub pre: Vec<Stmt>,
+    pub slices: Vec<Slice>,
+    pub states: Vec<StateVar>,
+    /// Runs once the fold is done: a guard's decision first, then the author's own.
+    pub post: Vec<Stmt>,
+}
+
+impl Stage {
+    /// The two halves in execution order. The one place that knows a stage has two, so a
+    /// walk that has to see every statement a declaration runs cannot silently miss one.
+    pub fn halves(&self) -> [&Vec<Stmt>; 2] {
+        [&self.pre, &self.post]
+    }
+
+    /// Whether this stage reads the log. A stage with no slices has nothing to resolve
+    /// and nothing to fold, so it never takes `after` and never asks the host.
+    pub fn reads(&self) -> bool {
+        !self.slices.is_empty()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -710,12 +744,6 @@ pub struct Update {
     /// `some(T)` rather than as a bare `T`, which is what makes `.is_none()` on a
     /// folded optional mean what it reads as.
     pub ty: Type,
-}
-
-#[derive(Debug, Clone)]
-pub struct Assign {
-    pub slot: Slot,
-    pub value: ExprId,
 }
 
 #[derive(Debug, Clone, Default)]

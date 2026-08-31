@@ -568,3 +568,109 @@ guard CourseIsDefined(course: String) {{
     assert!(program.guard("CourseIsDefined").is_some());
     assert_eq!(program.consts.len(), 1);
 }
+
+// ---------------------------------------------------------------------------------
+// Rule 3, the other half: a statement above a guard decides before it.
+
+const STAGED: &str = "\
+fn blank(course: String) -> Outcome? {
+  if course.trim().is_empty() {
+    return invalid(\"a course is required\")
+  }
+  return none
+}
+
+command SubscribeChecked(student: String, course: String) {
+  let objection = blank(course)
+  if objection.is_some() {
+    return objection
+  }
+
+  guard CourseIsDefined { course }
+
+  emit @student.subscribed { course, student }
+}
+";
+
+/// The fixture the port was missing: a malformed request against a world that would
+/// also refuse. Every `expect invalid` test in two applications set up an otherwise
+/// valid world, which is why 125 of them caught none of this.
+#[test]
+fn a_statement_above_a_guard_answers_before_it() {
+    let program = program(&format!("{EVENTS}{GUARDS}{STAGED}"));
+    let mut interpreter = Interpreter::new(&program);
+    let blank = || [("student", Value::str("s1")), ("course", Value::str(" "))];
+
+    // `CourseIsDefined` would reject a blank course too, since nothing defines one.
+    assert!(matches!(
+        interpreter.run("Subscribe", blank()).expect("ran").outcome,
+        Outcome::Reject { code, .. } if code == "undefined_course"
+    ));
+    // The same request and the same world, with the objection written above the guard.
+    let execution = interpreter.run("SubscribeChecked", blank()).expect("ran");
+    assert!(
+        matches!(&execution.outcome, Outcome::Invalid(message) if message == "a course is required"),
+        "got: {:?}",
+        execution.outcome
+    );
+    assert!(
+        execution.condition.slices.is_empty(),
+        "and it read nothing to say so"
+    );
+}
+
+/// A guard is copied into what names it, at the stage it was written in, so it cannot
+/// carry a second read across the splice. `guard A; guard B; state s` stays one read,
+/// which is what keeps a command's boundary one pass over the log.
+#[test]
+fn a_guard_is_one_read_of_the_log() {
+    let message = error(&format!(
+        "{EVENTS}guard G(course: String, student: String) {{
+  state defined: Bool = fold false
+    on @course.defined(course) => true
+  if !defined {{
+    return reject UndefinedCourse
+  }}
+  state registered: Bool = fold false
+    on @student.registered(student) => true
+}}
+"
+    ));
+    assert_eq!(message, "this `state` would be a second read of the log");
+}
+
+/// An emit on a path that returns before any declaration is appended under an empty
+/// condition, which never conflicts. That is not a hole: the decision read nothing, so
+/// nothing in the log could invalidate it, and heklang already answers this way for a
+/// command that declares no `state` at all.
+#[test]
+fn an_emit_above_a_guard_appends_unconditionally() {
+    let program = program(&format!(
+        "{EVENTS}{GUARDS}command Enrol(student: String, course: String) {{
+  if course == \"free\" {{
+    emit @student.subscribed {{ course, student }}
+    return
+  }}
+
+  guard CourseIsDefined {{ course }}
+
+  emit @student.subscribed {{ course, student }}
+}}
+"
+    ));
+    let mut interpreter = Interpreter::new(&program);
+    let execution = interpreter
+        .run(
+            "Enrol",
+            [
+                ("student", Value::str("s1")),
+                ("course", Value::str("free")),
+            ],
+        )
+        .expect("ran");
+
+    assert!(matches!(&execution.outcome, Outcome::Ok(events) if events.len() == 1));
+    assert!(execution.condition.slices.is_empty());
+    assert_eq!(execution.condition.after, 0);
+    assert_eq!(interpreter.log().len(), 1, "and it committed");
+}

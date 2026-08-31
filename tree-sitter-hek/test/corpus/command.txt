@@ -1,5 +1,5 @@
 ================================================================================
-guard, folds and a hoisted let
+guard, folds and a leading let
 ================================================================================
 
 command PlaceOrder(order_id: Uuid, customer_id: Int, notes: String?) {
@@ -197,3 +197,79 @@ command ListItem(item_id: Uuid, tier: Tier) {
                   (identifier)))))
           (field_initializer
             (identifier)))))))
+
+================================================================================
+declarations interleave with statements, and each run is one read
+================================================================================
+
+command ListItem(item_id: Uuid, sku: String) {
+  let trimmed = sku.trim()
+  if trimmed.is_empty() {
+    return invalid("a sku is required")
+  }
+
+  guard SkuIsFree { sku: trimmed }
+
+  state listed: Bool = fold false
+    on @item.listed(item_id) => true
+
+  emit @item.listed { item_id, sku: trimmed }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (command_declaration
+    name: (type_identifier)
+    parameters: (parameters
+      (parameter
+        name: (identifier)
+        type: (type
+          (primitive_type)))
+      (parameter
+        name: (identifier)
+        type: (type
+          (primitive_type))))
+    body: (block
+      (let_statement
+        name: (identifier)
+        value: (method_call
+          receiver: (identifier)
+          method: (identifier)
+          arguments: (arguments)))
+      (if_statement
+        condition: (method_call
+          receiver: (identifier)
+          method: (identifier)
+          arguments: (arguments))
+        consequence: (block
+          (return_statement
+            (outcome_expression
+              arguments: (arguments
+                (string
+                  (string_content)))))))
+      (guard_declaration
+        guard: (type_identifier)
+        (field_initializer_list
+          (field_initializer
+            name: (identifier)
+            value: (identifier))))
+      (state_declaration
+        name: (identifier)
+        type: (type
+          (primitive_type))
+        seed: (boolean_literal)
+        (fold_arm
+          (slice_reference
+            path: (event_path)
+            (filter
+              field: (identifier)))
+          value: (boolean_literal)))
+      (emit_statement
+        path: (event_path)
+        (field_initializer_list
+          (field_initializer
+            name: (identifier))
+          (field_initializer
+            name: (identifier)
+            value: (identifier)))))))

@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::mem;
 
 use crate::ir::{
-    Arm, Assign, BinOp, Bind, Command, EnvBind, EnvField, EventPath, Expr, ExprId, Exprs, Filter,
-    Function, Guard, GuardCall, Handler, Ident, Literal, Number, Param, Slice, SliceId, Slot, Span,
+    Arm, BinOp, Bind, Command, EnvBind, EnvField, EventPath, Expr, ExprId, Exprs, Filter, Function,
+    Guard, GuardCall, Handler, Ident, Literal, Number, Param, Slice, SliceId, Slot, Span, Stage,
     StateVar, Stmt, Type, UnOp, Update,
 };
 use crate::scaled::Rounding;
@@ -12,9 +13,15 @@ pub struct Builder {
     module: Option<Ident>,
     params: Vec<Param>,
     exprs: Exprs,
-    prologue: Vec<Assign>,
-    slices: Vec<Slice>,
-    states: Vec<StateVar>,
+    /// The stages closed so far, and the one still open. A declaration joins the open
+    /// stage; a statement written after one closes it, so the next declaration starts a
+    /// stage of its own and reads the log again.
+    stages: Vec<Stage>,
+    open: Stage,
+    /// The states the open stage declares. A seed, a filter or a guard argument may read
+    /// a state an *earlier* stage folded, and may not read one of these, which have not
+    /// folded when this stage resolves.
+    pending: HashSet<Slot>,
     frame: u32,
     span: Span,
     slot_types: Vec<Option<Type>>,
@@ -34,9 +41,9 @@ impl Builder {
             module: None,
             params: Vec::new(),
             exprs: Exprs::default(),
-            prologue: Vec::new(),
-            slices: Vec::new(),
-            states: Vec::new(),
+            stages: Vec::new(),
+            open: Stage::default(),
+            pending: HashSet::new(),
             frame: 0,
             span: Span::default(),
             slot_types: Vec::new(),
@@ -108,7 +115,8 @@ impl Builder {
 
     pub fn state(&mut self, name: &str, ty: Type, init: ExprId) -> Slot {
         let slot = self.alloc(name, Some(ty.clone()));
-        self.states.push(StateVar {
+        self.pending.insert(slot);
+        self.open.states.push(StateVar {
             name: name.to_string(),
             ty,
             slot,
@@ -117,15 +125,28 @@ impl Builder {
         slot
     }
 
+    /// Across every stage, open and closed: a slot is a `state` wherever it was folded,
+    /// which is what `seal_state` and a diagnostic naming one both want. Whether it has
+    /// folded *yet* is `pending`, and a different question.
     pub fn state_of(&self, slot: Slot) -> Option<&StateVar> {
-        self.states.iter().find(|state| state.slot == slot)
+        self.stages
+            .iter()
+            .chain([&self.open])
+            .flat_map(|stage| &stage.states)
+            .find(|state| state.slot == slot)
     }
 
     /// Rule 12: recorded once the whole fold is parsed, because it is a property of
     /// every arm agreeing rather than of any one of them. The seal lands on the
     /// declared type, the same way it lands on an entity column.
     pub fn seal_state(&mut self, slot: Slot, subject: Ident) {
-        if let Some(state) = self.states.iter_mut().find(|state| state.slot == slot) {
+        if let Some(state) = self
+            .stages
+            .iter_mut()
+            .chain([&mut self.open])
+            .flat_map(|stage| &mut stage.states)
+            .find(|state| state.slot == slot)
+        {
             state.ty = seal(state.ty.clone(), subject.clone());
         }
         if let Some(ty) = self.slot_types.get_mut(slot.0 as usize)
@@ -161,8 +182,8 @@ impl Builder {
         binds: Vec<Bind>,
         updates: Vec<Update>,
     ) -> SliceId {
-        let id = SliceId(self.slices.len() as u32);
-        self.slices.push(Slice {
+        let id = SliceId(self.open.slices.len() as u32);
+        self.open.slices.push(Slice {
             event,
             filters,
             binds,
@@ -175,46 +196,42 @@ impl Builder {
         self.slice(event, filters, Vec::new(), Vec::new())
     }
 
-    /// The first filter reading something the prologue has not set, with the span to
-    /// point at. Filters resolve at step 3 and the fold runs at step 6, so such a
-    /// filter can never be satisfied and is a mistake rather than a slow path.
-    pub fn filter_past_prologue(&self, deferred: &HashSet<Slot>) -> Option<(Ident, Span)> {
-        self.slices
+    /// The first filter in the open stage reading a `state` that stage itself declares,
+    /// with the span to point at. Filters resolve before the stage folds, so such a
+    /// filter can never be satisfied and is a mistake rather than a slow path. A filter
+    /// naming a state an *earlier* stage folded is fine, and is the point of staging.
+    pub fn filter_past_fold(&self) -> Option<(Ident, Span)> {
+        self.open
+            .slices
             .iter()
             .flat_map(|slice| &slice.filters)
             .find_map(|filter| {
-                self.reads_past_prologue(filter.value, deferred)
+                self.reads_pending(filter.value)
                     .then(|| (filter.field.clone(), self.exprs.span(filter.value)))
             })
     }
 
-    pub fn hoist(&mut self, name: &str, value: ExprId, ty: Option<Type>) -> Slot {
-        let slot = self.alloc(name, ty);
-        self.prologue.push(Assign { slot, value });
-        slot
-    }
-
     /// Whether `value` reads a slot the prologue has not filled by the time it runs: a
     /// `state`, which the fold sets at step 6, or a `let` already left in the body
-    /// because it read one. `docs/commands.md`'s execution order is the whole rule, and
-    /// a `let` this answers `true` for cannot be hoisted to step 2.
-    pub fn reads_past_prologue(&self, value: ExprId, deferred: &HashSet<Slot>) -> bool {
-        self.unset_read(value, deferred).is_some()
+    /// Whether `value` reads a `state` the open stage has not folded yet.
+    pub fn reads_pending(&self, value: ExprId) -> bool {
+        self.unset_read(value).is_some()
     }
 
-    /// The `state` an expression reads, with the span of the read. A seed asks this,
-    /// because a seed is evaluated before the fold and so sees another `state`'s seed
-    /// rather than what it folds to: an answer that is wrong rather than late.
+    /// The unfolded `state` an expression reads, with the span of the read. A seed asks
+    /// this, because a seed is evaluated before its own stage folds and so sees another
+    /// `state`'s seed rather than what it folds to: an answer that is wrong rather than
+    /// late. A state an earlier stage folded is not one of these.
     pub fn state_read(&self, value: ExprId) -> Option<(Ident, Span)> {
-        let (slot, at) = self.unset_read(value, &HashSet::new())?;
+        let (slot, at) = self.unset_read(value)?;
         let state = self.state_of(slot)?;
         Some((state.name.clone(), self.exprs.span(at)))
     }
 
-    /// The first read of something the prologue has not filled, as the slot and the
-    /// load that reads it. Both callers above want a different half of this, and a
-    /// second walk over the same arena is the kind of thing that drifts.
-    fn unset_read(&self, value: ExprId, deferred: &HashSet<Slot>) -> Option<(Slot, ExprId)> {
+    /// The first read of a `state` the open stage declares, as the slot and the load
+    /// that reads it. Both callers above want a different half of this, and a second
+    /// walk over the same arena is the kind of thing that drifts.
+    fn unset_read(&self, value: ExprId) -> Option<(Slot, ExprId)> {
         let mut stack = vec![value];
         while let Some(id) = stack.pop() {
             let Some(expr) = self.exprs.get(id) else {
@@ -222,7 +239,7 @@ impl Builder {
             };
             match expr {
                 Expr::Load(slot) => {
-                    if self.state_of(*slot).is_some() || deferred.contains(slot) {
+                    if self.pending.contains(slot) {
                         return Some((*slot, id));
                     }
                 }
@@ -385,13 +402,48 @@ impl Builder {
         }
     }
 
+    /// A statement, placed by where the open stage is: above its declarations while it
+    /// has none, below them once it has. This is the whole of what makes a stage a
+    /// stage, so nothing else may push onto `pre` or `post`.
+    pub fn stmt(&mut self, stmt: Stmt) {
+        if self.open.slices.is_empty() && self.open.states.is_empty() {
+            self.open.pre.push(stmt);
+        } else {
+            self.open.post.push(stmt);
+        }
+    }
+
+    /// Whether a declaration written now would open a new stage, which it does once a
+    /// statement has been written below the open stage's declarations. The caller asks
+    /// before declaring so a guard can be refused a second read.
+    pub fn would_stage(&self) -> bool {
+        !self.open.post.is_empty()
+    }
+
+    /// Closes the open stage if a declaration written now would start a new one. The
+    /// states it declared stop being pending, because from here they have folded.
+    pub fn stage_break(&mut self) {
+        if !self.would_stage() {
+            return;
+        }
+        self.stages.push(mem::take(&mut self.open));
+        self.pending.clear();
+    }
+
+    /// Closes the open stage behind the others. Every finisher starts here, so a
+    /// declaration always has at least one stage even when it declared nothing at all.
+    fn seal(&mut self) {
+        self.stages.push(mem::take(&mut self.open));
+    }
+
     /// A test has values and no statements, so it keeps the arena and the frame width
     /// and nothing else.
     pub fn finish_test(self) -> (usize, Exprs) {
         (self.frame as usize, self.exprs)
     }
 
-    pub fn finish(self, body: Vec<Stmt>) -> Command {
+    pub fn finish(mut self) -> Command {
+        self.seal();
         Command {
             name: self.name,
             module: self.module,
@@ -399,28 +451,25 @@ impl Builder {
             frame: self.frame as usize,
             exprs: self.exprs,
             now: self.now,
-            prologue: self.prologue,
-            slices: self.slices,
-            states: self.states,
+            stages: self.stages,
             calls: self.calls,
-            body,
         }
     }
 
     /// A command's shape minus `now`, which a guard may not pin because it decides from
-    /// the log rather than from the clock. See `docs/guards.md`.
-    pub fn finish_guard(self, body: Vec<Stmt>, span: Span) -> Guard {
+    /// the log rather than from the clock, and with one stage rather than many, because
+    /// a guard is one read. See `docs/guards.md`.
+    pub fn finish_guard(mut self, span: Span) -> Guard {
+        self.seal();
+        debug_assert_eq!(self.stages.len(), 1, "a guard is one stage");
         Guard {
             name: self.name,
             module: self.module,
             params: self.params,
             frame: self.frame as usize,
             exprs: self.exprs,
-            prologue: self.prologue,
-            slices: self.slices,
-            states: self.states,
+            stage: self.stages.pop().unwrap_or_default(),
             calls: self.calls,
-            body,
             span,
         }
     }
@@ -431,15 +480,20 @@ impl Builder {
         self.calls.push(GuardCall {
             guard: guard.into(),
             args,
-            at_slice: self.slices.len(),
-            at_state: self.states.len(),
+            at_stage: self.stages.len(),
+            at_slice: self.open.slices.len(),
+            at_state: self.open.states.len(),
             span,
         });
     }
 
-    /// Whether anything has been folded yet. A guard that folds nothing is a `fn`.
+    /// Whether anything has been folded yet, in any stage. A guard that folds nothing
+    /// is a `fn`.
     pub fn folds_nothing(&self) -> bool {
-        self.slices.is_empty()
+        self.stages
+            .iter()
+            .chain([&self.open])
+            .all(|stage| stage.slices.is_empty())
     }
 }
 
@@ -495,18 +549,16 @@ impl Builder {
         }
     }
 
-    pub fn finish_arm(self, events: Vec<EventPath>, span: Span, body: Vec<Stmt>) -> Arm {
+    pub fn finish_arm(mut self, events: Vec<EventPath>, span: Span) -> Arm {
+        self.seal();
         Arm {
             events,
             binds: self.binds,
             envelope: self.envelope,
             frame: self.frame as usize,
             exprs: self.exprs,
-            prologue: self.prologue,
-            slices: self.slices,
-            states: self.states,
             now: self.now,
-            body,
+            stages: self.stages,
             span,
         }
     }

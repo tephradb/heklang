@@ -43,15 +43,15 @@ transpose without a type error. What drifts when those fall out of step is the a
 
 ```
 guard <Name>(<name>: <Type>, ...) {
-  <state>*
-  <guard>*
-  <let>*
+  <statement>*
+  <state | guard>*
   <statement>*
 }
 ```
 
-A command body with no `emit`. Parameters in, folds, and a decision; **falling off the end means it
-holds**. There is no return type, because a guard either refuses or it does not.
+A command body with no `emit`, and with one declaration run rather than many, because a guard is one
+read (rule 6). Parameters in, folds, and a decision; **falling off the end means it holds**. There is
+no return type, because a guard either refuses or it does not.
 
 **A guard names a proposition, not an entity.** `CourseIsDefined`, `UserHasRegistered`,
 `ShopIsConnected`. Not `Course`, `User`, `Shop`.
@@ -93,18 +93,45 @@ raw slices, a name is a guard.
 
 ## 3. The order on the page is the precedence
 
-The guards run in the order they are written, each before the body, and the first that refuses is
-the command's outcome. That is the whole reason the ladder moved out of the declaration: five
-`guard` lines in precedence order say what a five-rung `if` ladder said, in the place a reader looks
-for it.
+The guards run in the order they are written, each before the statements below them, and the first
+that refuses is the command's outcome. That is the whole reason the ladder moved out of the
+declaration: five `guard` lines in precedence order say what a five-rung `if` ladder said, in the
+place a reader looks for it.
 
-`docs/commands.md`'s execution order gains one step, between the fold and the body:
+A run of guards and `state`s is one **stage**: one read of the log, with every decision in the run
+made after it. `docs/commands.md` has the order.
 
-> 7. **the guards' decisions** run, in the order the guards are written.
+**A statement above a guard decides before it, and reads nothing to do so.** This is what makes the
+precedence the author's rather than the construct's:
 
-A guard never straddles two phases. Its folds are `state` folds and run at step 6 with every other;
-its decision runs at step 7; the body it guards runs at step 8. That is why a `guard` is a
-declaration rather than a statement, and why it cannot be written among statements.
+```
+command ListItem(item_id: Uuid, seller_id: Int, sku: String?) {
+  let objection = sku_error(sku)
+  if objection.is_some() {
+    return objection
+  }
+
+  guard SkuIsAvailable { item_id, seller_id, sku }
+
+  emit @item.listed { item_id, seller_id, sku }
+}
+```
+
+It closed a defect rather than adding a convenience. A guard sees the arguments exactly as the
+caller passed them, because nothing has run that could have looked at them; that is what a parameter
+is. What was wrong is that guards owned the whole body, so a `return invalid(...)` was unreachable
+until after the fold, and a command that both validated its request and guarded the log answered the
+world's question first. A port of a real application took that inversion in all three commands that
+validate, and 125 tests caught none of it, because a test that expects `invalid` sets up an
+otherwise-valid world.
+
+The sharpest form was an existence oracle. A command deriving a SKU from a reserved prefix refused
+with `sku_taken` exactly when an item with the id the caller had pasted in existed, and `ok` when it
+did not, from a string the validator existed to reject outright, with the refusal message handing
+the probe back. Before the log check was a guard, that was `invalid` and unreachable.
+
+**A guard's arguments and its filters may read a `state` an earlier stage folded**, because by then
+it has. Reading one declared beside it is still refused, and rule 7 has that.
 
 ## 4. A guard's slices are the command's boundary
 
@@ -159,6 +186,10 @@ the closure, which is what pays for it:
 `ShopIsConnected` is two levels down and in the condition, and that line is the only place it shows.
 The listing is also the only way to compare two commands' boundaries, since a test cannot ask.
 
+It is an **upper bound** rather than the boundary. A command that returns above a declaration run
+never reaches the guards below it, so what a given request actually read can be less than what the
+listing names. What is in the condition is what the stages that ran read.
+
 **Asked for rather than printed**, because it is an enumeration rather than a summary, and for a
 program whose guards do not nest it restates the `guard` lines a reader just read.
 
@@ -177,6 +208,18 @@ interpreter sees either, so a command reaches the fold with one arena, one frame
 | `now()` | a guard decides from the log; take the moment as a parameter |
 | a bare `return`, or `return <value>` | see below |
 | fold nothing | a decision made from arguments alone is a `fn` |
+| read the log twice | a guard is one read; see below |
+
+**A guard is one read of the log.** Its declarations come before its first statement, so it is one
+stage, and a `state` or `guard` written after a statement is refused:
+
+> this `state` would be a second read of the log; a guard is one read: its declarations come before
+> its first statement, and a proposition that needs a second read is two guards
+
+A guard is copied into the stage of whatever names it, so one carrying two reads would split its
+caller's stage in half and turn `guard A; guard B; state s` into three reads where it is one. Rule 1
+already says a guard names one proposition; this is what that costs and what it buys.
+
 
 **A guard returns only a refusal.** `return reject <Name>` and `return invalid(...)`, and nothing
 else. A guard is spliced into the command that names it, where a bare `return` would read as *the
@@ -206,6 +249,52 @@ command CancelWarranty(warranty_id: Uuid, shop_id: Int) {
   emit @warranty.cancelled { warranty_id, shop_id }
 }
 ```
+
+**And an idempotent no-op keeps every refusal below it inline too.** This is the same rule read
+forwards, and it is the half that gets missed, because the guard that has to stay is not the no-op:
+it is the perfectly good proposition underneath one.
+
+```
+command RecordWarrantySale(warranty_id: Uuid, shop_id: Int, premium: Bool) {
+  guard ShopIsConnected { shop_id }
+
+  state already_sold: Bool = fold false
+    on @warranty.sold(warranty_id, shop_id) => true
+  if already_sold {
+    return
+  }
+
+  state sold: Int = fold 0
+    on @warranty.sold(shop_id) => sold + 1
+  if !premium && sold >= FREE_TIER_LIMIT {
+    return reject FreeTierExhausted
+  }
+
+  emit @warranty.sold { warranty_id, shop_id }
+}
+```
+
+`UnderFreeTierLimit` is a proposition, it has a refusal, and it folds. It still cannot be a guard,
+because rule 3 would give it the front of the body and it would refuse a replay of a sale already on
+the log. An effect rerun from position 0 depends on that replay answering `ok`, so the cap stays a
+`state` and an `if`.
+
+**The test is not "is this a no-op" but "can this refusal be reached by a request the command would
+have answered `ok`?"** If a replay has to answer `ok`, every refusal it precedes stays inline,
+however well that refusal would have read as a guard.
+
+Folding `already_sold` into the guard and writing `if !already_sold && !premium && sold >= LIMIT`
+does typecheck, and is worse twice over: the proposition it names is "under the limit, or else this
+sale is already recorded", which is rule 1's compound name, and it duplicates a fold the command
+still needs for its own no-op. A conditional guard would cost the static closure `--boundaries`
+prints and the splice model in `src/inline.rs`, for a case that inline `state` and `if` already say
+plainly.
+
+Note where this differs from the objection a statement above a guard makes. That one reads nothing,
+so it can sit above the first declaration run and answer before the log is touched at all. This one
+reads the log to know it is a replay, so there is nowhere above the fold to lift it to: it has to be
+below its own `state`, and everything after it is below that. Rule 3 gives the author the order for
+the first case and cannot give it for this one.
 
 **A guard binds nothing into its caller.** Its states are its own, so a `guard CourseHasSeats`
 gives the command no `seats`. A caller that wants a value folds it inline; the slice is already in
@@ -239,12 +328,15 @@ This is a *direct* duplicate in one declaration. Reaching the same guard twice t
 is allowed and silent: a caller often cannot know what the guards it names reach, and rule 5 is the
 point of the construct. `hek check` shows each one once.
 
-**An argument may not read a `state`.** An argument becomes a prologue assignment, which runs before
-any fold, so it would read the other state's seed rather than what it folds to. Exactly the mistake
-a seed makes (`docs/commands.md`), rejected the same way and for the same reason: the answer would
-be wrong rather than late.
+**An argument may not read a `state` from its own stage.** An argument is assigned above the
+declarations it sits with, so it would read that state's seed rather than what it folds to. Exactly
+the mistake a seed makes (`docs/commands.md`), rejected the same way and for the same reason: the
+answer would be wrong rather than late.
 
 > `course` is taken from `seen`, which has not folded yet
+
+A `state` an **earlier** stage folded is fine, and needs nothing but a statement between the two
+runs to close the first one.
 
 ## 8. Where this diverges from the runtime
 

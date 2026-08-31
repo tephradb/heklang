@@ -116,11 +116,15 @@ An arm is `on @path [as name] [{ destructure }] { body }`, the same shape a proj
 is the body; with one there is nothing to destructure. The two kinds share one construct rather than
 each having a slightly different one.
 
-An arm's prologue is **`state` alone**. A command hoists a leading `let` so that a filter can name
-it; an arm's filters have the trigger binding instead, so a `let` in an arm is an ordinary body
-statement and may call out. There is no `guard` either, in either of its shapes, because an effect
-has no append condition to build and no `Outcome` to refuse with: `docs/commands.md` has what a
-condition is and why a `state` declares it, and `docs/guards.md` has the named form.
+An arm stages like a command: a run of `state` declarations is one read, and a statement below one
+closes it, so a later run can filter on what an earlier one folded (`docs/commands.md`). Rule 3
+folds every run to the trigger's own position, so a second read sees the prefix the first did and
+there is no head to pin and no condition to build.
+
+There is no `guard`, in either of its shapes, because an effect has no append condition to build and
+no `Outcome` to refuse with: `docs/commands.md` has what a condition is and why a `state` declares
+it, and `docs/guards.md` has the named form. And a `let` in an arm is an ordinary statement that may
+call out, because rule 2 gives an arm's filters the trigger binding rather than a hoisted value.
 
 ## 3. The fold stops at the trigger's own position, inclusive
 

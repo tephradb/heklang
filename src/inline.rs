@@ -8,17 +8,17 @@
 //!
 //! The whole transform is one offset. A guard's expressions move to the end of the
 //! caller's arena and its slots to the end of the caller's frame, so every `ExprId` and
-//! every `Slot` inside the copy shifts by a constant. Arguments become prologue
-//! assignments onto the shifted parameter slots, which the caller evaluates before it
-//! resolves any filter (`docs/commands.md`, step 2 before step 3).
+//! every `Slot` inside the copy shifts by a constant. Arguments become assignments above
+//! the stage the guard was written in, onto the shifted parameter slots, which the caller
+//! evaluates before it resolves that stage's filters (`docs/commands.md`).
 //!
 //! `docs/guards.md` is the contract.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::ir::{
-    Assign, Bind, Command, Expr, ExprId, Exprs, Filter, Guard, GuardCall, Ident, Iter, Program,
-    Return, Slice, Slot, StateVar, Stmt, Update,
+    Bind, Command, Expr, ExprId, Exprs, Filter, Guard, GuardCall, Ident, Iter, Program, Return,
+    Slice, Slot, Stage, StateVar, Stmt, Update,
 };
 
 /// The guards a name reaches through, first to last, when they form a cycle. `None`
@@ -130,36 +130,38 @@ fn visit(program: &Program, name: &str, seen: &mut HashSet<Ident>, out: &mut Vec
 }
 
 /// What one splice needs from its destination, so a command and a guard share the code
-/// that does it. The fields are the six a callee contributes to.
+/// that does it: the arena and frame the callee's expressions move into, and the one
+/// stage its declarations join.
 struct Site<'a> {
     exprs: &'a mut Exprs,
     frame: &'a mut usize,
-    prologue: &'a mut Vec<Assign>,
-    slices: &'a mut Vec<Slice>,
-    states: &'a mut Vec<StateVar>,
-    body: &'a mut Vec<Stmt>,
+    stage: &'a mut Stage,
 }
 
 fn into_command(command: &mut Command, callee: &Guard, call: &GuardCall, grown: &mut Grown) {
+    // A guard joins the stage the author wrote it in. The clamp is the same defence
+    // `insert` makes below: a caller whose declarations were rejected has fewer stages
+    // than the count recorded at parse time, and a panic here would report a `guard`
+    // for someone else's mistake.
+    let Some(stage) = command.stages.get_mut(call.at_stage) else {
+        return;
+    };
     let mut site = Site {
         exprs: &mut command.exprs,
         frame: &mut command.frame,
-        prologue: &mut command.prologue,
-        slices: &mut command.slices,
-        states: &mut command.states,
-        body: &mut command.body,
+        stage,
     };
     at(&mut site, callee, call, grown);
 }
 
 fn into_guard(guard: &mut Guard, callee: &Guard, call: &GuardCall, grown: &mut Grown) {
+    // A guard is one read, so it has exactly one stage and every call in it names that
+    // one. `docs/guards.md` rule 6 has why.
+    debug_assert_eq!(call.at_stage, 0, "a guard is one stage");
     let mut site = Site {
         exprs: &mut guard.exprs,
         frame: &mut guard.frame,
-        prologue: &mut guard.prologue,
-        slices: &mut guard.slices,
-        states: &mut guard.states,
-        body: &mut guard.body,
+        stage: &mut guard.stage,
     };
     at(&mut site, callee, call, grown);
 }
@@ -178,26 +180,28 @@ fn at(site: &mut Site<'_>, callee: &Guard, call: &GuardCall, grown: &mut Grown) 
     }
     *site.frame += callee.frame;
 
-    // An argument first, because the guard's own prologue and its filters read the
-    // parameter it fills. The argument is already an expression in this arena, so it is
-    // the one thing here that does not shift.
+    // An argument first, because the statements above the guard's declarations and its
+    // filters both read the parameter it fills. The argument is already an expression in
+    // this arena, so it is the one thing here that does not shift. Both land at the end
+    // of `pre`, which is where the author wrote the `guard`: a declaration run closes
+    // `pre` before it opens, so nothing of the caller's can follow them.
     for param in &callee.params {
         let Some((_, value)) = call.args.iter().find(|(name, _)| name == &param.name) else {
             continue;
         };
-        site.prologue.push(Assign {
+        site.stage.pre.push(Stmt::Assign {
             slot: shift_slot(param.slot, slot_off),
             value: *value,
         });
     }
-    for assign in &callee.prologue {
-        site.prologue.push(Assign {
-            slot: shift_slot(assign.slot, slot_off),
-            value: shift_expr_id(assign.value, expr_off),
-        });
+    for stmt in &callee.stage.pre {
+        let mut moved = stmt.clone();
+        shift_stmt(&mut moved, expr_off, slot_off);
+        site.stage.pre.push(moved);
     }
 
     let slices: Vec<Slice> = callee
+        .stage
         .slices
         .iter()
         .map(|slice| Slice {
@@ -226,9 +230,10 @@ fn at(site: &mut Site<'_>, callee: &Guard, call: &GuardCall, grown: &mut Grown) 
                 .collect(),
         })
         .collect();
-    grown.slices += insert(site.slices, call.at_slice + grown.slices, slices);
+    grown.slices += insert(&mut site.stage.slices, call.at_slice + grown.slices, slices);
 
     let states: Vec<StateVar> = callee
+        .stage
         .states
         .iter()
         .map(|state| StateVar {
@@ -238,16 +243,16 @@ fn at(site: &mut Site<'_>, callee: &Guard, call: &GuardCall, grown: &mut Grown) 
             init: shift_expr_id(state.init, expr_off),
         })
         .collect();
-    grown.states += insert(site.states, call.at_state + grown.states, states);
+    grown.states += insert(&mut site.stage.states, call.at_state + grown.states, states);
 
     // Ahead of the body the author wrote, and after the guards written above this one:
     // a refusal is decided in the order the guards appear, and all of them before the
     // first statement of the body they guard.
-    let mut moved: Vec<Stmt> = callee.body.to_vec();
+    let mut moved: Vec<Stmt> = callee.stage.post.to_vec();
     for stmt in &mut moved {
         shift_stmt(stmt, expr_off, slot_off);
     }
-    grown.body += insert(site.body, grown.body, moved);
+    grown.body += insert(&mut site.stage.post, grown.body, moved);
 }
 
 /// Puts `what` into `into` at `at`, and answers how many that was. Clamped rather than
