@@ -26,9 +26,9 @@ pub use interp::{
 pub use ir::{
     Absent, Action, Arm, Assign, BinOp, Bind, Builtin, Command, ConstDef, Effect, EntityDef,
     EntityField, EnumDef, EnvBind, EnvField, EventDef, EventPath, Expr, ExprId, Exprs, FieldDef,
-    Filter, Function, Guard, GuardCall, Handler, Ident, Index, Iter, Literal, Number, NumberError,
-    Param, Pos, Program, Projector, RecordDef, RecordField, Return, Slice, SliceId, Slot, Span,
-    StateVar, Stmt, Type, UnOp, Update,
+    Filter, Function, Guard, GuardCall, Handler, Ident, Index, Iter, Literal, MessagePart, Number,
+    NumberError, Param, Pos, Program, Projector, RecordDef, RecordField, RefusalDef, RefusalParam,
+    Return, Slice, SliceId, Slot, Span, StateVar, Stmt, Type, UnOp, Update,
 };
 pub use parse::{check_files, parse, parse_files};
 pub use testing::{TestOutcome, TestResult, World, run_tests, run_tests_in};

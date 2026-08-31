@@ -377,6 +377,10 @@ fn cases() -> Vec<(Code, String)> {
             "event @a.b { id: Int }\nevent @c.d { other: String }\neffect E {\n  on @a.b, @c.d { log(\"x\") }\n}\n",
         ),
         (
+            Code::RefusalShape,
+            "refusal shopNotFound \"shop does not exist\"\n",
+        ),
+        (
             Code::StateShape,
             "event @a.b { id: Int }\ncommand C(id: Int) {\n  state n: Int = 0\n  emit @a.b { id }\n}\n",
         ),

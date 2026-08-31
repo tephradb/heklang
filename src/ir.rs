@@ -222,6 +222,8 @@ pub struct Program {
     pub commands: Vec<Command>,
     /// Named propositions, in declaration order. See `docs/guards.md`.
     pub guards: Vec<Guard>,
+    /// Named refusals, in declaration order. See `docs/refusals.md`.
+    pub refusals: Vec<RefusalDef>,
     pub projectors: Vec<Projector>,
     pub effects: Vec<Effect>,
     /// Module scope, shadowed inside a projector by one of its own.
@@ -244,6 +246,10 @@ impl Program {
 
     pub fn guard(&self, name: &str) -> Option<&Guard> {
         self.guards.iter().find(|guard| guard.name == name)
+    }
+
+    pub fn refusal(&self, name: &str) -> Option<&RefusalDef> {
+        self.refusals.iter().find(|def| def.name == name)
     }
 
     pub fn projector(&self, name: &str) -> Option<&Projector> {
@@ -327,6 +333,48 @@ pub struct ConstDef {
     pub module: Option<Ident>,
     pub ty: Type,
     pub value: Literal,
+}
+
+/// One piece of a refusal's message: literal text, or the parameter whose value goes
+/// there. A message names only the refusal's own parameters, which is what lets a use
+/// site build the string by substitution instead of evaluating in the declaration's
+/// scope, and what makes the message a function of the fields a caller was given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessagePart {
+    Text(String),
+    Param(usize),
+}
+
+/// A named refusal: the code a caller branches on, the fields its message needs, and
+/// the message. Declared once, so two `reject`s of the same refusal cannot disagree
+/// about what it says, which is the drift this replaces. Like a `const` it holds no
+/// expression arena: the message is text and holes, and the holes are filled at the
+/// use site from the caller's own arena. See `docs/refusals.md`.
+#[derive(Debug, Clone)]
+pub struct RefusalDef {
+    pub name: Ident,
+    pub module: Option<Ident>,
+    /// Derived from `name`: `ShopNotFound` is `shop_not_found`. This is what reaches
+    /// `Outcome::Reject` and so what a caller outside the program sees.
+    pub code: String,
+    pub params: Vec<RefusalParam>,
+    pub message: Vec<MessagePart>,
+    pub span: Span,
+}
+
+impl RefusalDef {
+    pub fn param(&self, name: &str) -> Option<(usize, &RefusalParam)> {
+        self.params
+            .iter()
+            .enumerate()
+            .find(|(_, param)| param.name == name)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RefusalParam {
+    pub name: Ident,
+    pub ty: Type,
 }
 
 #[derive(Debug, Clone)]

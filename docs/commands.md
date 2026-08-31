@@ -213,9 +213,9 @@ and beside it `return <expression>` takes anything of type `Outcome`, which is w
 `-> Outcome?` produces. That is how two commands share one ladder without sharing a body:
 
 ```
-let refusal = ladder(subscribed, taken, limit)
-if refusal.is_some() {
-  return refusal
+let decision = ladder(subscribed, taken, limit)
+if decision.is_some() {
+  return decision
 }
 ```
 

@@ -63,6 +63,7 @@ pub enum Code {
     EmptyDeclaration,
     EntityShape,
     EventShape,
+    RefusalShape,
     StateShape,
     NoZeroValue,
 
@@ -118,6 +119,7 @@ impl Code {
         Code::EmptyDeclaration,
         Code::EntityShape,
         Code::EventShape,
+        Code::RefusalShape,
         Code::StateShape,
         Code::NoZeroValue,
         Code::WrongContext,
@@ -163,6 +165,7 @@ impl Code {
             Code::EmptyDeclaration => "empty-declaration",
             Code::EntityShape => "entity-shape",
             Code::EventShape => "event-shape",
+            Code::RefusalShape => "refusal-shape",
             Code::StateShape => "state-shape",
             Code::NoZeroValue => "no-zero-value",
             Code::WrongContext => "wrong-context",

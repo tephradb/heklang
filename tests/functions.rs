@@ -219,8 +219,7 @@ fn ladder(months: Int) -> Outcome? {
   return none
 }
 ";
-    let body =
-        "  let refusal = ladder(months)\n  if refusal.is_some() {\n    return refusal\n  }\n{EMIT}";
+    let body = "  let decision = ladder(months)\n  if decision.is_some() {\n    return decision\n  }\n{EMIT}";
     let source = source(decls, &body.replace("{EMIT}", EMIT));
     let program = parse(&source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
 
@@ -268,7 +267,7 @@ fn an_outcome_is_not_a_type_anywhere_else() {
 #[test]
 fn an_unnarrowed_refusal_does_not_fill_a_return() {
     let decls = "\nfn ladder(months: Int) -> Outcome? { return none }\n";
-    let body = "  let refusal = ladder(months)\n  return refusal";
+    let body = "  let decision = ladder(months)\n  return decision";
     let message = err(decls, body);
     assert!(
         message.starts_with("expected Outcome, found Outcome?"),

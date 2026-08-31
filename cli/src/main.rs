@@ -323,6 +323,7 @@ fn counts(program: &Program) -> String {
     count(program.events.len(), "event", "events");
     count(program.commands.len(), "command", "commands");
     count(program.guards.len(), "guard", "guards");
+    count(program.refusals.len(), "refusal", "refusals");
     count(program.projectors.len(), "projector", "projectors");
     count(program.effects.len(), "effect", "effects");
     count(program.functions.len(), "fn", "fns");

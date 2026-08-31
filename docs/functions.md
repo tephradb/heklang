@@ -277,9 +277,9 @@ command Subscribe(course: Uuid, student: Uuid) {
   state subscribed: Bool = fold false
     on @StudentSubscribed(course, student) => true
   ...
-  let refusal = ladder(subscribed, taken, limit)
-  if refusal.is_some() {
-    return refusal
+  let decision = ladder(subscribed, taken, limit)
+  if decision.is_some() {
+    return decision
   }
   emit @StudentSubscribed { course, student }
 }

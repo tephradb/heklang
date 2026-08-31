@@ -8,9 +8,9 @@ use crate::inline;
 use crate::ir::{
     Absent, Action, Arm, BinOp, Bind, Builtin, Command, ConstDef, Effect, EntityDef, EntityField,
     EnumDef, EnvField, EventDef, EventPath, Expect, Expr, ExprId, Exprs, FieldDef, Filter,
-    Function, Given, Guard, Handler, Ident, Index, Iter, Literal, Number, Param, Pos, Program,
-    Projector, RecordDef, RecordField, ReplySpec, Return, Setup, Slot, Span, Stmt, Test, Type,
-    UnOp, Update,
+    Function, Given, Guard, Handler, Ident, Index, Iter, Literal, MessagePart, Number, Param, Pos,
+    Program, Projector, RecordDef, RecordField, RefusalDef, RefusalParam, ReplySpec, Return, Setup,
+    Slot, Span, Stmt, Test, Type, UnOp, Update,
 };
 use crate::lex::{Keyword, Spanned, Sym, Token, lex};
 use crate::scaled::{self, Rounding};
@@ -108,6 +108,10 @@ struct Parser {
     /// The same, for a guard, so a command may name one declared below it or in
     /// another module. See `docs/guards.md`.
     guards: Vec<Signature>,
+    /// Declared refusals, whole rather than as signatures: a use site needs the
+    /// message as well as the fields, because it builds the string itself. See
+    /// `docs/refusals.md`.
+    refusals: Vec<RefusalDef>,
     /// The same, for `fn`, so a helper may call one declared below it.
     functions: Vec<Signature>,
     /// The enclosing effect's own `fn` signatures; empty outside one. Two lists
@@ -243,6 +247,7 @@ impl Parser {
             kind: Kind::Command,
             commands: Vec::new(),
             guards: Vec::new(),
+            refusals: Vec::new(),
             functions: Vec::new(),
             local_fns: Vec::new(),
             in_effect: None,
@@ -711,7 +716,9 @@ impl Parser {
             projectors,
             effects: bodies.effects,
             // Cloned rather than taken: pass E below resolves a test's values against the
-            // same tables, so they have to stay in the parser until it has run.
+            // same tables, so they have to stay in the parser until it has run. A test
+            // writes `expect reject <Name>`, so refusals are one of them.
+            refusals: self.refusals.clone(),
             enums: self.module_enums.clone(),
             records: self.records.clone(),
             consts: self.consts.clone(),
@@ -920,6 +927,7 @@ impl Parser {
             }
             Token::Word(Keyword::Command) => self.command_signature()?,
             Token::Word(Keyword::Guard) => self.guard_signature()?,
+            Token::Word(Keyword::Refusal) => self.refusal_decl()?,
             Token::Word(Keyword::Fn) => self.fn_signature()?,
             Token::Word(Keyword::Effect) | Token::Word(Keyword::Test) => self.skip_item()?,
             other => return self.fail(Code::ExpectedToken, Self::expected_item(other)),
@@ -938,6 +946,7 @@ impl Parser {
             Token::Word(Keyword::Event)
             | Token::Word(Keyword::Enum)
             | Token::Word(Keyword::Record)
+            | Token::Word(Keyword::Refusal)
             | Token::Word(Keyword::Const) => self.skip_item()?,
             Token::Word(Keyword::Command) => {
                 let command = self.command_decl(events)?;
@@ -1032,6 +1041,169 @@ impl Parser {
             ret: None,
         });
         self.skip_braced()
+    }
+
+    /// Pass C. A refusal is a name, the fields its message needs, and the message.
+    /// Collected here rather than in pass D because a body names one, and beside a
+    /// guard's signature because both are read before anything that can use them.
+    fn refusal_decl(&mut self) -> Result<(), Diagnostic> {
+        let module = self.module_at(self.pos).map(str::to_string);
+        let span = self.span_here();
+        self.expect_word(Keyword::Refusal)?;
+        let named = self.pos;
+        let at = self.span_here();
+        let name = self.expect_ident()?;
+        if self.refusals.iter().any(|other| other.name == name) {
+            return Err(self.declared_twice(
+                "refusal",
+                &name,
+                format!("refusal `{name}` is declared twice"),
+                at,
+            ));
+        }
+        self.declare("refusal", &name, named);
+
+        // The one name in heklang whose spelling leaves the program: it derives the
+        // code a client switches on. Both rules keep that derivation reversible, so
+        // two names can never arrive as one code and the check for that is
+        // unnecessary rather than merely unlikely.
+        if !name.starts_with(|ch: char| ch.is_ascii_uppercase()) {
+            return Err(self
+                .err(
+                    Code::RefusalShape,
+                    format!("a refusal is named like a type, so `{name}` starts with a capital"),
+                    at,
+                )
+                .with_hint(format!(
+                    "the code a caller sees is derived from the name, and `{}` is `{}`",
+                    upper_first(&name),
+                    refusal_code(&upper_first(&name))
+                )));
+        }
+        if name.contains('_') {
+            return Err(self
+                .err(
+                    Code::RefusalShape,
+                    format!("a refusal's name has no `_`, and `{name}` has one"),
+                    at,
+                )
+                .with_hint(
+                    "the underscores go in the derived code rather than the name: \
+                     `ShopNotFound` is `shop_not_found`",
+                ));
+        }
+
+        let params = if self.at_sym(Sym::LParen) {
+            self.param_list(false)?
+        } else {
+            Vec::new()
+        };
+        let params: Vec<RefusalParam> = params
+            .into_iter()
+            .map(|(name, ty)| RefusalParam { name, ty })
+            .collect();
+
+        let code = refusal_code(&name);
+        let message = self.refusal_message(&name, &params)?;
+
+        // A parameter the message never names has nowhere to go: the use site would
+        // evaluate its argument into the arena and then reference it from nothing, so
+        // every check that walks the tree would step over it. Unreachable rather than
+        // merely unused, which is why this is an error and not a lint.
+        if let Some(unused) = params
+            .iter()
+            .enumerate()
+            .find(|(index, _)| !message.contains(&MessagePart::Param(*index)))
+            .map(|(_, param)| param.name.clone())
+        {
+            return Err(self
+                .err(
+                    Code::RefusalShape,
+                    format!("refusal `{name}` declares `{unused}` and never says it"),
+                    at,
+                )
+                .with_hint(
+                    "the message is the only thing a refusal's fields feed, so one the \
+                     message does not name could never be read",
+                ));
+        }
+
+        self.refusals.push(RefusalDef {
+            name,
+            module,
+            code,
+            params,
+            message,
+            span,
+        });
+        Ok(())
+    }
+
+    /// The message, as literal text and the parameters to splice into it. A hole is a
+    /// parameter name and nothing else: a declaration has no scope to evaluate an
+    /// expression in, and a message that could read anything wider would stop being a
+    /// function of the fields the caller was given, which is the whole point of
+    /// declaring it.
+    fn refusal_message(
+        &mut self,
+        name: &str,
+        params: &[RefusalParam],
+    ) -> Result<Vec<MessagePart>, Diagnostic> {
+        let at = self.span_here();
+        let mut parts = Vec::new();
+        let mut text = match self.bump().token {
+            Token::Text(text) => return Ok(vec![MessagePart::Text(text)]),
+            Token::TextOpen(text) => text,
+            other => {
+                return Err(self
+                    .err(
+                        Code::ExpectedToken,
+                        format!("refusal `{name}` needs a message, found {other}"),
+                        at,
+                    )
+                    .with_hint(
+                        "the message follows the name, and lives here so that two \
+                         `reject`s of it cannot disagree: `refusal ShopNotFound \"shop \
+                         does not exist\"`",
+                    ));
+            }
+        };
+        loop {
+            if !text.is_empty() {
+                parts.push(MessagePart::Text(text));
+            }
+            let hole = self.span_here();
+            let field = self.expect_ident()?;
+            let Some(index) = params.iter().position(|param| param.name == field) else {
+                return Err(self
+                    .err(
+                        Code::UnknownMember,
+                        format!("refusal `{name}` has no field `{field}`"),
+                        hole,
+                    )
+                    .with_hint(format!(
+                        "a refusal's message names its own fields and nothing else, so it says the same thing wherever it is written; declare it `refusal {name}({field}: <Type>)`"
+                    )));
+            };
+            parts.push(MessagePart::Param(index));
+            let next = self.span_here();
+            match self.bump().token {
+                Token::TextPart(part) => text = part,
+                Token::TextClose(part) => {
+                    if !part.is_empty() {
+                        parts.push(MessagePart::Text(part));
+                    }
+                    return Ok(parts);
+                }
+                other => {
+                    return Err(self.err(
+                        Code::ExpectedToken,
+                        format!("expected the rest of the message, found {other}"),
+                        next,
+                    ));
+                }
+            }
+        }
     }
 
     /// Pass C. Parameters and the result type only, so a call can be checked against a
@@ -1265,7 +1437,7 @@ impl Parser {
 
     fn expected_item(found: &Token) -> String {
         format!(
-            "expected `enum`, `record`, `const`, `fn`, `event`, `command`, `guard`, `projector`, `effect` or `test`, found {found}"
+            "expected `enum`, `record`, `const`, `fn`, `event`, `refusal`, `command`, `guard`, `projector`, `effect` or `test`, found {found}"
         )
     }
 
@@ -1624,10 +1796,13 @@ impl Parser {
     }
 
     fn skip_item(&mut self) -> Result<(), Diagnostic> {
-        // Every item but `const` has a braced body, and skipping a `const` by looking
-        // for one runs past it into whatever declaration comes next.
+        // Every item but `const` and `refusal` has a braced body, and skipping one of
+        // those by looking for a brace runs past it into whatever comes next.
         if self.at_word(Keyword::Const) {
             return self.skip_const();
+        }
+        if self.at_word(Keyword::Refusal) {
+            return self.skip_refusal();
         }
         self.bump();
         self.skip_braced()
@@ -1637,6 +1812,14 @@ impl Parser {
     /// its own.
     fn skip_const(&mut self) -> Result<(), Diagnostic> {
         self.expect_word(Keyword::Const)?;
+        self.skip_value();
+        Ok(())
+    }
+
+    /// A refusal ends where its message does, for the same reason a `const` does: a
+    /// string closes nothing that tells it from the next declaration.
+    fn skip_refusal(&mut self) -> Result<(), Diagnostic> {
+        self.expect_word(Keyword::Refusal)?;
         self.skip_value();
         Ok(())
     }
@@ -7116,6 +7299,31 @@ fn children(expr: &Expr) -> Vec<ExprId> {
 /// Whether every path out of a body returns. An `if` counts only when it has an
 /// `else` and both branches return; a `for` body never counts, because the container
 /// it walks can be empty and the loop can run zero times.
+/// A name with its first character in upper case, for a diagnostic that shows what the
+/// author probably meant to write.
+fn upper_first(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// A refusal's code: its name in snake_case, which is what reaches `Outcome::Reject`
+/// and so what a caller outside the program sees. Derived rather than written, because
+/// a second spelling is a second thing to keep in step; every code in the two
+/// applications ported so far is already exactly this.
+fn refusal_code(name: &str) -> String {
+    let mut code = String::with_capacity(name.len() + 4);
+    for (index, ch) in name.char_indices() {
+        if index > 0 && ch.is_ascii_uppercase() {
+            code.push('_');
+        }
+        code.extend(ch.to_lowercase());
+    }
+    code
+}
+
 /// The keywords a top-level declaration begins with.
 fn starts_item(word: Keyword) -> bool {
     matches!(
@@ -7127,6 +7335,7 @@ fn starts_item(word: Keyword) -> bool {
             | Keyword::Event
             | Keyword::Command
             | Keyword::Guard
+            | Keyword::Refusal
             | Keyword::Projector
             | Keyword::Effect
             | Keyword::Test
