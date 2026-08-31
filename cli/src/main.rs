@@ -11,7 +11,7 @@
 
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -26,7 +26,7 @@ const USAGE: &str = "\
 hek: check heklang sources, run their tests, and format them
 
 usage:
-  hek [check|test|fmt] [--boundaries] [--check] [path]
+  hek [check|test|fmt] [--boundaries] [--check] [path|-]
 
   check   parse every `.hk` file under `path` as one program
   test    the same, then run every `test` declaration in it
@@ -34,6 +34,9 @@ usage:
 
   --boundaries  print what each command guards, transitively
   --check       with `fmt`, name what would change and write nothing
+
+`hek fmt -` formats one module from stdin onto stdout, which is what an editor
+wants; it fails rather than printing nothing when the module does not parse.
 
 `path` is a directory or a single `.hk` file, and defaults to the current
 directory. With no command `hek` does both. Every file under `path` is one
@@ -60,6 +63,7 @@ fn run() -> Result<bool, String> {
     let mut root: Option<PathBuf> = None;
     let mut asked_for_boundaries = false;
     let mut checking = false;
+    let mut reading_stdin = false;
 
     for arg in args.by_ref() {
         match arg.as_str() {
@@ -69,6 +73,8 @@ fn run() -> Result<bool, String> {
             }
             "--boundaries" => asked_for_boundaries = true,
             "--check" => checking = true,
+            // Before the unknown-option arm below, which would otherwise claim it.
+            "-" => reading_stdin = true,
             "check" if root.is_none() => command = Command::Check,
             "test" if root.is_none() => command = Command::Test,
             "fmt" if root.is_none() => command = Command::Fmt,
@@ -77,6 +83,17 @@ fn run() -> Result<bool, String> {
             }
             other => root = Some(PathBuf::from(other)),
         }
+    }
+
+    if reading_stdin {
+        if command != Command::Fmt {
+            return Err(
+                "`-` formats one module read from stdin; `check` and `test` read a whole \
+                 program, which is a directory"
+                    .to_string(),
+            );
+        }
+        return format_stdin(checking);
     }
 
     let root = root.unwrap_or_else(|| PathBuf::from("."));
@@ -151,6 +168,31 @@ enum Command {
     Test,
     Both,
     Fmt,
+}
+
+/// One module in on stdin, the formatted module out on stdout.
+///
+/// The shape an editor's format-on-save wants: helix, and every editor that borrowed the
+/// idea from it, replaces the buffer with whatever this writes.
+///
+/// **Which is why a module that does not parse must fail rather than print nothing.** An
+/// empty stdout and a zero status would tell the editor the file is now empty, and it would
+/// say so on the next save. So the error goes to stderr through `main`, stdout stays
+/// untouched, and the editor keeps the buffer it had.
+fn format_stdin(checking: bool) -> Result<bool, String> {
+    let mut source = String::new();
+    io::stdin()
+        .read_to_string(&mut source)
+        .map_err(|err| format!("reading stdin: {err}"))?;
+    let Some(formatted) = hek::fmt::format(&source) else {
+        return Err("what arrived on stdin is not a `.hk` module that parses".to_string());
+    };
+    if checking {
+        // Nothing on stdout: `--check` answers with its status, here as everywhere.
+        return Ok(formatted == source);
+    }
+    print!("{formatted}");
+    Ok(true)
 }
 
 /// Rewrite every file under `path`, or with `--check` name the ones that would change and

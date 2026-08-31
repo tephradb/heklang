@@ -2,8 +2,9 @@
 //! way a user does: point it at a directory and read what it prints.
 
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 const EVENTS: &str = "event @order.placed { order_id: Int, total: Money(2) }\n";
 
@@ -283,7 +284,7 @@ fn help_succeeds_and_names_every_command() {
     assert!(output.status.success());
     let text = stdout(&output);
     assert!(
-        text.contains("hek [check|test|fmt] [--boundaries] [--check] [path]"),
+        text.contains("hek [check|test|fmt] [--boundaries] [--check] [path|-]"),
         "{text}"
     );
 }
@@ -673,6 +674,83 @@ fn check_with_the_fmt_flag_says_so() {
     assert!(!output.status.success());
     assert!(
         stderr(&output).contains("`--check` belongs to `fmt`"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+/// Run `hek` with something on stdin, which is how an editor calls a formatter.
+fn hek_stdin(args: &[&str], input: &str) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hek"))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn hek");
+    child
+        .stdin
+        .take()
+        .expect("a piped stdin")
+        .write_all(input.as_bytes())
+        .expect("write to stdin");
+    child.wait_with_output().expect("wait for hek")
+}
+
+/// `hek fmt -` is the editor shape: one module in, the formatted module out.
+#[test]
+fn fmt_reads_a_module_from_stdin() {
+    let output = hek_stdin(&["fmt", "-"], "record  Item{sku:String}\n");
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "record Item {\n  sku: String,\n}\n");
+}
+
+/// **The one that matters.** An editor replaces the buffer with what the formatter writes,
+/// so printing nothing and succeeding would empty the file the moment it stopped parsing
+/// mid-edit. It has to fail instead, with stdout untouched.
+#[test]
+fn fmt_from_stdin_fails_rather_than_emptying_an_unparseable_module() {
+    let output = hek_stdin(&["fmt", "-"], "record Item {\n");
+    assert!(
+        !output.status.success(),
+        "a module that does not parse must fail"
+    );
+    assert_eq!(
+        stdout(&output),
+        "",
+        "stdout must stay empty, or the editor writes it"
+    );
+    assert!(
+        stderr(&output).contains("not a `.hk` module that parses"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+/// `--check` still answers with its status alone, so it composes in a hook.
+#[test]
+fn fmt_check_from_stdin_answers_with_its_status() {
+    let tidy = hek_stdin(
+        &["fmt", "--check", "-"],
+        "record Item {\n  sku: String,\n}\n",
+    );
+    assert!(tidy.status.success());
+    assert_eq!(stdout(&tidy), "");
+
+    let messy = hek_stdin(&["fmt", "--check", "-"], "record  Item{sku:String}\n");
+    assert!(
+        !messy.status.success(),
+        "a module that would change fails the gate"
+    );
+}
+
+/// A program is a directory, so the other commands say what to hand them instead.
+#[test]
+fn check_from_stdin_says_a_program_is_a_directory() {
+    let output = hek_stdin(&["check", "-"], "record Item {\n  sku: String,\n}\n");
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("`-` formats one module"),
         "{}",
         stderr(&output)
     );

@@ -20,7 +20,7 @@ pass   an email that already placed an order is refused
 ## Usage
 
 ```
-hek [check|test|fmt] [--boundaries] [--check] [path]
+hek [check|test|fmt] [--boundaries] [--check] [path|-]
 ```
 
 | Command | Does |
@@ -46,6 +46,14 @@ checked 9 files
   Subscribe guards CourseIsDefined, StudentIsRegistered, CourseHasSeats
   Unsubscribe guards SubscriptionIsActive
 ```
+
+**`hek fmt -` formats one module from stdin onto stdout**, which is the shape an editor's
+format-on-save wants: helix and the editors that copied it replace the buffer with whatever
+the formatter writes. That is also why a module that does not parse **fails** here rather
+than printing nothing. An empty stdout and a zero status would tell the editor the file is
+now empty, and it would say so on the next save, so the message goes to stderr and stdout is
+left alone. `-` belongs to `fmt` alone: `check` and `test` read a whole program, which is a
+directory.
 
 `--check` belongs to `fmt` and turns it into a gate: it names the files that would change,
 writes nothing, and exits 1 if there are any. `docs/fmt.md` is the contract for what
