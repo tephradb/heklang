@@ -5667,7 +5667,7 @@ impl Parser {
     fn http_call(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, Diagnostic> {
         self.expect_sym(Sym::Dot)?;
         let at = self.span_here();
-        let verb = self.expect_ident()?;
+        let verb = self.expect_verb()?;
         let Some(builtin) = Builtin::verb(&verb) else {
             return Err(self
                 .err(

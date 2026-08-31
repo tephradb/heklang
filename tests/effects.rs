@@ -890,6 +890,52 @@ fn journaled_calls_do_not_re_fire_but_reveal_and_log_do() {
 // ---------------------------------------------------------------------------------
 // Rule 11: builtins.
 
+/// All five verbs, because three of them are keywords in their own right: `put`,
+/// `patch` and `delete` are projector statements, so a verb after the dot has to be
+/// read as a word rather than as a name. Reading it as a name made `http.put`,
+/// `http.patch` and `http.delete` unwritable while the table documented all five.
+#[test]
+fn every_http_verb_is_writable() {
+    for (verb, args) in [
+        ("get", format!("\"{URL}\"")),
+        ("post", format!("\"{URL}\", {{ \"to\": \"x\" }}")),
+        ("put", format!("\"{URL}\", {{ \"to\": \"x\" }}")),
+        ("patch", format!("\"{URL}\", {{ \"to\": \"x\" }}")),
+        ("delete", format!("\"{URL}\"")),
+    ] {
+        program(&format!(
+            "effect E {{
+  on @order.placed as e {{
+    let response = http.{verb}({args})
+    if response.status >= 400 {{
+      fail(\"rejected\")
+    }}
+  }}
+}}"
+        ));
+    }
+
+    // A word that is not a verb reports as one, rather than as a token the grammar
+    // cannot take: `emit` is a keyword and `head` is not, and both are the same mistake.
+    for name in ["head", "emit"] {
+        let message = err(&format!(
+            "effect E {{
+  on @order.placed as e {{
+    let response = http.{name}(\"{URL}\")
+  }}
+}}"
+        ));
+        assert!(
+            message.contains(&format!("`http` has no verb `{name}`")),
+            "got: {message}"
+        );
+        assert!(
+            message.contains("it has get, post, put, patch and delete"),
+            "got: {message}"
+        );
+    }
+}
+
 #[test]
 fn there_is_no_uuid4_or_random() {
     for name in ["uuid4", "random", "uuid5"] {
