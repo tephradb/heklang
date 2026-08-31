@@ -3386,18 +3386,13 @@ impl Parser {
     ) -> Result<Expect, Diagnostic> {
         if self.at_word(Keyword::Invalid) {
             self.bump();
-            self.expect_sym(Sym::LParen)?;
-            let message = self.expr(lower, Some(Type::String))?;
-            self.end_args()?;
+            let (_, message) = self.refusal_args(lower, Keyword::Invalid)?;
             return Ok(Expect::Invalid { message, span });
         }
         if self.at_word(Keyword::Reject) {
             self.bump();
-            self.expect_sym(Sym::LParen)?;
-            let code = self.expr(lower, Some(Type::String))?;
-            self.expect_sym(Sym::Comma)?;
-            let message = self.expr(lower, Some(Type::String))?;
-            self.end_args()?;
+            let (code, message) = self.refusal_args(lower, Keyword::Reject)?;
+            let code = code.expect("`reject` reads a code");
             return Ok(Expect::Reject {
                 code,
                 message,
@@ -3784,16 +3779,11 @@ impl Parser {
                     return Ok(Stmt::Return(Return::Ok));
                 }
                 let ret = if self.eat_word(Keyword::Invalid) {
-                    self.expect_sym(Sym::LParen)?;
-                    let message = self.expr(lower, Some(Type::String))?;
-                    self.end_args()?;
+                    let (_, message) = self.refusal_args(lower, Keyword::Invalid)?;
                     Return::Invalid(message)
                 } else if self.eat_word(Keyword::Reject) {
-                    self.expect_sym(Sym::LParen)?;
-                    let code = self.expr(lower, Some(Type::String))?;
-                    self.expect_sym(Sym::Comma)?;
-                    let message = self.expr(lower, Some(Type::String))?;
-                    self.end_args()?;
+                    let (code, message) = self.refusal_args(lower, Keyword::Reject)?;
+                    let code = code.expect("`reject` reads a code");
                     Return::Reject { code, message }
                 } else if self.kind == Kind::Command && !self.ends_return() {
                     // The decision came from somewhere else, which is the whole point:
@@ -6415,6 +6405,20 @@ impl Parser {
                 )
                 .with_hint(why));
         }
+        let (code, message) = self.refusal_args(lower, word)?;
+        lower.b.at(span);
+        Ok(lower.b.expr(Expr::Refusal { code, message }))
+    }
+
+    /// The arguments of `reject(code, message)` or `invalid(message)`, which the
+    /// keyword decides between. Written out three times before this: as a value here,
+    /// as a `return`, and as a test's `expect`. They are one shape, and a change that
+    /// reached two of the three would be silent in the one it missed.
+    fn refusal_args(
+        &mut self,
+        lower: &mut Lower,
+        word: Keyword,
+    ) -> Result<(Option<ExprId>, ExprId), Diagnostic> {
         self.expect_sym(Sym::LParen)?;
         let code = if word == Keyword::Reject {
             let code = self.expr(lower, Some(Type::String))?;
@@ -6425,8 +6429,7 @@ impl Parser {
         };
         let message = self.expr(lower, Some(Type::String))?;
         self.end_args()?;
-        lower.b.at(span);
-        Ok(lower.b.expr(Expr::Refusal { code, message }))
+        Ok((code, message))
     }
 
     fn invoke_expr(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, Diagnostic> {
