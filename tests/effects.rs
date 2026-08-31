@@ -599,6 +599,84 @@ fn an_empty_array_reaches_the_body_at_any_depth() {
     );
 }
 
+/// The three composites the outbound table gained when containers landed. The table
+/// calls itself total, so a type that crosses and is not on it is the table being
+/// wrong rather than the program being clever.
+#[test]
+fn a_record_a_list_and_a_map_cross_into_a_body() {
+    let program = program(
+        "record Line { sku: String, qty: Int }
+
+effect E {
+  on @order.placed as e {
+    state skus: List(String) = fold []
+      on @order.placed(order_id: e.order_id) => skus.push(\"a\")
+    state counts: Map(String, Int) = fold Map.empty
+      on @order.placed(order_id: e.order_id) => counts.set(\"a\", 1)
+
+    let line = Line { sku: \"a\", qty: 2 }
+    let response = http.post(\"https://mail.example/confirm\", {
+      \"line\": line,
+      \"skus\": skus,
+      \"counts\": counts,
+    })
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let (_, outcome) = deliver(
+        &program,
+        vec![placed(1, 7, 100)],
+        vec![Reply::Status(200)],
+        &mut journal,
+    );
+    outcome.expect("delivered");
+    let sent = posted(&journal);
+    assert!(
+        sent.contains("\"line\":{\"qty\":2,\"sku\":\"a\"}"),
+        "{sent}"
+    );
+    assert!(sent.contains("\"skus\":[\"a\"]"), "{sent}");
+    assert!(sent.contains("\"counts\":{\"a\":1}"), "{sent}");
+}
+
+/// The other direction, and the asymmetry the rule turns on: a body is undeclared, so
+/// its array comes back as `List(Json)` and every element is another branch.
+#[test]
+fn an_array_out_of_a_body_is_a_list_of_json() {
+    let program = program(
+        "effect E {
+  on @order.placed as e {
+    let response = http.get(\"https://mail.example/confirm\")
+    for problem in response.body.json(\"data\").unwrap_or(Json.empty).array(\"errors\").unwrap_or([]) {
+      log(problem.string(\"message\").unwrap_or(\"unknown\"))
+    }
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let (interpreter, outcome) = deliver(
+        &program,
+        vec![placed(1, 7, 100)],
+        vec![Reply::Body(
+            200,
+            Json::obj([(
+                "data",
+                Json::obj([(
+                    "errors",
+                    Json::Arr(vec![
+                        Json::obj([("message", Json::str("too many"))]),
+                        Json::obj([("code", Json::str("nope"))]),
+                    ]),
+                )]),
+            )]),
+        )],
+        &mut journal,
+    );
+    outcome.expect("delivered");
+    assert_eq!(interpreter.lines(), ["too many", "unknown"]);
+}
+
 // ---------------------------------------------------------------------------------
 // Rule 9: erase last, statically enforced.
 

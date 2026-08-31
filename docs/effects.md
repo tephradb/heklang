@@ -288,12 +288,20 @@ table, which is part of the contract because it decides what a remote service ac
 | `Uuid` | string |
 | `Timestamp` | number, epoch microseconds |
 | an enum | string, the variant name |
+| a record | object, one key per field |
+| `List(T)` | array of whatever `T` converts to |
+| `Map(K, V)` | object, keys as their text form |
 | `none` | `null` |
 | `some(x)` | whatever `x` converts to |
 
 `Money` and `Decimal` become strings rather than numbers so no precision is lost to a float on the
 far side, which is the same reason they are scaled integers here. Neither carries a currency; a
 program that needs one sends the field it declared for it (`docs/money.md`).
+
+A map's keys become strings because that is what a JSON object can hold, and the order is already the
+map's, so nothing is decided at the boundary. `Map.empty` is the one thing that cannot be written
+straight into a body, and the reason is a target rather than a table: an object literal is written
+`{ ... }`, so an empty map has no declaration to have come from (`docs/containers.md`).
 
 ### A number the author typed is a JSON number
 
@@ -377,8 +385,11 @@ wrong, and that gets its own answer: `Mismatch` names the path, the declared typ
 was stored, and it arrives as `ErrorKind::Mismatch` rather than `ErrorKind::Host`. Saying `Host`
 would blame a store that is working exactly as asked.
 
-Iteration over JSON arrays is deferred, and there is no list type. An array can arrive in a response
-body and be carried around; nothing in the language takes it apart yet.
+**An array crosses in both directions, and only one of them is typed.** `Value::from_json` fills a
+declared `List(T)` or `Map(K, V)` from an array or an object, because the declaration says what the
+elements are. A response body has no declaration, so `body.array("errors")` answers `List(Json)?` and
+each element is a `Json` read with the same one-step accessors as the body itself, one branch per
+step. `docs/containers.md` has the list and the `for` that walks it.
 
 ## 9. Erase last, statically enforced
 
