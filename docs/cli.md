@@ -70,10 +70,10 @@ order semantically.
 
 Every static check heklang has lives in the parser: the type check (`docs/types.md`),
 rule 9's erase-last reachability, the self-trigger cycle check, rule 12's fold subject
-checks and its decrypt boundary, `@subject` validation, and the recursion check.
-`docs/projectors.md` and `docs/effects.md` both record which checks are still deferred to
-a checker that does not exist yet, and `hek check` does not run those, because nothing
-does.
+checks and its decrypt boundary, `@subject` validation, the recursion check, and the
+`@max` invariant (`docs/projectors.md`). No specified check is deferred any more, so
+`hek check` runs the whole set; `docs/effects.md` records which of them have a reason to
+live in the parser and which are there only because nothing else exists yet.
 
 The type check is the one with a reason to stay rather than only a history. It has to
 run while the program is lowered, because a numeric literal needs its scale to be built
@@ -168,9 +168,9 @@ Reporting those would be reporting the checker's confusion. In practice the type
 are all in pass D, so one run names every command, projector and effect with something
 wrong in it.
 
-The three whole-program checks that run after the passes (recursion, the self-trigger
-cycle, and a `patch`'s zero values) still report one at a time, because each of them is a
-statement about the program rather than about a declaration.
+The four whole-program checks that run after the passes (recursion, the self-trigger
+cycle, a `patch`'s zero values, and the `@max` invariant) still report one at a time,
+because each of them is a statement about the program rather than about a declaration.
 
 `parse_files` keeps returning the first error alone, for an embedder that wants one;
 `check_files` is what `hek` calls.

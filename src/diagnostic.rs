@@ -84,6 +84,7 @@ pub enum Code {
     // Statements about the whole program, checked after every pass.
     RecursiveFn,
     RecursiveGuard,
+    MaxTightening,
     SelfTrigger,
     ConstCycle,
 }
@@ -130,6 +131,7 @@ impl Code {
         Code::TestShape,
         Code::RecursiveFn,
         Code::RecursiveGuard,
+        Code::MaxTightening,
         Code::SelfTrigger,
         Code::ConstCycle,
     ];
@@ -174,6 +176,7 @@ impl Code {
             Code::TestShape => "test-shape",
             Code::RecursiveFn => "recursive-fn",
             Code::RecursiveGuard => "recursive-guard",
+            Code::MaxTightening => "max-tightening",
             Code::SelfTrigger => "self-trigger",
             Code::ConstCycle => "const-cycle",
         }

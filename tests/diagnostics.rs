@@ -456,6 +456,13 @@ effect E {
   on @order.placed as e { invoke Again { order_id: e.order_id, customer_id: e.customer_id } }
 }",
         ),
+        (
+            Code::MaxTightening,
+            "projector P {
+  entity Note { order_id: Int @key, note: String @max(8) }
+  on @order.placed { order_id, email } { put Note { order_id, note: email } }
+}",
+        ),
     ];
 
     plain

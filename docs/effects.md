@@ -982,15 +982,16 @@ optional-out covers the fold, and narrowing covers the guard.
 
 ## Checker obligations
 
-The one recorded in `docs/projectors.md` still stands (the `@max` tightening invariant). Five checks
-are **implemented**, and the first of them has a reason to be where it is rather than only a history:
+**Nothing is deferred any more.** The `@max` tightening invariant recorded in `docs/projectors.md`
+was the last one and it now runs after the passes. Six checks are **implemented**, and the first of
+them has a reason to be where it is rather than only a history:
 
 0. **The type check** (`docs/types.md`). It has to run while the program is lowered, because a
    numeric literal needs its scale before its IR node exists and a narrowed optional lowers to a
    different node than a plain one. Its tables live in `src/types.rs` with no parser state in them,
    so a checker elsewhere can reuse them.
 
-The other four live in the parser only because nothing else exists yet:
+The other five live in the parser only because nothing else exists yet:
 
 1. **Erase-last reachability** (rule 9). Needs one arm's body, so the parser can host it, but it is a
    flow analysis and belongs with the others.
@@ -1001,6 +1002,8 @@ The other four live in the parser only because nothing else exists yet:
 4. **The decrypt boundary** (rule 12): sealed content may only be moved, asked about, or revealed.
    This one is a type rule rather than an analysis, so it is the one with the best claim to stay
    where it is; it fires wherever a type meets a value, which is everywhere the parser already looks.
+5. **The `@max` invariant** (`docs/projectors.md`). Needs the whole program, because the event and
+   the entity it compares are two declarations in any two files, so it moves with check 2.
 
 The projector half of check 3 landed with it, so `docs/projectors.md` rule 9 no longer records a
 no-op.

@@ -136,7 +136,7 @@ fn a_projector_runtime_error_names_its_module() {
   }
 
   on @order.shipped { order_id, tracking } {
-    put Note { order_id, tracking }
+    put Note { order_id, tracking: \"{tracking}\" }
   }
 }
 ";
@@ -161,7 +161,7 @@ fn a_projector_runtime_error_names_its_module() {
 
     assert_eq!(
         err.to_string(),
-        "projectors/notes.hk:8:26: tracking is 8 characters, the most allowed is 4"
+        "projectors/notes.hk:8:36: tracking is 8 characters, the most allowed is 4"
     );
 }
 

@@ -433,9 +433,22 @@ The invariant that makes it so:
 
 A command already rejects an over-length value at `emit`, so the only way a projector can observe one
 is if the entity's constraint is tighter than the event's, which is a schema bug rather than a data
-problem. That is a static check and it belongs in the checker. Until the checker exists, the runtime
-error is the backstop, and a projector that trips it is reporting a mismatch between two declarations
-rather than a bad event.
+problem. **That is checked**, after the passes and beside the other whole-program checks, and it
+reports as `max-tightening`:
+
+> this write narrows `notes`: @order.placed declares no bound and `Note.note` is `@max(8)`
+
+It reaches a **plain read of an event field**, written either way a handler can spell one, into a
+`put`, a `patch` or an `update`. That is the whole of what the invariant is about: two declarations
+that can disagree, with the write naming both of them. A computed value has no second declaration to
+compare against, so `note: "note: {notes}"` is not this defect and the runtime error is still what
+covers it. Widening the check to reason about the length of an expression would be a different
+question with a different answer.
+
+**The check crosses two declarations, so it cannot run during either one's pass.** An event is
+declared in pass B and an entity inside a projector in pass D, in any file and any order
+(`docs/modules.md`), so this joins recursion, the self-trigger cycle and `patch`'s zero values in the
+group that runs once the program is whole.
 
 **A record satisfies the invariant by construction**, and that is the argument for `@max` living on
 the record field (`docs/declarations.md`). The bound an event field carries and the bound an entity
@@ -444,10 +457,10 @@ stating. A record's fields are one declaration, reached from both ends, so there
 two to disagree about. Before that annotation existed the invariant was not violated by record-shaped
 data, it was silent about it: every string inside a record was unbounded at both ends.
 
-**`update` makes the backstop patchier, which is an argument for the checker rather than against
-`update`.** A write that is dropped never evaluates its field values, so a schema mismatch inside an
-`update` is reported only on the runs where the row happens to exist. The check was always meant to
-be static; this makes the interim version depend on the data, which the real one will not.
+**`update` is why the backstop was never enough on its own.** A write that is dropped never evaluates
+its field values, so a schema mismatch inside an `update` used to be reported only on the runs where
+the row happened to exist: late, and data-dependent as well. The static check has no such gap, since
+it reads the declarations rather than the write's outcome.
 
 ## Where this diverges from the runtime
 
@@ -504,18 +517,17 @@ enforces once beats a discipline every handler has to keep.
 
 ## Checker obligations
 
-One static check is specified here, recorded in the IR, and not yet enforced. It is backstopped at
-runtime, and it belongs to the eventual checker rather than the parser:
+**Nothing specified here is unenforced.** The `@max` invariant was the last of them and it now runs
+after the passes, so the runtime error it argued about covers only what the invariant does not
+describe: an over-length value that no pair of declarations predicted.
 
-1. **The `@max` invariant** above. Backstopped by a spanned runtime error, and only on the writes
-   that actually land: an `update` against an absent row evaluates nothing, so the backstop is now
-   data-dependent as well as late.
-
-**Rule 9's subject checks are no longer on this list.** Both landed with the seal moving into the
+**Rule 9's subject checks came off this list before it.** Both landed with the seal moving into the
 type: one column holds one subject, and sealed content may not be written where the seal is
-discarded. hekla's `enforce_subject_columns` remains the reference for the one part still outstanding,
-that the subject value must equal the row's own subject-id column, which needs the row rather than
-the write.
+discarded.
+
+What is left is not a check this document could specify. hekla's `enforce_subject_columns` also
+demands that a subject value equal the row's own subject-id column, and that needs the row rather
+than the write, so it is an obligation on a host rather than something a checker could ever see.
 
 ## Known gaps
 

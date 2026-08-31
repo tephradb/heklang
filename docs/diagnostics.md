@@ -126,7 +126,9 @@ Three, and they are all the same thing said differently: the parser is not at a 
   anything else that runs out of input reports there.
 - **A check that runs after the passes.** The recursion check and the self-trigger cycle check are
   statements about the program rather than about a place in it, so each reports at a declaration's
-  own span, which it has to go and find.
+  own span, which it has to go and find. The `@max` invariant is the exception among them: it is
+  also a statement about two declarations, but the write that brings them together is one
+  expression, so it has a place of its own to point at.
 - **A runtime error raised outside any expression.** `interp::Error` carries a `Span` rather than an
   `Option<Span>`, and `Span::default()` is the value that means nowhere: such an error renders with
   no position at all rather than with `0:0`. Three sites build one: the `From<ErrorKind>` conversion
@@ -211,6 +213,7 @@ be the whole of it:
 | `test-shape` | a test body out of order, or an expectation its action cannot produce |
 | `recursive-fn` | a `fn` that calls itself |
 | `recursive-guard` | a guard that names itself |
+| `max-tightening` | an entity column bounding an event field tighter than the event declared it |
 | `self-trigger` | an effect that can trigger itself |
 | `const-cycle` | a `const` that names itself |
 

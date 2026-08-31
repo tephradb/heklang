@@ -699,6 +699,7 @@ impl Parser {
         self.check_guards(&program)?;
         self.check_cycles(&program)?;
         self.check_zeros(&program)?;
+        self.check_max(&program)?;
         // Guards are spliced before pass E, so a test runs the command the interpreter
         // will: a `guard` is a compile-time copy and nothing downstream knows the word.
         inline::splice(&mut program);
@@ -6535,6 +6536,82 @@ impl Parser {
         Ok(())
     }
 
+    /// The `@max` invariant (`docs/projectors.md`): an entity field's bound must be no
+    /// tighter than that of every event field written into it, and a field with no
+    /// bound on the event side may not be written into a column that has one.
+    ///
+    /// A command already rejects an over-length value at `emit`, so the only way a
+    /// projector can meet one is if these two declarations disagree. That makes it a
+    /// schema bug rather than a data problem, which is what makes the hard error rule 2
+    /// leaves a projector defensible.
+    fn check_max(&self, program: &Program) -> Result<(), Diagnostic> {
+        for projector in &program.projectors {
+            for handler in &projector.handlers {
+                let Some(event) = program.event(&handler.event) else {
+                    continue;
+                };
+                let mut writes: Vec<(&Ident, &[(Ident, ExprId)])> = Vec::new();
+                walk_stmts(&handler.body, &mut |stmt| match stmt {
+                    Stmt::Put { entity, fields, .. } | Stmt::Patch { entity, fields, .. } => {
+                        writes.push((entity, fields))
+                    }
+                    _ => {}
+                });
+
+                for (entity, fields) in writes {
+                    let Some(def) = projector.entity(entity) else {
+                        continue;
+                    };
+                    for (column, value) in fields {
+                        let Some(bound) = def.field(column).and_then(|field| field.max_len) else {
+                            continue;
+                        };
+                        // Only a plain read of an event field. Anything computed is not
+                        // two declarations disagreeing, and the runtime backstop keeps
+                        // covering it.
+                        let Some(from) = loaded_field(handler, *value) else {
+                            continue;
+                        };
+                        let Some(source) = event.field(from) else {
+                            continue;
+                        };
+                        let (declared, fix) = match source.max_len {
+                            Some(len) if len <= bound => continue,
+                            Some(len) => (
+                                format!("`@max({len})`"),
+                                format!(
+                                    "widen the column to `@max({len})`, or tighten the event field to `@max({bound})`"
+                                ),
+                            ),
+                            None => (
+                                "no bound".to_string(),
+                                format!(
+                                    "give the event field `@max({bound})`, or drop the column's"
+                                ),
+                            ),
+                        };
+                        let error = Diagnostic::new(
+                            Code::MaxTightening,
+                            format!(
+                                "this write narrows `{from}`: {} declares {declared} and `{entity}.{column}` is `@max({bound})`",
+                                event.path
+                            ),
+                            handler.exprs.span(*value),
+                        )
+                        .with_hint(format!(
+                            "an over-length value is `invalid` at `emit`, so a projector meets one only when these two disagree, and it has no channel to report it; {fix}"
+                        ));
+                        return Err(match &projector.module {
+                            Some(module) => error.in_file(module),
+                            None => error,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn check_recursion(&self, program: &Program) -> Result<(), Diagnostic> {
         let Some(path) = fn_cycle(program) else {
             return Ok(());
@@ -6737,6 +6814,25 @@ fn invoked(exprs: &Exprs, body: &[Stmt]) -> Vec<Ident> {
         }
     });
     found
+}
+
+/// The triggering event's field this expression loads, if it is exactly that. The
+/// handler's binds carry every field it reads, destructured or reached through the
+/// envelope binding, so both spellings resolve the same way.
+fn loaded_field(handler: &Handler, value: ExprId) -> Option<&str> {
+    // A narrowed load is still that load, the same reason `trigger_field` peels one.
+    let value = match handler.exprs.get(value) {
+        Some(Expr::Unwrap(inner)) => *inner,
+        _ => value,
+    };
+    let Some(Expr::Load(slot)) = handler.exprs.get(value) else {
+        return None;
+    };
+    handler
+        .binds
+        .iter()
+        .find(|bind| bind.slot == *slot)
+        .map(|bind| bind.field.as_str())
 }
 
 fn walk_stmts<'a>(stmts: &'a [Stmt], visit: &mut impl FnMut(&'a Stmt)) {

@@ -58,9 +58,9 @@ projector Orders {
   }
 }
 
-// A schema bug on purpose: `notes` carries no `@max`, so writing it into a field
-// that has one is exactly what the `@max` invariant forbids. The checker will
-// reject this statically; until then it is a runtime error with a location.
+// What the `@max` invariant does not reach, and so the case the runtime backstop is
+// still for: an interpolation has no single declaration to compare a bound against.
+// Writing `notes` straight in would be the static error instead.
 projector Notes {
   entity OrderNote {
     order_id: Uuid @key,
@@ -68,7 +68,7 @@ projector Notes {
   }
 
   on @order.placed { order_id, notes } {
-    put OrderNote { order_id, note: notes }
+    put OrderNote { order_id, note: "note: {notes}" }
   }
 }
 

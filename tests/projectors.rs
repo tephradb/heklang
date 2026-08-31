@@ -1137,13 +1137,176 @@ fn err_entity_body(body: &str) -> String {
         .text()
 }
 
+// ---------------------------------------------------------------------------------
+// The `@max` invariant.
+
+/// A projector writing `note` into a `Note` entity, with whatever bounds the caller
+/// gives the two sides.
+fn bounds(event: &str, column: &str, value: &str) -> Result<(), String> {
+    let source = format!(
+        "event @order.placed {{ order_id: Uuid, notes: String{event} }}
+projector P {{
+  entity Note {{
+    order_id: Uuid @key,
+    note: String{column},
+  }}
+  on @order.placed as e {{ order_id, notes }} {{
+    put Note {{ order_id, note: {value} }}
+  }}
+}}
+"
+    );
+    parse(&source).map(|_| ()).map_err(|err| err.text())
+}
+
+#[test]
+fn an_entity_field_may_not_bound_tighter_than_the_event_field() {
+    let message = bounds(" @max(200)", " @max(8)", "notes").expect_err("200 into 8");
+    assert!(
+        message.contains(
+            "this write narrows `notes`: @order.placed declares `@max(200)` and `Note.note` is `@max(8)`"
+        ),
+        "got: {message}"
+    );
+    // Both fixes, because which one is right is the author's to say: the column may
+    // be the mistake or the event may be.
+    assert!(
+        message
+            .contains("widen the column to `@max(200)`, or tighten the event field to `@max(8)`"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn an_unbounded_event_field_may_not_fill_a_bounded_column() {
+    let message = bounds("", " @max(8)", "notes").expect_err("unbounded into 8");
+    assert!(
+        message.contains("@order.placed declares no bound and `Note.note` is `@max(8)`"),
+        "got: {message}"
+    );
+}
+
+/// The reason the check exists, stated in the hint: a command has a channel for an
+/// over-length value and rule 2 leaves a projector none, so the asymmetry is only
+/// defensible while the projector case is unreachable.
+#[test]
+fn the_invariant_names_the_channel_a_projector_has_not_got() {
+    let message = bounds("", " @max(8)", "notes").expect_err("unbounded into 8");
+    assert!(
+        message.contains("an over-length value is `invalid` at `emit`"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("no channel to report it"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn a_looser_or_equal_column_is_fine() {
+    for (event, column) in [
+        (" @max(8)", " @max(8)"),
+        (" @max(8)", " @max(200)"),
+        (" @max(8)", ""),
+        ("", ""),
+    ] {
+        bounds(event, column, "notes")
+            .unwrap_or_else(|err| panic!("for event{event} into column{column}: {err}"));
+    }
+}
+
+/// Both spellings of a field read resolve, because a handler binds a field on demand
+/// whether the destructure block named it or the envelope binding reached it.
+#[test]
+fn the_envelope_spelling_is_the_same_read() {
+    let message = bounds(" @max(200)", " @max(8)", "e.notes").expect_err("200 into 8");
+    assert!(
+        message.contains("this write narrows `notes`"),
+        "got: {message}"
+    );
+}
+
+/// Optionality is not what the bound is about, so neither coercion nor narrowing hides
+/// the read: a bare `T` filling a `T?` column is the same load, and a branch that proved
+/// a `T?` present lowers to `Unwrap` around one.
+#[test]
+fn an_optional_on_either_side_is_still_the_same_read() {
+    let coerced = bounds(" @max(200)", "? @max(100)", "notes").expect_err("200 into 100");
+    assert!(
+        coerced.contains("this write narrows `notes`"),
+        "a bare String filling a String? column: {coerced}"
+    );
+
+    let narrowed = parse(
+        "event @order.placed { order_id: Uuid, notes: String? @max(200) }
+projector P {
+  entity Note {
+    order_id: Uuid @key,
+    note: String @max(100),
+  }
+  on @order.placed { order_id, notes } {
+    if notes.is_some() {
+      put Note { order_id, note: notes }
+    }
+  }
+}
+",
+    )
+    .expect_err("200 into 100")
+    .text();
+    assert!(
+        narrowed.contains("this write narrows `notes`"),
+        "a narrowed load is still that load: {narrowed}"
+    );
+}
+
+/// `update` and `patch` are one node, so both are checked. A dropped write never
+/// evaluates its values, which is exactly why this could not stay at runtime.
+#[test]
+fn a_patch_and_an_update_are_checked_too() {
+    for statement in ["patch", "update"] {
+        let source = format!(
+            "event @order.placed {{ order_id: Uuid, notes: String }}
+projector P {{
+  entity Note {{
+    order_id: Uuid @key,
+    note: String @max(8),
+  }}
+  on @order.placed {{ order_id, notes }} {{
+    {statement} Note[order_id] {{ note: notes }}
+  }}
+}}
+"
+        );
+        let message = parse(&source).expect_err("unbounded into 8").text();
+        assert!(
+            message.contains("this write narrows `notes`"),
+            "for `{statement}`: {message}"
+        );
+    }
+}
+
+/// Only a plain read. Anything computed has no second declaration to disagree with,
+/// so it is not this defect and the runtime backstop keeps covering it.
+#[test]
+fn a_computed_value_is_not_two_declarations_disagreeing() {
+    for value in [
+        "\"note: {notes}\"",
+        "notes.upper()",
+        "notes.trim()",
+        "\"fixed\"",
+    ] {
+        bounds("", " @max(8)", value).unwrap_or_else(|err| panic!("for `{value}`: {err}"));
+    }
+}
+
 // Spans: a write-time failure points at the expression that produced the value.
 
 #[test]
 fn a_max_violation_reports_a_line_and_column() {
-    // `notes` carries no `@max`, so writing it into a field that has one is the
-    // schema bug the `@max` invariant forbids. Until the checker exists, this is
-    // where it surfaces.
+    // An interpolation, because writing `notes` straight in is now the static error:
+    // the invariant compares two declarations, and an interpolated string is not one
+    // of them. So this is what the runtime backstop is still for.
     let source = "event @order.placed { order_id: Uuid, notes: String }
 projector P {
   entity Note {
@@ -1151,7 +1314,7 @@ projector P {
     note: String @max(8),
   }
   on @order.placed { order_id, notes } {
-    put Note { order_id, note: notes }
+    put Note { order_id, note: \"note: {notes}\" }
   }
 }
 ";
@@ -1166,16 +1329,15 @@ projector P {
     let interpreter = Interpreter::with_log(&program, log);
     let err = interpreter
         .project("P")
-        .expect_err("17 characters into @max(8)");
+        .expect_err("23 characters into @max(8)");
 
     assert_eq!(
         err.to_string(),
-        "8:32: note is 17 characters, the most allowed is 8"
+        "8:32: note is 23 characters, the most allowed is 8"
     );
     let line = source.lines().nth(7).expect("line 8");
-    assert_eq!(
-        &line[31..36],
-        "notes",
+    assert!(
+        line[31..].starts_with("\"note: {notes}\""),
         "column 32 is the expression that produced the value"
     );
 }
