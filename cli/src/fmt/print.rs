@@ -75,7 +75,7 @@ impl<'a> Printer<'a> {
             "parameter" => self.typed(node),
             "annotation" => Doc::concat(self.docs(node)),
             "event_handler" => self.handler(node),
-            "destructure" => self.inline("{", "}", true, &self.kids(node)),
+            "destructure" => self.list("{", "}", true, &self.kids(node)),
 
             // ------------------------------------------------------------- tests
             "test_declaration" => self.keyed("test", node),
@@ -231,12 +231,13 @@ impl<'a> Printer<'a> {
 
     /// `on @a, @b as e { fields } { .. }`.
     ///
-    /// Everything before the block is flat. The corpus writes a 103-column header rather
-    /// than break a destructure, and the one header it does write across lines fits in 77
-    /// when flattened, so the language's only column alignment costs nothing to drop.
+    /// The path list breaks like any other list except that it takes **no trailing comma**:
+    /// it has no closing delimiter, so a comma there would be followed by `as` and would
+    /// not parse. Its continuations are indented rather than aligned under the first path,
+    /// which is what the corpus does by hand; one site writes twelve paths that way, and
+    /// flat it would be a 328-column line.
     fn handler(&self, node: Node<'a>) -> Doc<'a> {
         let kids = self.kids(node);
-        let mut parts = vec![Doc::text("on ")];
         let mut paths = Vec::new();
         let mut rest = Vec::new();
         for &kid in &kids {
@@ -245,7 +246,13 @@ impl<'a> Printer<'a> {
                 _ => rest.push(kid),
             }
         }
-        parts.push(Doc::join(Doc::text(", "), paths));
+        let mut parts = vec![
+            Doc::text("on "),
+            Doc::group(Doc::indent(Doc::join(
+                Doc::concat([Doc::text(","), Doc::Line]),
+                paths,
+            ))),
+        ];
         for kid in rest {
             match kid.kind() {
                 "identifier" => {

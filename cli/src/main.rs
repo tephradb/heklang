@@ -23,15 +23,17 @@ use heklang::{Diagnostic, Program, Severity, Span, TestOutcome, check_files, run
 const WIDTH: usize = 84;
 
 const USAGE: &str = "\
-hek: check heklang sources and run their tests
+hek: check heklang sources, run their tests, and format them
 
 usage:
-  hek [check|test] [--boundaries] [path]
+  hek [check|test|fmt] [--boundaries] [--check] [path]
 
   check   parse every `.hk` file under `path` as one program
   test    the same, then run every `test` declaration in it
+  fmt     rewrite every `.hk` file under `path` canonically
 
   --boundaries  print what each command guards, transitively
+  --check       with `fmt`, name what would change and write nothing
 
 `path` is a directory or a single `.hk` file, and defaults to the current
 directory. With no command `hek` does both. Every file under `path` is one
@@ -57,6 +59,7 @@ fn run() -> Result<bool, String> {
     let mut command = Command::Both;
     let mut root: Option<PathBuf> = None;
     let mut asked_for_boundaries = false;
+    let mut checking = false;
 
     for arg in args.by_ref() {
         match arg.as_str() {
@@ -65,8 +68,10 @@ fn run() -> Result<bool, String> {
                 return Ok(true);
             }
             "--boundaries" => asked_for_boundaries = true,
+            "--check" => checking = true,
             "check" if root.is_none() => command = Command::Check,
             "test" if root.is_none() => command = Command::Test,
+            "fmt" if root.is_none() => command = Command::Fmt,
             other if other.starts_with('-') => {
                 return Err(format!("unknown option `{other}`; try `hek --help`"));
             }
@@ -93,6 +98,13 @@ fn run() -> Result<bool, String> {
             root.display()
         ));
     };
+
+    if command == Command::Fmt {
+        return format(&root, &paths, checking);
+    }
+    if checking {
+        return Err("`--check` belongs to `fmt`; `check` is already a command".to_string());
+    }
 
     // Read every file before parsing any: `check_files` borrows all of them at once,
     // because one program is assembled from all the modules together.
@@ -138,6 +150,58 @@ enum Command {
     Check,
     Test,
     Both,
+    Fmt,
+}
+
+/// Rewrite every file under `path`, or with `--check` name the ones that would change and
+/// write nothing.
+///
+/// Per file rather than per program, which is the one place `fmt` parts company with
+/// `check`. A program is every `.hk` file together, but layout is a property of one file at
+/// a time, and a file whose neighbours are missing still formats.
+fn format(root: &Path, paths: &[PathBuf], checking: bool) -> Result<bool, String> {
+    let mut changed = Vec::new();
+    let mut unparsed = Vec::new();
+    for path in paths {
+        let source =
+            fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
+        // The grammar accepts more than the language does, so this is a syntax error and
+        // nothing else: a program `check` would reject still has a shape to print.
+        let Some(formatted) = hek::fmt::format(&source) else {
+            unparsed.push(label(root, path));
+            continue;
+        };
+        if formatted == source {
+            continue;
+        }
+        changed.push(label(root, path));
+        if !checking {
+            fs::write(path, formatted).map_err(|err| format!("{}: {err}", path.display()))?;
+        }
+    }
+
+    for name in &unparsed {
+        println!("{name}: does not parse, so it was left alone");
+    }
+    let verb = if checking { "would be" } else { "was" };
+    for name in &changed {
+        println!("{name} {verb} reformatted");
+    }
+    let s = if changed.len() == 1 { "" } else { "s" };
+    match (checking, changed.is_empty()) {
+        (_, true) => println!(
+            "{} file{} already formatted",
+            paths.len(),
+            if paths.len() == 1 { "" } else { "s" }
+        ),
+        (true, false) => println!("\n{} file{s} would change", changed.len()),
+        (false, false) => println!("\n{} file{s} reformatted", changed.len()),
+    }
+
+    // `--check` is a gate, so a file that would change fails it. Rewriting is not a gate,
+    // so it only fails on a file it could not read at all, which is what a syntax error is
+    // here: `check` is where a program is judged.
+    Ok(unparsed.is_empty() && (!checking || changed.is_empty()))
 }
 
 fn suite(program: &Program) -> bool {

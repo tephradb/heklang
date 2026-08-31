@@ -277,13 +277,13 @@ fn an_unknown_option_points_at_help() {
 }
 
 #[test]
-fn help_succeeds_and_names_both_commands() {
+fn help_succeeds_and_names_every_command() {
     let output = hek(&["--help"]);
 
     assert!(output.status.success());
     let text = stdout(&output);
     assert!(
-        text.contains("hek [check|test] [--boundaries] [path]"),
+        text.contains("hek [check|test|fmt] [--boundaries] [--check] [path]"),
         "{text}"
     );
 }
@@ -563,4 +563,117 @@ command RenameShop(shop_id: Int) {
     let text = stdout(&output);
     assert!(text.contains("1 guard"), "{text}");
     assert!(!text.contains("RenameShop guards"), "{text}");
+}
+
+/// `hek fmt` writes the file back, and says which ones it touched.
+#[test]
+fn fmt_rewrites_a_file_and_names_it() {
+    let root = project(
+        "fmt-writes",
+        &[("messy.hk", "record  Item{sku:String,price:Int}\n")],
+    );
+    let output = run(&root, &["fmt"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("messy.hk was reformatted"), "{text}");
+    let written = fs::read_to_string(root.join("messy.hk")).expect("read it back");
+    assert_eq!(
+        written, "record Item {\n  sku: String,\n  price: Int,\n}\n",
+        "a record always breaks, and every field takes a comma"
+    );
+}
+
+/// `--check` is the gate: it names what would change, writes nothing, and fails.
+#[test]
+fn fmt_check_reports_without_writing() {
+    let before = "record  Item{sku:String}\n";
+    let root = project("fmt-check", &[("messy.hk", before)]);
+    let output = run(&root, &["fmt", "--check"]);
+    assert!(!output.status.success(), "a file that would change fails");
+    let text = stdout(&output);
+    assert!(text.contains("messy.hk would be reformatted"), "{text}");
+    assert_eq!(
+        fs::read_to_string(root.join("messy.hk")).expect("read it back"),
+        before,
+        "`--check` wrote to the file"
+    );
+}
+
+/// Nothing to do is success and says so, which is what a pre-commit hook sees.
+#[test]
+fn fmt_check_is_quiet_when_everything_is_formatted() {
+    let root = project(
+        "fmt-clean",
+        &[("tidy.hk", "record Item {\n  sku: String,\n}\n")],
+    );
+    let output = run(&root, &["fmt", "--check"]);
+    assert!(output.status.success(), "{}", stdout(&output));
+    assert!(
+        stdout(&output).contains("already formatted"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+/// A file that does not parse is named and left alone rather than aborting the run, so one
+/// broken file does not stop the rest of a tree being formatted.
+#[test]
+fn fmt_leaves_a_file_it_cannot_parse_alone() {
+    let broken = "record Item {\n";
+    let root = project(
+        "fmt-broken",
+        &[
+            ("broken.hk", broken),
+            ("messy.hk", "record  Other{a:Int}\n"),
+        ],
+    );
+    let output = run(&root, &["fmt"]);
+    assert!(
+        !output.status.success(),
+        "an unparseable file fails the run"
+    );
+    let text = stdout(&output);
+    assert!(text.contains("broken.hk: does not parse"), "{text}");
+    assert_eq!(
+        fs::read_to_string(root.join("broken.hk")).expect("read it back"),
+        broken,
+        "the file that did not parse was written to"
+    );
+    assert!(
+        fs::read_to_string(root.join("messy.hk"))
+            .expect("read it back")
+            .contains("record Other {"),
+        "the file beside it should still have been formatted"
+    );
+}
+
+/// `fmt` formats what `check` would reject: the grammar is a superset of the language, and
+/// judging a program is a different command's job.
+#[test]
+fn fmt_formats_a_program_that_does_not_check() {
+    let root = project(
+        "fmt-uncheckable",
+        &[("bad.hk", "command  C(){emit @never.declared{x}}\n")],
+    );
+    let formatted = run(&root, &["fmt"]);
+    assert!(formatted.status.success(), "{}", stderr(&formatted));
+    let checked = run(&root, &["check"]);
+    assert!(!checked.status.success(), "the event really is undeclared");
+}
+
+/// `--check` names `fmt`'s flag, and `check` is already a command, so the pair is worth a
+/// sentence rather than a silent no-op.
+#[test]
+fn check_with_the_fmt_flag_says_so() {
+    let root = project(
+        "fmt-misuse",
+        &[("a.hk", "record Item {\n  sku: String,\n}\n")],
+    );
+    let output = run(&root, &["check", "--check"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("`--check` belongs to `fmt`"),
+        "{}",
+        stderr(&output)
+    );
 }

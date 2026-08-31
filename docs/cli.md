@@ -20,7 +20,7 @@ pass   an email that already placed an order is refused
 ## Usage
 
 ```
-hek [check|test] [--boundaries] [path]
+hek [check|test|fmt] [--boundaries] [--check] [path]
 ```
 
 | Command | Does |
@@ -28,6 +28,7 @@ hek [check|test] [--boundaries] [path]
 | `hek check` | parses every `.hk` file under `path` as one program |
 | `hek test` | the same, then runs every `test` declaration |
 | `hek` | both |
+| `hek fmt` | rewrites every `.hk` file under `path` canonically |
 
 `path` is a directory or a single `.hk` file, and defaults to the current directory.
 
@@ -46,9 +47,16 @@ checked 9 files
   Unsubscribe guards SubscriptionIsActive
 ```
 
+`--check` belongs to `fmt` and turns it into a gate: it names the files that would change,
+writes nothing, and exits 1 if there are any. `docs/fmt.md` is the contract for what
+canonical means. `fmt` is the one command that reads a file at a time rather than the whole
+program at once, because layout is a property of one file and a file whose neighbours are
+missing still formats.
+
 Exit status is 0 when everything parsed and every test passed, and 1 otherwise. `check`
 is the pre-commit form: a failing test does not fail it, because a test that fails is a
-program that parsed.
+program that parsed. Plain `hek fmt` holds to the same cut: it fails only on a file it could
+not read as hek at all, not on one it changed.
 
 ## Everything under `path` is one program
 

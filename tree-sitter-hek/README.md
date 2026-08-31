@@ -1,9 +1,17 @@
 # tree-sitter-hek
 
 A [tree-sitter](https://tree-sitter.github.io) grammar for **hek** (`.hk`), the language
-in this repository. It exists so an editor can highlight `.hk` sources; the authority on
-the language is still `../src/lex.rs` and `../src/parse.rs`, and `grammar.js` cites them
-where a rule is not obvious.
+in this repository. It exists so an editor can highlight `.hk` sources **and so `hek fmt`
+has a tree to print back**; the authority on what the language *means* is still
+`../src/lex.rs` and `../src/parse.rs`, and `grammar.js` cites them where a rule is not
+obvious.
+
+The formatter changed what a mistake here costs. `../cli/build.rs` compiles `src/parser.c`
+into the `hek` binary, so this is a build input rather than an editor convenience, and the
+"regenerate and commit `src/`" rule below is now load-bearing: skip it and `hek fmt` parses
+a language nobody is writing. `../cli/tests/grammar.rs` is the standing check that the
+grammar and the acceptance sources in `../hek` still agree, which until now was a command
+someone had to remember to run.
 
 It lives beside the language rather than in its own repository so that one commit can
 change the lexer and the grammar together, and so the grammar can be checked against the
