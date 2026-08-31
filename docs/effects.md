@@ -1022,6 +1022,5 @@ it, because a narrowed load lowers differently.
   `Keys` in `docs/host.md` is the seam this would move through, and it is already shaped for it.
 - **The second erase rule** (rule 9), for an id that round-trips through an HTTP response. The
   `reveal` case is now checked where it can be written.
-- **Arrays** in a JSON body can be carried but not taken apart (rule 8).
 - **The journal key is a readable description**, not a content hash. It is stable and it prints,
   which is what a harness wants; a real host hashes it.
