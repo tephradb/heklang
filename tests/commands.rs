@@ -456,6 +456,78 @@ fn state_and_guard_must_precede_the_first_statement() {
 }
 
 // ---------------------------------------------------------------------------------
+// Inside a fold: a filter reads the command's scope and a destructure reads the event.
+// They are the pair that gets swapped, because both are bare field names sitting
+// between the path and the `=>`.
+
+/// The parameter and the field are both called `total`, so an arm reading the wrong side
+/// checks clean and answers twice the argument instead of the sum over the log.
+#[test]
+fn a_destructure_reads_the_event_where_a_filter_reads_the_command() {
+    let program = program(
+        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+  state spend: Money(2) = fold 0
+    on @order.placed(customer_id) { total } => spend + total
+
+  if spend != 8.00 {
+    return reject(\"unexpected\", \"{spend}\")
+  }
+  emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
+}",
+    );
+    let log = vec![placed(1, 7, 500), placed(2, 7, 300)];
+    let mut interpreter = Interpreter::with_log(&program, log);
+    let execution = interpreter
+        .run(
+            "Place",
+            [
+                ("order_id", Value::uuid(ORDER)),
+                ("customer_id", Value::Int(7)),
+                ("total", Value::money(100, 2)),
+            ],
+        )
+        .expect("ran");
+    assert!(
+        matches!(execution.outcome, Outcome::Ok(_)),
+        "got: {:?}",
+        execution.outcome
+    );
+}
+
+/// A binding carries the field's own name, so there is no `{ field: alias }` form and a
+/// name for anything else is a `let` below the declarations.
+#[test]
+fn a_destructure_does_not_rename() {
+    let message = err(
+        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+  state spend: Money(2) = fold 0
+    on @order.placed(customer_id) { total: amount } => spend + amount
+
+  emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
+}",
+    );
+    assert!(message.contains("expected `}`"), "got: {message}");
+}
+
+/// Declared fields only, so an envelope is not reachable through a destructure. A
+/// command has none to reach for in the first place.
+#[test]
+fn a_destructure_reaches_no_envelope() {
+    let message = err(
+        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+  state last: Int = fold 0
+    on @order.placed(customer_id) { position } => position
+
+  emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
+}",
+    );
+    assert!(
+        message.contains("@order.placed has no field `position`"),
+        "got: {message}"
+    );
+}
+
+// ---------------------------------------------------------------------------------
 // What a command may not do. Each message names the rule where it is broken.
 
 fn body_is_rejected(body: &str) -> String {

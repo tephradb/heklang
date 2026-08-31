@@ -260,12 +260,68 @@ Each of those has a message naming the rule at the point of violation rather tha
 
 ## Inside a fold
 
-A fold arm is `on @path(filters) [{ fields }] => expression`, and the expression may name the state
-variable itself, which is what makes it a fold rather than a scan.
+A fold arm is `on @path(filters) [{ destructure }] => expression`, and the expression may name the
+state variable itself, which is what makes it a fold rather than a scan.
 
-A filter is `field` when a binding of that name is in scope, or `field: expression` for anything
-else. The shorthand is the common case: `@order.placed(customer_id)` beside a parameter called
-`customer_id`.
+**The parens and the braces read from opposite sides.** Both sit between the path and the `=>`, and
+both hold bare field names, which is the whole reason they get swapped:
+
+```
+state lifetime_spend: Money(2) = fold 0
+  on @order.placed(customer_id) { total } => lifetime_spend + total
+```
+
+| | says | evaluated | reads |
+| --- | --- | --- | --- |
+| `(customer_id)` | which events this arm matches | once, before the fold | the command's scope |
+| `{ total }` | which of its fields the arm may name | once per matching event | the event |
+
+So `customer_id` is the command's parameter and `total` is the event's field. Only the filter
+reaches the append condition, because only the filter narrows the slice: the `Predicate` above
+carries `filters` and has nowhere to put a destructure. A destructure opens events the filter has
+already chosen.
+
+**A filter is `field` when a binding of that name is in scope, and `field: expression` otherwise.**
+The shorthand is the common case, `@order.placed(customer_id)` beside a parameter of the same name.
+The long form is for when the two sides do not share a name:
+
+```
+on @customer.blocked(customer_id: customer) => true
+```
+
+Because it runs once and before anything folds, a filter may not name a `state` or a `let` that
+reads one, and a `let` it does name has to be above the declarations. "Execution order" above has
+both errors.
+
+**A destructure binds the event's own fields under their own names.** It is optional, and an arm
+needing only the fact that an event happened leaves it off:
+
+```
+on @order.placed(customer_id) => open_orders + 1
+```
+
+There is no renaming, so `{ total: amount }` does not parse. A binding always carries the field's
+name, which is what lets a reader who knows the event know what the arm has in scope without
+reading back up to the `on`; a name for anything else is a `let` below the declarations rather than
+an alias here. Where a parameter shares the name, the destructure shadows it for that one arm, which
+is what an arm folding `total` wants and not a collision.
+
+The name has to be a field that event declares, so an envelope is not reachable this way:
+
+> @order.placed has no field `position`
+
+A command has no envelope to reach for. An effect's fold sits inside a handler, so that handler's
+`as` binding is in scope in a filter and in an arm, but it is the *triggering* event and does not
+move as the fold runs (`docs/effects.md`).
+
+**The scope is one arm.** Folding two event types binds two sets of names that never meet, each
+checked against its own declaration:
+
+```
+state items: Map(Uuid, Item) = fold Map.empty
+  on @item.listed(seller_id) { item_id, item } => items.set(item_id, item)
+  on @item.delisted(seller_id) { item_id } => items.remove(item_id)
+```
 
 A fold arm may not read the clock or call out, because **a fold is not journaled**: every attempt
 re-folds and gets the same answer, which is only true if it cannot observe anything but the log
