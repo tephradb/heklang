@@ -5,3 +5,10 @@ edition = "2024"
 
 [dependencies]
 heklang = { path = ".." }
+tree-sitter = "0.27.0"
+tree-sitter-language = "0.1.8"
+
+# Compiles the committed `tree-sitter-hek/src/parser.c`. This is the reason the tool is a
+# separate crate: building the language must not require a C toolchain.
+[build-dependencies]
+cc = "1.4.4"

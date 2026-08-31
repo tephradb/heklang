@@ -2,13 +2,18 @@
 name = "heklang"
 version = "0.1.0"
 edition = "2024"
+default-run = "heklang"
 
-# `cli` is the `hek` binary. It is not a default member, so bare `cargo run` stays the
-# demo rather than becoming ambiguous across two packages holding a binary each; the
-# checker is `cargo run -p hek`. Testing everything is `cargo test --workspace`.
+# `cli` is the `hek` binary, split out because building the language must not need a C
+# toolchain: it compiles the tree-sitter parser and heklang does not.
+#
+# It is a default member so that bare `cargo test` still runs its tests. That leaves two
+# packages holding a binary each, which is what `default-run` above is now for: without it
+# `cargo run` cannot choose between `hek` and `heklang` and the demo-diff check every pass
+# runs stops working. The checker is `cargo run -p hek`.
 [workspace]
 members = ["cli"]
-default-members = ["."]
+default-members = [".", "cli"]
 
 [dependencies]
 uuid = { version = "1.26.0", default-features = false, features = ["std", "v5"] }
