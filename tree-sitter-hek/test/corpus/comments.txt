@@ -1,0 +1,145 @@
+================================================================================
+a file header and a comment above a declaration
+================================================================================
+
+// events/order.hk
+
+// What a command may emit.
+event @order.placed {
+  order_id: Uuid,
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (comment)
+  (comment)
+  (event_declaration
+    (event_path)
+    (event_field
+      (identifier)
+      (type
+        (primitive_type)))))
+
+================================================================================
+a comment between two fields
+================================================================================
+
+projector Orders {
+  entity Order {
+    order_id: Uuid @key,
+    // Optional because erasure is what a reader sees: erasing leaves the row
+    // present with these columns gone.
+    email: String?,
+    name: String?,
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (projector_declaration
+    (type_identifier)
+    (entity_declaration
+      (type_identifier)
+      (entity_field
+        (identifier)
+        (type
+          (primitive_type))
+        (annotation
+          (annotation_name)))
+      (comment)
+      (comment)
+      (entity_field
+        (identifier)
+        (type
+          (primitive_type)))
+      (entity_field
+        (identifier)
+        (type
+          (primitive_type))))))
+
+================================================================================
+a comment between two arguments
+================================================================================
+
+effect Audit {
+  on @order.placed as e { order_id } {
+    let response = http.post(
+      "https://audit.example/order",
+      { "order": order_id },
+      // What stops a second audit across a replay.
+      headers = { "Idempotency-Key": "{e.position}" },
+    )
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (effect_declaration
+    (type_identifier)
+    (event_handler
+      (event_path)
+      (identifier)
+      (destructure
+        (identifier))
+      (block
+        (let_statement
+          (identifier)
+          (method_call
+            (identifier)
+            (identifier)
+            (arguments
+              (string
+                (string_content))
+              (object_literal
+                (object_entry
+                  (string
+                    (string_content))
+                  (identifier)))
+              (comment)
+              (named_argument
+                (identifier)
+                (object_literal
+                  (object_entry
+                    (string
+                      (string_content))
+                    (string
+                      (interpolation
+                        (field_expression
+                          (identifier)
+                          (identifier))))))))))))))
+
+================================================================================
+a comment is the whole body
+================================================================================
+
+command Nothing() {
+  // Deliberately empty: the guard above is the whole decision.
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (command_declaration
+    (type_identifier)
+    (parameters)
+    (block
+      (comment))))
+
+================================================================================
+a comment after code on the same line
+================================================================================
+
+const LIMIT: Int = 10 // as many as a shop may hold
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (const_declaration
+    (identifier)
+    (type
+      (primitive_type))
+    (integer_literal))
+  (comment))
