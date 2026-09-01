@@ -24,3 +24,10 @@ uuid = { version = "1.26.0", default-features = false, features = ["std", "v5"] 
 name = "fold"
 harness = false
 test = false
+
+# The only dependency past `uuid`, and a dev one. `tests/roundtrip.rs` states rule 8's
+# table as a property over generated values rather than as a list someone maintains, and
+# shrinking is what turns a counterexample into something readable. `fork` and `timeout`
+# are off, so neither `rusty-fork` nor `wait-timeout` comes with it.
+[dev-dependencies]
+proptest = { version = "1.11", default-features = false, features = ["std", "bit-set"] }
