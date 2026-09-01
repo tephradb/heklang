@@ -879,3 +879,47 @@ fn a_world_that_cannot_be_built_errors_rather_than_fails() {
         "{results:?}"
     );
 }
+
+/// A seal is transparent to a literal, in an expectation as much as anywhere else.
+///
+/// `Number::resolve` already unseals what it is handed, but the hint that reaches it
+/// peeled only the optional, so a sealed numeric column never received its declared
+/// type: the literal defaulted to `Decimal` and then failed to fill the field it was
+/// written into. A sealed column has to be optional, so `Opt(Sealed(Money(2), org))` is
+/// the shape every one of them has and the only shape this could be found in.
+#[test]
+fn a_literal_takes_its_type_through_a_seal() {
+    let program = parse(
+        "event @t.happened {
+  id: Uuid,
+  org: Int,
+  amount: Money(2) @subject(org),
+  count: Int @subject(org),
+}
+projector P {
+  entity Row {
+    id: Uuid @key,
+    org: Int,
+    amount: Money(2)?,
+    count: Int?,
+  }
+  on @t.happened { id, org, amount, count } { put Row { id, org, amount, count } }
+}
+test \"a sealed numeric column takes a bare literal\" {
+  given @t.happened {
+    id: \"11111111-1111-1111-1111-111111111111\",
+    org: 1,
+    amount: 5.00,
+    count: 3,
+  }
+  project P
+  expect Row[\"11111111-1111-1111-1111-111111111111\"] { org: 1, amount: 5.00, count: 3 }
+}
+",
+    );
+    assert!(
+        program.is_ok(),
+        "a bare literal in a sealed numeric position must parse: {}",
+        program.err().map(|err| err.text()).unwrap_or_default()
+    );
+}

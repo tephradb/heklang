@@ -3,6 +3,14 @@ use std::fmt;
 
 pub const RATIO_SCALE: u8 = 6;
 
+/// The widest scale a `Decimal` or a `Money` may declare.
+///
+/// The units are an `i64`, and `i64::MAX` has nineteen digits. At nineteen places every
+/// digit is fractional, so the type cannot hold the value `1` and that literal is already
+/// out of range; at twenty [`text`]'s own divisor overflows a `u64`. The parser refuses a
+/// wider scale, so neither is reachable from a program.
+pub const MAX_SCALE: u8 = 18;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rounding {
     HalfUp,

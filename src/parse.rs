@@ -13,7 +13,7 @@ use crate::ir::{
     Slot, Span, Stage, Stmt, Test, Type, UnOp, Update,
 };
 use crate::lex::{Keyword, Spanned, Sym, Token, lex};
-use crate::scaled::{self, Rounding};
+use crate::scaled::{self, MAX_SCALE, Rounding};
 use crate::types::{
     self, a, default_type, fills, inner_of, method_sig, response_field, seal, wrap,
 };
@@ -2537,7 +2537,18 @@ impl Parser {
         let number = self.expect_number()?;
         self.expect_sym(Sym::RParen)?;
         match (number.scale, u8::try_from(number.digits)) {
-            (0, Ok(scale)) => Ok(scale),
+            (0, Ok(scale)) if scale <= MAX_SCALE => Ok(scale),
+            // Bounded here rather than left to arithmetic further down. The units are an
+            // `i64`, whose widest value has nineteen digits, so a scale of nineteen
+            // leaves none for the whole part and the literal `1` is already out of
+            // range. Past that `scaled::text` cannot build its divisor at all.
+            (0, Ok(scale)) => self.fail(
+                Code::BadType,
+                format!(
+                    "a {what} scale of {scale} leaves no digits for the whole part: the units \
+                     are a 64-bit integer, so {MAX_SCALE} places is the most one can hold"
+                ),
+            ),
             _ => self.fail(
                 Code::BadType,
                 format!("a {what} scale must be a small whole number"),
@@ -4910,10 +4921,21 @@ impl Parser {
         // the mistake: the mistake is comparing a String to a number, and the operator
         // table says so once the literal has been allowed a type of its own. `settle`
         // already ignores a hint that will not resolve, so this only moves the moment.
-        let target = expect
-            .filter(|ty| matches!(inner_of(ty), Type::Int | Type::Decimal(_) | Type::Money(_)));
+        //
+        // `peeled` as well as `inner_of`, because a seal is transparent to a literal
+        // exactly as an optional is: writing `25.99` into a `Money(2) @subject(shop_id)`
+        // is the encrypting direction, which rule 12 says needs no ceremony. Without it
+        // a sealed numeric column never received its declared type, so the literal
+        // defaulted to `Decimal` and then failed to fill the field it was written into.
+        let target = expect.filter(|ty| {
+            matches!(
+                inner_of(ty).peeled(),
+                Type::Int | Type::Decimal(_) | Type::Money(_)
+            )
+        });
         let defaulted = target.is_none();
         // A literal in a `T?` position is still a `T`; the write site wraps it.
+        // `Number::resolve` unseals what is left, so a seal needs no peeling here.
         let ty = match target {
             Some(ty) => inner_of(&ty).clone(),
             None => default_type(number),

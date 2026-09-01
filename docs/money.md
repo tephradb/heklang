@@ -74,6 +74,18 @@ So **an application handling several currencies should pick a scale that fits al
 is the mistake this framing is meant to prevent, since the field has to hold the most precise
 currency it will ever see, not the most common one.
 
+## The scale stops at 18
+
+`Money(n)` and `Decimal(n)` both refuse a scale above **18**, at the declaration.
+
+The units are an `i64`, and `i64::MAX` has nineteen digits. At nineteen places every digit is
+fractional, so the type cannot hold the value `1` and that literal is already out of range: a scale
+that wide is a type with no whole units in it. `Money(18)` is the last one that holds a unit, and it
+holds up to `9.223372036854775807`.
+
+The refusal is at the declaration rather than at the first value written out, because the checker's
+promise is that a program it accepts runs.
+
 ## The decision, and what was rejected
 
 **Currency in the value**, as `{ units, currency }`, was rejected. It buys exactly one runtime check,

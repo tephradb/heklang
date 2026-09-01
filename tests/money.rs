@@ -211,3 +211,38 @@ fn there_is_no_currency_item() {
          `projector`, `effect` or `test`, found `currency`"
     );
 }
+
+/// The units are an `i64`, so the scale has an end. Past it the type can hold no whole
+/// units at all, and past *that* rendering one overflows its own divisor. The parser is
+/// where it stops, because a program the checker accepts must not be able to take the
+/// process down when a value is written out.
+#[test]
+fn a_scale_wider_than_the_units_is_refused_at_the_declaration() {
+    for scale in [0, 2, 9, 18] {
+        parse(&format!("event @e.happened {{ amount: Money({scale}) }}\n"))
+            .unwrap_or_else(|err| panic!("Money({scale}) should be declarable: {err}"));
+    }
+    for scale in [19, 20, 30, 255] {
+        let err = parse(&format!("event @e.happened {{ amount: Money({scale}) }}\n"))
+            .expect_err(&format!("Money({scale}) cannot hold a whole unit"));
+        assert!(
+            err.text().contains("18 places is the most one can hold"),
+            "{}",
+            err.text()
+        );
+    }
+    // `Decimal` is the same scaled integer and stops in the same place.
+    parse("event @e.happened { ratio: Decimal(18) }\n").expect("Decimal(18) is declarable");
+    parse("event @e.happened { ratio: Decimal(19) }\n").expect_err("Decimal(19) is not");
+}
+
+/// The widest scale still holds a whole unit, and renders it. This is the other half of
+/// the bound: it is where the type stops being useful, not somewhere short of it.
+#[test]
+fn the_widest_scale_still_renders_a_whole_unit() {
+    assert_eq!(
+        heklang::scaled::text(9_000_000_000_000_000_000, 18),
+        "9.000000000000000000"
+    );
+    assert_eq!(heklang::scaled::MAX_SCALE, 18);
+}
