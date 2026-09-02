@@ -431,6 +431,150 @@ fn the_rule_holds_at_every_declared_position() {
     }
 }
 
+/// `{ id }` is `{ id: id }`, so it is the same declared position and gets the same
+/// check. It did not: the long form funnels through `expr`, which runs the pair, and
+/// the shorthand built its load directly and ran neither. So a field whose name matched
+/// while its type did not passed `hek check` at all seven sites that take the shorthand
+/// and failed only when something ran it, which is the exact defect this document's
+/// opening argues against. One test per site, because the fix is one helper they share
+/// and a site that stops calling it would otherwise be silent again.
+#[test]
+fn the_bare_name_shorthand_is_the_same_position() {
+    let cases = [
+        // an emit field
+        (
+            "command C(id: String) {
+  emit @thing.touched { id }
+}",
+            "expected Int, found String",
+        ),
+        // a slice filter
+        (
+            "command C(id: Int, name: Int) {
+  state seen: Bool = fold false
+    on @thing.happened(name) => true
+  emit @thing.touched { id }
+}",
+            "expected String, found Int",
+        ),
+        // a guard argument
+        (
+            "guard G(id: String) {
+  state seen: Bool = fold false
+    on @thing.touched(id: 1) => true
+  if !seen {
+    return invalid(\"no\")
+  }
+}
+command C(id: Int) {
+  guard G { id }
+  emit @thing.touched { id }
+}",
+            "expected String, found Int",
+        ),
+        // a refusal field
+        (
+            "refusal Taken(note: String) \"note {note} is taken\"
+command C(id: Int, note: Int) {
+  if id > 0 {
+    return reject Taken { note }
+  }
+  emit @thing.touched { id }
+}",
+            "expected String, found Int",
+        ),
+        // a record literal field
+        (
+            "command C(id: Int, note: Int) {
+  let f = Facts { note, count: 0 }
+  emit @thing.touched { id }
+}",
+            "expected String, found Int",
+        ),
+        // a `put` column
+        (
+            "projector P {
+  entity Row { id: Int @key, name: Int }
+  on @thing.happened { id, name } {
+    put Row { id, name }
+  }
+}",
+            "expected Int, found String",
+        ),
+        // a `patch` column
+        (
+            "projector P {
+  entity Row { id: Int @key, name: Int }
+  on @thing.happened { id, name } {
+    patch Row[id] { name }
+  }
+}",
+            "expected Int, found String",
+        ),
+        // an `invoke` argument
+        (
+            "command Touch(id: Int) {
+  emit @thing.touched { id }
+}
+effect E {
+  on @thing.happened as e { name } {
+    let id = name
+    invoke Touch { id }
+  }
+}",
+            "expected Int, found String",
+        ),
+    ];
+    for (body, expected) in cases {
+        let message = err(body);
+        assert!(
+            message.contains(expected),
+            "expected {expected:?}, got: {message}"
+        );
+    }
+}
+
+/// The other half, and the one that would make the fix a regression: the shorthand
+/// still coerces and still propagates a seal. `check_seal` stands down while a filter
+/// is folding and while a column is propagating, which is how the long form already
+/// behaves at both, so the shorthand inherits it rather than restating it.
+#[test]
+fn the_shorthand_still_wraps_and_still_propagates() {
+    let cases = [
+        // a bare `T` fills a `T?`
+        "command C(id: Int, maybe: String) {
+  state held: String? = fold maybe
+  emit @thing.touched { id }
+}",
+        // a branch that proved it present makes it its inner type
+        "command C(id: Int, held: String?) {
+  if held.is_none() {
+    return invalid(\"none\")
+  }
+  let f = Facts { note: held, count: 0 }
+  emit @thing.touched { id }
+}",
+        // sealed content into a column, which propagates rather than reading
+        "event @person.seen { person_id: Int, email: String @subject(person_id) }
+projector P {
+  entity Row { person_id: Int @key, email: String }
+  on @person.seen { person_id, email } {
+    put Row { person_id, email }
+  }
+}",
+        // sealed content as a filter, which narrows a slice rather than reading
+        "event @person.seen { person_id: Int, email: String @subject(person_id) }
+command C(id: Int, email: String) {
+  state seen: Bool = fold false
+    on @person.seen(email) => true
+  emit @thing.touched { id }
+}",
+    ];
+    for body in cases {
+        program(body);
+    }
+}
+
 /// A test's `given` and `expect` are declared positions too, which is what stops a
 /// suite from asserting something the program could never have produced.
 #[test]

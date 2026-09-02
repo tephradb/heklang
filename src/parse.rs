@@ -2837,8 +2837,7 @@ impl Parser {
             } else if lower.b.lookup(&field).is_none() {
                 return Err(self.not_in_scope(&field, at));
             } else {
-                lower.b.at(at);
-                lower.b.load(&field)
+                self.shorthand(lower, &field, &expected, at)
             };
             // An argument becomes a prologue assignment, which runs before any fold, so
             // this would read the other `state`'s seed rather than what it folds to. The
@@ -3077,8 +3076,7 @@ impl Parser {
                     self.folding = false;
                     return Err(self.not_in_scope(&field, at));
                 }
-                lower.b.at(at);
-                lower.b.load(&field)
+                self.shorthand(lower, &field, &expected, at)
             };
             self.folding = false;
             filters.push(Filter::new(field, value));
@@ -3843,8 +3841,7 @@ impl Parser {
             } else if lower.b.lookup(&name).is_none() {
                 self.record(lower, self.not_in_scope(&name, at))
             } else {
-                lower.b.at(at);
-                lower.b.load(&name)
+                self.shorthand(lower, &name, &expected, at)
             };
             self.propagating = outer;
             self.propagate_subject(lower, &def.name, &name, value, at)?;
@@ -4103,8 +4100,7 @@ impl Parser {
                     } else if lower.b.lookup(&name).is_none() {
                         self.record(lower, self.not_in_scope(&name, at))
                     } else {
-                        lower.b.at(at);
-                        lower.b.load(&name)
+                        self.shorthand(lower, &name, &expected, at)
                     };
                     // The second one is read and dropped, so what is left is a set and
                     // the completeness check below reads it as one.
@@ -5792,6 +5788,27 @@ impl Parser {
         self.note(self.advised(Code::TypeMismatch, mismatch(&found, want), at));
     }
 
+    /// The bare-name shorthand `{ order_id }`, which is `{ order_id: order_id }` and has
+    /// to be checked as one.
+    ///
+    /// The long form funnels through `expr`, which runs the pair at every declared
+    /// position; a shorthand builds its load directly and so ran neither. A field whose
+    /// name matched while its type did not therefore reached the interpreter, and
+    /// `emit @order.placed { sku }` with an `Int` parameter checked clean and failed at
+    /// the write. That is the defect `docs/types.md` exists to close, so the shorthand
+    /// runs the same two checks here rather than each of its seven sites repeating them.
+    ///
+    /// The flags the callers set are what keep it faithful to the long form: `check_seal`
+    /// stands down while `folding` or `propagating`, which is how a slice filter and a
+    /// projector column already behave when the value is written out.
+    fn shorthand(&self, lower: &mut Lower, name: &str, want: &Type, at: Span) -> ExprId {
+        lower.b.at(at);
+        let value = lower.b.load(name);
+        self.check_seal(lower, value, want, at);
+        self.check_type(lower, value, want, at);
+        value
+    }
+
     /// The same rule where nothing declares a type: an interpolation hole, a
     /// comparison, an HTTP body. Reading content into any of them is reading it.
     fn no_seal(&self, lower: &Lower, value: ExprId, what: &str, at: Span) {
@@ -6478,8 +6495,7 @@ impl Parser {
                 if lower.b.lookup(&field).is_none() {
                     return Err(self.not_in_scope(&field, at));
                 }
-                lower.b.at(at);
-                lower.b.load(&field)
+                self.shorthand(lower, &field, &expected, at)
             };
             fields.push((field, value));
             if !self.eat_sym(Sym::Comma) {
@@ -6762,8 +6778,7 @@ impl Parser {
             } else if lower.b.lookup(&field).is_none() {
                 return Err(self.not_in_scope(&field, field_at));
             } else {
-                lower.b.at(field_at);
-                lower.b.load(&field)
+                self.shorthand(lower, &field, &expected, field_at)
             };
             args[index] = Some(value);
             if !self.eat_sym(Sym::Comma) {
@@ -6871,8 +6886,7 @@ impl Parser {
                 if lower.b.lookup(&field).is_none() {
                     return Err(self.not_in_scope(&field, at));
                 }
-                lower.b.at(at);
-                lower.b.load(&field)
+                self.shorthand(lower, &field, &expected, at)
             };
             args.push((field, value));
             if !self.eat_sym(Sym::Comma) {

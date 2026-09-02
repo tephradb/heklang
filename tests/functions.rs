@@ -437,11 +437,11 @@ fn a_trailing_comma_closes_an_argument_list() {
         ),
         (
             "Uuid.derive",
-            "  let u = Uuid.derive(plan_id, \"s\",)\n  emit @plan.created { plan_id, sku, months }",
+            "  let u = Uuid.derive(plan_id, \"s\",)\n  emit @plan.created { plan_id, sku: effective_sku(sku, plan_id), months }",
         ),
         (
             "Timestamp.parse",
-            "  let t = Timestamp.parse(\"2026-01-01T00:00:00Z\",)\n  emit @plan.created { plan_id, sku, months }",
+            "  let t = Timestamp.parse(\"2026-01-01T00:00:00Z\",)\n  emit @plan.created { plan_id, sku: effective_sku(sku, plan_id), months }",
         ),
     ];
     for (what, body) in cases {
@@ -454,7 +454,8 @@ fn a_trailing_comma_closes_an_argument_list() {
 #[test]
 fn a_trailing_comma_closes_every_other_list() {
     let decls = "\nrecord Pair { a: Int, b: Int, }\nfn pair(a: Int, b: Int,) -> Int {\n  let xs = [a, b,]\n  let p = Pair { a: a, b: b, }\n  return p.a + xs.len()\n}\n";
-    let body = "  emit @plan.created { plan_id, sku, months: pair(1, 2), }";
+    let body =
+        "  emit @plan.created { plan_id, sku: effective_sku(sku, plan_id), months: pair(1, 2), }";
     parse(&source(decls, body)).unwrap_or_else(|err| panic!("{err}"));
 }
 

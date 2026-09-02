@@ -168,6 +168,35 @@ synthesise the operand's type. Put the same `!id` inside a `&&` and the conditio
 so nothing was left to notice. Fixing the synthesis alone would have made `if !id` pass; the two go
 together.
 
+**The bare-name shorthand was the second exception, and it was the larger one.** `{ id }` is
+`{ id: id }`, so it is the same position and takes the same check. It took neither. The long form
+funnels through the call site above; the shorthand skipped it and built its load directly, at all
+seven places that accept one: an `emit` field, a slice filter, a guard argument, a refusal field, a
+record literal field, a `put`/`patch`/`update` column and an `invoke` argument. So this passed
+`hek check` and reported only when a test ran it:
+
+```
+event @order.placed { order_id: Uuid, sku: String }
+command C(order_id: Uuid, sku: Int) {
+  emit @order.placed { order_id, sku }        // an Int into a String field
+}
+```
+
+Which is this document's opening defect exactly, on the path an author actually writes: the corpus
+uses the shorthand wherever the names line up, so the checked spelling was the rarer one. Both
+checks now run in one helper the seven sites share, `Parser::shorthand`, rather than in seven copies
+that a new site could be added without.
+
+The two flags are what keep it faithful rather than stricter. `check_seal` stands down while
+`folding` and while `propagating`, which is how a slice filter and a projector column already behave
+when the field is written out, so a filter on a subject-bound field and a column that takes the seal
+are unaffected. `check_type` sees through a seal either way. And the load is the same node the long
+form builds, so a narrowed optional still arrives narrowed: a branch that proved `sku` present makes
+`{ sku }` fill a `String`.
+
+`tests/types.rs` holds both halves, one case per site for what is now rejected and four for what
+must still pass.
+
 ### Where the check happens, and why not in a pass of its own
 
 In the parser, while it lowers. Two things need a type *before* the IR node exists: a numeric literal
