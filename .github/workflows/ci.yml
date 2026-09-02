@@ -73,21 +73,22 @@ jobs:
       - run: cargo doc --workspace --all-features --no-deps
 
   # Verify the declared minimum supported Rust versions still build. heklang is the library
-  # and sits at 1.85.0; tree-sitter-hek and hek sit at 1.90.0, which is what the tree-sitter
-  # crates require.
+  # and sits at 1.88.0, which is where let chains stabilised (`src/parse.rs` is full of them)
+  # and past the 1.86.0 trait upcasting in `src/interp.rs`. tree-sitter-hek and hek sit at
+  # 1.90.0, which is what the tree-sitter crates require.
   msrv:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.85.0
+          toolchain: 1.88.0
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.90.0
       - uses: Swatinem/rust-cache@v2
-      - name: Check the library on 1.85.0
-        run: cargo +1.85.0 check -p heklang --all-features
+      - name: Check the library on 1.88.0
+        run: cargo +1.88.0 check -p heklang --all-features
       - name: Check the whole workspace on 1.90.0
         run: cargo +1.90.0 check --workspace --all-features
 
