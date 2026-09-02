@@ -1,0 +1,50 @@
+// The read side: a pure fold over the log into rows. Nothing here calls out, reads a
+// clock, or branches on a stored value, so replaying from position 0 rebuilds exactly
+// these rows.
+
+projector Workshops {
+  enum Status { @default Open, Closed }
+
+  entity Workshop {
+    workshop_id: Uuid @key,
+    title: String @max(120),
+    seats: Int,
+    taken: Int,
+    revenue: Money(2),
+    status: Status,
+  }
+
+  entity Booking {
+    booking_id: Uuid @key,
+    workshop_id: Uuid @index,
+    attendee_id: Int @index,
+    // Sealed on the event, so writing it here seals the column. A projector stores
+    // personal data it can never read, which is what makes crypto-shredding cheap.
+    email: String @max(200),
+    paid: Money(2),
+    confirmed_at: Timestamp?,
+
+    index (workshop_id, attendee_id),
+  }
+
+  on @workshop.opened { workshop_id, title, seats } {
+    put Workshop { workshop_id, title, seats, taken: 0, revenue: 0.00, status: Open }
+  }
+
+  on @seat.booked { workshop_id, booking_id, attendee_id, email, paid } {
+    put Booking { booking_id, workshop_id, attendee_id, email, paid, confirmed_at: none }
+    // `update` rather than `patch`: a Workshop is an identity, so a booking for a
+    // workshop that is not there should drop rather than manufacture a row with a
+    // real id, a real revenue figure and an empty title.
+    update Workshop[workshop_id] { taken: .taken + 1, revenue: .revenue + paid }
+  }
+
+  on @seat.released { workshop_id, booking_id } {
+    delete Booking[booking_id]
+    update Workshop[workshop_id] { taken: .taken - 1 }
+  }
+
+  on @booking.confirmed as e { booking_id } {
+    update Booking[booking_id] { confirmed_at: e.at }
+  }
+}

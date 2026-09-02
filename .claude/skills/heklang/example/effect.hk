@@ -1,0 +1,38 @@
+// The only declaration that reaches the network. Every call is journaled, so a replay
+// answers from the journal rather than sending twice.
+
+const CONFIRM_URL: String = "https://mail.example/confirm"
+
+effect ConfirmBooking {
+  // Effect-local, so it may call out. It takes the already-revealed address rather
+  // than the sealed one, which keeps every decrypt at the arm's own level.
+  fn notify(booking_id: Uuid, to: String, first: Bool) {
+    let response = http.post(
+      CONFIRM_URL,
+      { "booking": booking_id, "to": to, "first_booking": first },
+      headers = { "Idempotency-Key": "{booking_id}" },
+    )
+    // Retryable statuses never arrive: the runtime absorbed them with backoff, so a
+    // 4xx here is a real decision rather than something every effect re-implements.
+    if response.status >= 400 {
+      fail("confirmation rejected with status {response.status}")
+    }
+  }
+
+  on @seat.booked as e { booking_id, attendee_id, email } {
+    // Folded up to and including the triggering event, so an attendee's first
+    // booking leaves this at one rather than zero.
+    state bookings: Int = fold 0
+      on @seat.booked(attendee_id) => bookings + 1
+
+    notify(booking_id, reveal(email), bookings == 1)
+
+    log("confirmed booking {booking_id} for attendee {attendee_id}")
+
+    // Derived, never minted: the same id on every attempt and every replay.
+    invoke RecordConfirmed {
+      booking_id,
+      notification_id: Uuid.derive(e.id, "confirmation"),
+    }
+  }
+}

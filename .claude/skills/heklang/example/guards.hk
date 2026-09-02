@@ -1,0 +1,35 @@
+// A guard is a named proposition about the log with one refusal. Each is named for
+// what it asserts rather than for the entity it reads, which is what keeps a command's
+// boundary the union of several small propositions instead of one aggregate.
+
+guard WorkshopIsOpen(workshop_id: Uuid) {
+  state opened: Bool = fold false
+    on @workshop.opened(workshop_id) => true
+
+  if !opened {
+    return reject WorkshopIsClosed
+  }
+}
+
+guard SeatIsAvailable(workshop_id: Uuid) {
+  // Two folds, one read: a run of `state` declarations is one pass over the log.
+  state capacity: Int = fold 0
+    on @workshop.opened(workshop_id) { seats } => seats
+  state taken: Int = fold 0
+    on @seat.booked(workshop_id) => taken + 1
+    on @seat.released(workshop_id) => taken - 1
+
+  if taken >= capacity {
+    return reject WorkshopIsFull { seats: capacity }
+  }
+}
+
+guard AttendeeHasNoSeat(workshop_id: Uuid, attendee_id: Int) {
+  state booked: Bool = fold false
+    on @seat.booked(workshop_id, attendee_id) => true
+    on @seat.released(workshop_id, attendee_id) => false
+
+  if booked {
+    return reject AlreadyBooked
+  }
+}

@@ -60,6 +60,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo run -p hek -- hek/
       - run: cargo run -p hek -- fmt --check hek/
+      # The agent skill's worked example makes the same claim about itself, and `hek` skips
+      # any directory beginning with `.`, so it has to be named rather than swept up.
+      - run: cargo run -p hek -- .claude/skills/heklang/example
+      - run: cargo run -p hek -- fmt --check .claude/skills/heklang/example
 
   # Rustdoc with warnings denied, catching broken intra-doc links and other doc warnings.
   docs:

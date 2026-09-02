@@ -1,0 +1,205 @@
+// A test is a declaration, so a file of them is an ordinary module. It states a log,
+// one thing to do to it, and what should come out.
+
+const RUST: Uuid = "0190d1a1-0000-7000-8000-000000000001"
+const BOOKING: Uuid = "0190d1a1-0000-7000-8000-000000000002"
+const SECOND: Uuid = "0190d1a1-0000-7000-8000-000000000003"
+
+// The event the harness stamps at position 1, which is what `e.id` reads in the arm.
+const TRIGGER: Uuid = "0190d1a1-0000-7000-9000-000000000001"
+
+fn seats_for(n: Int) -> Int {
+  return n * 2
+}
+
+test "a seat in an open workshop with room is booked as written" {
+  given @workshop.opened {
+    workshop_id: RUST,
+    title: "Rust",
+    seats: seats_for(1),
+    price: 40.00,
+  }
+
+  run BookSeat {
+    workshop_id: RUST,
+    booking_id: BOOKING,
+    attendee_id: 7,
+    email: "ada@example.com",
+    paid: 40.00,
+  }
+
+  expect @seat.booked {
+    workshop_id: RUST,
+    booking_id: BOOKING,
+    attendee_id: 7,
+    email: "ada@example.com",
+    paid: 40.00,
+  }
+}
+
+test "a workshop nobody opened is refused before anything else is read" {
+  run BookSeat {
+    workshop_id: RUST,
+    booking_id: BOOKING,
+    attendee_id: 7,
+    email: "ada@example.com",
+    paid: 40.00,
+  }
+
+  expect reject WorkshopIsClosed
+}
+
+test "a blank email is the caller's mistake, whatever the log says" {
+  run BookSeat {
+    workshop_id: RUST,
+    booking_id: BOOKING,
+    attendee_id: 7,
+    email: "   ",
+    paid: 40.00,
+  }
+
+  expect invalid("an attendee needs an email")
+}
+
+test "the last seat is the last seat" {
+  given @workshop.opened { workshop_id: RUST, title: "Rust", seats: 1, price: 40.00 }
+  given @seat.booked {
+    workshop_id: RUST,
+    booking_id: BOOKING,
+    attendee_id: 7,
+    email: "ada@example.com",
+    paid: 40.00,
+  }
+
+  run BookSeat {
+    workshop_id: RUST,
+    booking_id: SECOND,
+    attendee_id: 9,
+    email: "grace@example.com",
+    paid: 40.00,
+  }
+
+  expect reject WorkshopIsFull { seats: 1 }
+}
+
+test "releasing a seat nobody holds appends nothing" {
+  given @workshop.opened { workshop_id: RUST, title: "Rust", seats: 2, price: 40.00 }
+
+  run ReleaseSeat { workshop_id: RUST, booking_id: BOOKING, attendee_id: 7 }
+
+  expect nothing
+}
+
+test "a booking writes its row and counts against the workshop" {
+  given @workshop.opened { workshop_id: RUST, title: "Rust", seats: 2, price: 40.00 }
+  given @seat.booked {
+    workshop_id: RUST,
+    booking_id: BOOKING,
+    attendee_id: 7,
+    email: "ada@example.com",
+    paid: 40.00,
+  }
+
+  project Workshops
+
+  // A row is matched on the columns the test lists; an event is matched on all of them.
+  expect Workshop[RUST] { seats: 2, taken: 1, revenue: 40.00, status: Open }
+  expect Booking[BOOKING] { attendee_id: 7, email: "ada@example.com", confirmed_at: none }
+}
+
+test "a booking for a workshop that is gone drops rather than manufacturing one" {
+  given @seat.booked {
+    workshop_id: RUST,
+    booking_id: BOOKING,
+    attendee_id: 7,
+    email: "ada@example.com",
+    paid: 40.00,
+  }
+
+  project Workshops
+
+  expect no Workshop[RUST]
+  expect Booking[BOOKING] { attendee_id: 7 }
+}
+
+test "a first booking is confirmed, logged and recorded" {
+  given @workshop.opened { workshop_id: RUST, title: "Rust", seats: 2, price: 40.00 }
+  given @seat.booked {
+    workshop_id: RUST,
+    booking_id: BOOKING,
+    attendee_id: 7,
+    email: "ada@example.com",
+    paid: 40.00,
+  }
+
+  respond CONFIRM_URL 200
+
+  deliver ConfirmBooking
+
+  // A body is matched on the keys the test writes; an `invoke`'s arguments are matched
+  // exactly, because a command's arguments are its whole input.
+  expect http.post(CONFIRM_URL, { "to": "ada@example.com", "first_booking": true })
+  expect log("confirmed booking {BOOKING} for attendee 7")
+  expect invoke RecordConfirmed {
+    booking_id: BOOKING,
+    notification_id: Uuid.derive(TRIGGER, "confirmation"),
+  }
+}
+
+test "a retryable status is absorbed by the runtime and never reaches the arm" {
+  given @workshop.opened { workshop_id: RUST, title: "Rust", seats: 2, price: 40.00 }
+  given @seat.booked {
+    workshop_id: RUST,
+    booking_id: BOOKING,
+    attendee_id: 7,
+    email: "ada@example.com",
+    paid: 40.00,
+  }
+
+  respond CONFIRM_URL 503
+  respond CONFIRM_URL 200
+
+  deliver ConfirmBooking
+
+  expect http.post(CONFIRM_URL)
+  expect log("confirmed booking {BOOKING} for attendee 7")
+  expect invoke RecordConfirmed {
+    booking_id: BOOKING,
+    notification_id: Uuid.derive(TRIGGER, "confirmation"),
+  }
+}
+
+test "a 4xx is a decision the arm makes, and it fails terminally" {
+  given @workshop.opened { workshop_id: RUST, title: "Rust", seats: 2, price: 40.00 }
+  given @seat.booked {
+    workshop_id: RUST,
+    booking_id: BOOKING,
+    attendee_id: 7,
+    email: "ada@example.com",
+    paid: 40.00,
+  }
+
+  respond CONFIRM_URL 422
+
+  deliver ConfirmBooking
+
+  expect http.post(CONFIRM_URL)
+  expect fail("confirmation rejected with status 422")
+}
+
+test "an erased attendee skips rather than sending plaintext" {
+  given @workshop.opened { workshop_id: RUST, title: "Rust", seats: 2, price: 40.00 }
+  given @seat.booked {
+    workshop_id: RUST,
+    booking_id: BOOKING,
+    attendee_id: 7,
+    email: "ada@example.com",
+    paid: 40.00,
+  }
+
+  erased attendee_id "7"
+
+  deliver ConfirmBooking
+
+  expect skipped
+}

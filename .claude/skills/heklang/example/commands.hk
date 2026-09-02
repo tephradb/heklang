@@ -1,0 +1,53 @@
+// A command replays the history its decision depends on and appends. What it folds is
+// what it conflicts on, so the guards below are also this command's append condition.
+
+command BookSeat(
+  workshop_id: Uuid,
+  booking_id: Uuid,
+  attendee_id: Int,
+  email: String,
+  paid: Money(2),
+) {
+  // About the request rather than about the world, so it reads nothing and answers
+  // above the first guard. A caller who sends a blank email gets `invalid` whatever
+  // the log says, and learns nothing about which workshops exist.
+  if email.trim() == "" {
+    return invalid("an attendee needs an email")
+  }
+
+  // The order on the page is the precedence of the refusals.
+  guard WorkshopIsOpen { workshop_id }
+  guard SeatIsAvailable { workshop_id }
+  guard AttendeeHasNoSeat { workshop_id, attendee_id }
+
+  emit @seat.booked { workshop_id, booking_id, attendee_id, email, paid }
+}
+
+command ReleaseSeat(workshop_id: Uuid, booking_id: Uuid, attendee_id: Int) {
+  guard WorkshopIsOpen { workshop_id }
+
+  // An idempotent no-op is not a guard: a replay has to answer `ok` here, so this
+  // fold stays inline rather than becoming a proposition that would refuse it.
+  state held: Bool = fold false
+    on @seat.booked(booking_id) => true
+    on @seat.released(booking_id) => false
+
+  if !held {
+    return
+  }
+
+  emit @seat.released { workshop_id, booking_id, attendee_id }
+}
+
+// Internal. An effect writes back to the log by invoking a command, never by
+// appending, so the fact lands under this command's own guard.
+command RecordConfirmed(booking_id: Uuid, notification_id: Uuid) {
+  state confirmed: Bool = fold false
+    on @booking.confirmed(booking_id) => true
+
+  if confirmed {
+    return reject AlreadyConfirmed
+  }
+
+  emit @booking.confirmed { booking_id, notification_id, at: now() }
+}

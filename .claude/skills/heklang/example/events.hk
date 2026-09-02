@@ -1,0 +1,32 @@
+// Every fact this application records. An event is written whole and never changes,
+// so a field with a hole in it would be a different fact.
+
+event @workshop.opened {
+  workshop_id: Uuid,
+  title: String @max(120),
+  seats: Int,
+  price: Money(2),
+}
+
+event @seat.booked {
+  workshop_id: Uuid,
+  booking_id: Uuid,
+  attendee_id: Int,
+  // `@subject(attendee_id)` makes this Sealed(String, attendee_id): a projector may
+  // store it, only an effect may `reveal` it, and `erase(attendee_id)` makes every
+  // seal filed under that id permanently unreadable.
+  email: String @subject(attendee_id) @max(200),
+  paid: Money(2),
+}
+
+event @seat.released {
+  workshop_id: Uuid,
+  booking_id: Uuid,
+  attendee_id: Int,
+}
+
+event @booking.confirmed {
+  booking_id: Uuid,
+  notification_id: Uuid,
+  at: Timestamp,
+}

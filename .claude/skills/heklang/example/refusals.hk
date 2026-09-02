@@ -1,0 +1,8 @@
+// One home for every reason a command says no. The code a caller switches on is the
+// name in snake_case, so `WorkshopIsClosed` reaches a client as "workshop_is_closed",
+// and the message is settled here rather than at each site that answers with it.
+
+refusal WorkshopIsClosed "no such workshop"
+refusal WorkshopIsFull(seats: Int) "this workshop has only {seats} seats"
+refusal AlreadyBooked "this attendee already holds a seat"
+refusal AlreadyConfirmed "this booking was already confirmed"

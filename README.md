@@ -117,6 +117,17 @@ living in `tree-sitter-hek/` here. `hek fmt -` formats a module from stdin, whic
 editor's format-on-save wants, and the two stay in step because `hek fmt` links that same grammar.
 `tree-sitter-hek/README.md` has the Helix wiring for both.
 
+## Agent support
+
+[.claude/skills/heklang/] is a Claude skill: the whole language distilled into rules an agent can
+follow, one reference file per declaration kind, a table from every diagnostic code to its fix, and
+a seven-file example program that passes `hek check`, `hek test` and `hek fmt --check`. Copy the
+directory into `.claude/skills/` in an application that writes `.hk` files, and the agent working
+there picks it up. It is the specification in [docs/] with the reasoning taken out and the rules
+left in, so the two should change together.
+
+[.claude/skills/heklang/]: .claude/skills/heklang/
+
 ## Learn more
 
 - **[docs/]** is the specification, one document per idea, each paired with a test file of the same
