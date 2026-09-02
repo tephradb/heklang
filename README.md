@@ -73,25 +73,49 @@ command PlaceOrder(order_id: Uuid, customer_id: Int, email: String, total: Money
   the events, rows and calls that resulted. Tests live beside the code they exercise and run with
   the same binary that checks it, so there is no framework to adopt.
 
+## Install
+
+`hek` is the checker, test runner and formatter, and one binary is all of it. Prebuilt Linux
+binaries (`x86_64` and `aarch64`, gnu and musl) are attached to every release, and
+[cargo-binstall] fetches the right one rather than compiling it:
+
+```sh
+cargo binstall hek
+```
+
+Also `cargo install hek` to build it from source, `nix run github:tephradb/heklang` to run it
+without installing anything, or take a tarball straight from [Releases] (each is published
+beside its `.sha256`, and a `SHA256SUMS` covers the set).
+
+To embed the language instead of running the tool, `cargo add heklang`: that crate is the lexer,
+parser, checker and interpreter, and [hekla] is what drives it in production. The editor grammar
+is a third crate, [tree-sitter-hek], so an editor can load it without either of the others.
+
+[cargo-binstall]: https://github.com/cargo-bins/cargo-binstall
+[Releases]: https://github.com/tephradb/heklang/releases
+[tree-sitter-hek]: https://crates.io/crates/tree-sitter-hek
+
 ## The tool
 
 ```sh
-cargo run -p hek -- check hek/   # parse every `.hk` file under a path as one program
-cargo run -p hek -- test  hek/   # the same, then run every `test` declaration in it
-cargo run -p hek -- fmt   hek/   # rewrite canonically; `--check` makes it a gate
+hek check hek/   # parse every `.hk` file under a path as one program
+hek test  hek/   # the same, then run every `test` declaration in it
+hek fmt   hek/   # rewrite canonically; `--check` makes it a gate
 ```
 
 Every static check lives in the parser, so "parses" and "checks" are the same pass, and a
 diagnostic carries a code, an extent and a hint separately rather than as one sentence.
 
-The repository is a flake: `nix build .#hek` for the binary, `nix build .#tree-sitter-hek` for the
-grammar, `nix flake check` for the suite.
+From a checkout the same three are `cargo run -p hek -- check hek/` and so on. The repository is
+also a flake: `nix build .#hek` for the binary, `nix build .#tree-sitter-hek` for the grammar,
+`nix flake check` for the suite.
 
 ## Editor support
 
-`tree-sitter-hek/` holds a tree-sitter grammar and queries for `.hk`, and `hek fmt -` formats a
-module from stdin, which is what an editor's format-on-save wants. `tree-sitter-hek/README.md` has
-the Helix wiring for both.
+[tree-sitter-hek] is a tree-sitter grammar and queries for `.hk`, published as its own crate and
+living in `tree-sitter-hek/` here. `hek fmt -` formats a module from stdin, which is what an
+editor's format-on-save wants, and the two stay in step because `hek fmt` links that same grammar.
+`tree-sitter-hek/README.md` has the Helix wiring for both.
 
 ## Learn more
 
