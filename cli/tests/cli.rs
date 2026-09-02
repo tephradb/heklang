@@ -2,7 +2,7 @@
 //! way a user does: point it at a directory and read what it prints.
 
 use std::fs;
-use std::io::Write as _;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -695,12 +695,16 @@ fn hek_stdin(args: &[&str], input: &str) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn hek");
-    child
-        .stdin
-        .take()
-        .expect("a piped stdin")
-        .write_all(input.as_bytes())
-        .expect("write to stdin");
+    let mut stdin = child.stdin.take().expect("a piped stdin");
+    // A subcommand that rejects `-` outright answers and exits without reading, which closes
+    // the pipe: losing this write is that answer arriving first, not a failure. Anything else
+    // still panics.
+    match stdin.write_all(input.as_bytes()) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => {}
+        Err(err) => panic!("write to stdin: {err}"),
+    }
+    drop(stdin);
     child.wait_with_output().expect("wait for hek")
 }
 
