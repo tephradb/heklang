@@ -4,7 +4,7 @@
 refusal TooManyOpen "too many open orders"
 
 guard UnderOpenOrderLimit(customer_id: Int) {
-  state open: Int = fold 0
+  fold open: Int = 0
     on @order.placed(customer_id) => open + 1
     on @order.cancelled(customer_id) => open - 1
 
@@ -23,23 +23,23 @@ command PlaceOrder(order_id: Uuid, customer_id: Int, email: String, total: Money
 A command is the only thing that appends. It reads history by folding it, decides, and emits. It
 cannot call out, cannot write a read model, and cannot decrypt.
 
-## 1. `state` is a read declaration, not a binding
+## 1. `fold` is a read declaration, not a binding
 
-A `state` declares a **slice** of the log: an event type plus the filters that narrow it. The slices
+A `fold` declares a **slice** of the log: an event type plus the filters that narrow it. The slices
 a command folded **are** the condition its append is checked against. If another writer appends into
 one of those slices after the position the command started reading at, the append is rejected and
 the whole command retries against the new log. That is the Dynamic Consistency Boundary: what you
 read is what you conflict on.
 
-| | `state x = fold ...` | `let x = ...` |
+| | `fold x: T = ...` | `let x = ...` |
 | --- | --- | --- |
 | declares a slice in the append condition | **yes** | no |
 | re-runs on a retry | yes, re-folded against the new log | yes, from the same inputs |
 | may read the clock | no | yes, the pinned one |
 | may call out | no | no in a command |
 
-So: use `state` for anything folded out of the log, and `let` for everything else. Never reach for
-`let` to shorten a fold, and never add a `state` you do not read, because it widens the boundary.
+So: use `fold` for anything folded out of the log, and `let` for everything else. Never reach for
+`let` to shorten a fold, and never add a `fold` you do not read, because it widens the boundary.
 
 A slice leaves resolved rather than as a pointer: `@order.placed(customer_id)` becomes
 `@order.placed` narrowed to `customer_id = 7`. Filters are sorted by field name, so one slice is one
@@ -47,7 +47,7 @@ predicate however it was written.
 
 ## 2. Stages: a run of declarations is one read
 
-A run of adjacent `state` and `guard` declarations is a **stage**, folded in one pass over the log.
+A run of adjacent `fold` and `guard` declarations is a **stage**, folded in one pass over the log.
 A statement written below a stage's declarations closes it, so the next run is a stage of its own.
 Ten folds written together read the log once.
 
@@ -57,25 +57,25 @@ Order within a command:
 2. for each stage in the order written:
    1. the statements above its declarations run, and one that returns is the command's outcome,
    2. its **filters** are evaluated once, before the fold,
-   3. its **`state` seeds** are evaluated,
+   3. its **fold seeds** are evaluated,
    4. the log head is pinned on the first stage that reads, and every later stage reads to it,
    5. the fold runs, one pass, applying every matching slice per record in declaration order,
    6. the statements below the declarations run, the guards' decisions first;
 3. the outcome and the append condition are returned together.
 
-**A stage is unconditional.** A `state` or a `guard` may not be written inside an `if` or a `for`.
+**A stage is unconditional.** A `fold` or a `guard` may not be written inside an `if` or a `for`.
 
-**A seed or a filter may not name a `state` in its own stage**, because seeds and filters are
+**A seed or a filter may not name a `fold` in its own stage**, because seeds and filters are
 evaluated before that stage folds. The way out is a statement between them, which closes the first
 stage:
 
 ```hek
-state open: Int = fold 0
+fold open: Int = 0
   on @order.placed(customer_id) => open + 1
 
 let who = open                   // closes the stage above
 
-state blocked: Bool = fold false
+fold blocked: Bool = false
   on @customer.blocked(customer_id: who) => true
 ```
 
@@ -85,11 +85,11 @@ so a filter may name it; one below is in the second half, so it can read what th
 ## 3. Inside a fold
 
 ```hek
-state lifetime_spend: Money(2) = fold 0
+fold lifetime_spend: Money(2) = 0
   on @order.placed(customer_id) { total } => lifetime_spend + total
 ```
 
-The arm is `on @path(filters) [{ destructure }] => expression`, and the expression may name the state
+The arm is `on @path(filters) [{ destructure }] => expression`, and the expression may name the folded
 variable itself. The parens and the braces both hold bare field names and read from opposite sides:
 
 | | says | evaluated | reads |
@@ -110,7 +110,7 @@ for that one arm.
 **The scope is one arm.** Folding two event types binds two sets of names that never meet:
 
 ```hek
-state items: Map(Uuid, Item) = fold Map.empty
+fold items: Map(Uuid, Item) = Map.empty
   on @item.listed(seller_id) { item_id, item } => items.set(item_id, item)
   on @item.delisted(seller_id) { item_id } => items.remove(item_id)
 ```
@@ -120,7 +120,7 @@ every attempt re-folds and must get the same answer. It may call a module `fn`, 
 may not call an effect-local one.
 
 **A seed may be plain while an arm is sealed**, and that is the ordinary shape for a credential
-(`state token: String? = fold none` with two arms folding a `@subject(...)` field). What is rejected
+(`fold token: String? = none` with two arms folding a `@subject(...)` field). What is rejected
 is a mix: an arm folding a plain value into a variable another arm makes sealed, and two arms folding
 under two different subjects.
 
@@ -165,7 +165,7 @@ appended unconditionally, and does not get the protection of the guards below it
 ```hek
 guard <Name>(<name>: <Type>, ...) {
   <statement>*
-  <state | guard>*
+  <fold | guard>*
   <statement>*
 }
 
@@ -218,20 +218,20 @@ rather than `if defined { return }`.
 
 **An idempotent no-op is not a guard.** The test is not "is this a no-op" but **"can this refusal be
 reached by a request the command would have answered `ok`?"** If a replay has to answer `ok`, the
-check stays inline as a `state` and an `if`, and so does every refusal below it, because a guard runs
+check stays inline as a `fold` and an `if`, and so does every refusal below it, because a guard runs
 at the front of the body and would refuse the replay:
 
 ```hek
 command RecordWarrantySale(warranty_id: Uuid, shop_id: Int, premium: Bool) {
   guard ShopIsConnected { shop_id }
 
-  state already_sold: Bool = fold false
+  fold already_sold: Bool = false
     on @warranty.sold(warranty_id, shop_id) => true
   if already_sold {
     return
   }
 
-  state sold: Int = fold 0
+  fold sold: Int = 0
     on @warranty.sold(shop_id) => sold + 1
   if !premium && sold >= FREE_TIER_LIMIT {
     return reject FreeTierExhausted
@@ -242,11 +242,11 @@ command RecordWarrantySale(warranty_id: Uuid, shop_id: Int, premium: Bool) {
 ```
 
 **The raw slice form is the rare one.** `guard @order.placed(order_id)` adds slices and binds
-nothing. A `state` fold already contributes its own slice, so writing the raw form beside a fold on
+nothing. A `fold` already contributes its own slice, so writing the raw form beside a fold on
 the same slice adds an identical predicate and no safety. It earns its place only when the decision
 needs a slice in the boundary that nothing folds.
 
-**Reach for `state` when the value is this command's own**, since a guard hands nothing back. A
+**Reach for `fold` when the value is this command's own**, since a guard hands nothing back. A
 discount computed from `lifetime_spend` is a fold, not a guard.
 
 ## 7. Refusals

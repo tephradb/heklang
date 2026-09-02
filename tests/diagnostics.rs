@@ -381,8 +381,8 @@ fn cases() -> Vec<(Code, String)> {
             "refusal shopNotFound \"shop does not exist\"\n",
         ),
         (
-            Code::StateShape,
-            "event @a.b { id: Int }\ncommand C(id: Int) {\n  state n: Int = 0\n  emit @a.b { id }\n}\n",
+            Code::StageShape,
+            "event @a.b { id: Int }\ncommand C(id: Int) {\n  if id > 0 {\n    fold n: Int = 0\n      on @a.b(id) => n + 1\n  }\n  emit @a.b { id }\n}\n",
         ),
         (
             Code::NoZeroValue,
@@ -406,7 +406,7 @@ fn cases() -> Vec<(Code, String)> {
                 "refusal No \"no\"\n",
                 "guard G(x: Int) {\n",
                 "  guard G { x }\n",
-                "  state s: Bool = fold false\n",
+                "  fold s: Bool = false\n",
                 "    on @a.b(x) => true\n",
                 "  if !s { return reject No }\n",
                 "}\n",
@@ -419,7 +419,7 @@ fn cases() -> Vec<(Code, String)> {
         (
             Code::FoldRestriction,
             "command C(id: Int) {
-  state t: Timestamp = fold now()
+  fold t: Timestamp = now()
     on @order.placed(order_id: id) => t
   emit @order.placed { order_id: id, customer_id: id, email: \"x\", total: 1.00 }
 }",
@@ -591,7 +591,7 @@ fn an_undeclared_event_covers_the_path() {
         ),
         ("effect E {\n  on @no.such { log(\"x\") }\n}\n", 2, 6, 8),
         (
-            "command C(id: Int) {\n  state n: Int = fold 0\n    on @no.such(id) => n\n  return\n}\n",
+            "command C(id: Int) {\n  fold n: Int = 0\n    on @no.such(id) => n\n  return\n}\n",
             3,
             8,
             8,

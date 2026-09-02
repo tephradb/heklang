@@ -80,7 +80,7 @@ Directories beginning with `.` and any `target` directory are skipped.
 
 | | command | guard | projector | effect arm | effect-local `fn` | module `fn` | fold arm |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `state` / `guard` decls | yes | yes (one read) | no | yes | no | no | n/a |
+| `fold` / `guard` decls | yes | yes (one read) | no | yes | no | no | n/a |
 | `emit` | yes | no | no | no | no | no | no |
 | `put`/`patch`/`update`/`delete` | no | no | yes | no | no | no | no |
 | `http.*`, `invoke` | no | no | no | yes | yes | no | no |
@@ -144,7 +144,7 @@ fn effective_sku(sku: String?, item_id: Uuid) -> String {
 }
 
 guard UnderOpenOrderLimit(customer_id: Int) {
-  state open: Int = fold 0
+  fold open: Int = 0
     on @order.placed(customer_id) => open + 1
     on @order.cancelled(customer_id) => open - 1
 
@@ -184,7 +184,7 @@ effect NotifyCustomer {
   }
 
   on @order.placed as e { order_id, email } {
-    state orders: Int = fold 0
+    fold orders: Int = 0
       on @order.placed(customer_id: e.customer_id) => orders + 1
 
     send("https://mail.example/confirm", reveal(email))
@@ -215,7 +215,7 @@ entity-level `index (a, b)`; a **record field** takes `@max(n)`; an **enum varia
 
 ```hek
 let x = <expr>                          // no type annotation, immutable, no `var`
-state s: T = fold <seed>
+fold s: T = <seed>
   on @path(filters) { destructure } => <expr>
   on @other.path(filters) => <expr>
 guard Name { arg }                      // named proposition
@@ -259,10 +259,10 @@ A comment is `//` to the end of the line. Put one on its own line, leading whate
 
 ## Rules that are easy to break
 
-1. **`state` is a read declaration, not a variable.** It names a slice of the log, and the slices a
+1. **`fold` is a read declaration, not a variable.** It names a slice of the log, and the slices a
    command folded *are* the condition its append is checked against. Anything not folded is a `let`.
-2. **A stage is one read.** A run of `state` and `guard` declarations is one pass over the log; any
-   statement below them closes it. A seed or a filter may not name a `state` beside it. Put a `let`
+2. **A stage is one read.** A run of `fold` and `guard` declarations is one pass over the log; any
+   statement below them closes it. A seed or a filter may not name a `fold` beside it. Put a `let`
    between the two runs to make a second stage.
 3. **Everything is written whole.** `emit`, `put`, `given`, `invoke`, a record literal, `reject` with
    fields and `guard Name { .. }` all require every declared field, once each. `{ order_id }` is
@@ -295,7 +295,7 @@ A comment is `//` to the end of the line. Put one on its own line, leading whate
     `return reject <Name>` or `return invalid(...)`, folds at least one slice, reads the log once,
     and hands nothing back to its caller.
 14. **An idempotent no-op is not a guard.** If a replay must answer `ok`, the check stays inline as a
-    `state` and an `if`, and so does every refusal below it.
+    `fold` and an `if`, and so does every refusal below it.
 15. **A refusal's message may name its own fields and nothing else, and must name all of them.** The
     code is the name in snake_case, so the name must be capitalised and carry no `_`.
 
@@ -307,7 +307,7 @@ specification in `docs/` of the heklang repository, which carries the reasoning 
 | File | Covers |
 | --- | --- |
 | `reference/language.md` | types, literals and inference, optionals and narrowing, money, strings, containers, `fn`, `const`, `record`, `enum`, modules |
-| `reference/commands.md` | commands, `state` folds, stages, the append condition, guards, refusals |
+| `reference/commands.md` | commands, folds, stages, the append condition, guards, refusals |
 | `reference/projectors.md` | projectors, entities, `put`/`patch`/`update`/`delete`, zeros, indexes |
 | `reference/effects.md` | effect arms, the journal, `http`, `Json`, `invoke`, sealing, `reveal`, `erase` |
 | `reference/stdlib.md` | every method and builtin, and where each may be called |

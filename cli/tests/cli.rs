@@ -11,7 +11,7 @@ const EVENTS: &str = "event @order.placed { order_id: Int, total: Money(2) }\n";
 const COMMAND: &str = "refusal Duplicate \"already placed\"
 command Place(order_id: Int, total: Money(2)) {
   guard @order.placed(order_id)
-  state placed: Bool = fold false
+  fold placed: Bool = false
     on @order.placed(order_id) => true
   if placed {
     return reject Duplicate
@@ -507,7 +507,7 @@ refusal ShopNotFound \"shop does not exist\"
 refusal PlanNotFound \"no such plan\"
 
 guard ShopIsConnected(shop_id: Int) {
-  state connected: Bool = fold false
+  fold connected: Bool = false
     on @shop.connected(shop_id) => true
   if !connected {
     return reject ShopNotFound
@@ -516,7 +516,7 @@ guard ShopIsConnected(shop_id: Int) {
 
 guard PlanExists(plan_id: Int, shop_id: Int) {
   guard ShopIsConnected { shop_id }
-  state exists: Bool = fold false
+  fold exists: Bool = false
     on @plan.created(plan_id, shop_id) => true
   if !exists {
     return reject PlanNotFound
@@ -552,7 +552,7 @@ event @shop.renamed { shop_id: Int }
 refusal ShopNotFound \"shop does not exist\"
 
 guard ShopIsConnected(shop_id: Int) {
-  state connected: Bool = fold false
+  fold connected: Bool = false
     on @shop.connected(shop_id) => true
   if !connected {
     return reject ShopNotFound

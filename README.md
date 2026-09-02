@@ -41,7 +41,7 @@ refusal TooManyOpen "this customer has too many open orders"
 command PlaceOrder(order_id: Uuid, customer_id: Int, email: String, total: Money(2)) {
   // What this folds is what it conflicts on: if another writer lands in the same
   // slice first, the append is rejected and the whole command retries.
-  state open_orders: Int = fold 0
+  fold open_orders: Int = 0
     on @order.placed(customer_id) => open_orders + 1
     on @order.cancelled(customer_id) => open_orders - 1
 
@@ -55,7 +55,7 @@ command PlaceOrder(order_id: Uuid, customer_id: Int, email: String, total: Money
 
 ## Four ideas worth knowing
 
-- **A fold is a read declaration, not a variable.** `state` names a slice of the log, and the
+- **A fold is a read declaration, not a variable.** `fold` names a slice of the log, and the
   slices a command folded *are* the condition its append is checked against. What you read is what
   you conflict on, so optimistic concurrency falls out of the code instead of being configured
   beside it. That is why the keyword is not `let`.

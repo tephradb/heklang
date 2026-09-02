@@ -58,13 +58,16 @@ fn check_error(body: &str, expected: &str) {
 
 #[test]
 fn annotations_drive_resolution() {
-    check("state open: Int = fold 0\nreturn", &["Int(0)"]);
     check(
-        "state spent: Money(2) = fold 0\nreturn",
+        "fold open: Int = 0\n  on @order.placed(customer_id: count) => open\nreturn",
+        &["Int(0)"],
+    );
+    check(
+        "fold spent: Money(2) = 0\n  on @order.placed(customer_id: count) => spent\nreturn",
         &["Money(0, scale 2)"],
     );
     check(
-        "state fee: Decimal(4) = fold 0.0825\nreturn",
+        "fold fee: Decimal(4) = 0.0825\n  on @order.placed(customer_id: count) => fee\nreturn",
         &["Decimal(825, scale 4)"],
     );
 }
@@ -182,11 +185,11 @@ fn multiplication_and_division_never_cross_hint() {
 #[test]
 fn over_precision_is_an_error_not_a_round() {
     check_error(
-        "state fee: Decimal(2) = fold 0.0825\nreturn",
+        "fold fee: Decimal(2) = 0.0825\n  on @order.placed(customer_id: count) => fee\nreturn",
         "4 decimal places is too precise for Decimal(2)",
     );
     check_error(
-        "state open: Int = fold 10.5\nreturn",
+        "fold open: Int = 10.5\n  on @order.placed(customer_id: count) => open\nreturn",
         "1 decimal place is too precise for Int",
     );
     check_error(

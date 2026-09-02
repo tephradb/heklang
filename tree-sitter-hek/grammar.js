@@ -314,7 +314,7 @@ module.exports = grammar({
     _statement: ($) =>
       choice(
         $.guard_declaration,
-        $.state_declaration,
+        $.fold_declaration,
         $.let_statement,
         $.if_statement,
         $.for_statement,
@@ -335,14 +335,13 @@ module.exports = grammar({
         seq('guard', field('guard', $._type_name), $.field_initializer_list),
       ),
 
-    state_declaration: ($) =>
+    fold_declaration: ($) =>
       seq(
-        'state',
+        'fold',
         field('name', $.identifier),
         ':',
         field('type', $.type),
         '=',
-        'fold',
         field('seed', $._expression),
         repeat($.fold_arm),
       ),

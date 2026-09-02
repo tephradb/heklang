@@ -6,7 +6,7 @@ refusal TooManyOpen "too many open orders"
 command PlaceOrder(order_id: Uuid, customer_id: Int, email: String, total: Money(2)) {
   guard @order.placed(order_id), @order.cancelled(order_id)
 
-  state open_orders: Int = fold 0
+  fold open_orders: Int = 0
     on @order.placed(customer_id) => open_orders + 1
     on @order.cancelled(customer_id) => open_orders - 1
 
@@ -21,12 +21,12 @@ command PlaceOrder(order_id: Uuid, customer_id: Int, email: String, total: Money
 A command is the only thing that appends. It reads history by folding it, decides, and emits; it
 cannot call out, cannot write a read model, and cannot decrypt.
 
-## `state` is a read declaration, not a binding
+## `fold` is a read declaration, not a binding
 
 This is the one thing about a command worth understanding before anything else, and it is why the
 keyword is not `let`.
 
-A `state` declares a **slice** of the log: an event type plus the filters that narrow it. The slice
+A `fold` declares a **slice** of the log: an event type plus the filters that narrow it. The slice
 is what the runtime appends against:
 
 ```rust
@@ -58,7 +58,7 @@ filters in either order narrow the same events and have no business comparing un
 A `let` compiles to an assignment. It produces no slice and contributes nothing to the condition. So
 the two keywords are not two spellings of one idea:
 
-| | `state x = fold ...` | `let x = ...` |
+| | `fold x: T = ...` | `let x = ...` |
 | --- | --- | --- |
 | declares a slice | **yes**, and it is in the append condition | no |
 | re-runs on a retry | yes, re-folded against the new log | yes, but from the same inputs |
@@ -71,7 +71,7 @@ exactly like the thing that shortens an expression. The cost of keeping them apa
 
 **A `guard` also declares slices, and usually declares folds too.** `guard <Name> { args }` names a
 proposition whose own folds join this command's condition; the raw `guard @order.placed(id)` form is
-a `state` that binds nothing, and is the same call:
+a `fold` that binds nothing, and is the same call:
 
 ```rust
 pub fn guard(&mut self, event: EventPath, filters: Vec<Filter>) -> SliceId {
@@ -81,9 +81,19 @@ pub fn guard(&mut self, event: EventPath, filters: Vec<Filter>) -> SliceId {
 
 `docs/guards.md` has both, and "`guard` names a proposition" below has when to reach for which.
 
-**Rejected: `let name = fold ...`.** It is one keyword instead of two, and it hides the append
-condition inside the same syntax as arithmetic. A reader scanning for what a command conflicts on
-would have to read every binding in the body and know which right-hand sides were folds.
+**Rejected: `let name = fold ...`.** It hides the append condition inside the same syntax as
+arithmetic. A reader scanning for what a command conflicts on would have to read every binding in
+the body and know which right-hand sides were folds.
+
+**Rejected: `state name: T = fold seed`**, which is what this was until the keyword collapsed. The
+second word was grammatically free: `fold` followed `=` unconditionally, and there was no other
+right-hand side a `state` could have, so the parser supplied it. What it earned was marking the `=`
+as a **seed** rather than a value, at the exact column where that is easy to misread. Moving the
+word to the front pays that back twice over: the arms are already `fold_arm`s and the restriction on
+them is already `fold-restriction`, so `state` was the one place the construct went by another name,
+and `fold x: T = 0` raises "over what?" where `state x: T = 0` is a sentence the next line
+contradicts. The remaining hole is a fold with **no** arms, which really is a binding written the
+long way, so it is `empty-declaration` rather than a shape a reader has to notice.
 
 **Rejected: an explicit `reads @order.placed(id)` list.** It separates the declaration of the read
 set from the value that comes out of it, so the two can drift: a fold could name a slice the list
@@ -91,7 +101,7 @@ forgot. Deriving the condition from the folds themselves makes the drift unrepre
 
 ## Execution order
 
-A run of `state` and `guard` declarations is a **stage**: one read of the log, folded in one pass.
+A run of `fold` and `guard` declarations is a **stage**: one read of the log, folded in one pass.
 A statement written below a stage's declarations closes it, so the next run is a stage of its own.
 A command is a sequence of stages, and the order is fixed:
 
@@ -99,8 +109,8 @@ A command is a sequence of stages, and the order is fixed:
 2. then, for each **stage** in the order written:
    1. the statements above its declarations run, and one that returns is the command's outcome;
    2. its **filters** are evaluated once, so a filter may name a parameter, a `let` above it, or a
-      `state` an *earlier* stage folded;
-   3. its **`state` seeds** are evaluated and coerced;
+      `fold` an *earlier* stage folded;
+   3. its **fold seeds** are evaluated and coerced;
    4. `after` is taken, on the first stage that reads, and every later stage reads to it;
    5. its **fold** runs, one pass over the log, applying every matching slice per record in
       declaration order;
@@ -108,7 +118,7 @@ A command is a sequence of stages, and the order is fixed:
 3. the outcome and the `AppendCondition` are returned together, the condition naming what the
    stages that actually ran read.
 
-One pass per stage, not one per `state`: ten folds in one run read the log once, and a guard adds
+One pass per stage, not one per `fold`: ten folds in one run read the log once, and a guard adds
 folds rather than reads. A command whose declarations are all at the top -- which is most of them --
 is one stage and one read.
 
@@ -119,10 +129,10 @@ one took makes the stages one consistent view of the log, so the condition stays
 and a flat slice list. It is rule 11 applied to the log rather than to the clock, and `docs/host.md`
 section 5 has what it costs.
 
-**A stage is unconditional.** A `state` or a `guard` may not be written inside an `if` or a `for`,
+**A stage is unconditional.** A `fold` or a `guard` may not be written inside an `if` or a `for`,
 because a read that may or may not happen has nothing to say in an append condition:
 
-> `state` and `guard` must come before the first statement
+> `fold` and `guard` must come before the first statement
 
 Step 2.6 is why a `guard` is a declaration rather than a statement. A guard's folds happen at its
 stage's step 2.5 with every other in that run, its decision at 2.6, and neither straddles the two.
@@ -132,21 +142,23 @@ a filter can name it; one below the declarations is in the second half, so it ca
 folded.
 
 ```
-state open: Int = fold 0
+fold open: Int = 0
   on @order.placed(customer_id) => open + 1
-state shut: Int = fold 0
+fold shut: Int = 0
   on @order.cancelled(customer_id) => shut + 1
 
 let live = open - shut          // below the declarations, so after the fold
 ```
 
-**A seed may not read a `state` in its own stage**, because every seed in a run is evaluated before
-that run folds, so `fold open` would read `open`'s own seed and never what it folds to:
+**A seed may not read a `fold` in its own stage**, because every seed in a run is evaluated before
+that run folds, so seeding one with another would read that one's own seed and never what it folds
+to:
 
 ```
-state open: Int = fold 0
+fold open: Int = 0
   on @order.placed(customer_id) => open + 1
-state seen: Int = fold open      // rejected: `seen` is seeded from `open`
+fold seen: Int = open      // rejected: `seen` is seeded from `open`
+  on @order.cancelled(customer_id) => seen + 1
 ```
 
 There is nothing to defer it to, because a seed has to exist before the fold it seeds. And this one
@@ -157,33 +169,33 @@ The way out is a statement between them, which is also the general answer to eve
 section: it closes the first stage, so the second reads a log the first has already folded.
 
 ```
-state open: Int = fold 0
+fold open: Int = 0
   on @order.placed(customer_id) => open + 1
 
 let so_far = open                // closes the stage above
 
-state seen: Int = fold so_far    // a second stage, reading what the first folded
+fold seen: Int = so_far    // a second stage, reading what the first folded
   on @order.cancelled(customer_id) => seen + 1
 ```
 
 The same rule and the same escape apply to a filter, which is the case that pays for staging:
 
 ```
-state open: Int = fold 0
+fold open: Int = 0
   on @order.placed(customer_id) => open + 1
 
 let who = open
 
-state blocked: Bool = fold false
+fold blocked: Bool = false
   on @customer.blocked(customer_id: who) => true
 ```
 
 Written without the `let` between them, both folds are one stage and the filter asks that stage for
 a value it has not produced, which is refused:
 
-> this filter on `customer_id` is folded from a `state` beside it; a stage's filters are evaluated
-> once, before it folds, so they can name a parameter, a `let`, or a `state` an earlier declaration
-> run has already folded
+> this filter on `customer_id` reads a `fold` beside it; a stage's filters are evaluated once,
+> before it folds, so they can name a parameter, a `let`, or a `fold` an earlier declaration run has
+> already folded
 
 `after` is subtle and load-bearing: it is taken before any fold, so the condition means "nothing new
 in these slices since the position I started reading at".
@@ -208,7 +220,7 @@ omitted a field checked clean and failed at the append, so a branch no test reac
 The shorthand is `{ order_id }` for `{ order_id: order_id }`, so writing every field is usually
 writing every name.
 
-**A field with a `@max` is checked against where its value came from**, when that is a `state` folded
+**A field with a `@max` is checked against where its value came from**, when that is a value folded
 off another event field: emitting into a field bounded tighter than the one folded into it is
 `max-tightening`, and `docs/projectors.md` has the invariant. An over-length *value* is still
 `Outcome::Invalid` at run time, which is a different thing: one is a bad input and this is two
@@ -233,7 +245,7 @@ and a host that wants to cache or trace the decision needs to know what it depen
 computed after the body rather than as part of the success path for exactly that reason.
 
 **A decision that read nothing comes back with an empty condition**, and `after` at zero rather than
-at a head it never asked for. That is every command with no `state`, and now also any path that
+at a head it never asked for. That is every command with no `fold`, and now also any path that
 returns above the first declaration run. It is not a hole: `AppendCondition::conflicts` is false for
 every record when there are no slices, which is correct, because a decision that depended on nothing
 cannot be invalidated by anything. `after` is meaningful only alongside a non-empty `slices`.
@@ -244,7 +256,7 @@ the world -- and the `emit` sits visibly above the `guard` lines when it does. W
 is the protection of the guards below it, because they did not run.
 
 **An emitted event is not in the log a later stage folds.** Emits go to a buffer and the append
-happens once, at the end, so a `state` in a second stage counting `.placed` counts everything
+happens once, at the end, so a `fold` in a second stage counting `.placed` counts everything
 but the one this command is about to write. It cannot self-conflict either, since the condition is
 checked against the records already there.
 
@@ -281,14 +293,14 @@ guards' slices join this command's condition, so the boundary is the union of wh
 the order on the page is the precedence of the refusals.
 
 **The raw form stays, and it is the rare one.** `guard @order.placed(order_id)` adds slices to the
-boundary and binds nothing. A `state` fold already contributes its slice, so a command that folds
+boundary and binds nothing. A `fold` already contributes its slice, so a command that folds
 `@order.placed(order_id)` to decide whether an order exists has *already* declared that slice as its
 conflict boundary, and writing `guard @order.placed(order_id)` beside it adds a second, identical
 slice and no safety. It earns its place only when the decision needs a slice in the boundary that
 nothing folds: the one counter-example in either tree guards `@order.placed(order_id)` while folding
 on other fields.
 
-So: name a guard when the proposition has a refusal, reach for `state` when the value is this
+So: name a guard when the proposition has a refusal, reach for `fold` when the value is this
 command's own, and write raw slices when you can say which slice they add that no fold covers.
 
 ## What a command may not do
@@ -307,13 +319,13 @@ Each of those has a message naming the rule at the point of violation rather tha
 ## Inside a fold
 
 A fold arm is `on @path(filters) [{ destructure }] => expression`, and the expression may name the
-state variable itself, which is what makes it a fold rather than a scan.
+folded variable itself, which is what makes it a fold rather than a scan.
 
 **The parens and the braces read from opposite sides.** Both sit between the path and the `=>`, and
 both hold bare field names, which is the whole reason they get swapped:
 
 ```
-state lifetime_spend: Money(2) = fold 0
+fold lifetime_spend: Money(2) = 0
   on @order.placed(customer_id) { total } => lifetime_spend + total
 ```
 
@@ -335,8 +347,8 @@ The long form is for when the two sides do not share a name:
 on @customer.blocked(customer_id: customer) => true
 ```
 
-Because it runs once and before its own stage folds, a filter may not name a `state` declared beside
-it, and a `let` it does name has to be above the declarations of its stage. It may name a `state` an
+Because it runs once and before its own stage folds, a filter may not name a `fold` declared beside
+it, and a `let` it does name has to be above the declarations of its stage. It may name a `fold` an
 earlier stage folded. "Execution order" above has the errors and the escape.
 
 **A destructure binds the event's own fields under their own names.** It is optional, and an arm
@@ -364,7 +376,7 @@ move as the fold runs (`docs/effects.md`).
 checked against its own declaration:
 
 ```
-state items: Map(Uuid, Item) = fold Map.empty
+fold items: Map(Uuid, Item) = Map.empty
   on @item.listed(seller_id) { item_id, item } => items.set(item_id, item)
   on @item.delisted(seller_id) { item_id } => items.remove(item_id)
 ```

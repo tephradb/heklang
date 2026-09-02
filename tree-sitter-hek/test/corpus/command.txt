@@ -5,15 +5,15 @@ guard, folds and a leading let
 command PlaceOrder(order_id: Uuid, customer_id: Int, notes: String?) {
   guard @order.placed(order_id), @order.cancelled(order_id)
 
-  state email_taken: Bool = fold false
+  fold email_taken: Bool = false
     on @order.placed(email) => true
 
-  state lifetime_spend: Money(2) = fold 0
+  fold lifetime_spend: Money(2) = 0
     on @order.placed(customer_id) { total } => lifetime_spend + total
     on @order.cancelled(customer_id) { refund } => lifetime_spend - refund
 
   let customer = customer_id
-  state blocked: Bool = fold false
+  fold blocked: Bool = false
     on @customer.blocked(customer_id: customer) => true
 
   if blocked {
@@ -53,7 +53,7 @@ command PlaceOrder(order_id: Uuid, customer_id: Int, notes: String?) {
           (event_path)
           (filter
             (identifier))))
-      (state_declaration
+      (fold_declaration
         (identifier)
         (type
           (primitive_type))
@@ -64,7 +64,7 @@ command PlaceOrder(order_id: Uuid, customer_id: Int, notes: String?) {
             (filter
               (identifier)))
           (boolean_literal)))
-      (state_declaration
+      (fold_declaration
         (identifier)
         (type
           (scaled_type
@@ -93,7 +93,7 @@ command PlaceOrder(order_id: Uuid, customer_id: Int, notes: String?) {
       (let_statement
         (identifier)
         (identifier))
-      (state_declaration
+      (fold_declaration
         (identifier)
         (type
           (primitive_type))
@@ -210,7 +210,7 @@ command ListItem(item_id: Uuid, sku: String) {
 
   guard SkuIsFree { sku: trimmed }
 
-  state listed: Bool = fold false
+  fold listed: Bool = false
     on @item.listed(item_id) => true
 
   emit @item.listed { item_id, sku: trimmed }
@@ -254,7 +254,7 @@ command ListItem(item_id: Uuid, sku: String) {
           (field_initializer
             name: (identifier)
             value: (identifier))))
-      (state_declaration
+      (fold_declaration
         name: (identifier)
         type: (type
           (primitive_type))

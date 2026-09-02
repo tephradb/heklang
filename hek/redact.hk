@@ -31,7 +31,7 @@ effect RedactTenant {
     // Every member the tenant still holds data for. A cursor would page this; a fold
     // does not, and a redact is rare and one-shot, so the width is acceptable here in
     // a way it would not be on a hot path.
-    state members: List(Int) = fold []
+    fold members: List(Int) = []
       on @tenant.member.joined(tenant_id) { member_id } =>
         if members.contains(member_id) { members } else { members.push(member_id) }
       on @tenant.member.left(tenant_id) { member_id } => members.remove(member_id)

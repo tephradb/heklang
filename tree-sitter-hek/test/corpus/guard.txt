@@ -3,7 +3,7 @@ a guard declares parameters and folds
 ================================================================================
 
 guard ShopIsConnected(shop_id: Int) {
-  state connected: Bool = fold false
+  fold connected: Bool = false
     on @shop.connected(shop_id) => true
 
   if !connected {
@@ -22,7 +22,7 @@ guard ShopIsConnected(shop_id: Int) {
         type: (type
           (primitive_type))))
     body: (block
-      (state_declaration
+      (fold_declaration
         name: (identifier)
         type: (type
           (primitive_type))

@@ -47,13 +47,13 @@ effect SyncShop {
   }
 
   on @shop.sync.requested as e { shop_id } {
-    state domain: String = fold ""
+    fold domain: String = ""
       on @shop.connected(shop_id) { shop_domain } => shop_domain
       on @shop.reconnected(shop_id) { shop_domain } => shop_domain
 
     // Two arms, one subject. The seed is plain and that is allowed; an arm folding a
     // plain value in beside these would not be.
-    state token: String? = fold none
+    fold token: String? = none
       on @shop.connected(shop_id) { access_token } => access_token
       on @shop.reconnected(shop_id) { access_token } => access_token
 

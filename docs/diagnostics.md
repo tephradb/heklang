@@ -201,11 +201,11 @@ be the whole of it:
 | `entity-shape` | an entity with no `@key`, or an index on a field it has not got |
 | `event-shape` | an arm over event types with nothing in common |
 | `refusal-shape` | a refusal named or written in a way its derived code could not survive |
-| `state-shape` | a `state` or `guard` written where or how it does not go |
+| `stage-shape` | a `fold` or `guard` written where or how it does not go |
 | `no-zero-value` | a `patch` that would materialise a row it cannot fill |
 | `wrong-context` | a statement in a declaration kind that does not have it |
 | `impure-fn` | a `fn` doing something a pure function cannot |
-| `fold-restriction` | a `state` fold calling out or decrypting |
+| `fold-restriction` | a `fold` calling out or decrypting |
 | `arm-only` | an effect-local `fn` doing what stays in the arm |
 | `return-shape` | a `return` that does not match the signature it is in |
 | `seal-boundary` | rule 12: sealed content leaving without `reveal` |
@@ -258,7 +258,7 @@ which reads as a clause of the sentence before it rather than as a line of its o
 stands alone or it is not a hint, so both were reworded to start after a `; ` like the
 rest, which is the only text this work altered.
 
-**Some hints name a replacement**: ``write `= fold <seed>` ``, ``did you mean `{name}()`?``,
+**Some hints name a replacement**: ``write `let {name} = <seed>` ``, ``did you mean `{name}()`?``,
 ``move that `let` up``, ``write `for key, value in ...` ``. Those are what a code action
 will be built from, and they are the reason `hint` is a field rather than a suffix. It is
 not enough on its own: an applicable edit needs a span to replace and the text to put

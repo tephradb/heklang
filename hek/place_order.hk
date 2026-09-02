@@ -41,7 +41,7 @@ guard CustomerIsNotBlocked(customer_id: Int) {
   // A leading `let` a filter names is hoisted here exactly as it is in a command: a
   // guard's prologue is a command's prologue.
   let customer = customer_id
-  state blocked: Bool = fold false
+  fold blocked: Bool = false
     on @customer.blocked(customer_id: customer) => true
 
   if blocked {
@@ -50,7 +50,7 @@ guard CustomerIsNotBlocked(customer_id: Int) {
 }
 
 guard EmailIsUnused(email: String) {
-  state taken: Bool = fold false
+  fold taken: Bool = false
     on @order.placed(email) => true
 
   if taken {
@@ -59,7 +59,7 @@ guard EmailIsUnused(email: String) {
 }
 
 guard UnderOpenOrderLimit(customer_id: Int) {
-  state open_orders: Int = fold 0
+  fold open_orders: Int = 0
     on @order.placed(customer_id) => open_orders + 1
     on @order.cancelled(customer_id) => open_orders - 1
 
@@ -87,7 +87,7 @@ command PlaceOrder(
 
   // Folded here rather than guarded, because it decides a discount rather than a
   // refusal, and a guard hands nothing back.
-  state lifetime_spend: Money(2) = fold 0
+  fold lifetime_spend: Money(2) = 0
     on @order.placed(customer_id) { total } => lifetime_spend + total
 
   // Not a guard either: it is about the input rather than the log, so it folds nothing.

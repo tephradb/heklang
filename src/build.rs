@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::mem;
 
 use crate::ir::{
-    Arm, BinOp, Bind, Command, EnvBind, EnvField, EventPath, Expr, ExprId, Exprs, Filter, Function,
-    Guard, GuardCall, Handler, Ident, Literal, Number, Param, Slice, SliceId, Slot, Span, Stage,
-    StateVar, Stmt, Type, UnOp, Update,
+    Arm, BinOp, Bind, Command, EnvBind, EnvField, EventPath, Expr, ExprId, Exprs, Filter, FoldVar,
+    Function, Guard, GuardCall, Handler, Ident, Literal, Number, Param, Slice, SliceId, Slot, Span,
+    Stage, Stmt, Type, UnOp, Update,
 };
 use crate::scaled::Rounding;
 
@@ -19,7 +19,7 @@ pub struct Builder {
     stages: Vec<Stage>,
     open: Stage,
     /// The states the open stage declares. A seed, a filter or a guard argument may read
-    /// a state an *earlier* stage folded, and may not read one of these, which have not
+    /// a `fold` an *earlier* stage folded, and may not read one of these, which have not
     /// folded when this stage resolves.
     pending: HashSet<Slot>,
     frame: u32,
@@ -113,10 +113,10 @@ impl Builder {
         self.param(name, Type::opt(inner))
     }
 
-    pub fn state(&mut self, name: &str, ty: Type, init: ExprId) -> Slot {
+    pub fn fold(&mut self, name: &str, ty: Type, init: ExprId) -> Slot {
         let slot = self.alloc(name, Some(ty.clone()));
         self.pending.insert(slot);
-        self.open.states.push(StateVar {
+        self.open.folds.push(FoldVar {
             name: name.to_string(),
             ty,
             slot,
@@ -125,29 +125,29 @@ impl Builder {
         slot
     }
 
-    /// Across every stage, open and closed: a slot is a `state` wherever it was folded,
-    /// which is what `seal_state` and a diagnostic naming one both want. Whether it has
+    /// Across every stage, open and closed: a slot is a `fold` wherever it was folded,
+    /// which is what `seal_fold` and a diagnostic naming one both want. Whether it has
     /// folded *yet* is `pending`, and a different question.
-    pub fn state_of(&self, slot: Slot) -> Option<&StateVar> {
+    pub fn fold_of(&self, slot: Slot) -> Option<&FoldVar> {
         self.stages
             .iter()
             .chain([&self.open])
-            .flat_map(|stage| &stage.states)
-            .find(|state| state.slot == slot)
+            .flat_map(|stage| &stage.folds)
+            .find(|var| var.slot == slot)
     }
 
     /// Rule 12: recorded once the whole fold is parsed, because it is a property of
     /// every arm agreeing rather than of any one of them. The seal lands on the
     /// declared type, the same way it lands on an entity column.
-    pub fn seal_state(&mut self, slot: Slot, subject: Ident) {
-        if let Some(state) = self
+    pub fn seal_fold(&mut self, slot: Slot, subject: Ident) {
+        if let Some(var) = self
             .stages
             .iter_mut()
             .chain([&mut self.open])
-            .flat_map(|stage| &mut stage.states)
-            .find(|state| state.slot == slot)
+            .flat_map(|stage| &mut stage.folds)
+            .find(|var| var.slot == slot)
         {
-            state.ty = seal(state.ty.clone(), subject.clone());
+            var.ty = seal(var.ty.clone(), subject.clone());
         }
         if let Some(ty) = self.slot_types.get_mut(slot.0 as usize)
             && let Some(ty) = ty.as_mut()
@@ -196,10 +196,10 @@ impl Builder {
         self.slice(event, filters, Vec::new(), Vec::new())
     }
 
-    /// The first filter in the open stage reading a `state` that stage itself declares,
+    /// The first filter in the open stage reading a `fold` that stage itself declares,
     /// with the span to point at. Filters resolve before the stage folds, so such a
     /// filter can never be satisfied and is a mistake rather than a slow path. A filter
-    /// naming a state an *earlier* stage folded is fine, and is the point of staging.
+    /// naming a `fold` an *earlier* stage folded is fine, and is the point of staging.
     pub fn filter_past_fold(&self) -> Option<(Ident, Span)> {
         self.open
             .slices
@@ -211,24 +211,24 @@ impl Builder {
             })
     }
 
-    /// Whether `value` reads a slot the prologue has not filled by the time it runs: a
-    /// `state`, which the fold sets at step 6, or a `let` already left in the body
-    /// Whether `value` reads a `state` the open stage has not folded yet.
+    /// Whether `value` reads a slot the open stage has not filled by the time it runs:
+    /// a `fold`, which its stage sets at step 2.5, or a `let` already left in the body.
+    /// `docs/commands.md` has the numbered order.
     pub fn reads_pending(&self, value: ExprId) -> bool {
         self.unset_read(value).is_some()
     }
 
-    /// The unfolded `state` an expression reads, with the span of the read. A seed asks
+    /// The unfolded `fold` an expression reads, with the span of the read. A seed asks
     /// this, because a seed is evaluated before its own stage folds and so sees another
-    /// `state`'s seed rather than what it folds to: an answer that is wrong rather than
-    /// late. A state an earlier stage folded is not one of these.
-    pub fn state_read(&self, value: ExprId) -> Option<(Ident, Span)> {
+    /// `fold`'s seed rather than what it folds to: an answer that is wrong rather than
+    /// late. A `fold` an earlier stage folded is not one of these.
+    pub fn fold_read(&self, value: ExprId) -> Option<(Ident, Span)> {
         let (slot, at) = self.unset_read(value)?;
-        let state = self.state_of(slot)?;
-        Some((state.name.clone(), self.exprs.span(at)))
+        let var = self.fold_of(slot)?;
+        Some((var.name.clone(), self.exprs.span(at)))
     }
 
-    /// The first read of a `state` the open stage declares, as the slot and the load
+    /// The first read of a `fold` the open stage declares, as the slot and the load
     /// that reads it. Both callers above want a different half of this, and a second
     /// walk over the same arena is the kind of thing that drifts.
     fn unset_read(&self, value: ExprId) -> Option<(Slot, ExprId)> {
@@ -406,7 +406,7 @@ impl Builder {
     /// has none, below them once it has. This is the whole of what makes a stage a
     /// stage, so nothing else may push onto `pre` or `post`.
     pub fn stmt(&mut self, stmt: Stmt) {
-        if self.open.slices.is_empty() && self.open.states.is_empty() {
+        if self.open.slices.is_empty() && self.open.folds.is_empty() {
             self.open.pre.push(stmt);
         } else {
             self.open.post.push(stmt);
@@ -482,7 +482,7 @@ impl Builder {
             args,
             at_stage: self.stages.len(),
             at_slice: self.open.slices.len(),
-            at_state: self.open.states.len(),
+            at_fold: self.open.folds.len(),
             span,
         });
     }

@@ -146,7 +146,7 @@ impl Http for Elsewhere {
 }
 
 const COUNTING: &str = "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-  state open: Int = fold 0
+  fold open: Int = 0
     on @order.placed(customer_id) => open + 1
 
   emit @order.placed { order_id, customer_id, total }
@@ -248,7 +248,7 @@ fn the_condition_comes_back_resolved() {
 
 const CAPPED: &str = "refusal AtCapacity \"two is the limit\"
 command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-  state open: Int = fold 0
+  fold open: Int = 0
     on @order.placed(customer_id) => open + 1
 
   if open >= 2 { return reject AtCapacity }
@@ -332,7 +332,7 @@ fn a_second_run_folds_what_the_first_appended() {
     let program = program(
         "refusal OnePerCustomer \"already ordered\"
 command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-  state open: Int = fold 0
+  fold open: Int = 0
     on @order.placed(customer_id) => open + 1
 
   if open > 0 { return reject OnePerCustomer }
@@ -358,7 +358,7 @@ const SEALED: &str = "event @shop.connected {
 }
 effect Use {
   on @order.placed as e {
-    state token: String? = fold none
+    fold token: String? = none
       on @shop.connected(shop_id: e.customer_id) { token } => token
 
     log(reveal(token).unwrap_or(\"nothing\"))
@@ -610,7 +610,7 @@ fn a_command_that_read_nothing_conflicts_with_nothing() {
     };
     assert!(
         !condition.conflicts(&[order(0, 7), order(1, 8)]),
-        "a command with no `state` declared no slice, so nothing can beat it to one"
+        "a command with no `fold` declared no slice, so nothing can beat it to one"
     );
 }
 
@@ -884,12 +884,12 @@ fn a_command_that_folds_nothing_asks_the_host_for_no_position() {
 fn two_stages_read_twice_against_one_pinned_head() {
     let program = program(
         "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-  state open: Int = fold 0
+  fold open: Int = 0
     on @order.placed(customer_id) => open + 1
 
   let seen = open
 
-  state again: Int = fold 0
+  fold again: Int = 0
     on @order.placed(customer_id: seen) => again + 1
 
   emit @order.placed { order_id, customer_id, total }

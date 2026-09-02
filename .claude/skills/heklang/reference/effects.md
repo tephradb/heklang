@@ -8,7 +8,7 @@ with a journal, and most of the rules below are about paying for it honestly.
 ```hek
 effect NotifyCustomer {
   on @order.placed as e {
-    state orders: Int = fold 0
+    fold orders: Int = 0
       on @order.placed(customer_id: e.customer_id) => orders + 1
 
     let response = http.post("https://mail.example/confirm", {
@@ -61,10 +61,10 @@ in the trigger, they stay separate arms.
 
 ## 2. State lives inside the arm
 
-`as e` binds the trigger and is in scope for the arm's `state` filters and its body. There is **no**
+`as e` binds the trigger and is in scope for the arm's `fold` filters and its body. There is **no**
 effect-level trigger binding and no effect-level state.
 
-An arm stages exactly like a command body: a run of `state` declarations is one read, a statement
+An arm stages exactly like a command body: a run of `fold` declarations is one read, a statement
 below one closes it, and a later run may filter on what an earlier one folded. There is **no
 `guard`** in an effect, in either shape: an effect has no append condition to build and no `Outcome`
 to refuse with.
@@ -73,12 +73,12 @@ A `let` in an arm is an ordinary statement and may call out.
 
 ## 3. The fold stops at the trigger's own position, inclusive
 
-`state` is folded over the log up to **and including** the triggering event, never to the head. It is
+`fold` is folded over the log up to **and including** the triggering event, never to the head. It is
 therefore a pure function of the log prefix and that position, so every attempt and every replay
 reproduces it. Three consequences:
 
 - **it cannot race**, so an effect has no read of a projector;
-- **it is not journaled**, so a filter, a `state` seed and a fold arm may not call out, invoke,
+- **it is not journaled**, so a filter, a fold seed and a fold arm may not call out, invoke,
   decrypt or read a clock. Each is a compile error naming the fold rather than the builtin;
 - **it counts the trigger**, so an effect folding its own trigger type sees itself, and a customer's
   first order leaves a count of one, not zero.
@@ -277,7 +277,7 @@ identity that already exists, and `e.id` is the seed most handlers want. The rej
 recognised and each points at `derive`.
 
 **The clock rule.** `now()` is available in a command body (pinned once per request) and in an effect
-arm (journaled); it is absent in a `state` fold of either kind, in a projector, in a module `fn` and
+arm (journaled); it is absent in a `fold` of either kind, in a projector, in a module `fn` and
 in an effect-local `fn`. It is pinned **once**, not per call, so two calls in one body read the same
 value.
 
@@ -310,7 +310,7 @@ It **may not**:
 
 - `reveal` or `erase`. Those stay in the arm, which is what keeps the erase-last analysis over one
   statement tree. **Pass the already-revealed value in as a parameter.**
-- declare `state`. A fold belongs to the arm; pass what it decided in.
+- declare a `fold`. A fold belongs to the arm; pass what it decided in.
 - read `now()`. The clock is pinned into a slot the arm fills; read it in the arm and pass it in.
 - `emit` or write a read model.
 - shadow the name of a module `fn`.
@@ -340,7 +340,7 @@ is no question at all.
 
 | | |
 | --- | --- |
-| **Move it** into a position sealed under the same subject: a `let`, a `state` fold, an entity column, another event field declared `@subject(<same name>)` | the content is never read |
+| **Move it** into a position sealed under the same subject: a `let`, a `fold`, an entity column, another event field declared `@subject(<same name>)` | the content is never read |
 | **Ask if it is there**: `.is_some()` / `.is_none()` | presence is not content |
 | **`reveal` it**, in an effect arm | the boundary itself |
 
@@ -367,11 +367,11 @@ into a `@subject(...)` field with no ceremony. Only reading back out needs `reve
 
 ### Folding a credential out of the log
 
-A credential is almost never on the event being handled, so the seal propagates through a `state`
+A credential is almost never on the event being handled, so the seal propagates through a `fold`
 fold:
 
 ```hek
-state token: String? = fold none
+fold token: String? = none
   on @shop.connected(shop_id) { access_token } => access_token
   on @shop.reconnected(shop_id) { access_token } => access_token
 

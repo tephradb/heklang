@@ -377,10 +377,20 @@ fn a_condition_is_a_declared_position() {
 #[test]
 fn the_rule_holds_at_every_declared_position() {
     let cases = [
-        // a state seed and a fold arm
+        // a fold seed
         (
             "command C(id: Int, text: String) {
-  state seen: Int = fold text
+  fold seen: Int = text
+    on @thing.happened(id) => seen
+  emit @thing.touched { id }
+}",
+            "expected Int, found String",
+        ),
+        // a fold arm, which is a declared position of its own
+        (
+            "command C(id: Int) {
+  fold seen: Int = 0
+    on @thing.happened(id) { name } => name
   emit @thing.touched { id }
 }",
             "expected Int, found String",
@@ -396,7 +406,8 @@ fn the_rule_holds_at_every_declared_position() {
         // a list element, against the element type the target declared
         (
             "command C(id: Int, n: Int) {
-  state xs: List(String) = fold [n]
+  fold xs: List(String) = [n]
+    on @thing.happened(id) => xs
   emit @thing.touched { id }
 }",
             "expected String, found Int",
@@ -451,7 +462,7 @@ fn the_bare_name_shorthand_is_the_same_position() {
         // a slice filter
         (
             "command C(id: Int, name: Int) {
-  state seen: Bool = fold false
+  fold seen: Bool = false
     on @thing.happened(name) => true
   emit @thing.touched { id }
 }",
@@ -460,7 +471,7 @@ fn the_bare_name_shorthand_is_the_same_position() {
         // a guard argument
         (
             "guard G(id: String) {
-  state seen: Bool = fold false
+  fold seen: Bool = false
     on @thing.touched(id: 1) => true
   if !seen {
     return invalid(\"no\")
@@ -543,7 +554,8 @@ fn the_shorthand_still_wraps_and_still_propagates() {
     let cases = [
         // a bare `T` fills a `T?`
         "command C(id: Int, maybe: String) {
-  state held: String? = fold maybe
+  fold held: String? = maybe
+    on @thing.happened(id) { name } => name
   emit @thing.touched { id }
 }",
         // a branch that proved it present makes it its inner type
@@ -565,7 +577,7 @@ projector P {
         // sealed content as a filter, which narrows a slice rather than reading
         "event @person.seen { person_id: Int, email: String @subject(person_id) }
 command C(id: Int, email: String) {
-  state seen: Bool = fold false
+  fold seen: Bool = false
     on @person.seen(email) => true
   emit @thing.touched { id }
 }",

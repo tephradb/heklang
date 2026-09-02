@@ -119,7 +119,7 @@ command ListItem(
 
   // The seller's live catalogue, keyed by item. Uniqueness is a rule about all of it,
   // so the boundary is every listing this seller has.
-  state items: Map(Uuid, Item) = fold Map.empty
+  fold items: Map(Uuid, Item) = Map.empty
     on @item.listed(seller_id) { item_id, item } => items.set(item_id, item)
     on @item.delisted(seller_id) { item_id } => items.remove(item_id)
 
@@ -181,11 +181,11 @@ effect AuditCatalog {
   // else, and that is exactly what the binding may name: `reason` is on the flag alone
   // and `item` on the listing alone, so neither is reachable here.
   on @item.listed, @item.delisted, @item.flagged as e { item_id, seller_id } {
-    state listed: Int = fold 0
+    fold listed: Int = 0
       on @item.listed(seller_id) => listed + 1
       on @item.delisted(seller_id) => listed - 1
 
-    state house: Map(Uuid, Item) = fold Map.empty
+    fold house: Map(Uuid, Item) = Map.empty
       on @item.listed(seller_id) { item_id, item } => house.set(item_id, item)
       on @item.delisted(seller_id) { item_id } => house.remove(item_id)
 

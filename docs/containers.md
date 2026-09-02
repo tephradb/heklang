@@ -28,7 +28,7 @@ applies at every other declared position (`docs/optionals.md`). So `xs.push(name
 `List(String?)` stores `some(name)`, and `.first()` on it reads back a `String??` that is `some` twice
 over rather than a shape nothing can branch on.
 
-**`push` and `remove` return a new list.** Nothing mutates, so a `state` fold arm still returns new
+**`push` and `remove` return a new list.** Nothing mutates, so a fold arm still returns new
 state and a value that was handed to something else cannot change underneath it. That is the same
 property the fold already relied on for scalars, extended rather than excepted.
 
@@ -44,7 +44,7 @@ rather than trapping, and does not invite the out-of-bounds question at all. Any
 ## `Map(K, V)`
 
 ```
-state skus: Map(Uuid, String) = fold Map.empty
+fold skus: Map(Uuid, String) = Map.empty
   on @warranty.plan.created(shop_id) { plan_id, sku } => skus.set(plan_id, sku)
 ```
 
@@ -85,14 +85,14 @@ can answer a question the author has not said they are asking.
 **One real case needed insertion order and worked around it**, which is the honest evidence rather
 than a claim that nobody wants it: a port gives a shop's *oldest surviving* plan the default variant
 of a master product. A sorted map cannot answer "oldest", so that fold carries a separate
-`state plan_order: List(Uuid)` beside the map. The workaround is fine, and it is better than it
+`fold plan_order: List(Uuid)` beside the map. The workaround is fine, and it is better than it
 looks: the list says out loud that order matters here, where an insertion-ordered map would have hid
 that in the container's choice.
 
 ## Where an empty container's type comes from
 
 `[]` and `Map.empty` hold nothing, so nothing in them says what they hold. The type comes from the
-target: a `state` declaration, a command or `fn` parameter, an event or entity field, or the argument
+target: a `fold` declaration, a command or `fn` parameter, an event or entity field, or the argument
 position of a method that already knows (`plans.get(id).unwrap_or(Map.empty)` takes it from `plans`).
 Without one, both are a compile error that names those places.
 
@@ -130,7 +130,7 @@ map" is not a thing the language has: there is no pair type, and adding one to s
 nobody asked for would be a type earning its keep only inside `for`.
 
 A `for` always terminates: it runs once per element of a finite container, and there is no `while`.
-That matters more here than in most languages, because a `state` fold has to reproduce without a
+That matters more here than in most languages, because a `fold` has to reproduce without a
 journal and a command may be retried.
 
 There is no `break` and no `continue`. Every search in a 3,186-line port is a pure `fn` with an early

@@ -58,7 +58,7 @@ fn plan_sku(n: Int) -> String {
 a fixture built by the thing under test means one broken command fails every test that used it as
 scenery, and the report names the wrong test. Raw events keep a failure local.
 
-There is no way to seed state directly. A fold's state is derived from the log.
+There is no way to seed a fold directly. A folded value is derived from the log.
 
 ## 3. Setup
 
@@ -155,7 +155,7 @@ derived id is written as the same call rather than as a hard-coded uuid.
 
 ## 8. What a test cannot assert
 
-- **State.** There is no `expect state token == "x"`. What the arm did with a fold is already in the
+- **State.** There is no `expect token == "x"`. What the arm did with a fold is already in the
   trace.
 - **An arbitrary boolean.** There is no `assert <expr>`. A case is a table of inputs and outputs;
   once it can compute, it is a program with its own bugs.

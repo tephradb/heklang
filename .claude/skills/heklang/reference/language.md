@@ -24,7 +24,7 @@ program is assembled from files. Handler kinds have their own files.
 Two more are spellable **only** in a `fn` parameter or return type, and nowhere else:
 
 - `Response`, what `http.*` returns. A response is transport, not data, so no event field, entity
-  column, record field, `state` or command parameter may name one, and neither may `List(Response)`.
+  column, record field, `fold` or command parameter may name one, and neither may `List(Response)`.
 - `Outcome`, what an `invoke` answers with and what `reject`/`invalid` construct. A refusal is a
   decision, not data, so the same restriction applies.
 
@@ -53,7 +53,7 @@ Nothing else. In particular `T?` does **not** fill `T`, and a typed `Int` value 
 `Money(n)` or a `Decimal(n)` (a *literal* resolves directly to either; a value does not).
 
 The positions this holds at, exhaustively: an `emit` field, a `put`/`patch`/`update` column and its
-key, a command parameter at `run` and at `invoke`, a `fn` argument and its return, a `state` seed and
+key, a command parameter at `run` and at `invoke`, a `fn` argument and its return, a fold seed and
 every fold arm, a slice filter value, a record literal field, a list element and a comprehension's
 yield, a method argument, an entity default, a `const`, a guard argument, a refusal field, a `given`
 field and every `expect` value, an `if` condition and every operand of `&&`, `||` and `!`.
@@ -140,7 +140,7 @@ become a `Decimal(2)` and `10.5` cannot become an `Int`.
 
 The target comes from, in priority order:
 
-1. **an annotation**: a parameter type, a `state` type, an event field type in a filter or an `emit`,
+1. **an annotation**: a parameter type, a `fold` type, an event field type in a filter or an `emit`,
    a column, a `fn` parameter, a method's declared argument;
 2. **the other operand of `+`, `-` or a comparison**, in either direction. `*`, `/` and `%` never
    cross-hint, because their operands are deliberately different types. A hint is never taken from a
@@ -234,7 +234,7 @@ documents and anything else brace-dense.
 
 ```hek
 let ids = [first_id, second_id]
-state skus: Map(Uuid, String) = fold Map.empty
+fold skus: Map(Uuid, String) = Map.empty
   on @plan.created(shop_id) { plan_id, sku } => skus.set(plan_id, sku)
 ```
 
@@ -250,7 +250,7 @@ twice has to serialise identically for replay verification. If insertion order m
 separate `List(K)` beside the map and say so.
 
 **Where an empty container's type comes from.** `[]` and `Map.empty` hold nothing, so the type comes
-from the target: a `state` declaration, a command or `fn` parameter, an event or entity field, or a
+from the target: a `fold` declaration, a command or `fn` parameter, an event or entity field, or a
 method argument that already knows. A `let` is **not** a target, because `let` takes no type
 annotation. Inside a JSON object literal `[]` needs no target, since a body's values are typed by
 what they are.
@@ -283,7 +283,7 @@ fn effective_sku(sku: String?, plan_id: Uuid) -> String {
 ```
 
 Module scope, a **required** return type, and `return <expr>`. Callable from a command, a guard, a
-projector, an effect, another `fn` and a `state` fold arm.
+projector, an effect, another `fn` and a fold arm.
 
 **A module `fn` is pure.** No clock, no `http.*`, no `invoke`, no `reveal`, no `erase`, no `emit`, no
 read-model write. That purity is what makes it callable from a fold arm and from a projector without
@@ -313,7 +313,7 @@ if decision.is_some() {
 
 **An effect-local `fn`** is declared inside an `effect` and is the one impure helper. See
 `effects.md`; the short version is that it may `http.*`, `invoke`, `log` and `fail`, may **not**
-`reveal`, `erase`, `now()` or declare `state`, may omit its return type (the only signature that may),
+`reveal`, `erase`, `now()` or declare a `fold`, may omit its return type (the only signature that may),
 and a call to a void one is a statement rather than an expression.
 
 Arguments are positional and checked against the declared parameters, with each parameter's type as
@@ -351,7 +351,7 @@ record LineItem {
 }
 ```
 
-A named product type at module scope, and an ordinary value: it can be a `state` type, an event
+A named product type at module scope, and an ordinary value: it can be a `fold` type, an event
 field, a command or `fn` parameter, a return type, and the element of a `List` or `Map`. It
 serialises to a JSON object.
 

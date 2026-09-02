@@ -195,7 +195,7 @@ impl Value {
         // A seal can sit under an `Opt` as well as at the top: an `Opt(String)` holding
         // sealed content and an `Opt(Sealed(String, x))` are the same shape to a runtime
         // that does not model ciphertext, and treating them as different made a folded
-        // credential fail to fit the `state` it was folded into. `same_unsealed` is what
+        // credential fail to fit the `fold` it was folded into. `same_unsealed` is what
         // reads through both sides.
         //
         // The variants carrying a type or a name are matched here rather than left to

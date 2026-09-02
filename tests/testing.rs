@@ -19,7 +19,7 @@ event @plan.synced { plan_id: Int }
 refusal Already \"already synced\"
 command RecordSync(plan_id: Int) {
   guard @plan.synced(plan_id)
-  state synced: Bool = fold false
+  fold synced: Bool = false
     on @plan.synced(plan_id) => true
   if synced {
     return reject Already
@@ -49,9 +49,9 @@ event @shop.sync.requested { shop_id: Int }
 
 effect SyncShop {
   on @shop.sync.requested { shop_id } {
-    state domain: String = fold \"\"
+    fold domain: String = \"\"
       on @shop.connected(shop_id) { domain } => domain
-    state token: String? = fold none
+    fold token: String? = none
       on @shop.connected(shop_id) { token } => token
 
     let secret = reveal(token)

@@ -207,6 +207,6 @@ a container or a record is an error naming the type.
 ## 10. What a projector may not do
 
 No `now()`, no `http.*`, no `invoke`, no `log`, no `fail`, no `reveal`, no `erase`, no `emit`, no
-`state`, no `guard`. A projector has no clock and no network because a rebuild has to reproduce every
+`fold`, no `guard`. A projector has no clock and no network because a rebuild has to reproduce every
 value it wrote, and no failure channel at all because a write returns nothing. It may call a module
 `fn`, which is pure.

@@ -23,7 +23,7 @@
 ] @indent
 
 ; A fold is the one construct here that indents with no delimiter to do it: its arms sit two
-; spaces under the `state` line and nothing closes them.
+; spaces under the `fold` line and nothing closes them.
 ;
 ; Deliberately `@indent` without `@extend`. `@extend` is how helix's own python queries carry
 ; an indent past a node's end, and it is wrong here: a fold ends where its last arm does, and
@@ -31,7 +31,7 @@
 ; `@extend.prevent-once` on. The cost is that the *first* arm is still indented by hand,
 ; because until it exists the declaration ends at its seed; every arm after it follows from
 ; this, which is 98 of the 158 folds in the sources.
-(state_declaration) @indent
+(fold_declaration) @indent
 
 [
   "}"

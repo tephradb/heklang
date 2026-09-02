@@ -149,7 +149,7 @@ value does not), and no type fills `Json` except a `Json`.
 Every one of them, because the rule is only worth something if it holds at all of them:
 
 an `emit` field, a `put`/`patch`/`update` column and its key, a command parameter at `run` and at
-`invoke`, a `fn` argument and its return, a `state` seed and every fold arm, a slice filter value, a
+`invoke`, a `fn` argument and its return, a fold seed and every fold arm, a slice filter value, a
 record literal field, a list element and a comprehension's yield, a method argument, an entity
 default and a `const`, a `given` field and every `expect` value, an `if` condition and both operands
 of `&&`, `||` and `!` (which is where `if owner_email` stops being a program).

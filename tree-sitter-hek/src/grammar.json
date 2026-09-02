@@ -1509,7 +1509,7 @@
         },
         {
           "type": "SYMBOL",
-          "name": "state_declaration"
+          "name": "fold_declaration"
         },
         {
           "type": "SYMBOL",
@@ -1625,12 +1625,12 @@
         }
       ]
     },
-    "state_declaration": {
+    "fold_declaration": {
       "type": "SEQ",
       "members": [
         {
           "type": "STRING",
-          "value": "state"
+          "value": "fold"
         },
         {
           "type": "FIELD",
@@ -1655,10 +1655,6 @@
         {
           "type": "STRING",
           "value": "="
-        },
-        {
-          "type": "STRING",
-          "value": "fold"
         },
         {
           "type": "FIELD",

@@ -27,7 +27,7 @@ and it holds at **every** position that declares a type:
 | a `fn` parameter and its return type | `fn find(...) -> String?` returning a `String` |
 | an `emit` field | `emit @order.shipped { tracking }` where the field is `String?` |
 | an entity field in `put`, `patch` and `update` | `put Order { tracking }` into a `String?` column |
-| a `state` seed and every fold arm | `state token: String? = fold none` with a `String`-valued arm |
+| a fold seed and every fold arm | `fold token: String? = none` with a `String`-valued arm |
 | a record literal field | `Facts { note }` where `note` is declared `String?` |
 | a list or map element | `xs.push(name)` where `xs` is a `List(String?)` |
 | a test's `given` field and expected value | `expect Order[id] { tracking: "TRK-1" }` against a `String?` column |
@@ -40,7 +40,7 @@ the declared type, not a conversion that recurses.
 
 **Why the list is exhaustive rather than illustrative.** Each of these is a separate site in the
 interpreter, and the rule is only worth anything if it holds at all of them. It has three times not:
-a `state` seed and a fold arm each stored a bare value into an optional slot until they were fixed;
+a fold seed and a fold arm each stored a bare value into an optional slot until they were fixed;
 the record and container positions did the same until the sweep that produced this table; and the
 last two rows failed differently again, by rejecting the write outright, so that an optional-typed
 constant had no writable value at all. The first two failures were silent, because nothing
@@ -49,10 +49,10 @@ that a `String` has no such method, naming a symptom several statements away fro
 
 **That silence is gone, twice over.** `docs/types.md`'s check catches a mismatch before the program
 runs wherever it can name the type, and every write position that only coerced now also checks: a
-`state` seed and each fold arm, a `fn` parameter and its return, a list element and a comprehension's
+fold seed and each fold arm, a `fn` parameter and its return, a list element and a comprehension's
 yield, a record literal field, `push` and `set`. So a mismatch is reported at the write, with its
 span, rather than wherever the value is next read. Doing that found one more instance of the same
-class: a sealed value did not fit the `state` it was folded into, because the runtime's type test
+class: a sealed value did not fit the `fold` it was folded into, because the runtime's type test
 looked through a seal at the top and not through one under an `Opt`.
 
 The last two rows are also why the rule now lives in one place. Every literal position funnels

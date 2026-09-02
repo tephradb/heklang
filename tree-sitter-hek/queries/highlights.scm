@@ -113,7 +113,6 @@
   "on"
   "patch"
   "put"
-  "state"
   "update"
 ] @keyword
 

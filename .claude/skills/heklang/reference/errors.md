@@ -84,7 +84,7 @@ The set is closed: every diagnostic heklang can produce is one of these.
 | `entity-shape` | an entity with no `@key`, more than one, an unorderable key, or an index on a field it has not got | |
 | `event-shape` | a multi-path arm over event types with nothing in common | a field is shared only when its type and its `@subject` match on every listed path |
 | `refusal-shape` | a refusal named or written so its derived code could not survive | start with a capital, use no `_`, and let the message name every field and nothing else |
-| `state-shape` | a `state` or `guard` written where or how it does not go | declarations come before the first statement of their stage, never inside an `if` or a `for`; a seed or filter may not read a `state` beside it; a guard is one read |
+| `stage-shape` | a `fold` or `guard` written where or how it does not go | declarations come before the first statement of their stage, never inside an `if` or a `for`; a seed or filter may not read a `fold` beside it; a guard is one read |
 | `no-zero-value` | a `patch` that would materialise a row it cannot fill | give the column a default, make it optional, or make the write an `update` |
 
 ### Context and purity
@@ -93,8 +93,8 @@ The set is closed: every diagnostic heklang can produce is one of these.
 | --- | --- | --- |
 | `wrong-context` | a statement in a declaration kind that does not have it | see the matrix in `stdlib.md`: `emit` is a command's, the four writes are a projector's, `http`/`invoke`/`log`/`fail` are an effect's |
 | `impure-fn` | a module `fn` doing something a pure function cannot | move the call to the caller and pass the result in, or make it an effect-local `fn` |
-| `fold-restriction` | a `state` fold calling out, invoking, decrypting or reading a clock | a fold has to reproduce without a journal; do it in the body and pass it in |
-| `arm-only` | an effect-local `fn` doing what stays in the arm | `reveal`, `erase`, `now()` and `state` stay in the arm; pass the revealed value or the moment in as a parameter |
+| `fold-restriction` | a `fold` calling out, invoking, decrypting or reading a clock | a fold has to reproduce without a journal; do it in the body and pass it in |
+| `arm-only` | an effect-local `fn` doing what stays in the arm | `reveal`, `erase`, `now()` and `fold` stay in the arm; pass the revealed value or the moment in as a parameter |
 | `return-shape` | a `return` that does not match the signature it is in | a guard returns only `reject <Name>` or `invalid(...)`; a module `fn` must declare a return type and return on every path; `reject`/`invalid` need `-> Outcome` or `-> Outcome?` |
 
 ### Seals

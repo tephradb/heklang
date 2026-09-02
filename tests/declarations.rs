@@ -1,4 +1,4 @@
-use heklang::{Command, Pos, parse};
+use heklang::{Code, Command, Pos, parse};
 
 /// Every slice a command declares, across its stages. A command whose declarations are
 /// all at the top is one stage, which is every command in this file.
@@ -11,7 +11,7 @@ fn a_command_may_precede_the_events_it_uses() {
     let source = "command PlaceOrder(order_id: Uuid, customer_id: Int) {
   guard @order.placed(order_id)
 
-  state open: Int = fold 0
+  fold open: Int = 0
     on @order.placed(customer_id) => open + 1
 
   emit @order.placed { order_id, customer_id }
@@ -53,7 +53,7 @@ command C(order_id: Uuid, customer_id: Int) {
 fn a_filter_naming_a_later_let_points_at_the_definition() {
     let source = "event @customer.blocked { customer_id: Int }
 command C(customer_id: Int) {
-  state blocked: Bool = fold false
+  fold blocked: Bool = false
     on @customer.blocked(customer_id: customer) => true
 
   let customer = customer_id
@@ -134,21 +134,63 @@ command C(y: Int) { return }
     );
 }
 
+/// `state` was the keyword a fold used to be declared with, and it bought nothing the
+/// parser could not supply: `fold` followed `=` unconditionally. Collapsing the two into
+/// one keyword freed the word, and a field called `state` is the kind of name a domain
+/// actually wants.
 #[test]
-fn a_state_without_fold_is_rejected() {
-    let source = "event @a.b { x: Int }
-command C(y: Int) {
-  state seen: Bool = false
+fn state_is_an_ordinary_name() {
+    let source = "event @a.b { x: Int, state: String }
+command C(y: Int, state: String) {
+  fold seen: Bool = false
     on @a.b(x: y) => true
 
-  return
+  emit @a.b { x: y, state }
 }
 ";
-    let err = parse(source).expect_err("`state` needs `fold` before its seed");
+    parse(source).expect("`state` is a name like any other");
+}
+
+/// A fold with no arms narrows nothing, so it declares no slice and adds nothing to the
+/// append condition. With the keyword at the front the line reads as a binding, which is
+/// exactly what it is, so it has to say so.
+#[test]
+fn a_fold_with_no_arms_is_rejected() {
+    let source = "event @a.b { x: Int }
+command C(y: Int) {
+  fold seen: Bool = false
+
+  emit @a.b { x: y }
+}
+";
+    let err = parse(source).expect_err("a fold with no arms folds nothing");
+    assert_eq!(err.code, Code::EmptyDeclaration);
     assert_eq!(
         err.text(),
-        "`seen` is a fold over the log, so `=` introduces a seed rather than a value; \
-         write `= fold <seed>`"
+        "fold `seen` has no arms, so it is only its seed; a fold with no arms declares no \
+         slice and adds nothing to the append condition; write `let seen = <seed>`"
+    );
+}
+
+/// The structural error wins, and is the only one. A seed is checked against the type its
+/// fold declares, so a declaration with no arms was answering a question it does not ask:
+/// both used to be reported, seed first, which put the message about the half that was
+/// not wrong in front of the author.
+#[test]
+fn an_arm_less_fold_reports_the_shape_rather_than_the_seed() {
+    let source = "event @a.b { x: Int }
+command C(y: Int, text: String) {
+  fold seen: Int = text
+
+  emit @a.b { x: y }
+}
+";
+    let err = parse(source).expect_err("no arms, and a seed of the wrong type");
+    assert_eq!(err.code, Code::EmptyDeclaration);
+    assert!(
+        !err.text().contains("expected Int, found String"),
+        "the seed's type is not the mistake to lead with; got: {}",
+        err.text()
     );
 }
 

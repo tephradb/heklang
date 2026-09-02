@@ -656,7 +656,7 @@ pub struct GuardCall {
     /// splice puts the guard's own where the author put the guard. Source order is the
     /// decision order, and it costs nothing to make the IR agree with it.
     pub at_slice: usize,
-    pub at_state: usize,
+    pub at_fold: usize,
     pub span: Span,
 }
 
@@ -668,7 +668,7 @@ pub struct Param {
 }
 
 #[derive(Debug, Clone)]
-pub struct StateVar {
+pub struct FoldVar {
     pub name: Ident,
     pub ty: Type,
     pub slot: Slot,
@@ -688,7 +688,7 @@ pub struct Stage {
     /// read.
     pub pre: Vec<Stmt>,
     pub slices: Vec<Slice>,
-    pub states: Vec<StateVar>,
+    pub folds: Vec<FoldVar>,
     /// Runs once the fold is done: a guard's decision first, then the author's own.
     pub post: Vec<Stmt>,
 }

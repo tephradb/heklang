@@ -44,7 +44,7 @@ refusal No \"no\"
 
 const GUARDS: &str = "\
 guard CourseIsDefined(course: String) {
-  state defined: Bool = fold false
+  fold defined: Bool = false
     on @course.defined(course) => true
 
   if !defined {
@@ -53,7 +53,7 @@ guard CourseIsDefined(course: String) {
 }
 
 guard StudentIsRegistered(student: String) {
-  state registered: Bool = fold false
+  fold registered: Bool = false
     on @student.registered(student) => true
 
   if !registered {
@@ -62,10 +62,10 @@ guard StudentIsRegistered(student: String) {
 }
 
 guard CourseHasSeats(course: String) {
-  state seats: Int = fold 0
+  fold seats: Int = 0
     on @course.defined(course) { capacity } => capacity
 
-  state enrolled: Int = fold 0
+  fold enrolled: Int = 0
     on @student.subscribed(course) => enrolled + 1
 
   if enrolled >= seats {
@@ -264,7 +264,7 @@ refusal ShopNotFound \"shop does not exist\"
 refusal PlanNotFound \"no such plan\"
 
 guard ShopIsConnected(shop_id: Int) {
-  state connected: Bool = fold false
+  fold connected: Bool = false
     on @shop.connected(shop_id) => true
 
   if !connected {
@@ -275,7 +275,7 @@ guard ShopIsConnected(shop_id: Int) {
 guard PlanExists(plan_id: Int, shop_id: Int) {
   guard ShopIsConnected { shop_id }
 
-  state exists: Bool = fold false
+  fold exists: Bool = false
     on @plan.created(plan_id, shop_id) => true
 
   if !exists {
@@ -348,7 +348,7 @@ fn a_nested_guards_slices_reach_the_command() {
 fn a_guard_appends_nothing() {
     let message = error(&format!(
         "{EVENTS}guard G(course: String) {{
-  state d: Bool = fold false
+  fold d: Bool = false
     on @course.defined(course) => true
   emit @student.subscribed {{ course, student: \"s\" }}
 }}
@@ -367,7 +367,7 @@ fn a_guard_appends_nothing() {
 fn a_guard_returns_only_a_refusal() {
     let message = error(&format!(
         "{EVENTS}guard G(course: String) {{
-  state d: Bool = fold false
+  fold d: Bool = false
     on @course.defined(course) => true
   if d {{ return }}
 }}
@@ -390,11 +390,36 @@ fn a_guard_that_folds_nothing_is_a_fn() {
     assert_eq!(message, "guard `G` folds nothing");
 }
 
+/// An arm-less fold is `empty-declaration` wherever it is written, but the way out is
+/// not the same everywhere. In a command it is a `let`; in a guard that would land on
+/// `guard `G` folds nothing`, so the hint has to name an edit that ends the error rather
+/// than trading it for the next one. `docs/diagnostics.md` bills these hints as the
+/// material a code action is built from, which is what makes the difference load-bearing.
+#[test]
+fn an_arm_less_fold_in_a_guard_is_not_told_to_write_a_let() {
+    let hint = parse(&format!(
+        "{EVENTS}guard G(course: String) {{
+  fold seen: Bool = false
+
+  if !seen {{ return reject No }}
+}}
+"
+    ))
+    .expect_err("a fold with no arms folds nothing")
+    .hint
+    .expect("the way out");
+    assert_eq!(
+        hint,
+        "a fold with no arms declares no slice and adds nothing to the append condition; give it an arm; a guard decides from what it folds, and one that folds nothing is a `fn`"
+    );
+    assert!(!hint.contains("`let seen`"), "got: {hint}");
+}
+
 #[test]
 fn a_guard_has_no_clock() {
     let message = error(&format!(
         "{EVENTS}guard G(course: String) {{
-  state d: Bool = fold false
+  fold d: Bool = false
     on @course.defined(course) => true
   let at = now()
   if !d {{ return reject No }}
@@ -473,7 +498,7 @@ fn a_guard_cannot_name_itself() {
     let message = error(&format!(
         "{EVENTS}guard G(course: String) {{
   guard G {{ course }}
-  state d: Bool = fold false
+  fold d: Bool = false
     on @course.defined(course) => true
   if !d {{ return reject No }}
 }}
@@ -490,13 +515,13 @@ fn a_cycle_through_another_guard_is_refused() {
     let message = error(&format!(
         "{EVENTS}guard A(course: String) {{
   guard B {{ course }}
-  state d: Bool = fold false
+  fold d: Bool = false
     on @course.defined(course) => true
   if !d {{ return reject No }}
 }}
 guard B(course: String) {{
   guard A {{ course }}
-  state e: Bool = fold false
+  fold e: Bool = false
     on @course.defined(course) => true
   if !e {{ return reject No }}
 }}
@@ -508,14 +533,14 @@ guard B(course: String) {{
     );
 }
 
-/// An argument is evaluated before any fold, so a `state` is not available to one. The
+/// An argument is evaluated before any fold, so a `fold` is not available to one. The
 /// same rule a seed follows, for the same reason: the answer would be wrong rather than
 /// late.
 #[test]
-fn a_guard_argument_cannot_read_a_state() {
+fn a_guard_argument_cannot_read_a_fold() {
     let message = error(&format!(
         "{EVENTS}{GUARDS}command C(course: String) {{
-  state seen: String = fold \"\"
+  fold seen: String = \"\"
     on @course.defined(course) => course
   guard CourseIsDefined {{ course: seen }}
   emit @student.subscribed {{ course, student: \"s\" }}
@@ -538,7 +563,7 @@ fn a_command_and_a_guard_may_share_a_name() {
   emit @student.subscribed {{ course, student: \"s\" }}
 }}
 guard Same(course: String) {{
-  state d: Bool = fold false
+  fold d: Bool = false
     on @course.defined(course) => true
   if !d {{ return reject UndefinedCourse }}
 }}
@@ -558,7 +583,7 @@ fn a_const_above_a_guard_does_not_swallow_it() {
     let source = format!(
         "{EVENTS}const LIMIT: Int = 10
 guard CourseIsDefined(course: String) {{
-  state defined: Bool = fold false
+  fold defined: Bool = false
     on @course.defined(course) => true
   if !defined {{ return reject UndefinedCourse }}
 }}
@@ -620,29 +645,29 @@ fn a_statement_above_a_guard_answers_before_it() {
 }
 
 /// A guard is copied into what names it, at the stage it was written in, so it cannot
-/// carry a second read across the splice. `guard A; guard B; state s` stays one read,
+/// carry a second read across the splice. `guard A; guard B; fold s` stays one read,
 /// which is what keeps a command's boundary one pass over the log.
 #[test]
 fn a_guard_is_one_read_of_the_log() {
     let message = error(&format!(
         "{EVENTS}guard G(course: String, student: String) {{
-  state defined: Bool = fold false
+  fold defined: Bool = false
     on @course.defined(course) => true
   if !defined {{
     return reject UndefinedCourse
   }}
-  state registered: Bool = fold false
+  fold registered: Bool = false
     on @student.registered(student) => true
 }}
 "
     ));
-    assert_eq!(message, "this `state` would be a second read of the log");
+    assert_eq!(message, "this `fold` would be a second read of the log");
 }
 
 /// An emit on a path that returns before any declaration is appended under an empty
 /// condition, which never conflicts. That is not a hole: the decision read nothing, so
 /// nothing in the log could invalidate it, and heklang already answers this way for a
-/// command that declares no `state` at all.
+/// command that declares no `fold` at all.
 #[test]
 fn an_emit_above_a_guard_appends_unconditionally() {
     let program = program(&format!(

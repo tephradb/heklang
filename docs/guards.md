@@ -6,7 +6,7 @@ A `guard` is a named proposition about the log, and one refusal for when it does
 refusal UndefinedCourse "no such course"
 
 guard CourseIsDefined(course: String) {
-  state defined: Bool = fold false
+  fold defined: Bool = false
     on @course.defined(course) => true
 
   if !defined {
@@ -28,10 +28,10 @@ command Subscribe(student: String, course: String) {
 This document is the contract. `tests/guards.rs` is the same set of rules as executable tests.
 Change the doc, the tests and the code together.
 
-The gap it closes is the one duplication heklang forced and no test could catch. A `state` fold
+The gap it closes is the one duplication heklang forced and no test could catch. A `fold`
 declares the read boundary and the conflict boundary together (`docs/commands.md`), so it cannot be
 factored into a `fn` the way a decision can. Two independent applications wrote the same folds over
-and over: one repeats `state shop: Bool = fold false / on @shop.connected(shop_id) => true`
+and over: one repeats `fold shop: Bool = false / on @shop.connected(shop_id) => true`
 **thirteen times byte-identical**, each followed by its own copy of the rejection; the other gives
 two commands six identical folds and a shared six-argument `fn` whose three `Bool`s and three `Int`s
 transpose without a type error. What drifts when those fall out of step is the append condition, and
@@ -44,7 +44,7 @@ transpose without a type error. What drifts when those fall out of step is the a
 ```
 guard <Name>(<name>: <Type>, ...) {
   <statement>*
-  <state | guard>*
+  <fold | guard>*
   <statement>*
 }
 ```
@@ -98,7 +98,7 @@ that refuses is the command's outcome. That is the whole reason the ladder moved
 declaration: five `guard` lines in precedence order say what a five-rung `if` ladder said, in the
 place a reader looks for it.
 
-A run of guards and `state`s is one **stage**: one read of the log, with every decision in the run
+A run of guards and `fold`s is one **stage**: one read of the log, with every decision in the run
 made after it. `docs/commands.md` has the order.
 
 **A statement above a guard decides before it, and reads nothing to do so.** This is what makes the
@@ -130,7 +130,7 @@ with `sku_taken` exactly when an item with the id the caller had pasted in exist
 did not, from a string the validator existed to reject outright, with the refusal message handing
 the probe back. Before the log check was a guard, that was `invalid` and unreachable.
 
-**A guard's arguments and its filters may read a `state` an earlier stage folded**, because by then
+**A guard's arguments and its filters may read a `fold` an earlier stage folded**, because by then
 it has. Reading one declared beside it is still refused, and rule 7 has that.
 
 ## 4. A guard's slices are the command's boundary
@@ -162,7 +162,7 @@ A guard may guard another guard, to any depth:
 guard PlanExists(plan_id: Uuid, shop_id: Int) {
   guard ShopIsConnected { shop_id }
 
-  state exists: Bool = fold false
+  fold exists: Bool = false
     on @plan.created(plan_id, shop_id) => true
 
   if !exists {
@@ -211,13 +211,13 @@ interpreter sees either, so a command reaches the fold with one arena, one frame
 | read the log twice | a guard is one read; see below |
 
 **A guard is one read of the log.** Its declarations come before its first statement, so it is one
-stage, and a `state` or `guard` written after a statement is refused:
+stage, and a `fold` or `guard` written after a statement is refused:
 
-> this `state` would be a second read of the log; a guard is one read: its declarations come before
+> this `fold` would be a second read of the log; a guard is one read: its declarations come before
 > its first statement, and a proposition that needs a second read is two guards
 
 A guard is copied into the stage of whatever names it, so one carrying two reads would split its
-caller's stage in half and turn `guard A; guard B; state s` into three reads where it is one. Rule 1
+caller's stage in half and turn `guard A; guard B; fold s` into three reads where it is one. Rule 1
 already says a guard names one proposition; this is what that costs and what it buys.
 
 
@@ -240,7 +240,7 @@ command CancelWarranty(warranty_id: Uuid, shop_id: Int) {
   guard ShopIsConnected { shop_id }
   guard WarrantyIsSold { warranty_id, shop_id }
 
-  state cancelled: Bool = fold false
+  fold cancelled: Bool = false
     on @warranty.cancelled(warranty_id, shop_id) => true
   if cancelled {
     return
@@ -258,13 +258,13 @@ it is the perfectly good proposition underneath one.
 command RecordWarrantySale(warranty_id: Uuid, shop_id: Int, premium: Bool) {
   guard ShopIsConnected { shop_id }
 
-  state already_sold: Bool = fold false
+  fold already_sold: Bool = false
     on @warranty.sold(warranty_id, shop_id) => true
   if already_sold {
     return
   }
 
-  state sold: Int = fold 0
+  fold sold: Int = 0
     on @warranty.sold(shop_id) => sold + 1
   if !premium && sold >= FREE_TIER_LIMIT {
     return reject FreeTierExhausted
@@ -277,7 +277,7 @@ command RecordWarrantySale(warranty_id: Uuid, shop_id: Int, premium: Bool) {
 `UnderFreeTierLimit` is a proposition, it has a refusal, and it folds. It still cannot be a guard,
 because rule 3 would give it the front of the body and it would refuse a replay of a sale already on
 the log. An effect rerun from position 0 depends on that replay answering `ok`, so the cap stays a
-`state` and an `if`.
+`fold` and an `if`.
 
 **The test is not "is this a no-op" but "can this refusal be reached by a request the command would
 have answered `ok`?"** If a replay has to answer `ok`, every refusal it precedes stays inline,
@@ -287,16 +287,16 @@ Folding `already_sold` into the guard and writing `if !already_sold && !premium 
 does typecheck, and is worse twice over: the proposition it names is "under the limit, or else this
 sale is already recorded", which is rule 1's compound name, and it duplicates a fold the command
 still needs for its own no-op. A conditional guard would cost the static closure `--boundaries`
-prints and the splice model in `src/inline.rs`, for a case that inline `state` and `if` already say
+prints and the splice model in `src/inline.rs`, for a case that inline `fold` and `if` already say
 plainly.
 
 Note where this differs from the objection a statement above a guard makes. That one reads nothing,
 so it can sit above the first declaration run and answer before the log is touched at all. This one
 reads the log to know it is a replay, so there is nowhere above the fold to lift it to: it has to be
-below its own `state`, and everything after it is below that. Rule 3 gives the author the order for
+below its own `fold`, and everything after it is below that. Rule 3 gives the author the order for
 the first case and cannot give it for this one.
 
-**A guard binds nothing into its caller.** Its states are its own, so a `guard CourseHasSeats`
+**A guard binds nothing into its caller.** Its folds are its own, so a `guard CourseHasSeats`
 gives the command no `seats`. A caller that wants a value folds it inline; the slice is already in
 the boundary, so the second fold costs an accumulator and nothing else. Handing values back would
 make a guard an object with fields, which is the aggregate rule 1 is about.
@@ -328,14 +328,14 @@ This is a *direct* duplicate in one declaration. Reaching the same guard twice t
 is allowed and silent: a caller often cannot know what the guards it names reach, and rule 5 is the
 point of the construct. `hek check` shows each one once.
 
-**An argument may not read a `state` from its own stage.** An argument is assigned above the
-declarations it sits with, so it would read that state's seed rather than what it folds to. Exactly
+**An argument may not read a `fold` from its own stage.** An argument is assigned above the
+declarations it sits with, so it would read that fold's seed rather than what it folds to. Exactly
 the mistake a seed makes (`docs/commands.md`), rejected the same way and for the same reason: the
 answer would be wrong rather than late.
 
 > `course` is taken from `seen`, which has not folded yet
 
-A `state` an **earlier** stage folded is fine, and needs nothing but a statement between the two
+A `fold` an **earlier** stage folded is fine, and needs nothing but a statement between the two
 runs to close the first one.
 
 ## 8. Where this diverges from the runtime

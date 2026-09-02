@@ -22,7 +22,7 @@ effect ConfirmBooking {
   on @seat.booked as e { booking_id, attendee_id, email } {
     // Folded up to and including the triggering event, so an attendee's first
     // booking leaves this at one rather than zero.
-    state bookings: Int = fold 0
+    fold bookings: Int = 0
       on @seat.booked(attendee_id) => bookings + 1
 
     notify(booking_id, reveal(email), bookings == 1)

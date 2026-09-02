@@ -97,7 +97,7 @@ wrong: a fixture built by the thing under test means one broken command fails ev
 as scenery, and the report names the wrong test. Raw events keep a failure local to the case that
 found it.
 
-**Rejected: reaching for state directly.** There is no `given state total = 5`. A fold's state is
+**Rejected: reaching for state directly.** There is no `given total = 5`. A folded value is
 derived from the log, and a test that could set it would be asserting about a value the runtime never
 produces.
 
@@ -230,7 +230,7 @@ only other output is a decision not to call out.
 
 ## 8. What a test cannot assert
 
-- **State.** There is no `expect state token == "x"`. A fold's state is an intermediate, and the
+- **State.** There is no `expect token == "x"`. A folded value is an intermediate, and the
   reason to have it is what the arm did with it, which is already in the trace.
 - **Anything through an arbitrary boolean.** There is no `assert <expr>`. A case is a table of
   inputs and outputs; once it can compute, it is a program with its own bugs, and the thing that

@@ -671,12 +671,12 @@ impl<'a, H: Host> Interpreter<'a, H> {
         let mut flow: Result<Flow, Error> = Ok(Flow::Next);
         'stages: for stage in &arm.stages {
             for half in [Half::Pre, Half::Post] {
-                if half == Half::Post && (!stage.states.is_empty() || stage.reads()) {
+                if half == Half::Post && (!stage.folds.is_empty() || stage.reads()) {
                     let predicates = resolve(program, &arm.exprs, &stage.slices, &mut frame)?;
-                    for state in &stage.states {
-                        let value = eval(program, &arm.exprs, &mut frame, state.init, None)?;
-                        let value = fitted_at(value, &state.ty, arm.exprs.span(state.init))?;
-                        frame.set(state.slot, value)?;
+                    for var in &stage.folds {
+                        let value = eval(program, &arm.exprs, &mut frame, var.init, None)?;
+                        let value = fitted_at(value, &var.ty, arm.exprs.span(var.init))?;
+                        frame.set(var.slot, value)?;
                     }
                     if stage.reads() {
                         // Rule 3: the fold stops at the trigger's own position,
@@ -934,9 +934,9 @@ fn execute(
                 }
             }
 
-            if !stage.states.is_empty() || stage.reads() {
+            if !stage.folds.is_empty() || stage.reads() {
                 // Resolved per stage and per attempt, rather than once for the command,
-                // because a filter may now name a `state` an earlier stage folded.
+                // because a filter may now name a `fold` an earlier stage folded.
                 let predicates = resolve(program, &command.exprs, &stage.slices, &mut frame)?;
                 // A stage whose filters moved since the last attempt folded a different
                 // slice, so its carry answers a different question.
@@ -949,17 +949,15 @@ fn execute(
                     // the last attempt folded is, and the delta below is what it has
                     // not seen.
                     Some(carry) => {
-                        for (state, value) in stage.states.iter().zip(&carry.states) {
-                            frame.set(state.slot, value.clone())?;
+                        for (var, value) in stage.folds.iter().zip(&carry.folds) {
+                            frame.set(var.slot, value.clone())?;
                         }
                     }
                     None => {
-                        for state in &stage.states {
-                            let value =
-                                eval(program, &command.exprs, &mut frame, state.init, None)?;
-                            let value =
-                                fitted_at(value, &state.ty, command.exprs.span(state.init))?;
-                            frame.set(state.slot, value)?;
+                        for var in &stage.folds {
+                            let value = eval(program, &command.exprs, &mut frame, var.init, None)?;
+                            let value = fitted_at(value, &var.ty, command.exprs.span(var.init))?;
+                            frame.set(var.slot, value)?;
                         }
                     }
                 }
@@ -1002,15 +1000,15 @@ fn execute(
                     if leading {
                         // Taken before the statements below the declarations, which is
                         // what makes the carry safe rather than merely fast: one that
-                        // assigns into a `state` changes what *it* decides on and cannot
+                        // assigns into a `fold` changes what *it* decides on and cannot
                         // reach what the next attempt folds onto.
                         folded = Some(Carry {
                             through: at,
                             predicates,
-                            states: stage
-                                .states
+                            folds: stage
+                                .folds
                                 .iter()
-                                .map(|state| frame.get(state.slot).cloned())
+                                .map(|var| frame.get(var.slot).cloned())
                                 .collect::<Result<Vec<_>, _>>()?,
                         });
                     }
@@ -1080,7 +1078,7 @@ struct Carry {
     /// `[through, after)` onto them rather than starting at the seed.
     through: u64,
     predicates: Vec<Predicate>,
-    states: Vec<Value>,
+    folds: Vec<Value>,
 }
 
 fn bind_params(

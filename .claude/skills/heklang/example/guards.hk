@@ -3,7 +3,7 @@
 // boundary the union of several small propositions instead of one aggregate.
 
 guard WorkshopIsOpen(workshop_id: Uuid) {
-  state opened: Bool = fold false
+  fold opened: Bool = false
     on @workshop.opened(workshop_id) => true
 
   if !opened {
@@ -12,10 +12,10 @@ guard WorkshopIsOpen(workshop_id: Uuid) {
 }
 
 guard SeatIsAvailable(workshop_id: Uuid) {
-  // Two folds, one read: a run of `state` declarations is one pass over the log.
-  state capacity: Int = fold 0
+  // Two folds, one read: a run of `fold` declarations is one pass over the log.
+  fold capacity: Int = 0
     on @workshop.opened(workshop_id) { seats } => seats
-  state taken: Int = fold 0
+  fold taken: Int = 0
     on @seat.booked(workshop_id) => taken + 1
     on @seat.released(workshop_id) => taken - 1
 
@@ -25,7 +25,7 @@ guard SeatIsAvailable(workshop_id: Uuid) {
 }
 
 guard AttendeeHasNoSeat(workshop_id: Uuid, attendee_id: Int) {
-  state booked: Bool = fold false
+  fold booked: Bool = false
     on @seat.booked(workshop_id, attendee_id) => true
     on @seat.released(workshop_id, attendee_id) => false
 

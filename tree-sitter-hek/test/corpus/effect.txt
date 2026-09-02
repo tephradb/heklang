@@ -7,7 +7,7 @@ effect AuditCatalog {
      @item.delisted,
      @item.flagged as e { item_id, seller_id } {
 
-    state listed: Int = fold 0
+    fold listed: Int = 0
       on @item.listed(seller_id) => listed + 1
 
     let response = http.post(
@@ -43,7 +43,7 @@ effect AuditCatalog {
         (identifier)
         (identifier))
       (block
-        (state_declaration
+        (fold_declaration
           (identifier)
           (type
             (primitive_type))
@@ -138,7 +138,7 @@ reveal, now and erase
 
 effect SyncShop {
   on @shop.sync.requested as e { shop_id } {
-    state token: String? = fold none
+    fold token: String? = none
       on @shop.connected(shop_id) { access_token } => access_token
 
     let secret = reveal(token)
@@ -161,7 +161,7 @@ effect SyncShop {
       (destructure
         (identifier))
       (block
-        (state_declaration
+        (fold_declaration
           (identifier)
           (type
             (primitive_type))

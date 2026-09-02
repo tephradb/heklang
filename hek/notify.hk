@@ -4,7 +4,7 @@ effect NotifyCustomer {
   on @order.placed as e {
     // Rule 3: folded up to and including this event, so a customer's first order
     // leaves the count at one rather than zero.
-    state orders: Int = fold 0
+    fold orders: Int = 0
       on @order.placed(customer_id: e.customer_id) => orders + 1
 
     let response = http.post(
@@ -37,7 +37,7 @@ refusal AlreadyNotified "this order was already confirmed"
 command RecordNotified(order_id: Uuid, notification_id: Uuid) {
   // No raw `guard @order.notified(order_id)` here: the fold below already declares that
   // slice, so writing it twice adds an identical predicate and no safety.
-  state notified: Bool = fold false
+  fold notified: Bool = false
     on @order.notified(order_id) => true
 
   if notified {

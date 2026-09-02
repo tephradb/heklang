@@ -48,7 +48,7 @@ refusal Unknown \"no orders\"
 command RecordNotified(order_id: Uuid, notification_id: Uuid) {
   guard @order.notified(order_id)
 
-  state notified: Bool = fold false
+  fold notified: Bool = false
     on @order.notified(order_id) => true
 
   if notified {
@@ -200,11 +200,11 @@ fn one_event_selects_exactly_one_arm() {
 // Rule 2: state lives inside the arm.
 
 #[test]
-fn arm_state_may_filter_on_the_trigger_binding() {
+fn an_arm_fold_may_filter_on_the_trigger_binding() {
     let program = program(
         "effect E {
   on @order.placed as e {
-    state mine: Int = fold 0
+    fold mine: Int = 0
       on @order.placed(customer_id: e.customer_id) => mine + 1
 
     http.post(\"https://mail.example/confirm\", { \"mine\": mine })
@@ -224,10 +224,10 @@ fn arm_state_may_filter_on_the_trigger_binding() {
 }
 
 #[test]
-fn state_is_per_arm_not_per_effect() {
+fn a_fold_is_per_arm_not_per_effect() {
     let message = err("effect E {
   on @order.placed as e {
-    state mine: Int = fold 0
+    fold mine: Int = 0
       on @order.placed(customer_id: e.customer_id) => mine + 1
 
     log(\"first\")
@@ -242,7 +242,7 @@ fn state_is_per_arm_not_per_effect() {
 
 const COUNTING: &str = "effect E {
   on @order.placed as e {
-    state seen: Int = fold 0
+    fold seen: Int = 0
       on @order.placed(customer_id: e.customer_id) => seen + 1
 
     http.post(\"https://mail.example/confirm\", { \"seen\": seen })
@@ -613,9 +613,9 @@ fn a_record_a_list_and_a_map_cross_into_a_body() {
 
 effect E {
   on @order.placed as e {
-    state skus: List(String) = fold []
+    fold skus: List(String) = []
       on @order.placed(order_id: e.order_id) => skus.push(\"a\")
-    state counts: Map(String, Int) = fold Map.empty
+    fold counts: Map(String, Int) = Map.empty
       on @order.placed(order_id: e.order_id) => counts.set(\"a\", 1)
 
     let line = Line { sku: \"a\", qty: 2 }
@@ -735,7 +735,7 @@ fn an_erase_on_a_path_that_fails_does_not_poison_the_join() {
 fn an_erase_in_a_loop_reaches_a_reveal_above_it() {
     let message = err("effect E {
   on @order.placed as e {
-    state ids: List(Int) = fold []
+    fold ids: List(Int) = []
       on @order.placed(customer_id: e.customer_id) { customer_id } => ids.push(customer_id)
 
     for id in ids {
@@ -822,7 +822,7 @@ fn joined(tenant_id: i64, member_id: i64) -> Event {
 
 const REDACT: &str = "effect E {
   on @tenant.redacted as e { tenant_id } {
-    state members: List(Int) = fold []
+    fold members: List(Int) = []
       on @tenant.member.joined(tenant_id) { member_id } => members.push(member_id)
 
     for id in members {
@@ -1118,13 +1118,13 @@ fn derive_produces_the_same_bytes_as_uuid_v5() {
 fn now_is_absent_from_a_fold_and_a_projector() {
     let message = err("effect E {
   on @order.placed as e {
-    state at: Timestamp = fold e.at
+    fold at: Timestamp = e.at
       on @order.placed(customer_id: e.customer_id) => now()
 
     log(\"x\")
   }
 }");
-    assert_eq!(message, "`state` folds the log, so it cannot read a clock");
+    assert_eq!(message, "a `fold` reads the log, so it cannot read a clock");
 
     let message = parse(
         "event @a.b { id: Uuid }
@@ -1266,7 +1266,7 @@ fn the_skip_message_says_the_erase_may_be_non_local() {
 
 const FOLDING: &str = "effect E {
   on @order.reviewed as e { customer_id } {
-    state contact: String? = fold none
+    fold contact: String? = none
       on @order.placed(customer_id) { email } => email
       on @order.reconfirmed(customer_id) { email } => email
 
@@ -1336,7 +1336,7 @@ fn a_narrowed_optional_can_be_revealed() {
     let program = program(
         "effect E {
   on @order.reviewed as e { customer_id } {
-    state contact: String? = fold none
+    fold contact: String? = none
       on @order.placed(customer_id) { email } => email
 
     if contact.is_some() {
@@ -1386,7 +1386,7 @@ fn a_non_subject_seed_is_accepted() {
     let program = program(
         "effect E {
   on @order.reviewed as e { customer_id } {
-    state contact: String = fold \"nobody\"
+    fold contact: String = \"nobody\"
       on @order.placed(customer_id) { email } => email
 
     log(reveal(contact))
@@ -1407,7 +1407,7 @@ fn a_non_subject_seed_is_accepted() {
 fn two_arms_with_different_subjects_are_a_conflict() {
     let message = err("effect E {
   on @order.reviewed as e { customer_id, order_id } {
-    state secret: String? = fold none
+    fold secret: String? = none
       on @order.placed(customer_id) { email } => email
       on @order.audited(order_id) { note } => note
 
@@ -1428,7 +1428,7 @@ fn two_arms_with_different_subjects_are_a_conflict() {
 fn a_non_subject_arm_into_a_subject_bound_variable_is_rejected() {
     let subject_first = err("effect E {
   on @order.reviewed as e { customer_id, order_id } {
-    state secret: String? = fold none
+    fold secret: String? = none
       on @order.placed(customer_id) { email } => email
       on @order.audited(order_id) { tool } => tool
 
@@ -1437,7 +1437,7 @@ fn a_non_subject_arm_into_a_subject_bound_variable_is_rejected() {
 }");
     let plain_first = err("effect E {
   on @order.reviewed as e { customer_id, order_id } {
-    state secret: String? = fold none
+    fold secret: String? = none
       on @order.audited(order_id) { tool } => tool
       on @order.placed(customer_id) { email } => email
 
@@ -1464,7 +1464,7 @@ fn a_non_subject_arm_into_a_subject_bound_variable_is_rejected() {
 fn a_transform_of_sealed_content_is_rejected_where_it_is_written() {
     let message = err("effect E {
   on @order.reviewed as e { customer_id } {
-    state contact: String? = fold none
+    fold contact: String? = none
       on @order.placed(customer_id) { email } => email.trim()
 
     log(reveal(contact))
@@ -1534,7 +1534,7 @@ fn a_let_keeps_the_seal() {
 fn the_fold_rules_hold_in_a_command_too() {
     let good = source(
         "command Check(customer_id: Int) {
-  state secret: String? = fold none
+  fold secret: String? = none
     on @order.placed(customer_id) { email } => email
 
   if secret.is_none() {
@@ -1547,7 +1547,7 @@ fn the_fold_rules_hold_in_a_command_too() {
 
     let message = parse(&source(
         "command Check(customer_id: Int, order_id: Uuid) {
-  state secret: String? = fold none
+  fold secret: String? = none
     on @order.placed(customer_id) { email } => email
     on @order.audited(order_id) { tool } => tool
 
@@ -1569,7 +1569,7 @@ fn the_fold_rules_hold_in_a_command_too() {
 fn the_inferring_erase_stays_on_the_trigger() {
     let message = err("effect E {
   on @order.reviewed as e { customer_id } {
-    state who: Int? = fold none
+    fold who: Int? = none
       on @order.placed(customer_id) { customer_id } => customer_id
 
     erase(who)
@@ -1697,11 +1697,11 @@ effect E { on @e.happened as e { log(\"x\") } }
 /// A fold arm producing a `T` lands in a `T?` state as `some(T)`. Without that,
 /// `.is_none()` on a folded optional is a method call on a bare `Int`.
 #[test]
-fn a_fold_into_an_optional_state_holds_an_optional() {
+fn a_fold_into_an_optional_holds_an_optional() {
     let program = program(
         "effect E {
   on @order.reviewed as e { order_id } {
-    state customer: Int? = fold none
+    fold customer: Int? = none
       on @order.placed(order_id) { customer_id } => customer_id
 
     if customer.is_none() {
@@ -1748,7 +1748,7 @@ fn a_timeout_is_not_a_call_argument() {
 // Rule 14: verify mode stays.
 
 #[test]
-fn folding_an_arm_twice_gives_the_same_state() {
+fn folding_an_arm_twice_gives_the_same_value() {
     let program = program(COUNTING);
     let log = vec![placed(1, 7, 100), placed(2, 7, 100)];
 
@@ -2733,22 +2733,22 @@ fn a_fold_arm_may_not_call_an_effect_local_fn() {
   fn bump(n: Int) -> Int { return n + 1 }
 
   on @order.placed as e {
-    state seen: Int = fold 0
+    fold seen: Int = 0
       on @order.placed(customer_id: e.customer_id) => bump(seen)
     log(\"{seen}\")
   }
 }");
     assert_eq!(
         message,
-        "`state` folds the log, so it cannot call `bump`, which may call out"
+        "a `fold` reads the log, so it cannot call `bump`, which may call out"
     );
 }
 
 #[test]
-fn an_effect_local_fn_has_no_state() {
+fn an_effect_local_fn_has_no_fold() {
     let message = err("effect E {
   fn count(customer_id: Int) -> Int {
-    state seen: Int = fold 0
+    fold seen: Int = 0
       on @order.placed(customer_id) => seen + 1
     return seen
   }
@@ -2756,7 +2756,7 @@ fn an_effect_local_fn_has_no_state() {
   on @order.placed as e { log(\"{count(e.customer_id)}\") }
 }");
     assert!(
-        message.contains("an effect-local `fn` has no `state`"),
+        message.contains("an effect-local `fn` has no `fold` declaration"),
         "got: {message}"
     );
     assert!(
@@ -2920,13 +2920,13 @@ fn reveal_reads_a_seal_back_at_its_declared_type() {
 }
 effect E {
   on @order.placed as e {
-    state n: Int? = fold none
+    fold n: Int? = none
       on @vault.filled(owner: e.customer_id) { count } => count
-    state amount: Money(2)? = fold none
+    fold amount: Money(2)? = none
       on @vault.filled(owner: e.customer_id) { owed } => owed
-    state flag: Bool? = fold none
+    fold flag: Bool? = none
       on @vault.filled(owner: e.customer_id) { ok } => ok
-    state reference: Uuid? = fold none
+    fold reference: Uuid? = none
       on @vault.filled(owner: e.customer_id) { ref } => ref
 
     if n.is_some() && amount.is_some() && flag.is_some() && reference.is_some() {
@@ -3072,7 +3072,7 @@ fn sealed_content_may_be_written_into_the_same_seal() {
         "command Reconfirm(order_id: Uuid, customer_id: Int) {
   guard @order.reconfirmed(order_id)
 
-  state held: String = fold \"\"
+  fold held: String = \"\"
     on @order.placed(customer_id) { email } => email
 
   emit @order.reconfirmed { order_id, customer_id, email: held }

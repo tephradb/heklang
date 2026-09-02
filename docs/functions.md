@@ -11,7 +11,7 @@ fn effective_sku(sku: String?, plan_id: Uuid) -> String {
 ```
 
 Module scope, a required return type, and `return <expr>`. Callable from a command, a projector, an
-effect and a `state` fold arm.
+effect and a fold arm.
 
 A `fn` declared inside an `effect` is the one exception to everything in the next section: it may
 call out, and it is scoped to that effect. It has its own section below.
@@ -44,7 +44,7 @@ error keeps naming two spans in one body.
 
 Purity buys three more things, each of which would otherwise be its own rule:
 
-- **A fold arm may call one.** `docs/effects.md` rule 3 requires a `state` fold to reproduce without a
+- **A fold arm may call one.** `docs/effects.md` rule 3 requires a `fold` to reproduce without a
   journal, which is why a fold cannot read a clock or call out. A pure `fn` cannot do either by
   construction, so "may a fold call a module helper" needs no answer of its own. An effect-local one
   is the first that cannot make that promise, and is the first a fold may not call.
@@ -73,7 +73,7 @@ effect CreateMasterProduct {
   }
 
   on @shop.onboarding.completed, @shop.reconnected as e { shop_id } {
-    state token: String = fold "" on @shop.connected(shop_id) { access_token } => access_token
+    fold token: String = "" on @shop.connected(shop_id) { access_token } => access_token
     ...
     create(shop_id, domain, reveal(token))
   }
@@ -150,7 +150,7 @@ because a call is an expression and cannot carry a control-flow result out.
 
 ### What else it may not do
 
-- **`state`.** A fold belongs to the arm (`docs/effects.md` rule 2), so pass what it decided in.
+- **`fold`.** A fold belongs to the arm (`docs/effects.md` rule 2), so pass what it decided in.
 - **`now()`.** Rule 11 pins the clock once per invocation, into a slot the arm fills before its body
   runs. A helper has no such slot, and giving it one would make `now()` mean something different
   inside a call than outside it. Read it in the arm and pass it in. The port reads a clock in zero
@@ -159,7 +159,7 @@ because a call is an expression and cannot carry a control-flow result out.
 
 ### A fold arm may not call one
 
-`docs/effects.md` rule 3 requires a `state` fold to reproduce without a journal. A module `fn` is
+`docs/effects.md` rule 3 requires a `fold` to reproduce without a journal. A module `fn` is
 pure by construction, so the section above can say a fold may call one and stop there. This is the
 first helper that cannot make that promise, so it is the first that a fold may not call.
 
@@ -234,7 +234,7 @@ data.** Reading one is pure, so a helper may take one; storing one is not, so no
 it.
 
 Concretely, `Response` is spellable in a `fn` parameter and in a `fn` return type, and nowhere else.
-An event field, an entity column, a record field, a `state` declaration and a command parameter all
+An event field, an entity column, a record field, a `fold` declaration and a command parameter all
 still report `unknown type`, and so do `List(Response)` and `Map(String, Response)`, because the
 allowance sits above the general type parser rather than inside its recursion.
 
@@ -277,7 +277,7 @@ fn ladder(subscribed: Bool, taken: Int, cap: Int) -> Outcome? {
 }
 
 command Subscribe(course: Uuid, student: Uuid) {
-  state subscribed: Bool = fold false
+  fold subscribed: Bool = false
     on @StudentSubscribed(course, student) => true
   ...
   let decision = ladder(subscribed, taken, limit)
@@ -311,7 +311,7 @@ an effect or an effect-local `fn` still say so. A projector still cannot write e
 projector write cannot fail in a way the program observes.
 
 **What this does not do.** Two commands can now share the decision; they still each declare their own
-`state`, because a `state` declares the append condition and that has to be the command's own. The
+`fold`, because a `fold` declares the append condition and that has to be the command's own. The
 duplication that remains is the fold block, not the logic, and a check-and-do pair is better served
 by the host running the real command without appending than by a second command that copies it.
 

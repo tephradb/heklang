@@ -141,6 +141,15 @@ carves out below.
 This keeps a projector a pure fold over the event log, so rebuild determinism is structural rather
 than a rule authors can violate.
 
+**A projector has no `fold` and no `guard` either**, and for the same reason from the other side: a
+projector is *already* the fold, one handler per event, so a second one inside a handler would be
+reading the log a rebuild has not reached yet. The error says so rather than telling an author to
+move the declaration up, because a handler's fold is already its first statement and there is
+nowhere above it to go:
+
+> a projector has no `fold` and no `guard`; a projector is already a fold over the whole log, one
+> handler per event; a handler writes what its event says
+
 **Rejected: a general `get(entity, key)`.** This is not hypothetical. hekla has exactly that today,
 reading any row through the current batch's uncommitted writes. It is more expressive, and it makes
 read-modify-write across entities possible. It lost because with it, whether a projector rebuilds to
@@ -409,7 +418,7 @@ statically, where the write was written.
 - **One column, one subject.** Two handlers writing content sealed under different subjects into one
   column is an error naming both, because a key is filed under exactly one subject and a column
   holding two would have nothing static to say which it needs. This is the same sentence
-  `docs/effects.md` rule 12 says about a `state` fold, one level out.
+  `docs/effects.md` rule 12 says about a `fold`, one level out.
 
   > `Row.text` already holds content sealed under `customer_id`, so it cannot also hold content
   > sealed under `shop_id`; one column holds one subject, because `erase` files a key under exactly
@@ -463,7 +472,7 @@ freshly written is checked here or nowhere. On a plain field it turns a schema b
 on the inputs that happen to be long into one that surfaces at `hek check`.
 
 The two sides reach a source differently, because a command has no event binding. A projector writes
-a **plain read of an event field**, spelled either way a handler can. A command emits a `state`, and
+a **plain read of an event field**, spelled either way a handler can. A command emits a `fold`, and
 the sources are the fields its arms fold, one per arm, since the invariant is about *every* field
 written into a position. A parameter is not one: it carries no bound, so there is nothing to
 disagree with.

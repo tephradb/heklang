@@ -28,7 +28,7 @@ command ReleaseSeat(workshop_id: Uuid, booking_id: Uuid, attendee_id: Int) {
 
   // An idempotent no-op is not a guard: a replay has to answer `ok` here, so this
   // fold stays inline rather than becoming a proposition that would refuse it.
-  state held: Bool = fold false
+  fold held: Bool = false
     on @seat.booked(booking_id) => true
     on @seat.released(booking_id) => false
 
@@ -42,7 +42,7 @@ command ReleaseSeat(workshop_id: Uuid, booking_id: Uuid, attendee_id: Int) {
 // Internal. An effect writes back to the log by invoking a command, never by
 // appending, so the fact lands under this command's own guard.
 command RecordConfirmed(booking_id: Uuid, notification_id: Uuid) {
-  state confirmed: Bool = fold false
+  fold confirmed: Bool = false
     on @booking.confirmed(booking_id) => true
 
   if confirmed {

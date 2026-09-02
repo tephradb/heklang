@@ -165,15 +165,15 @@ fn main() {
     // The floor: visit every record, check the filter, add one. Nothing bound.
     measure(
         "count, no binds",
-        "  state seen: Int = fold 0\n    on @order.placed(customer_id) => seen + 1",
+        "  fold seen: Int = 0\n    on @order.placed(customer_id) => seen + 1",
         &events,
         rounds,
     );
 
     // Against the floor, this is the cost of reading a state variable at all.
     measure(
-        "count, no state read",
-        "  state seen: Int = fold 0\n    on @order.placed(customer_id) => 1",
+        "count, no fold read",
+        "  fold seen: Int = 0\n    on @order.placed(customer_id) => 1",
         &events,
         rounds,
     );
@@ -181,8 +181,8 @@ fn main() {
     // Two slices over the same events, which is the shape a real command has.
     measure(
         "two slices",
-        "  state seen: Int = fold 0\n    on @order.placed(customer_id) => seen + 1\n  \
-         state sum: Money(2) = fold 0.00\n    on @order.placed(customer_id) { total } => sum + total",
+        "  fold seen: Int = 0\n    on @order.placed(customer_id) => seen + 1\n  \
+         fold sum: Money(2) = 0.00\n    on @order.placed(customer_id) { total } => sum + total",
         &events,
         rounds,
     );
@@ -190,7 +190,7 @@ fn main() {
     // A scalar payload: bound, read and accumulated without allocating once.
     measure(
         "accumulate Money(2)",
-        "  state sum: Money(2) = fold 0.00\n    on @order.placed(customer_id) { total } => sum + total",
+        "  fold sum: Money(2) = 0.00\n    on @order.placed(customer_id) { total } => sum + total",
         &events,
         rounds,
     );
@@ -198,7 +198,7 @@ fn main() {
     // Every `Expr::Load` of a String clones it, so reading `sku` twice costs twice.
     measure(
         "bind a String, read it twice",
-        "  state seen: Int = fold 0\n    on @order.placed(customer_id) { sku } => seen + sku.len() - sku.len() + 1",
+        "  fold seen: Int = 0\n    on @order.placed(customer_id) { sku } => seen + sku.len() - sku.len() + 1",
         &events,
         rounds,
     );
@@ -211,7 +211,7 @@ fn main() {
     // value (which cost `Value` a third of its size, and every move with it).
     measure(
         "bind a sealed String",
-        "  state seen: Int = fold 0\n    on @order.placed(customer_id) { email } => seen + 1",
+        "  fold seen: Int = 0\n    on @order.placed(customer_id) { email } => seen + 1",
         &events,
         rounds,
     );
@@ -221,7 +221,7 @@ fn main() {
     // a fold, but this is where the trade is paid rather than collected.
     measure(
         "build a String per event",
-        "  state s: String = fold \"\"\n    on @order.placed(customer_id) { sku } => \"{sku}-x\"",
+        "  fold s: String = \"\"\n    on @order.placed(customer_id) { sku } => \"{sku}-x\"",
         &events,
         rounds,
     );
@@ -229,26 +229,26 @@ fn main() {
     // The optional pair. These differ in one character and nothing else, which is what
     // makes the gap between them attributable.
     measure(
-        "Int state",
-        "  state n: Int = fold 0\n    on @order.placed(customer_id) => 1",
+        "Int fold",
+        "  fold n: Int = 0\n    on @order.placed(customer_id) => 1",
         &events,
         rounds,
     );
     measure(
         "Int? state",
-        "  state n: Int? = fold none\n    on @order.placed(customer_id) => 1",
+        "  fold n: Int? = none\n    on @order.placed(customer_id) => 1",
         &events,
         rounds,
     );
     measure(
         "String state",
-        "  state s: String = fold \"\"\n    on @order.placed(customer_id) => \"x\"",
+        "  fold s: String = \"\"\n    on @order.placed(customer_id) => \"x\"",
         &events,
         rounds,
     );
     measure(
-        "String? state",
-        "  state s: String? = fold none\n    on @order.placed(customer_id) => \"x\"",
+        "String? fold",
+        "  fold s: String? = none\n    on @order.placed(customer_id) => \"x\"",
         &events,
         rounds,
     );
@@ -257,7 +257,7 @@ fn main() {
     // the port's credential folds actually look like.
     measure(
         "bind a String into a String?",
-        "  state last: String? = fold none\n    on @order.placed(customer_id) { sku } => sku",
+        "  fold last: String? = none\n    on @order.placed(customer_id) { sku } => sku",
         &events,
         rounds,
     );

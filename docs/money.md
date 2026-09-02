@@ -90,7 +90,7 @@ promise is that a program it accepts runs.
 
 **Currency in the value**, as `{ units, currency }`, was rejected. It buys exactly one runtime check,
 that adding USD to AUD fails, and it costs: an ISO 4217 table in the language, a currency-polymorphic
-zero so that `= fold 0` knows what it is zero of, and a currency parameter threaded through parsing
+zero so that `= 0` knows what it is zero of, and a currency parameter threaded through parsing
 into every literal resolution. One check is not worth a table and a parameter.
 
 **Currency in config** was rejected because a multi-tenant application is the normal case, not the

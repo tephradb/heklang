@@ -78,7 +78,7 @@ pub struct Predicate {
 }
 ```
 
-A `state` declares a slice of the log, and the filters are expressions the command evaluated. They
+A `fold` declares a slice of the log, and the filters are expressions the command evaluated. They
 arrive at the host as **values**, because "which slice" means nothing to something that did not
 compile the program, and because a value is what an index can be looked up by.
 
@@ -169,14 +169,14 @@ Three things follow, and each is a property `tests/host.rs` asserts:
   host's half of the bargain (section 4).
 - The delta is folded **onto the state that attempt built**, never onto the seed. Folding one rival
   event onto `0` commits a third order against a cap of two.
-- The state is taken **before the body runs**, so a body that assigns into a `state` changes what it
+- The state is taken **before the body runs**, so a body that assigns into a `fold` changes what it
   decides on and cannot reach what the next attempt folds onto.
 
 What does not carry is what a retry has no reason to redo: `now()` is pinned once for the whole
 request (rule 11), and so are the bound arguments.
 
 **The slices are not among them, and that is what staging changed.** A command reads once per
-declaration run (`docs/commands.md`), and a later run's filter may name a `state` an earlier one
+declaration run (`docs/commands.md`), and a later run's filter may name a `fold` an earlier one
 folded, so its predicates are not the same on every attempt. Two things follow. The head is pinned
 once per attempt, at the first run that reads, and every later run reads to it, so the runs are one
 consistent view of the log and the condition stays a single `after` over a flat slice list. And only
@@ -186,7 +186,7 @@ would notice. A later run re-seeds and folds the whole range, which is what it w
 no carry at all.
 
 **`after` is meaningful only alongside a non-empty `slices`.** A command that read nothing -- one
-with no `state`, or one that returned above its first declaration -- comes back with no slices and
+with no `fold`, or one that returned above its first declaration -- comes back with no slices and
 `after` at zero rather than at a head it never asked for. `conflicts` is false for every record
 either way, which is correct: a decision that depended on nothing cannot be invalidated. A host that
 reads `after` as an expected version rather than as half of the predicate has to check `slices`
@@ -302,7 +302,7 @@ than the language reshaping itself to match one runtime.
 
 ## Related
 
-- `docs/commands.md`: the append condition, and why a `state` is a read declaration.
+- `docs/commands.md`: the append condition, and why a `fold` is a read declaration.
 - `docs/effects.md`: rules 3, 5, 10, 11 and 12, which are the reasons this seam is cut where it is.
 - `docs/projectors.md`: the other reader of the log, and the one writer of a read model.
 - `docs/testing.md`: `given`, `respond` and `erased`, which are how the language scripts a harness.

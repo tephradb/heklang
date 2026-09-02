@@ -184,12 +184,11 @@ fn a_fn_is_pure() {
 }
 
 #[test]
-fn a_fn_has_no_state() {
-    let decls =
-        "\nfn helper(p: Uuid) -> String {\n  state seen: Bool = fold false\n  return \"\"\n}\n";
+fn a_fn_has_no_fold() {
+    let decls = "\nfn helper(p: Uuid) -> String {\n  fold seen: Bool = false\n  return \"\"\n}\n";
     assert_eq!(
         err(decls, EMIT),
-        "a `fn` has no `state`; it is a pure function of its arguments"
+        "a `fn` has no `fold` declaration; it is a pure function of its arguments"
     );
 }
 
@@ -288,7 +287,7 @@ fn years(months: Int) -> Int {
 }
 
 command C(plan_id: Uuid, months: Int) {
-  state total: Int = fold 0
+  fold total: Int = 0
     on @plan.created(plan_id) { months } => total + years(months)
 
   emit @plan.created { plan_id, months }

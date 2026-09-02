@@ -94,7 +94,7 @@ impl<'a> Printer<'a> {
             // -------------------------------------------------------- statements
             "block" => self.body(&self.kids(node)),
             "guard_declaration" => self.guard(node),
-            "state_declaration" => self.state(node),
+            "fold_declaration" => self.fold(node),
             "fold_arm" => self.fold_arm(node),
             "slice_reference" => self.slice(node),
             "filter" | "field_initializer" => self.optional_value(node),
@@ -351,15 +351,15 @@ impl<'a> Printer<'a> {
         Doc::concat([Doc::text("guard "), self.spaced(node)])
     }
 
-    /// `state x: T = fold seed` with its arms indented under it.
-    fn state(&self, node: Node<'a>) -> Doc<'a> {
+    /// `fold x: T = seed` with its arms indented under it.
+    fn fold(&self, node: Node<'a>) -> Doc<'a> {
         let kids = self.kids(node);
         let mut parts = vec![
-            Doc::text("state "),
+            Doc::text("fold "),
             self.node(kids[0]),
             Doc::text(": "),
             self.node(kids[1]),
-            Doc::text(" = fold "),
+            Doc::text(" = "),
             self.node(kids[2]),
         ];
         let arms: Vec<Doc<'a>> = kids[3..]

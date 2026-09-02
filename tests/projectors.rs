@@ -1090,6 +1090,28 @@ fn an_entity_needs_exactly_one_key() {
 
 // Statement gating.
 
+/// A projector has no `fold` and no `guard` at any position, so the generic "must come
+/// before the first statement" is the wrong answer here: the fold *is* the first
+/// statement of its handler, and there is nowhere above it to move it to.
+#[test]
+fn a_projector_has_no_fold_and_no_guard() {
+    let message = err(
+        "  on @order.placed { order_id } {\n    fold n: Int = 0\n      on @order.placed(order_id) => n + 1\n    delete Order[order_id]\n  }",
+    );
+    assert_eq!(
+        message,
+        "a projector has no `fold` and no `guard`; a projector is already a fold over the whole log, one handler per event; a handler writes what its event says"
+    );
+
+    let guarded = err(
+        "  on @order.placed { order_id } {\n    guard @order.purged(order_id)\n    delete Order[order_id]\n  }",
+    );
+    assert!(
+        guarded.starts_with("a projector has no `fold` and no `guard`"),
+        "got: {guarded}"
+    );
+}
+
 #[test]
 fn emit_is_a_command_statement_and_the_writes_are_not() {
     let message =
@@ -1311,7 +1333,7 @@ event @order.copied {{ order_id: Uuid, customer_id: Int, note: String{subject}{t
 
 refusal Nothing \"nothing to copy\"
 command Copy(order_id: Uuid, customer_id: Int) {{
-  state note: String? = fold none
+  fold note: String? = none
     on @order.placed(customer_id) {{ note }} => note
 
   if note.is_none() {{
@@ -1386,7 +1408,7 @@ event @order.copied { order_id: Uuid, customer_id: Int, note: String @max(5) }
 
 refusal Nothing \"nothing to copy\"
 command Copy(order_id: Uuid, customer_id: Int) {
-  state note: String? = fold none
+  fold note: String? = none
     on @order.placed(customer_id) { note } => note
     on @order.trimmed(customer_id) { note } => note.trim()
 

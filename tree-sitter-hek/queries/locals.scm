@@ -34,7 +34,7 @@
 (let_statement
   name: (identifier) @local.definition.variable)
 
-(state_declaration
+(fold_declaration
   name: (identifier) @local.definition.variable)
 
 (iter_bindings

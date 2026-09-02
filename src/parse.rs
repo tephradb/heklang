@@ -94,7 +94,7 @@ struct Parser {
     /// value it was handed.
     errors: RefCell<Vec<Diagnostic>>,
     prologue: bool,
-    /// Set while parsing a filter, a `state` seed or a fold arm. Narrower than
+    /// Set while parsing a filter, a `fold` seed or a fold arm. Narrower than
     /// `prologue`, which also covers a hoisted `let`: that runs once per request,
     /// before the fold, so it may read the pinned clock while a fold may not.
     folding: bool,
@@ -128,7 +128,7 @@ struct Parser {
     in_body: bool,
     /// Set while parsing a value written into an entity column, the one position that
     /// takes sealed content by propagating the seal onto itself rather than reading
-    /// what is behind it. A `state` fold is the other, and uses `folding`.
+    /// what is behind it. A `fold` is the other, and uses `folding`.
     propagating: bool,
     /// The enclosing projector's declarations; empty outside one.
     enums: Vec<EnumDef>,
@@ -441,7 +441,7 @@ impl Parser {
             (Some(_), true) => (
                 format!("`{name}` is defined below these declarations"),
                 Some(
-                    "a run of `guard` and `state` reads the log before the statements below \
+                    "a run of `guard` and `fold` reads the log before the statements below \
                      it, so it can only use names bound above it; move that `let` up"
                         .to_string(),
                 ),
@@ -1277,7 +1277,7 @@ impl Parser {
     }
 
     /// Pass D. A `fn` has a command's frame and arena and none of its prologue, since
-    /// `state`, `guard` and a hoisted clock are all things a pure helper cannot have.
+    /// `fold`, `guard` and a hoisted clock are all things a pure helper cannot have.
     fn fn_decl(&mut self, events: &[EventDef], kind: Kind) -> Result<Function, Diagnostic> {
         let module = self.module_at(self.pos).map(str::to_string);
         let at = self.span_here();
@@ -2658,7 +2658,7 @@ impl Parser {
                     at,
                 )
                 .with_hint(
-                    "a guard is a proposition about the log, so it needs a `state`; a decision made from arguments alone is a `fn`",
+                    "a guard is a proposition about the log, so it needs a `fold`; a decision made from arguments alone is a `fn`",
                 ));
         }
         Ok(lower.b.finish_guard(at))
@@ -2683,7 +2683,7 @@ impl Parser {
         Ok(())
     }
 
-    /// Declarations and statements, in the order written. A run of `state` and `guard`
+    /// Declarations and statements, in the order written. A run of `fold` and `guard`
     /// is one stage and one read of the log; a statement below one closes it, so the
     /// next run reads again, to the head the first stage pinned. Shared by a command and
     /// a guard: a guard is spliced into the command that names it, so anything true of
@@ -2701,24 +2701,24 @@ impl Parser {
             match self.peek() {
                 Token::Word(Keyword::Guard) if self.kind == Kind::Effect => {
                     return self.fail_hint(
-                        Code::StateShape,
+                        Code::StageShape,
                         "an effect has no `guard`",
                         "it appends nothing, so there is no append condition to build",
                     );
                 }
-                Token::Word(Keyword::Guard | Keyword::State) => {
+                Token::Word(Keyword::Guard | Keyword::Fold) => {
                     // A guard is copied into what names it, at the stage it was written
                     // in, so it cannot carry a second read across the splice.
                     if one_stage && lower.b.would_stage() {
                         let at = self.span_here();
-                        let word = if self.at_word(Keyword::State) {
-                            "state"
+                        let word = if self.at_word(Keyword::Fold) {
+                            "fold"
                         } else {
                             "guard"
                         };
                         return Err(self
                             .err(
-                                Code::StateShape,
+                                Code::StageShape,
                                 format!("this `{word}` would be a second read of the log"),
                                 at,
                             )
@@ -2735,7 +2735,7 @@ impl Parser {
                     self.prologue = true;
                     let parsed = match self.peek() {
                         Token::Word(Keyword::Guard) => self.guard_decl(lower, events, &mut named),
-                        _ => self.state_decl(lower, events),
+                        _ => self.fold_decl(lower, events),
                     };
                     self.prologue = false;
                     parsed?;
@@ -2753,18 +2753,18 @@ impl Parser {
 
     /// The filters of the stage now closing, checked against the states that stage
     /// itself declares. It has to happen here rather than once at the end: by then the
-    /// open stage is the last one, and a filter reading its own stage's `state` would go
+    /// open stage is the last one, and a filter reading its own stage's `fold` would go
     /// unnoticed and answer with the seed.
     fn stage_check(&mut self, lower: &mut Lower) -> Result<(), Diagnostic> {
         if let Some((field, at)) = lower.b.filter_past_fold() {
             return Err(self
                 .err(
-                    Code::StateShape,
-                    format!("this filter on `{field}` is folded from a `state` beside it"),
+                    Code::StageShape,
+                    format!("this filter on `{field}` reads a `fold` beside it"),
                     at,
                 )
                 .with_hint(
-                    "a stage's filters are evaluated once, before it folds, so they can name a parameter, a `let`, or a `state` an earlier declaration run has already folded",
+                    "a stage's filters are evaluated once, before it folds, so they can name a parameter, a `let`, or a `fold` an earlier declaration run has already folded",
                 ));
         }
         Ok(())
@@ -2840,12 +2840,12 @@ impl Parser {
                 self.shorthand(lower, &field, &expected, at)
             };
             // An argument becomes a prologue assignment, which runs before any fold, so
-            // this would read the other `state`'s seed rather than what it folds to. The
+            // this would read the other fold's seed rather than what it folds to. The
             // same mistake a seed makes, rejected the same way.
-            if let Some((read, at)) = lower.b.state_read(value) {
+            if let Some((read, at)) = lower.b.fold_read(value) {
                 return Err(self
                     .err(
-                        Code::StateShape,
+                        Code::StageShape,
                         format!("`{field}` is taken from `{read}`, which has not folded yet"),
                         at,
                     )
@@ -2898,40 +2898,35 @@ impl Parser {
         Ok(())
     }
 
-    fn state_decl(&mut self, lower: &mut Lower, events: &[EventDef]) -> Result<(), Diagnostic> {
-        let _decl = self.span_here();
-        self.expect_word(Keyword::State)?;
+    fn fold_decl(&mut self, lower: &mut Lower, events: &[EventDef]) -> Result<(), Diagnostic> {
+        let decl = self.span_here();
+        self.expect_word(Keyword::Fold)?;
         let name = self.expect_ident()?;
         self.expect_sym(Sym::Colon)?;
         let ty = self.type_ref()?;
         self.expect_sym(Sym::Assign)?;
-        if !self.eat_word(Keyword::Fold) {
-            return self.fail_hint(
-                Code::StateShape,
-                format!(
-                    "`{name}` is a fold over the log, so `=` introduces a seed rather than a value"
-                ),
-                "write `= fold <seed>`",
-            );
-        }
+        // What the seed noted, so an arm-less fold can drop it. A seed is checked against
+        // the type the fold declares, and a declaration with no arms is not a fold, so
+        // that answer was to the wrong question. See the `any_arm` check below.
+        let before_seed = self.errors.borrow().len();
         self.folding = true;
         let init = self.expr(lower, Some(ty.clone()))?;
         self.folding = false;
-        // A seed runs before the fold, so it reads the other `state`'s seed rather than
-        // what it folds to. That answer is wrong rather than late, and it used to check
-        // clean: `state t: Int = fold s` returned 0 where the author meant 3.
-        if let Some((read, at)) = lower.b.state_read(init) {
+        // A seed runs before the fold, so it reads the other fold's seed rather than what
+        // it folds to. That answer is wrong rather than late, and it used to check clean:
+        // `fold t: Int = s` returned 0 where the author meant 3.
+        if let Some((read, at)) = lower.b.fold_read(init) {
             return Err(self
                 .err(
-                    Code::StateShape,
+                    Code::StageShape,
                     format!("`{name}` is seeded from `{read}`, which has not folded yet"),
                     at,
                 )
                 .with_hint(format!(
-                    "every seed is evaluated before any fold runs, so this reads `{read}`'s own seed rather than what it folds to; to compute from a folded `state`, write a `let` below the declarations"
+                    "every seed is evaluated before any fold runs, so this reads `{read}`'s own seed rather than what it folds to; to compute from a folded value, write a `let` below the declarations"
                 )));
         }
-        let slot = lower.b.state(&name, ty.clone(), init);
+        let slot = lower.b.fold(&name, ty.clone(), init);
 
         // Rule 12: whether the variable is subject-bound is a property of every arm
         // agreeing, so it is settled across the declaration rather than at any one arm.
@@ -2939,8 +2934,10 @@ impl Parser {
         // only arms.
         let mut bound: Option<(Ident, EventPath)> = None;
         let mut plain: Option<(EventPath, Span)> = None;
+        let mut any_arm = false;
 
         while self.at_word(Keyword::On) {
+            any_arm = true;
             let arm = self.span_here();
             self.bump();
             let at = self.span_here();
@@ -2993,11 +2990,11 @@ impl Parser {
                     if let Some((have, first)) = &bound
                         && have != &field
                     {
-                        return Err(self.err(Code::StateShape, format!("`{name}` folds under two subjects, `{have}` from {first} and `{field}` from {path}"), arm).with_hint("one variable holds one subject, because `reveal` names the key by it"));
+                        return Err(self.err(Code::StageShape, format!("`{name}` folds under two subjects, `{have}` from {first} and `{field}` from {path}"), arm).with_hint("one variable holds one subject, because `reveal` names the key by it"));
                     }
                     if let Some((first, at)) = &plain {
                         return Err(self.advised(
-                            Code::StateShape,
+                            Code::StageShape,
                             self.mixed_fold(&name, &field, first),
                             *at,
                         ));
@@ -3007,7 +3004,7 @@ impl Parser {
                 None => {
                     if let Some((have, _)) = &bound {
                         let message = self.mixed_fold(&name, have, &path);
-                        return Err(self.advised(Code::StateShape, message, arm));
+                        return Err(self.advised(Code::StageShape, message, arm));
                     }
                     plain.get_or_insert((path.clone(), arm));
                 }
@@ -3016,10 +3013,39 @@ impl Parser {
             lower.b.slice(path, filters, binds, updates);
         }
 
+        // With the keyword at the front the declaration line reads as a binding, and with
+        // no arms beneath it that is what it is: nothing narrows the log, so the append
+        // condition gains nothing and the value is its seed at every position.
+        if !any_arm {
+            // The structural error wins. A seed noting `expected Int, found String` is an
+            // answer to "does this fill the type this fold declares", which is not a
+            // question an arm-less declaration asks: it is a binding written the long way.
+            // Both were reported before, seed first, so the message an author read was
+            // about the half that was not wrong.
+            self.errors.borrow_mut().truncate(before_seed);
+            // A guard is a proposition about the log, so `let` is not the way out of an
+            // arm-less fold there: taking it lands on `guard `G` folds nothing` instead.
+            // A hint is the material a code action is built from, so it has to name an
+            // edit that ends the error rather than trading it for the next one.
+            let fix = match self.kind {
+                Kind::Guard => "give it an arm; a guard decides from what it folds, and one that folds nothing is a `fn`".to_string(),
+                _ => format!("write `let {name} = <seed>`"),
+            };
+            return Err(self
+                .err(
+                    Code::EmptyDeclaration,
+                    format!("fold `{name}` has no arms, so it is only its seed"),
+                    decl,
+                )
+                .with_hint(format!(
+                    "a fold with no arms declares no slice and adds nothing to the append condition; {fix}"
+                )));
+        }
+
         // The declared type is what the author wrote; the seal propagates onto it, the
         // same way it propagates onto an entity column. That is what `reveal` reads.
         if let Some((field, _)) = bound {
-            lower.b.seal_state(slot, field);
+            lower.b.seal_fold(slot, field);
         }
 
         Ok(())
@@ -3189,7 +3215,7 @@ impl Parser {
         // Rule 9's second check, which was a no-op until the seal was a type: one
         // column holds one subject, because a key is filed under exactly one and a
         // column with two would have nothing static to say which it needs. The same
-        // sentence rule 12 says about a `state` fold.
+        // sentence rule 12 says about a `fold`.
         if let Some(seen) = &target.subject
             && seen != &subject
         {
@@ -4268,24 +4294,33 @@ impl Parser {
                 lower.b.pop_scope();
                 Ok(Stmt::For { iter, body })
             }
-            Token::Word(Keyword::State) | Token::Word(Keyword::Guard) => {
+            Token::Word(Keyword::Fold) | Token::Word(Keyword::Guard) => {
                 if self.kind == Kind::Function {
                     return self.fail_hint(
-                        Code::StateShape,
-                        "a `fn` has no `state`",
+                        Code::StageShape,
+                        "a `fn` has no `fold` declaration",
                         "it is a pure function of its arguments",
                     );
                 }
                 if self.kind == Kind::EffectFn {
                     return self.fail_hint(
-                        Code::StateShape,
-                        "an effect-local `fn` has no `state`",
+                        Code::StageShape,
+                        "an effect-local `fn` has no `fold` declaration",
                         "the fold belongs to the arm, so pass what it decided in as a parameter",
                     );
                 }
+                // A projector has no fold at any position, so "move it up" is advice with
+                // nowhere to go: it is already the first statement of its handler.
+                if self.kind == Kind::Projector {
+                    return self.fail_hint(
+                        Code::StageShape,
+                        "a projector has no `fold` and no `guard`",
+                        "a projector is already a fold over the whole log, one handler per event; a handler writes what its event says",
+                    );
+                }
                 self.fail(
-                    Code::StateShape,
-                    "`state` and `guard` must come before the first statement",
+                    Code::StageShape,
+                    "`fold` and `guard` must come before the first statement",
                 )
             }
             Token::Ident(name) if self.starts_effect_statement(name) => {
@@ -5414,7 +5449,7 @@ impl Parser {
         } else {
             None
         };
-        // Rule 2: the trigger binding is in scope for the arm's `state` filters as well
+        // Rule 2: the trigger binding is in scope for the arm's `fold` filters as well
         // as its body, so it is registered before the prologue runs.
         self.event = Some(def.clone());
         self.envelope = envelope;
@@ -5477,7 +5512,7 @@ impl Parser {
                 | Keyword::Let
                 | Keyword::Invoke
                 | Keyword::For
-                | Keyword::State
+                | Keyword::Fold
                 | Keyword::Guard,
             ) => true,
             Token::Ident(name) => self.starts_effect_statement(name),
@@ -5711,13 +5746,13 @@ impl Parser {
 
     /// Rule 5's gating. Each wrong context gets a message about that context, so the
     /// error teaches the rule at the point of violation rather than naming a category.
-    /// Rule 3: a `state` fold is not journaled, because every attempt re-folds and
+    /// Rule 3: a `fold` is not journaled, because every attempt re-folds and
     /// gets the same answer. That only holds if the fold cannot call out or decrypt.
     fn not_in_fold(&self, what: &str, span: Span) -> Result<(), Diagnostic> {
         if self.folding {
             return Err(self.err(
                 Code::FoldRestriction,
-                format!("`state` folds the log, so it cannot {what}"),
+                format!("a `fold` reads the log, so it cannot {what}"),
                 span,
             ));
         }
@@ -5740,7 +5775,7 @@ impl Parser {
 
     /// Rule 12: sealed content may be written only where the same seal is declared.
     /// Everywhere else it would leave the boundary without `reveal`, which is the one
-    /// thing the seal exists to stop. A `state` fold and an entity column are the
+    /// thing the seal exists to stop. A `fold` and an entity column are the
     /// exceptions: both take it by propagating the seal onto themselves.
     fn check_seal(&self, lower: &Lower, value: ExprId, want: &Type, at: Span) {
         if self.folding || self.propagating {
@@ -6067,7 +6102,7 @@ impl Parser {
                 Some(ty) => format!("this is a plain {ty}"),
                 None => "this is not one".to_string(),
             };
-            return Err(self.err(Code::SealBoundary, format!("`reveal` takes subject-bound content and {found}"), at).with_hint("it decrypts a field declared `@subject(...)`, or a `state` folded from one. An arm that transforms what it folds drops the seal, because the key belongs to the field's content rather than to whatever is computed from it"));
+            return Err(self.err(Code::SealBoundary, format!("`reveal` takes subject-bound content and {found}"), at).with_hint("it decrypts a field declared `@subject(...)`, or a value folded from one. An arm that transforms what it folds drops the seal, because the key belongs to the field's content rather than to whatever is computed from it"));
         };
 
         // The content type, recorded here because it is the same at every run: a seal
@@ -6181,7 +6216,7 @@ impl Parser {
                         "an empty list needs a target type to know what it holds",
                         span,
                     )
-                    .with_hint("that comes from the `state`, parameter or field it fills"));
+                    .with_hint("that comes from the `fold`, parameter or field it fills"));
             };
             lower.b.at(span);
             return Ok(lower.b.lit(Literal::List {
@@ -6373,7 +6408,7 @@ impl Parser {
                             format!("`{ty}.parse` needs a target scale to know what it is parsing into"),
                             span,
                         )
-                        .with_hint("that comes from the field, parameter or `state` it fills"));
+                        .with_hint("that comes from the field, parameter or `fold` it fills"));
                     }
                 }
             }
@@ -6450,7 +6485,7 @@ impl Parser {
                     "`Map.empty` needs a target type to know what it holds",
                     span,
                 )
-                .with_hint("that comes from the `state`, parameter or field it fills"));
+                .with_hint("that comes from the `fold`, parameter or field it fills"));
         };
         let lit = Literal::EmptyMap(key.as_ref().clone(), value.as_ref().clone());
         lower.b.at(span);
@@ -6745,7 +6780,7 @@ impl Parser {
     }
 
     /// `{ field: value, ... }` against a refusal's declared fields. The same checks a
-    /// guard's arguments take, minus the one about reading a `state`: a refusal's
+    /// guard's arguments take, minus the one about reading a `fold`: a refusal's
     /// arguments are ordinary expressions in the body, not prologue assignments.
     fn reject_fields(
         &mut self,
@@ -7374,7 +7409,7 @@ fn invoked(exprs: &Exprs, body: &[Stmt]) -> Vec<Ident> {
 ///
 /// A command has no event binding of its own: what it holds came from a parameter or
 /// from folding the log, and only the second has a declaration to compare against. So
-/// this walks the fold. The value loads a `state`, and every arm writing that state is a
+/// this walks the fold. The value loads a fold's slot, and every arm writing that slot is a
 /// plain read of a field it destructured; those fields are the sources, one per arm,
 /// because the invariant is about *every* field written into a position.
 ///
@@ -7389,13 +7424,13 @@ fn folded_from<'a>(
     let Some(slot) = loaded_slot(&command.exprs, value) else {
         return Vec::new();
     };
-    // Across every stage: a `state` folded before one statement and emitted after
+    // Across every stage: a fold read before one statement and emitted after
     // another is still the same slot, and rule 12's bound is about where the value came
     // from rather than when.
     if !command
         .stages
         .iter()
-        .flat_map(|stage| &stage.states)
+        .flat_map(|stage| &stage.folds)
         .any(|state| state.slot == slot)
     {
         return Vec::new();

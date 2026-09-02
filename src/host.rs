@@ -14,7 +14,7 @@ use crate::value::{Event, Invoked, Json, Key, Record, Value};
 
 /// One resolved read: an event path and the values its filters narrowed it to.
 ///
-/// A `state` declares a slice, and what a command folded is what it conflicts on, so
+/// A `fold` declares a slice, and what a command folded is what it conflicts on, so
 /// the query a host reads with and the condition it appends against are one shape.
 /// `docs/commands.md` has the argument.
 #[derive(Debug, Clone, PartialEq, Eq)]

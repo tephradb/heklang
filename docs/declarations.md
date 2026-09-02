@@ -78,7 +78,7 @@ record ProductApplicability {
 }
 ```
 
-A named product type at module scope. Unlike an entity it is an ordinary value: it can be a `state`
+A named product type at module scope. Unlike an entity it is an ordinary value: it can be a `fold`
 type, an event field, a command or `fn` parameter, a return type, and the element of a `List` or
 `Map`. Records serialise to JSON objects under `docs/effects.md` rule 8, so one goes straight into a
 request body.
@@ -189,7 +189,7 @@ restriction has a second benefit, which is that a const is inlined at every use 
 runtime lookup.
 
 `Map.empty` and `Json.empty` are spellable here for that same reason: both are literals in the IR
-rather than calls, so they construct nothing and read nothing. It is also why both may be a `state`
+rather than calls, so they construct nothing and read nothing. It is also why both may be a `fold`
 seed and an entity default.
 
 ### A string literal resolves against a `Uuid` or `Timestamp` target

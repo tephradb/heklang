@@ -89,7 +89,7 @@ added or removed otherwise.
 The corpus is emphatic about this. `const` runs are packed by what they are for and
 blank-separated between groups. A `test` body separates arrange from act from assert:
 `given` is preceded by a blank 0 times out of 459 and `deliver` 53 out of 53. Three folds
-that answer one question are written packed, while 75 other `state` declarations are
+that answer one question are written packed, while 75 other `fold` declarations are
 separated. No rule derivable from the tree gets all of that right, and the author already
 got it right.
 

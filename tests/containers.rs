@@ -377,13 +377,13 @@ fn an_empty_comprehension_keeps_its_declared_element_type() {
 
 #[test]
 fn a_fold_arm_accumulates_a_container() {
-    let body = "  state seen: List(Int) = fold []\n    on @item.added(basket_id) { item } => seen.push(item)\n\n"
-        .to_string()
-        + &emitting("seen");
+    let body =
+        "  fold seen: List(Int) = []\n    on @item.added(basket_id) { item } => seen.push(item)\n\n"
+            .to_string() + &emitting("seen");
     let event = fired("", &body, vec![]);
     assert_eq!(items(&event), [30, 10, 20], "log order, not sorted");
 
-    let map_body = "  state tags: Map(Int, String) = fold Map.empty\n    on @item.added(basket_id) { item, tag } => tags.set(item, tag)\n\n"
+    let map_body = "  fold tags: Map(Int, String) = Map.empty\n    on @item.added(basket_id) { item, tag } => tags.set(item, tag)\n\n"
         .to_string()
         + &describing(r#""{tags}""#);
     assert_eq!(

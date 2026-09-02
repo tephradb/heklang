@@ -10,7 +10,7 @@ refusal SkuTaken(sku: String, item: Uuid) "sku {sku} already belongs to item {it
 command ListItem(item_id: Uuid, seller_id: Int, sku: String) {
   guard ShopIsConnected { seller_id }
 
-  state items: Map(Uuid, Item) = fold Map.empty
+  fold items: Map(Uuid, Item) = Map.empty
     on @item.listed(seller_id) { item_id, item } => items.set(item_id, item)
 
   for other_id, other in items {

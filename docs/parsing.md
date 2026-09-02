@@ -15,7 +15,7 @@ deciding to grow it.
 | `text.strip_prefix(prefix)` | `String` |
 | `text.after_last(separator)` | `String` |
 
-All pure, so all callable from a command, a projector, an effect, a `fn` and a `state` fold arm.
+All pure, so all callable from a command, a projector, an effect, a `fn` and a fold arm.
 
 ## Everything fallible returns an optional
 

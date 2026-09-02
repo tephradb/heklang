@@ -64,7 +64,7 @@ pub enum Code {
     EntityShape,
     EventShape,
     RefusalShape,
-    StateShape,
+    StageShape,
     NoZeroValue,
 
     // Where a statement may appear.
@@ -120,7 +120,7 @@ impl Code {
         Code::EntityShape,
         Code::EventShape,
         Code::RefusalShape,
-        Code::StateShape,
+        Code::StageShape,
         Code::NoZeroValue,
         Code::WrongContext,
         Code::ImpureFn,
@@ -166,7 +166,7 @@ impl Code {
             Code::EntityShape => "entity-shape",
             Code::EventShape => "event-shape",
             Code::RefusalShape => "refusal-shape",
-            Code::StateShape => "state-shape",
+            Code::StageShape => "stage-shape",
             Code::NoZeroValue => "no-zero-value",
             Code::WrongContext => "wrong-context",
             Code::ImpureFn => "impure-fn",

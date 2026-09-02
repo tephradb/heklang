@@ -17,8 +17,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ir::{
-    Bind, Command, Expr, ExprId, Exprs, Filter, Guard, GuardCall, Ident, Iter, Program, Return,
-    Slice, Slot, Stage, StateVar, Stmt, Update,
+    Bind, Command, Expr, ExprId, Exprs, Filter, FoldVar, Guard, GuardCall, Ident, Iter, Program,
+    Return, Slice, Slot, Stage, Stmt, Update,
 };
 
 /// The guards a name reaches through, first to last, when they form a cycle. `None`
@@ -100,7 +100,7 @@ pub fn splice(program: &mut Program) {
 #[derive(Default)]
 struct Grown {
     slices: usize,
-    states: usize,
+    folds: usize,
     body: usize,
 }
 
@@ -232,18 +232,18 @@ fn at(site: &mut Site<'_>, callee: &Guard, call: &GuardCall, grown: &mut Grown) 
         .collect();
     grown.slices += insert(&mut site.stage.slices, call.at_slice + grown.slices, slices);
 
-    let states: Vec<StateVar> = callee
+    let folds: Vec<FoldVar> = callee
         .stage
-        .states
+        .folds
         .iter()
-        .map(|state| StateVar {
-            name: state.name.clone(),
-            ty: state.ty.clone(),
-            slot: shift_slot(state.slot, slot_off),
-            init: shift_expr_id(state.init, expr_off),
+        .map(|fold| FoldVar {
+            name: fold.name.clone(),
+            ty: fold.ty.clone(),
+            slot: shift_slot(fold.slot, slot_off),
+            init: shift_expr_id(fold.init, expr_off),
         })
         .collect();
-    grown.states += insert(&mut site.stage.states, call.at_state + grown.states, states);
+    grown.folds += insert(&mut site.stage.folds, call.at_fold + grown.folds, folds);
 
     // Ahead of the body the author wrote, and after the guards written above this one:
     // a refusal is decided in the order the guards appear, and all of them before the

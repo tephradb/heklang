@@ -14,7 +14,7 @@ test per numbered rule. Change the doc, the tests and the code together.
 ```
 effect NotifyCustomer {
   on @order.placed as e {
-    state orders: Int = fold 0
+    fold orders: Int = 0
       on @order.placed(customer_id: e.customer_id) => orders + 1
 
     let response = http.post("https://mail.example/confirm", {
@@ -66,7 +66,7 @@ still an error naming the first. What is given up is only consequence #2 below, 
 concrete type", which was listed as a consequence rather than as the reason.
 
 The evidence is one real effect that dispatches **thirteen** event types onto one body. With
-one arm per type, that effect is thirteen copies of six `state` declarations and a forty-line body,
+one arm per type, that effect is thirteen copies of six `fold` declarations and a forty-line body,
 and the thirteenth copy is where the drift starts. Five more effects in the same application dispatch
 two to four types each. Writing the same fold thirteen times is not a rule being enforced, it is a
 rule being avoided by copying.
@@ -92,7 +92,7 @@ them all in one invocation. Three things go wrong with that:
 The counter-example, for honesty about where this stops helping: an effect posting eight different
 alert shapes cannot use one multi-path arm, because its arms differ in the body and not only in the
 trigger. Those eight arms still repeat the same three folds between them, and that is the case that
-argues for effect-level `state`, which this pass deliberately did not add. Per-arm state solved a
+argues for effect-level `fold`, which this pass deliberately did not add. Per-arm state solved a
 real ordering problem, and multi-path arms plus records may shrink the duplication that motivates it,
 so the case is worth re-measuring before it is answered.
 
@@ -104,7 +104,7 @@ matching handler. See "The three kinds are deliberately not unified".
 
 ## 2. State lives inside the arm
 
-`as e` binds the trigger, and it is in scope for the arm's `state` filters and its body. There is no
+`as e` binds the trigger, and it is in scope for the arm's `fold` filters and its body. There is no
 effect-level trigger binding and no effect-level state.
 
 This is more expressive than hekla's single `query(event)`, which has to work for every subscribed
@@ -116,19 +116,19 @@ An arm is `on @path [as name] [{ destructure }] { body }`, the same shape a proj
 is the body; with one there is nothing to destructure. The two kinds share one construct rather than
 each having a slightly different one.
 
-An arm stages like a command: a run of `state` declarations is one read, and a statement below one
+An arm stages like a command: a run of `fold` declarations is one read, and a statement below one
 closes it, so a later run can filter on what an earlier one folded (`docs/commands.md`). Rule 3
 folds every run to the trigger's own position, so a second read sees the prefix the first did and
 there is no head to pin and no condition to build.
 
 There is no `guard`, in either of its shapes, because an effect has no append condition to build and
-no `Outcome` to refuse with: `docs/commands.md` has what a condition is and why a `state` declares
+no `Outcome` to refuse with: `docs/commands.md` has what a condition is and why a `fold` declares
 it, and `docs/guards.md` has the named form. And a `let` in an arm is an ordinary statement that may
 call out, because rule 2 gives an arm's filters the trigger binding rather than a hoisted value.
 
 ## 3. The fold stops at the trigger's own position, inclusive
 
-`state` is folded over the log up to **and including** the triggering event, never to the head of the
+`fold` is folded over the log up to **and including** the triggering event, never to the head of the
 log. It is therefore a pure function of the log prefix and that position, so every attempt and every
 replay reproduces it. Three things follow, and together they are why an effect has no read of a
 projector:
@@ -137,7 +137,7 @@ projector:
 - **It is not journaled.** Every attempt re-folds and gets the same answer, so there is nothing to
   record. Contrast `now()`, which is journaled precisely because it cannot reproduce itself.
 
-  That only holds if a fold cannot do anything it would have to record, so a filter, a `state` seed
+  That only holds if a fold cannot do anything it would have to record, so a filter, a fold seed
   and a fold arm may not call out, invoke, decrypt or read a clock. Each is a compile error naming
   the fold rather than the builtin, because the fold is the reason. This is the same boundary hekla
   draws by evaluating `query` and `fold` without a request context.
@@ -452,7 +452,7 @@ not come from the trigger there is no name to recover, so the second form suppli
 
 ```
 on @shop.redact.received as e { shop_id } {
-  state customers: List(Int) = fold []
+  fold customers: List(Int) = []
     on @order.paid(shop_id) { customer_id } => customers.push(customer_id)
 
   for id in customers {
@@ -558,7 +558,7 @@ is pinned or journaled, and is absent where replay demands determinism.
 | --- | --- |
 | a command body | available, pinned once per request |
 | an effect arm | available, journaled |
-| a `state` fold (either kind) | absent |
+| a `fold` (either kind) | absent |
 | a projector | absent |
 
 `now()` is pinned **once**, not per call: it lowers to a single slot filled before the body runs, so
@@ -593,7 +593,7 @@ disturb:
 - **Rule 9 is unchanged.** A helper may not `reveal` or `erase`, so the erase-last analysis still runs
   over one arm's statement tree. That is the restriction the whole design is built around, and it is
   free: no helper in the port that motivated this contains either.
-- **Rule 3 is unchanged.** A `state` fold may not call one, because a fold has to reproduce without a
+- **Rule 3 is unchanged.** A `fold` may not call one, because a fold has to reproduce without a
   journal and this is the first helper that could call out.
 - **Rule 11 is unchanged.** `now()` stays pinned once per invocation, into a slot the arm fills, so a
   helper may not read the clock: read it in the arm and pass it in.
@@ -653,7 +653,7 @@ storing it.
 
 ```
 on @shop.sync.requested as e { shop_id } {
-  state token: String? = fold none
+  fold token: String? = none
     on @shop.connected(shop_id) { access_token } => access_token
     on @shop.reconnected(shop_id) { access_token } => access_token
 
@@ -661,7 +661,7 @@ on @shop.sync.requested as e { shop_id } {
 ```
 
 A credential is almost never on the event being handled. It was appended when the shop connected,
-long before, so **the seal propagates through a `state` fold**: the variable's declared type is what
+long before, so **the seal propagates through a `fold`**: the variable's declared type is what
 the author wrote, and folding sealed content onto it seals it. That is the same propagation
 `docs/projectors.md` rule 9 performs through a projector write.
 
@@ -713,7 +713,7 @@ or a `fn`.
 
 | | Why it is safe |
 | --- | --- |
-| **Move it** into a position sealed under the same subject: a `let`, a `state` fold, an entity column, another event field | the content is never read |
+| **Move it** into a position sealed under the same subject: a `let`, a `fold`, an entity column, another event field | the content is never read |
 | **Ask if it is there**: `.is_some()` / `.is_none()` | presence is not content |
 | **`reveal` it** | the boundary itself |
 
@@ -736,7 +736,7 @@ for content that has a key. It is the same argument `mixed_fold` makes about a f
 holding an ordinary `String` may `emit` it into a `@subject(...)` field with no ceremony; only reading
 back out needs `reveal`.
 
-**Two positions propagate instead of reading**: a `state` fold and an entity column. Both take sealed
+**Two positions propagate instead of reading**: a `fold` and an entity column. Both take sealed
 content and become sealed themselves, which is why a projector can store a credential it may never
 `reveal`. That is `docs/projectors.md` rule 9, and it is what the port's read models depend on.
 
@@ -768,7 +768,7 @@ The asymmetry is not obvious, so both halves are stated:
 
 - **The seed is never subject-bound, and that is fine.** It is evaluated before the fold, with no
   event behind it, so it is a value the author wrote rather than one that came out of the log.
-  `state token: String? = fold none` seeds with nothing and folds credentials into it.
+  `fold token: String? = none` seeds with nothing and folds credentials into it.
 - **An arm folding a non-subject-bound value into a variable another arm makes subject-bound is an
   error**, in either declaration order, naming the arm to change. Otherwise plaintext and a value
   that needs a key share one slot, with nothing static to say which one is in it.
@@ -811,7 +811,7 @@ rule; failing terminally for both wedges every subject that simply has no value 
 
 **Rejected: `reveal` unwraps with a zero.** That is a sentinel, which the zero-value table in
 `docs/projectors.md` exists to argue against, and it is the workaround a real port had to write
-before this rule existed: `state token: String = fold ""` and then `token.is_empty()`, where an
+before this rule existed: `fold token: String = ""` and then `token.is_empty()`, where an
 absent credential and an empty one are the same string.
 
 ### Failing is terminal
@@ -987,7 +987,7 @@ and `0` as absent-credential sentinels, in a language whose zero-value table in
 `docs/projectors.md` exists to argue against exactly that:
 
 ```
-state token: String = fold ""          becomes    state token: String? = fold none
+fold token: String = ""          becomes    fold token: String? = none
 if token.is_empty() { ... }            becomes    if token.is_none() { ... }
 => customer_name.unwrap_or("")         becomes    => customer_name
 ```

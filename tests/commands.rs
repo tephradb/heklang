@@ -1,5 +1,5 @@
 //! `docs/commands.md` as executable tests. The append condition is the part worth
-//! pinning down: it is what makes a `state` a read declaration rather than a binding,
+//! pinning down: it is what makes a `fold` a read declaration rather than a binding,
 //! and it is the whole reason the keyword is not `let`.
 
 use heklang::{Event, EventPath, Interpreter, Outcome, Program, Value, parse};
@@ -46,10 +46,10 @@ fn placed(seq: u32, customer_id: i64, total: i64) -> Event {
 }
 
 // ---------------------------------------------------------------------------------
-// `state` is a read declaration: the slices it names are the append condition.
+// `fold` is a read declaration: the slices it names are the append condition.
 
 const COUNTING: &str = "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-  state open: Int = fold 0
+  fold open: Int = 0
     on @order.placed(customer_id) => open + 1
     on @order.cancelled(customer_id) => open - 1
 
@@ -57,7 +57,7 @@ const COUNTING: &str = "command Place(order_id: Uuid, customer_id: Int, total: M
 }";
 
 #[test]
-fn a_state_puts_its_slices_in_the_append_condition() {
+fn a_fold_puts_its_slices_in_the_append_condition() {
     let program = program(COUNTING);
     let mut interpreter = Interpreter::new(&program);
     let execution = interpreter
@@ -133,7 +133,7 @@ fn a_let_puts_nothing_in_the_append_condition() {
     );
 }
 
-/// `guard` is the same call as `state` with no binds and no updates, so it lands in the
+/// `guard` is the same call as `fold` with no binds and no updates, so it lands in the
 /// condition the same way and is the only reason to write one.
 #[test]
 fn a_guard_is_a_slice_that_binds_nothing() {
@@ -165,10 +165,10 @@ fn a_guard_is_a_slice_that_binds_nothing() {
 fn the_condition_comes_back_for_every_outcome() {
     let program = program(
         "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-  state blocked: Bool = fold false
+  fold blocked: Bool = false
     on @customer.blocked(customer_id) => true
 
-  state open: Int = fold 0
+  fold open: Int = 0
     on @order.placed(customer_id) => open + 1
 
   if total <= 0.00 {
@@ -254,7 +254,7 @@ fn a_filter_may_name_a_let_above_the_declarations() {
         "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
   let who = customer_id
 
-  state blocked: Bool = fold false
+  fold blocked: Bool = false
     on @customer.blocked(customer_id: who) => true
 
   emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
@@ -289,7 +289,7 @@ fn a_filter_may_name_a_let_above_the_declarations() {
 fn a_filter_naming_a_later_let_says_to_move_it() {
     let message = err(
         "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-  state blocked: Bool = fold false
+  fold blocked: Bool = false
     on @customer.blocked(customer_id: who) => true
 
   let who = customer_id
@@ -303,17 +303,17 @@ fn a_filter_naming_a_later_let_says_to_move_it() {
     assert!(message.contains("move that `let` up"), "got: {message}");
 }
 
-/// A `let` that reads a `state`
+/// A `let` that reads a `fold`
 /// stays below them: above the declarations the fold has not run and the slot holds
 /// nothing. It used to be lifted anyway, which `check` accepted and which failed with "read
 /// before it was set" on a line that looked ordinary.
 #[test]
-fn a_let_reading_a_state_runs_after_the_fold() {
+fn a_let_reading_a_fold_runs_after_it() {
     let program = program(
         "command Count(order_id: Uuid, customer_id: Int, total: Money(2)) {
-  state open: Int = fold 0
+  fold open: Int = 0
     on @order.placed(customer_id) => open + 1
-  state shut: Int = fold 0
+  fold shut: Int = 0
     on @order.cancelled(customer_id) => shut + 1
 
   let live = open - shut
@@ -343,7 +343,7 @@ fn a_let_reading_a_state_runs_after_the_fold() {
 fn a_let_reading_a_folded_let_stays_with_it() {
     let program = program(
         "command Count(order_id: Uuid, customer_id: Int, total: Money(2)) {
-  state open: Int = fold 0
+  fold open: Int = 0
     on @order.placed(customer_id) => open + 1
 
   let live = open
@@ -369,15 +369,15 @@ fn a_let_reading_a_folded_let_stays_with_it() {
 }
 
 /// The other half of a seed running before its own stage folds, and the worse half: this one used to
-/// check clean and answer with the wrong number. A seed reads another `state`'s *seed*,
+/// check clean and answer with the wrong number. A seed reads another `fold`'s *seed*,
 /// never what it folds to, so the answer was a plausible zero rather than a failure.
 #[test]
-fn a_seed_may_not_read_another_state() {
+fn a_seed_may_not_read_another_fold() {
     let message = err(
         "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-  state open: Int = fold 0
+  fold open: Int = 0
     on @order.placed(customer_id) => open + 1
-  state seen: Int = fold open
+  fold seen: Int = open
     on @order.cancelled(customer_id) => seen + 1
 
   emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
@@ -402,7 +402,7 @@ fn a_seed_may_read_a_parameter_or_a_let_above_it() {
         "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
   let base = customer_id * 2
 
-  state open: Int = fold base
+  fold open: Int = base
     on @order.placed(customer_id) => open + 1
 
   if open != 14 {
@@ -426,7 +426,7 @@ fn a_seed_may_read_a_parameter_or_a_let_above_it() {
 }
 
 /// The shape the old model could not express at all: a filter naming a `let` that
-/// reads a `state`. It used to be rejected, because everything folded at once and the
+/// reads a `fold`. It used to be rejected, because everything folded at once and the
 /// filter would have asked the fold for the value deciding what the fold reads. A
 /// statement between the two declarations now splits them, so the first folds, the `let`
 /// reads what it folded, and the second resolves its filter against that.
@@ -434,11 +434,11 @@ fn a_seed_may_read_a_parameter_or_a_let_above_it() {
 fn a_filter_may_name_a_let_that_reads_an_earlier_stage() {
     let program = program(
         "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-  state open: Int = fold 0
+  fold open: Int = 0
     on @order.placed(customer_id) => open + 1
 
   let who = open
-  state blocked: Bool = fold false
+  fold blocked: Bool = false
     on @customer.blocked(customer_id: who) => true
 
   if blocked {
@@ -482,11 +482,11 @@ fn a_filter_may_name_a_let_that_reads_an_earlier_stage() {
 /// read either happens or it does not, and the append condition cannot say "maybe".
 /// Interleaving is a top-level shape only.
 #[test]
-fn state_and_guard_may_not_be_declared_inside_a_block() {
+fn fold_and_guard_may_not_be_declared_inside_a_block() {
     let message = err(
         "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
   if customer_id > 0 {
-    state open: Int = fold 0
+    fold open: Int = 0
       on @order.placed(customer_id) => open + 1
   }
 
@@ -495,7 +495,7 @@ fn state_and_guard_may_not_be_declared_inside_a_block() {
     );
     assert_eq!(
         message,
-        "`state` and `guard` must come before the first statement"
+        "`fold` and `guard` must come before the first statement"
     );
 }
 
@@ -510,7 +510,7 @@ fn state_and_guard_may_not_be_declared_inside_a_block() {
 fn a_destructure_reads_the_event_where_a_filter_reads_the_command() {
     let program = program(
         "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-  state spend: Money(2) = fold 0
+  fold spend: Money(2) = 0
     on @order.placed(customer_id) { total } => spend + total
 
   if spend != 8.00 {
@@ -544,7 +544,7 @@ fn a_destructure_reads_the_event_where_a_filter_reads_the_command() {
 fn a_destructure_does_not_rename() {
     let message = err(
         "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-  state spend: Money(2) = fold 0
+  fold spend: Money(2) = 0
     on @order.placed(customer_id) { total: amount } => spend + amount
 
   emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
@@ -559,7 +559,7 @@ fn a_destructure_does_not_rename() {
 fn a_destructure_reaches_no_envelope() {
     let message = err(
         "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-  state last: Int = fold 0
+  fold last: Int = 0
     on @order.placed(customer_id) { position } => position
 
   emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
@@ -602,7 +602,7 @@ fn a_command_cannot_invoke() {
 fn a_command_cannot_decrypt() {
     let message = err(
         "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-  state held: String = fold \"\"
+  fold held: String = \"\"
     on @order.placed(customer_id) { email } => email
 
   let seen = reveal(held)
@@ -639,7 +639,7 @@ fn a_command_cannot_fail() {
 fn a_command_may_move_sealed_content_without_revealing() {
     program(
         "command Replace(order_id: Uuid, customer_id: Int, total: Money(2)) {
-  state held: String = fold \"\"
+  fold held: String = \"\"
     on @order.placed(customer_id) { email } => email
 
   emit @order.placed { order_id, customer_id, email: held, total }
