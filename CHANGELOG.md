@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/tephradb/heklang/compare/heklang-v0.1.1...heklang-v0.1.2) - 2026-09-02
+
+### Fixed
+
+- the bare-name shorthand is the same declared position as the long form
+
+### Other
+
+- the language as a skill an agent can write it from
+- four ways to install the tool, now that there are four ([#4](https://github.com/tephradb/heklang/pull/4))
+
 ## [0.1.1](https://github.com/tephradb/heklang/compare/heklang-v0.1.0...heklang-v0.1.1) - 2026-09-02
 
 ### Fixed
