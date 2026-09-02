@@ -1,7 +1,7 @@
 [package]
 name = "heklang"
 description = "The total, event-sourced module language for hekla: lexer, parser, checker and interpreter"
-version = "0.1.1"
+version = "0.1.2"
 categories = ["compilers", "development-tools"]
 keywords = ["event-sourcing", "language", "interpreter", "dsl", "cqrs"]
 rust-version = "1.88.0"
