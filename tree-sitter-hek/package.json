@@ -5,7 +5,7 @@
   "main": "grammar.js",
   "type": "commonjs",
   "keywords": ["tree-sitter", "hek", "heklang", "parser"],
-  "license": "MIT",
+  "license": "MIT OR Apache-2.0",
   "scripts": {
     "build": "tree-sitter generate --abi 14",
     "test": "tree-sitter test",

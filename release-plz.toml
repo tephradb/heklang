@@ -1,0 +1,11 @@
+# release-plz configuration: https://release-plz.dev/docs/config
+#
+# Changelogs, git tags, and GitHub releases are enabled by default, so only the per-package
+# overrides are listed here. Versions and changelogs are derived from conventional commits.
+
+[[package]]
+name = "hek"
+# Tag the CLI release as v{version} (not hek-v{version}), so the release-binaries workflow's
+# `v*.*.*` trigger fires on each one. heklang and tree-sitter-hek keep the default
+# {package}-v{version} tags, which deliberately do not build binaries: neither ships one.
+git_tag_name = "v{{ version }}"

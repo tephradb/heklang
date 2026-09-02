@@ -12,7 +12,7 @@
   ],
   "metadata": {
     "version": "0.1.0",
-    "license": "MIT",
+    "license": "MIT OR Apache-2.0",
     "description": "hek grammar for tree-sitter",
     "authors": [{ "name": "Ari Seyhun" }]
   }

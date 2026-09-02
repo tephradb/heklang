@@ -23,8 +23,8 @@
         #
         # `src = self` is the whole repository as git has it, which is the point: the
         # working tree carries a multi-gigabyte `target/`, and a flake's source is the
-        # tracked files alone. `cli/build.rs` compiles the committed tree-sitter parser, so
-        # this needs a C compiler and not the tree-sitter CLI.
+        # tracked files alone. `tree-sitter-hek/bindings/rust/build.rs` compiles the committed
+        # parser, so this needs a C compiler and not the tree-sitter CLI.
         hek = pkgs.rustPlatform.buildRustPackage {
           pname = "hek";
           inherit version;
@@ -46,7 +46,10 @@
           meta = {
             description = "Checker, test runner and formatter for heklang";
             mainProgram = "hek";
-            license = pkgs.lib.licenses.mit;
+            license = with pkgs.lib.licenses; [
+              mit
+              asl20
+            ];
             platforms = systems;
           };
         };

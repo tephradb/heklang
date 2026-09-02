@@ -1,0 +1,162 @@
+name: release-binaries
+
+# Build the hek binary for the four supported Linux targets and attach the archives to the
+# GitHub release that release-plz creates for each CLI version tag.
+#
+# release-plz (see release-plz.yml) publishes the crates, pushes the v{version} tag, and
+# CREATES the GitHub release. This workflow only UPLOADS assets onto that existing release;
+# it never creates or edits the release itself, so release-plz's generated notes are left
+# untouched. It keys off the tag (v*.*.*), which release-plz.toml assigns to `hek` alone,
+# so the two workflows stay decoupled and just meet at the tag.
+#
+# Targets: {x86_64,aarch64}-unknown-linux-{gnu,musl}. Each is built on a runner whose host
+# arch matches the target arch (ubuntu-latest for x86_64, ubuntu-24.04-arm for aarch64), so
+# the gnu builds use the host compiler with no cross toolchain, and the musl builds need
+# only musl-tools. Every target needs a C compiler regardless: tree-sitter-hek's build.rs
+# compiles the generated parser.c through the cc crate.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach binaries to (e.g. v0.1.0). Required for manual runs."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Resolve tag and version
+        id: resolve
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          tag="${INPUT_TAG:-$REF_NAME}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::could not resolve a v*.*.* tag (got '$tag'). for a manual run, pass the 'tag' input." >&2
+            exit 1
+          fi
+          echo "tag=$tag"          >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}"  >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            musl: false
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            musl: true
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            musl: false
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            musl: true
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install musl toolchain
+        if: matrix.musl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools musl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build hek
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build --release --locked -p hek --target ${{ matrix.target }}
+
+      - name: Package archive
+        id: package
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          name="hek-v${VERSION}-${TARGET}"
+          staging="$(mktemp -d)/${name}"
+          mkdir -p "$staging"
+          cp "target/${TARGET}/release/hek" "$staging/"
+          cp LICENSE-MIT LICENSE-APACHE "$staging/"
+          tar -C "$(dirname "$staging")" -czf "${name}.tar.gz" "${name}"
+          sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
+          echo "archive=${name}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      - name: Write SHA256SUMS
+        working-directory: dist
+        run: sha256sum -- *.tar.gz > SHA256SUMS
+
+      - name: Wait for the release to exist
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5 6 7 8; do
+            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "release $TAG found."
+              exit 0
+            fi
+            delay=$((attempt * 20))
+            echo "release $TAG not found (attempt $attempt); retrying in ${delay}s..."
+            sleep "$delay"
+          done
+          echo "::error::release $TAG never appeared; release-plz may not have created it." >&2
+          exit 1
+
+      - name: Upload assets to the release
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" \
+            dist/*.tar.gz dist/*.tar.gz.sha256 dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --clobber
