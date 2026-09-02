@@ -177,7 +177,7 @@ pub fn write(f: &mut fmt::Formatter<'_>, units: i64, scale: u8) -> fmt::Result {
     f.write_str(&text(units, scale))
 }
 
-/// The same rendering as [`write`], as a string. Needed where a value is serialised
+/// The same rendering as [`write()`], as a string. Needed where a value is serialised
 /// rather than displayed, which is how `Money` and `Decimal` reach JSON (rule 8).
 pub fn text(units: i64, scale: u8) -> String {
     let sign = if units < 0 { "-" } else { "" };

@@ -1,0 +1,43 @@
+# cargo-deny configuration for the heklang workspace.
+# Run locally with `cargo deny check`. Enforced in CI by the `deny` job in ci.yml.
+
+# Evaluate the dependency graph with every feature enabled, matching how CI builds and tests,
+# so a dependency pulled in only by an optional feature is still audited.
+[graph]
+all-features = true
+
+[advisories]
+# Any crate with a known security advisory or a yanked release fails the check. Suppress a
+# specific, reviewed advisory by adding its RUSTSEC id to `ignore` with a comment.
+yanked = "deny"
+# Only fail on unmaintained crates that the workspace depends on directly, not deep transitives
+# we cannot act on.
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+# Permissive licenses the dependency tree uses. A dependency under anything else fails the
+# check until it is reviewed and added here (or given a per-crate exception below).
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+# The workspace's own crates are covered by the MIT OR Apache-2.0 in [workspace.package].
+private = { ignore = true }
+
+[bans]
+# Duplicate versions of the same crate are a warning, not a hard failure.
+multiple-versions = "warn"
+# Every dependency, internal or external, must carry a real version requirement.
+wildcards = "deny"
+
+[sources]
+# Only crates.io is trusted; unknown registries and git sources fail the check.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -1,0 +1,38 @@
+[package]
+name = "tree-sitter-hek"
+description = "tree-sitter grammar for heklang, the module language for hekla"
+version = "0.1.0"
+categories = ["parser-implementations", "text-editors"]
+keywords = ["tree-sitter", "parser", "grammar", "heklang", "hek"]
+rust-version = "1.90.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The published crate is the grammar and its Rust binding, not the tooling that produced
+# them: `test/corpus/` is a `tree-sitter test` input and `package.json` drives `generate`,
+# and neither is reachable from a consumer. `src/` ships whole because `parser.c` is the
+# grammar and `node-types.json` is what a consumer inspects the tree with.
+include = [
+    "bindings/rust/**",
+    "grammar.js",
+    "queries/**",
+    "src/**",
+    "tree-sitter.json",
+    "README.md",
+]
+
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "0.1.8"
+
+[build-dependencies]
+cc = "1.4.4"
+
+[dev-dependencies]
+tree-sitter = "0.27.0"

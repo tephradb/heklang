@@ -1,27 +1,13 @@
-//! The tree-sitter grammar, linked in by `build.rs`.
+//! The tree-sitter grammar, as `hek` uses it.
 //!
-//! heklang has two front ends and this is the second one. `heklang::parse` lowers straight
-//! to IR and throws comments away with the rest of the trivia (`src/lex.rs` `skip_trivia`),
-//! which is right for a checker and useless for a formatter: there is no tree to print back
-//! and no comment to print. The grammar keeps every byte, so `hek fmt` reads through here
-//! and `hek check` does not.
-//!
-//! The two disagree in one direction on purpose. `grammar.js` has no idea whether it is
-//! inside a command or a projector, so it accepts `put` in a command and `emit` in a `fn`:
-//! nothing valid fails to parse, and some invalid programs do parse. That is the safe
-//! direction for a formatter, which needs a tree for everything an author can write and is
-//! not the thing that decides whether it means anything. `check` is still the gate.
+//! The grammar itself is the `tree-sitter-hek` crate, which compiles the committed
+//! `parser.c` and hands back a `LanguageFn`. What lives here is the one thing `hek` wants
+//! from it that a grammar crate has no business deciding: whether a tree is good enough to
+//! print back out.
 
 use tree_sitter::{Parser, Tree};
-use tree_sitter_language::LanguageFn;
 
-unsafe extern "C" {
-    fn tree_sitter_hek() -> *const ();
-}
-
-/// The compiled grammar. ABI 14, which is what Helix loads and what `tree-sitter` accepts
-/// (it takes 13 through 15), so one generated parser serves the editor and this.
-pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_hek) };
+pub use tree_sitter_hek::LANGUAGE;
 
 /// The tree for one module, or `None` when the source does not parse.
 ///

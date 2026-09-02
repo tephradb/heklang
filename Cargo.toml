@@ -1,8 +1,20 @@
 [package]
 name = "heklang"
+description = "The total, event-sourced module language for hekla: lexer, parser, checker and interpreter"
 version = "0.1.0"
-edition = "2024"
+categories = ["compilers", "development-tools"]
+keywords = ["event-sourcing", "language", "interpreter", "dsl", "cqrs"]
+rust-version = "1.85.0"
 default-run = "heklang"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The nix, devenv and CI files describe this checkout rather than the crate. `hek/` and
+# `benches/` both stay in: the demo binary reads `hek/` through `CARGO_MANIFEST_DIR`, and
+# the `[[bench]]` below names a file that has to be there.
+exclude = ["devenv.*", "flake.*", ".github/", "deny.toml", "release-plz.toml"]
 
 # `cli` is the `hek` binary, split out because building the language must not need a C
 # toolchain: it compiles the tree-sitter parser and heklang does not.
@@ -11,9 +23,20 @@ default-run = "heklang"
 # packages holding a binary each, which is what `default-run` above is now for: without it
 # `cargo run` cannot choose between `hek` and `heklang` and the demo-diff check every pass
 # runs stops working. The checker is `cargo run -p hek`.
+#
+# `tree-sitter-hek` is a member so it is versioned and published with the rest, but not a
+# default member: it is `cli`'s dependency, and nothing at the root reaches it.
 [workspace]
-members = ["cli"]
+members = ["cli", "tree-sitter-hek"]
 default-members = [".", "cli"]
+
+# Everything the three crates agree on. Versions and descriptions are per-crate, because
+# they move independently: release-plz bumps each from its own commits.
+[workspace.package]
+authors = ["Ari Seyhun <dev@tqwewe.com>"]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tephradb/heklang"
 
 [dependencies]
 uuid = { version = "1.26.0", default-features = false, features = ["std", "v5"] }
