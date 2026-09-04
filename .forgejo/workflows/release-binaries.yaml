@@ -1,0 +1,131 @@
+name: release-binaries
+
+# Build the hek binary for the four supported Linux targets and attach the archives to the
+# Forgejo release that release-plz creates for each version tag.
+#
+# release-plz (see release-plz.yaml) publishes the crate, pushes the v{version} tag, and
+# CREATES the release. This workflow only UPLOADS assets onto that existing release; it never
+# creates or edits the release itself, so release-plz's generated notes are left untouched. It
+# keys off the tag (v*.*.*), which release-plz.toml assigns to `hek` alone, so the two
+# workflows stay decoupled and just meet at the tag.
+#
+# Targets: {x86_64,aarch64}-unknown-linux-{gnu,musl}, all four cross-compiled on the one
+# x86_64 runner. The Rust toolchain in hostPackages carries std for each of them, and zig is
+# the C compiler and linker for all four, because tree-sitter-hek's build.rs compiles the
+# generated parser.c through the cc crate.
+#
+# `cargo zigbuild` rather than `cargo build`, and this is not a preference: the runner is
+# NixOS, and its cc wrapper bakes an ELF interpreter and a RUNPATH under /nix/store into
+# whatever it links. A gnu binary built that way runs on the runner and on no other machine.
+# zig links against the standard loader, and the `.2.17` suffix pins the glibc floor rather
+# than inheriting the build host's (2.42 here, which would strand every current distro).
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach binaries to (e.g. v0.1.0). Required for manual runs."
+        required: false
+        type: string
+
+jobs:
+  binaries:
+    runs-on: native
+    env:
+      API: ${{ github.server_url }}/api/v1
+      FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag and version
+        id: resolve
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          tag="${INPUT_TAG:-$REF_NAME}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::could not resolve a v*.*.* tag (got '$tag'). for a manual run, pass the 'tag' input." >&2
+            exit 1
+          fi
+          echo "tag=$tag"          >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}"  >> "$GITHUB_OUTPUT"
+
+      # One job builds all four in sequence: the runner has capacity 1, so a matrix would
+      # queue behind itself and pay for four checkouts to do it.
+      #
+      # Each entry is `what to build|what it is called`: the glibc floor is part of the
+      # target zig is given, and no part of the target cargo writes to disk or of the name
+      # the archive carries. Every link logs "ignoring deprecated linker optimization
+      # setting", which is zig's lld talking to itself.
+      - name: Build and package
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for spec in \
+            "x86_64-unknown-linux-gnu.2.17|x86_64-unknown-linux-gnu" \
+            "x86_64-unknown-linux-musl|x86_64-unknown-linux-musl" \
+            "aarch64-unknown-linux-gnu.2.17|aarch64-unknown-linux-gnu" \
+            "aarch64-unknown-linux-musl|aarch64-unknown-linux-musl"
+          do
+            build="${spec%%|*}"
+            target="${spec##*|}"
+            echo "::group::$target"
+            cargo zigbuild --release --locked -p hek --target "$build"
+            name="hek-v${VERSION}-${target}"
+            staging="$(mktemp -d)/${name}"
+            mkdir -p "$staging"
+            cp "target/${target}/release/hek" "$staging/"
+            cp LICENSE-MIT LICENSE-APACHE "$staging/"
+            tar -C "$(dirname "$staging")" -czf "dist/${name}.tar.gz" "$name"
+            (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
+            echo "::endgroup::"
+          done
+          (cd dist && sha256sum -- *.tar.gz > SHA256SUMS)
+
+      # The tag can reach the forge before release-plz has finished creating the release for
+      # it, and a tag pushed by hand may never get one at all.
+      - name: Wait for the release to exist
+        id: release
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5 6 7 8; do
+            id="$(curl -fsS -H "Authorization: token $FORGEJO_TOKEN" \
+              "$API/repos/$GITHUB_REPOSITORY/releases/tags/$TAG" | jq -r '.id' || true)"
+            if [ -n "$id" ] && [ "$id" != "null" ]; then
+              echo "release $TAG found (id $id)."
+              echo "id=$id" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            delay=$((attempt * 20))
+            echo "release $TAG not found (attempt $attempt); retrying in ${delay}s..."
+            sleep "$delay"
+          done
+          echo "::error::release $TAG never appeared; release-plz may not have created it." >&2
+          exit 1
+
+      - name: Upload assets to the release
+        env:
+          ID: ${{ steps.release.outputs.id }}
+        run: |
+          set -euo pipefail
+          existing="$(curl -fsS -H "Authorization: token $FORGEJO_TOKEN" \
+            "$API/repos/$GITHUB_REPOSITORY/releases/$ID" | jq -c '.assets // []')"
+          for file in dist/*; do
+            name="$(basename "$file")"
+            # --clobber, by hand: the API stores a second asset under the same name rather
+            # than replacing the first, so a re-run would double every archive.
+            for asset in $(echo "$existing" | jq -r --arg n "$name" '.[] | select(.name == $n) | .id'); do
+              curl -fsS -X DELETE -H "Authorization: token $FORGEJO_TOKEN" \
+                "$API/repos/$GITHUB_REPOSITORY/releases/$ID/assets/$asset"
+            done
+            curl -fsS -X POST -H "Authorization: token $FORGEJO_TOKEN" \
+              -F "attachment=@$file" \
+              "$API/repos/$GITHUB_REPOSITORY/releases/$ID/assets?name=$name" > /dev/null
+            echo "uploaded $name"
+          done

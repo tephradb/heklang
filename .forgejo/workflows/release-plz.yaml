@@ -1,0 +1,50 @@
+name: release-plz
+
+# Automated releases (https://release-plz.dev). On every push to main:
+#   - `release` publishes any crate whose Cargo.toml version is not yet on crates.io, pushes
+#     its git tag, and creates the Forgejo release. Publish order follows the dependency
+#     graph: tree-sitter-hek, then heklang, then hek.
+#   - `release-pr` keeps a release PR up to date (version bumps + changelogs from the
+#     conventional commits since the last release).
+#
+# The CLI comes from the runner's hostPackages rather than release-plz's own action, which is
+# written for GitHub. `--forge gitea` is what points it at this instance: Forgejo speaks the
+# Gitea API.
+#
+# FORGEJO_TOKEN is a user token with read:repository and write:repository. Using it rather
+# than the automatic per-job token is what lets the tags release-plz pushes trigger downstream
+# workflows, so a hek release (tagged v{version} by release-plz.toml) fires the binary build.
+#
+# CARGO_REGISTRY_TOKEN is what authenticates the crates.io publish. On GitHub this was OIDC
+# trusted publishing, which has no equivalent here; the trusted publishers registered on
+# crates.io against the old repository are dead weight now and can be removed there.
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release-plz:
+    runs-on: native
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # release-plz reads the whole history to work out what changed since the last tag.
+          fetch-depth: 0
+          token: ${{ secrets.FORGEJO_TOKEN }}
+
+      # release-plz commits the version bumps and changelog onto the release branch, and git
+      # refuses to commit without an identity.
+      - name: Configure git identity
+        run: |
+          git config user.name "release-plz"
+          git config user.email "dev@tqwewe.com"
+
+      # Publish + tag + Forgejo release for any crate whose version is unpublished.
+      - name: Publish and tag
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: release-plz release --forge gitea --git-token "${{ secrets.FORGEJO_TOKEN }}"
+
+      # Keep the release PR (version bumps + changelogs) up to date.
+      - name: Update the release PR
+        run: release-plz release-pr --forge gitea --git-token "${{ secrets.FORGEJO_TOKEN }}"

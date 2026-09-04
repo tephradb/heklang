@@ -14,7 +14,7 @@ repository.workspace = true
 # The nix, devenv and CI files describe this checkout rather than the crate. `hek/` and
 # `benches/` both stay in: the demo binary reads `hek/` through `CARGO_MANIFEST_DIR`, and
 # the `[[bench]]` below names a file that has to be there.
-exclude = ["devenv.*", "flake.*", ".github/", ".claude/", "deny.toml", "release-plz.toml"]
+exclude = ["devenv.*", "flake.*", ".forgejo/", ".claude/", "deny.toml", "release-plz.toml"]
 
 # `cli` is the `hek` binary, split out because building the language must not need a C
 # toolchain: it compiles the tree-sitter parser and heklang does not.
@@ -36,7 +36,7 @@ default-members = [".", "cli"]
 authors = ["Ari Seyhun <dev@tqwewe.com>"]
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/tephradb/heklang"
+repository = "https://git.tqwewe.com/tephra/heklang"
 
 [dependencies]
 uuid = { version = "1.26.0", default-features = false, features = ["std", "v5"] }

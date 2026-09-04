@@ -31,11 +31,11 @@ superset, so `check` remains the gate on whether a program means anything.
 **[`docs/cli.md`] is the contract**, and `tests/cli.rs` is that document as executable
 tests.
 
-[heklang]: https://github.com/tephradb/heklang
+[heklang]: https://git.tqwewe.com/tephra/heklang
 [`tree-sitter-hek`]: https://crates.io/crates/tree-sitter-hek
-[`docs/cli.md`]: https://github.com/tephradb/heklang/blob/main/docs/cli.md
+[`docs/cli.md`]: https://git.tqwewe.com/tephra/heklang/src/branch/main/docs/cli.md
 
 ## License
 
-Licensed under either of [Apache-2.0](https://github.com/tephradb/heklang/blob/main/LICENSE-APACHE)
-or [MIT](https://github.com/tephradb/heklang/blob/main/LICENSE-MIT) at your option.
+Licensed under either of [Apache-2.0](https://git.tqwewe.com/tephra/heklang/src/branch/main/LICENSE-APACHE)
+or [MIT](https://git.tqwewe.com/tephra/heklang/src/branch/main/LICENSE-MIT) at your option.

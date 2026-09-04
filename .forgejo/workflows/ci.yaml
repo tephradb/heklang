@@ -1,0 +1,75 @@
+name: ci
+
+# Workspace checks on every push to main and every pull request: formatting, clippy, tests,
+# rustdoc, the demo gate, the declared MSRVs, and the dependency audit. Green here means the
+# tree is correct and clean.
+#
+# One job rather than one per gate. The runner is a single host with capacity 1, so jobs run
+# in sequence anyway, and each one would start from an empty `target/`; sharing a job means
+# the tests reuse what clippy already built. Every gate is still its own step, so a failure
+# names itself.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A newer push to the same ref supersedes an in-progress run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # `native` is the runner on the desktop, running jobs directly on NixOS rather than in a
+  # container: the Rust toolchain and cargo-deny come from `hostPackages` in
+  # desktop/forgejo-runner.nix. There are no cache steps because CARGO_HOME and SCCACHE_DIR
+  # already point outside the job's working directory.
+  ci:
+    runs-on: native
+    steps:
+      - uses: actions/checkout@v4
+
+      # Canonical formatting.
+      - run: cargo fmt --all --check
+
+      # Everything compiles cleanly and lint-free: lib, bins, tests, and benches. This is the
+      # primary "it builds" gate.
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # Unit, integration, and doctests. Not --all-targets, so doctests actually run.
+      - run: cargo test --workspace --all-features
+
+      # The demo program in hek/ is the language's own regression suite: it must check, its
+      # tests must pass, and it must already be formatted canonically.
+      - run: cargo run -p hek -- hek/
+      - run: cargo run -p hek -- fmt --check hek/
+
+      # The agent skill's worked example makes the same claim about itself, and `hek` skips
+      # any directory beginning with `.`, so it has to be named rather than swept up.
+      - run: cargo run -p hek -- .claude/skills/heklang/example
+      - run: cargo run -p hek -- fmt --check .claude/skills/heklang/example
+
+      # Rustdoc with warnings denied, catching broken intra-doc links and other doc warnings.
+      - run: cargo doc --workspace --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      # Dependency audit: security advisories, license policy, banned/duplicate crates, sources.
+      - run: cargo deny check
+
+  # Verify the declared minimum supported Rust versions still build. heklang is the library
+  # and sits at 1.88.0, which is where let chains stabilised (`src/parse.rs` is full of them)
+  # and past the 1.86.0 trait upcasting in `src/interp.rs`. tree-sitter-hek and hek sit at
+  # 1.90.0, which is what the tree-sitter crates require.
+  #
+  # $RUST_MSRV_DIR holds the pinned toolchains the runner keeps off PATH so they cannot shadow
+  # the stable one; `services.forgejoRunner.msrvVersions` is what lists them.
+  msrv:
+    runs-on: native
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the library on 1.88.0
+        run: PATH="$RUST_MSRV_DIR/1.88.0/bin:$PATH" cargo check -p heklang --all-features
+      - name: Check the whole workspace on 1.90.0
+        run: PATH="$RUST_MSRV_DIR/1.90.0/bin:$PATH" cargo check --workspace --all-features

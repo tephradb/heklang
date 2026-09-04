@@ -19,7 +19,7 @@ per element of a finite container, and every path must return. Every program ter
 contract language buys that guarantee at run time with gas metering; here it is not expressible in
 the first place.
 
-[hekla]: https://github.com/tephradb/hekla
+[hekla]: https://git.tqwewe.com/tephra/hekla
 
 ## What it looks like
 
@@ -83,16 +83,16 @@ binaries (`x86_64` and `aarch64`, gnu and musl) are attached to every release, a
 cargo binstall hek
 ```
 
-Also `cargo install hek` to build it from source, `nix run github:tephradb/heklang` to run it
-without installing anything, or take a tarball straight from [Releases] (each is published
-beside its `.sha256`, and a `SHA256SUMS` covers the set).
+Also `cargo install hek` to build it from source, `nix run git+https://git.tqwewe.com/tephra/heklang`
+to run it without installing anything, or take a tarball straight from [Releases] (each is
+published beside its `.sha256`, and a `SHA256SUMS` covers the set).
 
 To embed the language instead of running the tool, `cargo add heklang`: that crate is the lexer,
 parser, checker and interpreter, and [hekla] is what drives it in production. The editor grammar
 is a third crate, [tree-sitter-hek], so an editor can load it without either of the others.
 
 [cargo-binstall]: https://github.com/cargo-bins/cargo-binstall
-[Releases]: https://github.com/tephradb/heklang/releases
+[Releases]: https://git.tqwewe.com/tephra/heklang/releases
 [tree-sitter-hek]: https://crates.io/crates/tree-sitter-hek
 
 ## The tool

@@ -6,7 +6,7 @@ description: Write, review and debug heklang (.hk) modules, the total event-sour
 # heklang
 
 heklang is a small, **total** language for event-sourced application logic, and the module
-language for [hekla](https://github.com/tephradb/hekla). Five declaration kinds do the work:
+language for [hekla](https://git.tqwewe.com/tephra/hekla). Five declaration kinds do the work:
 
 - a **command** replays the history its decision depends on and appends events;
 - a **projector** consumes events into a read model;
@@ -35,8 +35,9 @@ hek fmt   path/      # rewrite canonically; --check makes it a gate
 hek check --boundaries   # one line per command naming what it guards, transitively
 ```
 
-Install with `cargo binstall hek`, `cargo install hek`, or `nix run github:tephradb/heklang`. From a
-heklang checkout it is `cargo run -p hek -- check path/`.
+Install with `cargo binstall hek`, `cargo install hek`, or
+`nix run git+https://git.tqwewe.com/tephra/heklang`. From a heklang checkout it is
+`cargo run -p hek -- check path/`.
 
 **Workflow for every change:** write or edit the `.hk` files, run `hek check`, fix what it names,
 add or update a `test`, run `hek test`, then `hek fmt`. Never claim a module is correct without
