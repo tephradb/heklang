@@ -20,7 +20,8 @@ pass   an email that already placed an order is refused
 ## Usage
 
 ```
-hek [check|test|fmt] [--boundaries] [--check] [path|-]
+hek [check|test|fmt|digest] [--boundaries] [--check]
+    [--packed|--hash|--json] [--tests] [path|-]
 ```
 
 | Command | Does |
@@ -29,6 +30,7 @@ hek [check|test|fmt] [--boundaries] [--check] [path|-]
 | `hek test` | the same, then runs every `test` declaration |
 | `hek` | both |
 | `hek fmt` | rewrites every `.hk` file under `path` canonically |
+| `hek digest` | prints what that program does, with everything else taken away |
 
 `path` is a directory or a single `.hk` file, and defaults to the current directory.
 
@@ -52,14 +54,31 @@ format-on-save wants: helix and the editors that copied it replace the buffer wi
 the formatter writes. That is also why a module that does not parse **fails** here rather
 than printing nothing. An empty stdout and a zero status would tell the editor the file is
 now empty, and it would say so on the next save, so the message goes to stderr and stdout is
-left alone. `-` belongs to `fmt` alone: `check` and `test` read a whole program, which is a
-directory.
+left alone. `-` belongs to `fmt` and `digest`: both read one module, and a module is a whole program
+(`docs/modules.md`). `check` and `test` read the tests beside the code, which is a directory.
 
 `--check` belongs to `fmt` and turns it into a gate: it names the files that would change,
 writes nothing, and exits 1 if there are any. `docs/fmt.md` is the contract for what
 canonical means. `fmt` is the one command that reads a file at a time rather than the whole
 program at once, because layout is a property of one file and a file whose neighbours are
 missing still formats.
+
+**`hek digest` prints the digest form**, which is what the program does with names of local
+bindings, layout, comments, file boundaries and declaration order taken out of it. Hash it to find
+out whether a program meaningfully changed, expand it to find out where. `docs/digest.md` is the
+contract.
+
+There is one canonical artifact and two views of it. `--packed` is the canonical form, one line per
+declaration, and the only thing the hash covers; the default output is the readable expansion and
+`--json` is the structural view, and nothing hashes either, so both may read better later without
+moving a stored hash. `--hash` prints the hash alone, which is what a gate wants, and `--tests` adds
+the `test` declarations, which are otherwise a section of their own. `--tests` says what the output
+holds in every one of the four forms, and `--packed`, `--hash` and `--json` together are an error:
+they are three ways of reading one answer.
+
+Nothing is printed on the way, so `hek digest --packed hek/ | sha256sum` agrees with
+`hek digest --hash hek/`. A program that does not check has no digest form, so the diagnostics go to
+stderr and the status is 1. `hek digest -` reads one module from stdin, like `fmt -`.
 
 Exit status is 0 when everything parsed and every test passed, and 1 otherwise. `check`
 is the pre-commit form: a failing test does not fail it, because a test that fails is a

@@ -40,6 +40,10 @@ repository = "https://git.tqwewe.com/tephra/heklang"
 
 [dependencies]
 uuid = { version = "1.26.0", default-features = false, features = ["std", "v5"] }
+# The digest form is hashed, and a hash compared across machines and heklang versions has
+# to be one every other tool can compute too. `sha2` is pure Rust, so the rule that building
+# the language needs no C toolchain still holds.
+sha2 = "0.11.0"
 
 # `harness = false` because this reports allocation counts rather than pass or fail,
 # and `test = false` so `cargo test` does not fold a hundred thousand events.

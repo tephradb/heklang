@@ -75,7 +75,7 @@ command PlaceOrder(order_id: Uuid, customer_id: Int, email: String, total: Money
 
 ## Install
 
-`hek` is the checker, test runner and formatter, and one binary is all of it. Prebuilt Linux
+`hek` is the checker, test runner, formatter and digest tool, and one binary is all of it. Prebuilt Linux
 binaries (`x86_64` and `aarch64`, gnu and musl) are attached to every release, and
 [cargo-binstall] fetches the right one rather than compiling it:
 
@@ -98,15 +98,23 @@ is a third crate, [tree-sitter-hek], so an editor can load it without either of 
 ## The tool
 
 ```sh
-hek check hek/   # parse every `.hk` file under a path as one program
-hek test  hek/   # the same, then run every `test` declaration in it
-hek fmt   hek/   # rewrite canonically; `--check` makes it a gate
+hek check  hek/   # parse every `.hk` file under a path as one program
+hek test   hek/   # the same, then run every `test` declaration in it
+hek fmt    hek/   # rewrite canonically; `--check` makes it a gate
+hek digest hek/   # what the program does, with everything else taken away
 ```
 
 Every static check lives in the parser, so "parses" and "checks" are the same pass, and a
 diagnostic carries a code, an extent and a hint separately rather than as one sentence.
 
-From a checkout the same three are `cargo run -p hek -- check hek/` and so on. The repository is
+`digest` is the odd one out: it prints a condensed, deterministic rendering of what the program
+*does*, with local names, layout, comments, file boundaries and declaration order taken out. Two
+versions that behave the same hash the same. The canonical form is s-expressions, one line per
+declaration (`--packed`), it reads back into the same object with no source tree in reach, and
+every declaration carries a hash of its own plus a hash of just its externally-visible signature.
+[docs/digest.md] has the rules.
+
+From a checkout the same four are `cargo run -p hek -- check hek/` and so on. The repository is
 also a flake: `nix build .#hek` for the binary, `nix build .#tree-sitter-hek` for the grammar,
 `nix flake check` for the suite.
 
@@ -140,6 +148,7 @@ left in, so the two should change together.
 [docs/commands.md]: docs/commands.md
 [docs/effects.md]: docs/effects.md
 [docs/refusals.md]: docs/refusals.md
+[docs/digest.md]: docs/digest.md
 
 ## License
 

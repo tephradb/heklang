@@ -16,31 +16,39 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use heklang::{Diagnostic, Program, Severity, Span, TestOutcome, check_files, run_tests};
+use heklang::{Diagnostic, Digest, Program, Severity, Span, TestOutcome, check_files, run_tests};
 
 /// Where a `= ` line wraps. Wide enough for a long sentence to stay one or two lines,
 /// narrow enough to read beside the source it is about.
 const WIDTH: usize = 84;
 
 const USAGE: &str = "\
-hek: check heklang sources, run their tests, and format them
+hek: check heklang sources, run their tests, format them and digest them
 
 usage:
-  hek [check|test|fmt] [--boundaries] [--check] [path|-]
+  hek [check|test|fmt|digest] [--boundaries] [--check]
+      [--packed|--hash|--json] [--tests] [path|-]
 
   check   parse every `.hk` file under `path` as one program
   test    the same, then run every `test` declaration in it
   fmt     rewrite every `.hk` file under `path` canonically
+  digest  print what that program does, with everything else taken away
 
   --boundaries  print what each command guards, transitively
   --check       with `fmt`, name what would change and write nothing
+  --packed      with `digest`, print the canonical form the hash covers
+  --hash        with `digest`, print only the hash
+  --json        with `digest`, print the form as JSON
+  --tests       with `digest`, include the `test` declarations
 
 `hek fmt -` formats one module from stdin onto stdout, which is what an editor
 wants; it fails rather than printing nothing when the module does not parse.
+`hek digest -` reads one module the same way.
 
 `path` is a directory or a single `.hk` file, and defaults to the current
-directory. With no command `hek` does both. Every file under `path` is one
-module of one program, and declaration order across them does not matter.
+directory. With no command `hek` does both `check` and `test`. Every file under
+`path` is one module of one program, and declaration order across them does not
+matter.
 ";
 
 fn main() -> ExitCode {
@@ -64,6 +72,9 @@ fn run() -> Result<bool, String> {
     let mut asked_for_boundaries = false;
     let mut checking = false;
     let mut reading_stdin = false;
+    let mut view = View::Expanded;
+    let mut views = 0;
+    let mut with_tests = false;
 
     for arg in args.by_ref() {
         match arg.as_str() {
@@ -73,11 +84,25 @@ fn run() -> Result<bool, String> {
             }
             "--boundaries" => asked_for_boundaries = true,
             "--check" => checking = true,
+            "--json" => {
+                view = View::Json;
+                views += 1;
+            }
+            "--hash" => {
+                view = View::Hash;
+                views += 1;
+            }
+            "--packed" => {
+                view = View::Packed;
+                views += 1;
+            }
+            "--tests" => with_tests = true,
             // Before the unknown-option arm below, which would otherwise claim it.
             "-" => reading_stdin = true,
             "check" if root.is_none() => command = Command::Check,
             "test" if root.is_none() => command = Command::Test,
             "fmt" if root.is_none() => command = Command::Fmt,
+            "digest" if root.is_none() => command = Command::Digest,
             other if other.starts_with('-') => {
                 return Err(format!("unknown option `{other}`; try `hek --help`"));
             }
@@ -85,15 +110,30 @@ fn run() -> Result<bool, String> {
         }
     }
 
+    if views > 1 {
+        return Err(
+            "`--packed`, `--hash` and `--json` are three ways of reading one digest; pick one"
+                .to_string(),
+        );
+    }
+    if command != Command::Digest && (views > 0 || with_tests) {
+        return Err("`--packed`, `--hash`, `--json` and `--tests` belong to `digest`".to_string());
+    }
+
     if reading_stdin {
-        if command != Command::Fmt {
-            return Err(
-                "`-` formats one module read from stdin; `check` and `test` read a whole \
-                 program, which is a directory"
-                    .to_string(),
-            );
+        match command {
+            Command::Fmt => return format_stdin(checking),
+            // A module is a whole program (`docs/modules.md`: there is no header item),
+            // so one on stdin has a digest form like any other.
+            Command::Digest => return digest_stdin(view, with_tests),
+            _ => {
+                return Err(
+                    "`-` formats or digests one module read from stdin; `check` and `test` \
+                     read a whole program, which is a directory"
+                        .to_string(),
+                );
+            }
         }
-        return format_stdin(checking);
     }
 
     let root = root.unwrap_or_else(|| PathBuf::from("."));
@@ -130,6 +170,10 @@ fn run() -> Result<bool, String> {
         let body = fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
         sources.push((label(&root, path), body));
     }
+    if command == Command::Digest {
+        return digest(&sources, view, with_tests);
+    }
+
     let files: Vec<(&str, &str)> = sources
         .iter()
         .map(|(name, body)| (name.as_str(), body.as_str()))
@@ -168,6 +212,7 @@ enum Command {
     Test,
     Both,
     Fmt,
+    Digest,
 }
 
 /// One module in on stdin, the formatted module out on stdout.
@@ -244,6 +289,64 @@ fn format(root: &Path, paths: &[PathBuf], checking: bool) -> Result<bool, String
     // so it only fails on a file it could not read at all, which is what a syntax error is
     // here: `check` is where a program is judged.
     Ok(unparsed.is_empty() && (!checking || changed.is_empty()))
+}
+
+/// One module in on stdin, its digest form out on stdout. `fmt -`'s shape, for the reason
+/// `fmt -` has it: an editor or a script has one buffer and no directory to point at.
+fn digest_stdin(view: View, tests: bool) -> Result<bool, String> {
+    let mut body = String::new();
+    io::stdin()
+        .read_to_string(&mut body)
+        .map_err(|err| format!("stdin: {err}"))?;
+    digest(&[("<stdin>".to_string(), body)], view, tests)
+}
+
+/// Which of the four ways of reading a digest was asked for.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum View {
+    /// The readable expansion. What a person at a terminal wants, and what a diff reads.
+    Expanded,
+    /// The canonical bytes. What a caller stores, and what the hash covers.
+    Packed,
+    Hash,
+    Json,
+}
+
+/// A digest, in the view that was asked for.
+///
+/// A program that does not check has no digest form: what a `Program` holding an
+/// `Expr::Invalid` does is not defined, so it is reported rather than hashed. Nothing else
+/// is printed on the way, so `hek digest --packed path | sha256sum` agrees with
+/// `hek digest --hash path`.
+fn digest(sources: &[(String, String)], view: View, tests: bool) -> Result<bool, String> {
+    let files: Vec<(&str, &str)> = sources
+        .iter()
+        .map(|(name, body)| (name.as_str(), body.as_str()))
+        .collect();
+    let program = match check_files(files) {
+        Ok(program) => program,
+        Err(errors) => {
+            for err in &errors {
+                eprint!("{}", report(sources, err));
+            }
+            let s = if errors.len() == 1 { "" } else { "s" };
+            eprintln!("\n{} error{s}", errors.len());
+            return Ok(false);
+        }
+    };
+
+    let digest = Digest::of(&program);
+    match (view, tests) {
+        (View::Hash, false) => println!("{}", digest.hash()),
+        (View::Hash, true) => println!("{}", digest.hash_with_tests()),
+        (View::Json, false) => println!("{}", digest.json()),
+        (View::Json, true) => println!("{}", digest.json_with_tests()),
+        (View::Packed, false) => print!("{}", digest.packed()),
+        (View::Packed, true) => print!("{}", digest.packed_with_tests()),
+        (View::Expanded, false) => print!("{}", digest.expanded()),
+        (View::Expanded, true) => print!("{}", digest.expanded_with_tests()),
+    }
+    Ok(true)
 }
 
 fn suite(program: &Program) -> bool {

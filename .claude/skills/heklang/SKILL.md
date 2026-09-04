@@ -1,6 +1,6 @@
 ---
 name: heklang
-description: Write, review and debug heklang (.hk) modules, the total event-sourced module language for the hekla runtime. Covers events, commands, guards, refusals, projectors, effects, fn helpers, consts and tests, plus the hek check/test/fmt tool. Use for any .hk file, for anything mentioning heklang, hekla, hek check, or event-sourcing handlers written as commands, projectors and effects.
+description: Write, review and debug heklang (.hk) modules, the total event-sourced module language for the hekla runtime. Covers events, commands, guards, refusals, projectors, effects, fn helpers, consts and tests, plus the hek check/test/fmt/digest tool. Use for any .hk file, for anything mentioning heklang, hekla, hek check, or event-sourcing handlers written as commands, projectors and effects.
 ---
 
 # heklang
@@ -23,7 +23,8 @@ once per element of a finite container.
 
 ## Run the checker. Always.
 
-`hek` is the checker, test runner and formatter, and it is the authority on every rule below. Every
+`hek` is the checker, test runner, formatter and digest tool, and it is the authority on every rule
+below. Every
 static check the language has lives in one pass, so "parses" and "checks" are the same thing, and it
 reports every mistake rather than only the first.
 
@@ -33,6 +34,7 @@ hek test  path/      # the same, then run every `test` declaration
 hek                  # both, on the current directory
 hek fmt   path/      # rewrite canonically; --check makes it a gate
 hek check --boundaries   # one line per command naming what it guards, transitively
+hek digest --hash path/  # a hash of what the program does, for "did this meaningfully change?"
 ```
 
 Install with `cargo binstall hek`, `cargo install hek`, or
@@ -42,6 +44,12 @@ Install with `cargo binstall hek`, `cargo install hek`, or
 **Workflow for every change:** write or edit the `.hk` files, run `hek check`, fix what it names,
 add or update a `test`, run `hek test`, then `hek fmt`. Never claim a module is correct without
 having run it. Do not invent syntax; if a construct is not in this skill, it does not exist.
+
+`hek digest` writes nothing and changes nothing: it renders what the program does with local names,
+layout, comments, file boundaries and declaration order taken out, so two versions that behave the
+same hash the same. Use it to answer whether an edit was a refactor or a change, never as a
+substitute for `hek check`. `--packed` is the canonical form a tool stores; the default output is
+the readable one.
 
 **A green `hek check` is necessary and not sufficient.** What it cannot see is data-dependent: a
 `Money` operation that cannot be answered exactly type-checks and then fails at run time naming

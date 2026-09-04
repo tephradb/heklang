@@ -7548,7 +7548,7 @@ fn roots(stmt: &Stmt) -> Vec<ExprId> {
     }
 }
 
-fn children(expr: &Expr) -> Vec<ExprId> {
+pub(crate) fn children(expr: &Expr) -> Vec<ExprId> {
     match expr {
         Expr::Lit(_) | Expr::Load(_) => Vec::new(),
         Expr::Unary { operand, .. } => vec![*operand],

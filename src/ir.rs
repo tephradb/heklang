@@ -951,6 +951,7 @@ impl Builtin {
                 | Builtin::TimestampParse
                 | Builtin::TimestampFromParts
                 | Builtin::MoneyParse(_)
+                | Builtin::DecimalParse(_)
         )
     }
 

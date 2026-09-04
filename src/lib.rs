@@ -1,5 +1,6 @@
 pub mod build;
 pub mod diagnostic;
+pub mod digest;
 pub mod harness;
 pub mod host;
 pub mod inline;
@@ -14,6 +15,7 @@ pub mod value;
 
 pub use build::Builder;
 pub use diagnostic::{Code, Diagnostic, Related, Severity};
+pub use digest::{Digest, Entry, Hash, Kind, Sexp, SexpError};
 pub use harness::{Harness, Journal, Reply, Sandbox};
 pub use host::{
     AppendCondition, Attempt, Calls, Clock, Host, Http, Keys, Log, Predicate, Query, Recorded,

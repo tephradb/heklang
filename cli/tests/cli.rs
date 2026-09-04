@@ -287,10 +287,13 @@ fn help_succeeds_and_names_every_command() {
 
     assert!(output.status.success());
     let text = stdout(&output);
-    assert!(
-        text.contains("hek [check|test|fmt] [--boundaries] [--check] [path|-]"),
-        "{text}"
-    );
+    for command in ["check", "test", "fmt", "digest"] {
+        assert!(
+            text.contains(&format!("\n  {command}")),
+            "{command} is missing: {text}"
+        );
+    }
+    assert!(text.contains("hek [check|test|fmt|digest]"), "{text}");
 }
 
 /// The line of carets a run drew, without its trailing newline.
@@ -761,8 +764,202 @@ fn check_from_stdin_says_a_program_is_a_directory() {
     let output = hek_stdin(&["check", "-"], "record Item {\n  sku: String,\n}\n");
     assert!(!output.status.success());
     assert!(
-        stderr(&output).contains("`-` formats one module"),
+        stderr(&output).contains("`-` formats or digests one module"),
         "{}",
         stderr(&output)
+    );
+}
+
+/// `hek digest` prints the readable expansion and nothing else. `docs/digest.md` is the
+/// contract.
+#[test]
+fn digest_prints_the_form_and_nothing_else() {
+    let root = project(
+        "digest-form",
+        &[("events.hk", EVENTS), ("commands.hk", COMMAND)],
+    );
+    let output = run(&root, &["digest"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let form = stdout(&output);
+    assert!(form.starts_with("hek-digest 2\n"), "{form}");
+    assert!(
+        form.contains("(event @order.placed (f order_id Int) (f total (Money 2)))"),
+        "{form}"
+    );
+    assert!(form.contains("(command Place"), "{form}");
+    assert!(
+        !form.contains("checked"),
+        "nothing is printed on the way: {form}"
+    );
+    // The refusal is inlined at the `reject` and has no declaration of its own.
+    assert!(form.contains("(str \"duplicate\")"), "{form}");
+    assert!(!form.contains("(refusal "), "{form}");
+}
+
+/// `--packed` is the canonical form, one line per declaration, and it is the thing the
+/// hash covers.
+#[test]
+fn digest_packed_is_one_line_per_declaration() {
+    let root = project(
+        "digest-packed",
+        &[("events.hk", EVENTS), ("commands.hk", COMMAND)],
+    );
+    let packed = stdout(&run(&root, &["digest", "--packed"]));
+
+    let lines: Vec<&str> = packed.trim_end().lines().collect();
+    assert_eq!(lines[0], "hek-digest 2");
+    assert_eq!(
+        lines.len(),
+        3,
+        "a version line, an event and a command: {packed}"
+    );
+    for line in &lines[1..] {
+        assert!(line.starts_with('(') && line.ends_with(')'), "{line}");
+    }
+
+    // The readable view says the same thing over more lines, and nothing hashes it.
+    let expanded = stdout(&run(&root, &["digest"]));
+    assert!(expanded.lines().count() > lines.len(), "{expanded}");
+}
+
+/// `--hash` is the same answer with the form left off, which is what a gate wants.
+#[test]
+fn digest_hash_is_one_line_of_hex() {
+    let root = project(
+        "digest-hash",
+        &[("events.hk", EVENTS), ("commands.hk", COMMAND)],
+    );
+    let hash = stdout(&run(&root, &["digest", "--hash"]));
+    let hash = hash.trim_end();
+    assert_eq!(hash.len(), 64, "a SHA-256, in lowercase hex: {hash}");
+    assert!(
+        hash.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    );
+
+    // Same program, different layout on disk. `docs/modules.md`: a module is a label.
+    let moved = project(
+        "digest-hash-moved",
+        &[("a/deep/commands.hk", COMMAND), ("b/events.hk", EVENTS)],
+    );
+    assert_eq!(
+        stdout(&run(&moved, &["digest", "--hash"])),
+        stdout(&run(&root, &["digest", "--hash"])),
+        "which file a declaration is in is not part of the program"
+    );
+}
+
+/// A `test` declaration runs nothing in production, so it is a section of its own.
+#[test]
+fn digest_keeps_tests_out_of_the_program() {
+    let files = [
+        ("events.hk", EVENTS),
+        ("commands.hk", COMMAND),
+        ("tests.hk", PASSING),
+    ];
+    let root = project("digest-tests", &files);
+    let bare = project(
+        "digest-no-tests",
+        &[("events.hk", EVENTS), ("commands.hk", COMMAND)],
+    );
+
+    assert_eq!(
+        stdout(&run(&root, &["digest", "--hash"])),
+        stdout(&run(&bare, &["digest", "--hash"])),
+        "the program is the same program"
+    );
+    assert_ne!(
+        stdout(&run(&root, &["digest", "--hash", "--tests"])),
+        stdout(&run(&bare, &["digest", "--hash", "--tests"])),
+        "but a suite was written, and that is a change"
+    );
+    assert!(
+        stdout(&run(&root, &["digest", "--tests"])).contains("(test \"a first order is appended\""),
+        "the suite is in the form when it is asked for"
+    );
+}
+
+/// The JSON carries every entry structurally, with its own hash and its signature, so a
+/// caller can ask which declarations changed and whether the change could break anyone.
+#[test]
+fn digest_json_carries_every_entry() {
+    let root = project(
+        "digest-json",
+        &[("events.hk", EVENTS), ("commands.hk", COMMAND)],
+    );
+    let json = stdout(&run(&root, &["digest", "--json"]));
+    assert!(
+        json.starts_with('{') && json.trim_end().ends_with('}'),
+        "{json}"
+    );
+    assert!(json.contains("\"version\":\"hek-digest 2\""), "{json}");
+    assert!(json.contains("\"kind\":\"command\""), "{json}");
+    assert!(json.contains("\"name\":\"Place\""), "{json}");
+    assert!(json.contains("\"entries\":["), "{json}");
+    // Structural, not a text blob: the form is a tree with named keys.
+    assert!(json.contains("\"params\":["), "{json}");
+    assert!(json.contains("\"signature_hash\":"), "{json}");
+    assert!(json.contains("\"rejects\""), "{json}");
+
+    // `--tests` says what the output holds, in every form it can be read in.
+    assert!(
+        !json.contains("\"tests\":[") && !json.contains("\"hash_with_tests\":"),
+        "unasked-for tests are not in the JSON either: {json}"
+    );
+    let all = stdout(&run(&root, &["digest", "--json", "--tests"]));
+    assert!(all.contains("\"tests\":["), "{all}");
+    assert!(
+        all.contains("\"hash_with_tests\":"),
+        "and the hash that covers them comes with them: {all}"
+    );
+}
+
+/// One module is a whole program, so stdin has a digest form like a directory does.
+#[test]
+fn digest_from_stdin_reads_one_module() {
+    let output = hek_stdin(
+        &["digest", "--packed", "-"],
+        "event @order.placed { order_id: Int }\n",
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "hek-digest 2\n(event @order.placed (f order_id Int))\n"
+    );
+}
+
+/// A program that does not check has no digest form: what it does is not defined.
+#[test]
+fn digest_reports_a_program_that_does_not_check() {
+    let root = project("digest-broken", &[("broken.hk", "command Place( {\n")]);
+    let output = run(&root, &["digest"]);
+    assert!(!output.status.success());
+    assert_eq!(stdout(&output), "", "nothing half-hashed reaches stdout");
+    assert!(stderr(&output).contains("error"), "{}", stderr(&output));
+}
+
+/// The three ways of reading one answer, and where the flags belong.
+#[test]
+fn digest_flags_are_checked_before_anything_is_read() {
+    let root = project(
+        "digest-flags",
+        &[("events.hk", EVENTS), ("commands.hk", COMMAND)],
+    );
+
+    let both = run(&root, &["digest", "--hash", "--json"]);
+    assert!(!both.status.success());
+    assert!(
+        stderr(&both).contains("three ways of reading one digest"),
+        "{}",
+        stderr(&both)
+    );
+
+    let misplaced = run(&root, &["check", "--json"]);
+    assert!(!misplaced.status.success());
+    assert!(
+        stderr(&misplaced).contains("belong to `digest`"),
+        "{}",
+        stderr(&misplaced)
     );
 }
