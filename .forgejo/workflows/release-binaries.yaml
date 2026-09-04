@@ -34,7 +34,7 @@ jobs:
     runs-on: native
     env:
       API: ${{ github.server_url }}/api/v1
-      FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+      FORGE_TOKEN: ${{ secrets.FORGE_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -95,7 +95,7 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in 1 2 3 4 5 6 7 8; do
-            id="$(curl -fsS -H "Authorization: token $FORGEJO_TOKEN" \
+            id="$(curl -fsS -H "Authorization: token $FORGE_TOKEN" \
               "$API/repos/$GITHUB_REPOSITORY/releases/tags/$TAG" | jq -r '.id' || true)"
             if [ -n "$id" ] && [ "$id" != "null" ]; then
               echo "release $TAG found (id $id)."
@@ -114,17 +114,17 @@ jobs:
           ID: ${{ steps.release.outputs.id }}
         run: |
           set -euo pipefail
-          existing="$(curl -fsS -H "Authorization: token $FORGEJO_TOKEN" \
+          existing="$(curl -fsS -H "Authorization: token $FORGE_TOKEN" \
             "$API/repos/$GITHUB_REPOSITORY/releases/$ID" | jq -c '.assets // []')"
           for file in dist/*; do
             name="$(basename "$file")"
             # --clobber, by hand: the API stores a second asset under the same name rather
             # than replacing the first, so a re-run would double every archive.
             for asset in $(echo "$existing" | jq -r --arg n "$name" '.[] | select(.name == $n) | .id'); do
-              curl -fsS -X DELETE -H "Authorization: token $FORGEJO_TOKEN" \
+              curl -fsS -X DELETE -H "Authorization: token $FORGE_TOKEN" \
                 "$API/repos/$GITHUB_REPOSITORY/releases/$ID/assets/$asset"
             done
-            curl -fsS -X POST -H "Authorization: token $FORGEJO_TOKEN" \
+            curl -fsS -X POST -H "Authorization: token $FORGE_TOKEN" \
               -F "attachment=@$file" \
               "$API/repos/$GITHUB_REPOSITORY/releases/$ID/assets?name=$name" > /dev/null
             echo "uploaded $name"

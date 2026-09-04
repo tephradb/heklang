@@ -11,7 +11,7 @@ name: release-plz
 # written for GitHub. `--forge gitea` is what points it at this instance: Forgejo speaks the
 # Gitea API.
 #
-# FORGEJO_TOKEN is a user token with read:repository and write:repository. Using it rather
+# FORGE_TOKEN is a user token with read:repository and write:repository. Using it rather
 # than the automatic per-job token is what lets the tags release-plz pushes trigger downstream
 # workflows, so a hek release (tagged v{version} by release-plz.toml) fires the binary build.
 #
@@ -30,7 +30,7 @@ jobs:
         with:
           # release-plz reads the whole history to work out what changed since the last tag.
           fetch-depth: 0
-          token: ${{ secrets.FORGEJO_TOKEN }}
+          token: ${{ secrets.FORGE_TOKEN }}
 
       # release-plz commits the version bumps and changelog onto the release branch, and git
       # refuses to commit without an identity.
@@ -43,8 +43,8 @@ jobs:
       - name: Publish and tag
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: release-plz release --forge gitea --git-token "${{ secrets.FORGEJO_TOKEN }}"
+        run: release-plz release --forge gitea --git-token "${{ secrets.FORGE_TOKEN }}"
 
       # Keep the release PR (version bumps + changelogs) up to date.
       - name: Update the release PR
-        run: release-plz release-pr --forge gitea --git-token "${{ secrets.FORGEJO_TOKEN }}"
+        run: release-plz release-pr --forge gitea --git-token "${{ secrets.FORGE_TOKEN }}"
