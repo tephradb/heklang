@@ -1,7 +1,7 @@
 [package]
 name = "hek"
 description = "Checker, test runner and formatter for heklang"
-version = "0.1.2"
+version = "0.2.0"
 categories = ["command-line-utilities", "development-tools"]
 keywords = ["heklang", "formatter", "linter", "cli", "event-sourcing"]
 rust-version = "1.90.0"
@@ -16,8 +16,8 @@ pkg-fmt = "tgz"
 bin-dir = "{ name }-v{ version }-{ target }/{ bin }{ binary-ext }"
 
 [dependencies]
-heklang = { path = "..", version = "0.1.2" }
+heklang = { path = "..", version = "0.2.0" }
 # The grammar carries its own `build.rs`, which is the reason the tool is a separate crate:
 # building the language must not require a C toolchain.
-tree-sitter-hek = { path = "../tree-sitter-hek", version = "0.1.0" }
+tree-sitter-hek = { path = "../tree-sitter-hek", version = "0.2.0" }
 tree-sitter = "0.27.0"

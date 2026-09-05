@@ -1,7 +1,7 @@
 [package]
 name = "tree-sitter-hek"
 description = "tree-sitter grammar for heklang, the module language for hekla"
-version = "0.1.0"
+version = "0.2.0"
 categories = ["parser-implementations", "text-editors"]
 keywords = ["tree-sitter", "parser", "grammar", "heklang", "hek"]
 rust-version = "1.90.0"
