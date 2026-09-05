@@ -223,18 +223,31 @@ module.exports = grammar({
         '}',
       ),
 
-    // One shape for a projector handler and an effect arm; only an arm lists more than
-    // one path, and a projector with two would be rejected by the checker, not here.
+    // One shape for a projector handler and an effect arm; only an arm carries a
+    // delivery modifier or lists more than one path, and a projector doing either would
+    // be rejected by the checker, not here.
     event_handler: ($) =>
       seq(
         'on',
+        optional(field('delivery', $.delivery_keyword)),
         commaSep1(field('path', $.event_path)),
         optional(seq('as', field('binding', $.identifier))),
         optional(field('destructure', $.destructure)),
         field('body', $.block),
       ),
 
-    destructure: ($) => seq('{', commaSep1($.identifier), '}'),
+    // `latest` and `live` stay soft, so they are still writable as names everywhere else
+    // (parse.rs `delivery`): `word` is `identifier`, so keyword extraction claims them
+    // only in this position. A node of its own rather than a bare anonymous token, so a
+    // theme can colour it and so `hek fmt`, which walks named children only, can see it.
+    delivery_keyword: (_) => choice('latest', 'live'),
+
+    // An entry may carry `@key`, which marks an effect arm's partition key (rule 15).
+    // Only the annotated form is wrapped, so a plain field stays the bare identifier
+    // every query and every corpus tree already names.
+    destructure: ($) => seq('{', commaSep1(choice($.identifier, $.keyed_field)), '}'),
+
+    keyed_field: ($) => seq($.annotation, field('name', $.identifier)),
 
     // ----------------------------------------------------------------------- tests
 

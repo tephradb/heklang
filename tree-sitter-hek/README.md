@@ -32,6 +32,13 @@ and a `fn` is not a statement. That asymmetry is real rather than an oversight, 
 grammar keeps it: `effect_decl` sweeps for `fn` and `on`, `projector_shell` for `enum`,
 `entity` and `on`.
 
+The widening covers rule 15 too. `event_handler` is one rule for both kinds, so it takes
+`on latest` and a `@key` in the destructure wherever a handler goes; only an effect arm
+may carry either, and the checker is what says so. `destructure` is shared with `fold_arm`
+for the same reason. `latest` and `live` are soft: `word` is `identifier`, so keyword
+extraction claims them between `on` and the first path and nowhere else, and a field called
+`live` still parses as a name.
+
 Three things are decided by lookahead the way the parser decides them with a flag:
 
 - `on @p { a, b } { ... }` against `on @p { ... }` — a destructure is a block with

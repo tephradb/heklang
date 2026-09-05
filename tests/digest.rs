@@ -124,7 +124,7 @@ fn a_written_decimal_place_is_not_the_value() {
 fn an_unwritten_headers_argument_and_an_empty_one_are_one() {
     same(
         "effect Ping {
-           on @order.placed as e {
+           on @order.placed as e { @key order_id } {
              let response = http.get(\"https://ping.example/\")
              if response.status >= 400 {
                fail(\"no\")
@@ -132,7 +132,7 @@ fn an_unwritten_headers_argument_and_an_empty_one_are_one() {
            }
          }",
         "effect Ping {
-           on @order.placed as e {
+           on @order.placed as e { @key order_id } {
              let response = http.get(\"https://ping.example/\", headers = {})
              if response.status >= 400 {
                fail(\"no\")
@@ -350,7 +350,7 @@ fn a_body_holding_a_call_keeps_the_order_it_was_written_in() {
         return response.status
       }
 
-      on @order.placed as e {
+      on @order.placed as e { @key order_id } {
         let sent = http.post(\"https://ship.example/\", {
           \"b\": ping(\"https://b.example/\"),
           \"a\": ping(\"https://a.example/\"),
@@ -367,7 +367,7 @@ fn a_body_holding_a_call_keeps_the_order_it_was_written_in() {
         return response.status
       }
 
-      on @order.placed as e {
+      on @order.placed as e { @key order_id } {
         let sent = http.post(\"https://ship.example/\", {
           \"a\": ping(\"https://a.example/\"),
           \"b\": ping(\"https://b.example/\"),
@@ -395,7 +395,7 @@ fn a_body_holding_a_call_keeps_the_order_it_was_written_in() {
 fn a_json_key_is_quoted_because_it_is_not_an_identifier() {
     let digest = with_events(
         "effect Ship {
-           on @order.placed as e {
+           on @order.placed as e { @key order_id } {
              let sent = http.post(\"https://ship.example/\", { \"a-b\": 1 })
              if sent.status >= 400 {
                fail(\"no\")
@@ -999,5 +999,132 @@ fn a_fn_and_a_test_have_no_signature() {
     assert!(
         entry(&digest, "P").signature.is_some(),
         "a projector's entities are the read API and do have one"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Rule 15 of `docs/effects.md`: delivery and the partition key
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_delivery_modifier_is_what_a_program_does() {
+    differs(
+        "effect E {
+           on @order.placed as e { @key customer_id } { log(\"x\") }
+         }",
+        "effect E {
+           on latest @order.placed as e { @key customer_id } { log(\"x\") }
+         }",
+        "collapsing changes how many invocations there are",
+    );
+    differs(
+        "effect E {
+           on @order.placed as e { @key customer_id } { log(\"x\") }
+         }",
+        "effect E {
+           on live @order.placed as e { @key customer_id } { log(\"x\") }
+         }",
+        "declining history changes which invocations there are",
+    );
+}
+
+#[test]
+fn a_partition_key_is_what_a_program_does() {
+    differs(
+        "effect E {
+           on @order.placed as e { @key customer_id, order_id } { log(\"x\") }
+         }",
+        "effect E {
+           on @order.placed as e { @key customer_id, @key order_id } { log(\"x\") }
+         }",
+        "a second key is a narrower lane",
+    );
+}
+
+/// A composite is a sequence, not a set: rule 4's sorting stops at the arm's key.
+#[test]
+fn reordering_a_composite_key_is_a_change() {
+    differs(
+        "effect E {
+           on @order.placed as e { @key customer_id, @key order_id } { log(\"x\") }
+         }",
+        "effect E {
+           on @order.placed as e { @key order_id, @key customer_id } { log(\"x\") }
+         }",
+        "`{ @key a, @key b }` and `{ @key b, @key a }` are different lanes",
+    );
+}
+
+/// The rest of the arm is unchanged by any of this: what a local is called is still not
+/// in the form.
+#[test]
+fn a_key_does_not_make_local_names_matter() {
+    same(
+        "effect E {
+           on latest @order.placed as e { @key customer_id } {
+             let who = customer_id
+             log(\"{who}\")
+           }
+         }",
+        "effect E {
+           on latest @order.placed as e { @key customer_id } {
+             let whom = customer_id
+             log(\"{whom}\")
+           }
+         }",
+        "a `let` is a slot, and a slot has no name",
+    );
+}
+
+/// The signature carries what a deployment has to know about how events reach an effect,
+/// and nothing else from the arm: not the `as` binding, not the fields it destructures
+/// for its own use.
+#[test]
+fn an_effect_signature_names_its_arms_delivery_and_keys() {
+    let digest = with_events(
+        "effect E {
+           on latest @order.placed, @order.cancelled as e { @key customer_id, order_id } {
+             log(\"x\")
+           }
+         }",
+    );
+    assert_eq!(
+        signature(&digest, "E"),
+        "(sig effect E (on (events @order.cancelled @order.placed) (delivery latest) (key customer_id)))"
+    );
+}
+
+#[test]
+fn an_effect_signature_moves_when_its_lanes_do() {
+    let signature_of = |body: &str| entry(&with_events(body), "E").signature_hash;
+    let base = "effect E {
+      on @order.placed as e { @key customer_id } { log(\"x\") }
+    }";
+    assert_ne!(
+        signature_of(base),
+        signature_of(
+            "effect E {
+               on latest @order.placed as e { @key customer_id } { log(\"x\") }
+             }"
+        ),
+        "a catchup policy is a deployment's business"
+    );
+    assert_ne!(
+        signature_of(base),
+        signature_of(
+            "effect E {
+               on @order.placed as e { @key order_id } { log(\"x\") }
+             }"
+        ),
+        "so is which lane an event lands in"
+    );
+    assert_eq!(
+        signature_of(base),
+        signature_of(
+            "effect E {
+               on @order.placed as e { @key customer_id } { log(\"y\") }
+             }"
+        ),
+        "and the body is still the effect's own business"
     );
 }

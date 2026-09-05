@@ -13,7 +13,7 @@ test per numbered rule. Change the doc, the tests and the code together.
 
 ```
 effect NotifyCustomer {
-  on @order.placed as e {
+  on live @order.placed as e { @key customer_id } {
     fold orders: Int = 0
       on @order.placed(customer_id: e.customer_id) => orders + 1
 
@@ -58,7 +58,7 @@ event type is a compile error pointing at the first.
 ```
 on @shop.reconnected,
    @warranty.plan.created,
-   @warranty.plan.updated as e { shop_id } { ... }
+   @warranty.plan.updated as e { @key shop_id } { ... }
 ```
 
 Every listed path still selects that one arm, and a path appearing in two arms of one effect is
@@ -111,10 +111,11 @@ This is more expressive than hekla's single `query(event)`, which has to work fo
 type and so in practice restricts filters to fields common to all triggers. Per-arm state has no such
 constraint: each arm knows exactly one event type, so it can filter on any field of it.
 
-An arm is `on @path [as name] [{ destructure }] { body }`, the same shape a projector handler has
-(`docs/projectors.md`, rule 1). With two blocks the first destructures payload fields and the second
-is the body; with one there is nothing to destructure. The two kinds share one construct rather than
-each having a slightly different one.
+An arm is `on [latest|live] @path [as name] { [@key] field, ... } { body }`, nearly the shape a
+projector handler has (`docs/projectors.md`, rule 1). The first block destructures payload fields and
+the second is the body. The two kinds share one construct rather than each having a slightly
+different one, and rule 15 is where they part: a handler may omit the destructure and an arm may not,
+because that is where the arm's partition key is written.
 
 An arm stages like a command: a run of `fold` declarations is one read, and a statement below one
 closes it, so a later run can filter on what an earlier one folded (`docs/commands.md`). Rule 3
@@ -451,7 +452,7 @@ the `@subject(...)` declaration on that event says which key namespace it names.
 not come from the trigger there is no name to recover, so the second form supplies it:
 
 ```
-on @shop.redact.received as e { shop_id } {
+on @shop.redact.received as e { @key shop_id } {
   fold customers: List(Int) = []
     on @order.paid(shop_id) { customer_id } => customers.push(customer_id)
 
@@ -582,8 +583,8 @@ effect SyncShop {
     log("synced shop {shop_id} at {domain}")
   }
 
-  on @shop.sync.requested as e { shop_id } { ... sync(shop_id, domain, reveal(token)) }
-  on @shop.reconnected as e { shop_id } { ... sync(shop_id, domain, reveal(token)) }
+  on @shop.sync.requested as e { @key shop_id } { ... sync(shop_id, domain, reveal(token)) }
+  on @shop.reconnected as e { @key shop_id } { ... sync(shop_id, domain, reveal(token)) }
 }
 ```
 
@@ -652,7 +653,7 @@ storing it.
 ### What it takes: a field of the trigger, or a fold of one
 
 ```
-on @shop.sync.requested as e { shop_id } {
+on @shop.sync.requested as e { @key shop_id } {
   fold token: String? = none
     on @shop.connected(shop_id) { access_token } => access_token
     on @shop.reconnected(shop_id) { access_token } => access_token
@@ -890,6 +891,171 @@ what remains.
 
 The goal is that verify keeps covering only causes not yet nameable. It should keep shrinking.
 
+## 15. Delivery is declared, and a key names the lane
+
+An arm says which events it answers. Until this rule it said nothing about **how many invocations
+that should be**, and two things followed from the silence.
+
+*Every effect had one lane.* Events were processed strictly in log order, so one unprocessable event
+blocked every unrelated aggregate behind it. This is not hypothetical: in a production deployment one
+oversized order event stalled a warranty-recording effect for every merchant on the platform for
+eight hours, because that effect had no key and therefore one lane.
+
+*Every effect replayed from position 0.* A new effect has no watermark, so adding one to a running
+deployment fires its side effects across the whole history. For a notification effect that is an
+email to every customer in the log. For a convergent one it is N redundant API calls where one would
+do.
+
+Authors worked around both by reading the log at head inside the effect ("skip unless this is the
+newest event for this key"), which is exactly what rule 3 forbids and should keep forbidding: a fold
+being a pure function of the log prefix and the trigger's position is what buys replay equivalence
+and verify mode. So the fix goes in the declaration.
+
+Everything below serves one sentence:
+
+> **A catchup policy may change how much work happens. It must never change what the log says.**
+
+```
+arm := "on" [ "latest" | "live" ]
+       path ("," path)*
+       ["as" ident]
+       "{" [ "@key" ] ident ("," [ "@key" ] ident)* [","] "}"
+       "{" body "}"
+```
+
+### `@key`
+
+Marks a destructured binding as part of this arm's partition key. At least one per arm, and marking
+several forms a composite, ordered as written.
+
+**Mandatory, with no opt-out.** An implicit "no key" default is a default of one global lane and
+maximum blast radius, which is the failure this rule exists for. If a genuinely global-ordering
+effect turns up later, an explicit opt-out is additive.
+
+It is an annotation on a binding rather than a clause of its own, and the alternatives are worth
+recording:
+
+- **Rejected: a header clause,** `effect Foo by shop_id`. It makes the same token resolve as a
+  field-name lookup in one place and as a binding in another, and it hides the key from the arm that
+  uses it.
+- **Rejected: an expression form,** `by <expr>`. A partition key is a domain identity, not a computed
+  value. Key functions returning an arbitrary value exist in other runtimes and nothing real uses the
+  freedom. If a case appears, `@key` on a `let` above the body is the additive extension.
+- It reuses an annotation whose meaning already matches: `@key` on an entity field marks identity, and
+  `@key` on a trigger binding marks the identity that defines the lane. The two positions are
+  disjoint, so nothing has to tell them apart.
+- Renames are free: `{ @key shop }` for a legacy event whose field is not called `shop_id`.
+- It costs five characters. `by <expr>` costs eleven, which measurably pushes arm headers past
+  `hek fmt`'s 90-column wrap: on a real eight-arm effect, `by shop_id` wraps four of the eight headers
+  into six-line blocks and `@key` wraps one.
+
+**A key may not be sealed.** Choosing a lane means reading the key, and rule 12 lets sealed content
+only be moved, asked about or revealed. The subject id it is bound to is not sealed and is usually the
+key that was wanted anyway. A key also has to be a type that identifies, which is the same set an
+entity key takes: an `Int`, a `String`, a `Uuid`, a `Timestamp` or an enum.
+
+**Composite order is significant.** `{ @key a, @key b }` and `{ @key b, @key a }` are different lanes,
+so the digest does not sort them (`docs/digest.md` rule 4).
+
+### The modifiers
+
+| Form | Delivery | May `invoke` |
+| --- | --- | --- |
+| `on` | every matching event gets an invocation | yes |
+| `on latest` | one invocation per key per batch, at the newest matching position in it | **no** |
+| `on live` | only events appended after the effect's first activation | yes |
+
+`on` is the default and is unchanged: existing behaviour, existing programs.
+
+**`on latest` is not "skip history".** History is processed; the arm runs once per key instead of once
+per event, and because rule 3 stops a fold at the trigger's own position inclusive, that one
+invocation has already seen every event before it. What varies is batch size. Catching up, the batch
+is the whole backlog, so thirty historical plan edits for one shop produce one invocation. Live, a
+batch is normally one event, so `latest` only collapses when several events for one key are pending
+while an earlier invocation is still running. That burst behaviour matters beyond migrations: a
+merchant editing six plans in a minute gets one publish, permanently.
+
+**`on live` declares that history is not news.** It is not a position constant in source. The runtime
+resolves it to a concrete position once, at first activation, per data directory. Source states
+intent, so dev, staging and production each resolve correctly, the value cannot rot, and `hek digest`
+does not move when an operator makes an operational decision.
+
+`latest` and `live` are **soft**, claimed only between `on` and the first path, so a field or
+parameter called `live` stays writable. This is the same device the effect builtins use (rule 10).
+
+### Why `latest` forbids `invoke` and `live` does not
+
+The asymmetry is load-bearing, so it is enforced *and* written down.
+
+`on live` declines whole invocations. No HTTP, no `invoke`, no record. The one-to-one relationship
+between an invocation and what it wrote survives, and the log truthfully says nothing happened,
+because nothing did.
+
+`on latest` keeps one invocation out of N. That breaks one-to-one, and whether the surviving record
+still tells the truth depends on whether it described *the invocation* ("I published the metafield")
+or *the events* ("this webhook means the shop uninstalled"). Those spell identically and only the
+author knows which.
+
+The check is interprocedural within the effect, because an effect-local `fn` may `invoke`; a walk that
+stopped at the arm's own statements would let the same program through by moving one line.
+
+Two rejected alternatives, recorded so they are not revisited:
+
+- **Rejected: "safe if the invoke's input uses only the key."** Unsound. `invoke DisconnectShop
+  { shop_id }` has key-only input, but a shop that uninstalled, reinstalled and uninstalled again has
+  two triggering webhooks, and collapsing them emits one `@shop.uninstalled` where reality had two.
+  The difference is not in the data.
+- **Rejected: "safe if no fold or projector reads the emitted event type."** Sound for known cases,
+  but it makes the meaning of `latest` depend on what the rest of the program happens to read today,
+  so an unrelated fold added elsewhere silently changes an effect's licence. It also lets a scheduling
+  hint change the log's contents whenever nobody is looking, which is the one sentence this rule is
+  for.
+
+**The cost is real.** A convergent effect cannot both collapse and record a durable fact in the log.
+There is no workaround inside one effect, since rule 1 forbids two arms naming one event type, and
+none across two, since the record is conditional on the call having succeeded and a second effect
+cannot observe that. The author picks one.
+
+**Where it lands in practice, measured rather than assumed.** The port has six effects that look like
+`on latest` candidates, and all six invoke a `Record...` command. Migrated, one takes the modifier
+and five do not, for three different reasons, and the split is the useful part:
+
+- **Three fold the event they emit** (`master_product_id != 0`, and two `enabled` facts). There the
+  record is not an audit trail at all, it is the convergence state: the arm reads it back to decide
+  whether to act. Dropping it costs the convergence. But they also lose nothing to the ban, because
+  folding the record is exactly what makes a redundant run a no-op, so they are already self-limiting
+  and had no reason to collapse.
+- **One records real domain state** read by a guard, a projector and another effect
+  (`@shop.subscription.synced`). Not a record of the invocation at all; it happens to be emitted by
+  one.
+- **One records the emitting command's own idempotence memory**
+  (`@shop.webhook.registration.completed`, folded by the command that emits it, per topic). Nothing
+  else reads it, but dropping it would make that command emit on every call.
+- **One is the case this rule was written around.** `sync-shop-plans-metafield` emits
+  `@shop.plans_metafield.synced` through a command that is a bare `emit`: no guard, no fold, and a
+  comment saying the journal covers replay so the event is purely an audit fact. It appears in three
+  places in the whole program, all of them its own declaration and emission. Dropping the `invoke` is
+  unobservable, and it is the effect with the most to gain: **fourteen trigger paths collapsing to one
+  publish per shop.**
+
+So the correction to make here is narrower than it first looked. "Such records are usually redundant
+with the runtime's invocation journal" was too glib, and three of six are the opposite. But the ban
+costs those three nothing, and `on latest` does have a user. Corpus support across the port, once
+migrated: `@key` on 23 of 23 arms, `on live` on 9, `on latest` on 1.
+
+**The question to ask about a candidate** is not "does it record?" but "does anything read what it
+records?" Three readers to check, in order: the arm's own folds, another declaration's, and the
+emitting command's own. If all three answer no, the record is an audit fact and collapsing is free.
+
+### Per arm, not per effect
+
+An effect may mix modifiers, and keys may differ between its arms. The evidence is a real
+`disconnect-shop` effect whose first arm derives a domain fact and must replay, while its second is
+convergent and collapses. Arms of one effect keying by genuinely different identities usually means it
+should have been two effects, since lanes are mutual exclusion and two arms touching one remote
+resource want one lane space; that is a lint waiting on a warning channel rather than an error, since
+the checker cannot know whether the two resources are disjoint. See "Known gaps".
+
 ---
 
 ## The three kinds are deliberately not unified
@@ -976,6 +1142,43 @@ These are places the *language* differs from hekla. `docs/host.md` is the other 
 | `now()` | pinned once per invocation, one journal entry | journaled per call, so two calls can disagree |
 | self-triggering | rejected statically | unguarded |
 | `erase` | a statement, no result (rule 9) | an expression returning a bool |
+| delivery | declared per arm (rule 15) | one global lane, replaying from position 0 |
+
+## What the runtime owes rule 15
+
+The language surface is a declaration and nothing else. These four are the dispatcher's, and they are
+what make the declaration mean anything.
+
+**They do not all have to land together, and the corpus says which order.** Lanes and the live
+boundary carry 23 and 9 arms respectively, are well understood, and are what the eight-hour stall and
+the replay-from-zero problem actually need. Batch collapse is the most complex of the four, because
+recording the collapsed positions is what keeps replay equivalence true, and it has **one** customer.
+So 1 and 2 first, then ship; 3 goes with them since it is the only way back from a `live` boundary;
+4 can follow. Nothing is wasted by deferring it: `latest` is already coherent in the language, carried
+in the digest and in the signature, and modelled by `hek test`, so the runtime half is the only piece
+outstanding and an author who writes it today gets a checked program and a truthful test.
+
+1. **Lanes.** Events with the same key are processed in log order. Events with different keys may be
+   processed concurrently. This is an ordering guarantee the author chooses, not a parallelism hint,
+   and it should be documented that way: two warranty plans in one shop write variants onto the same
+   remote product, so they must share a lane even though per-plan parallelism looks tempting.
+
+2. **The live boundary is a separate number from the watermark.** Do *not* implement `on live` by
+   initialising the watermark to head. An effect may mix `on` and `on live` arms, and one cursor
+   cannot start at both 0 and head. Store one additional integer per effect, resolved to the log head
+   at first activation. The cursor still starts at 0; during catch-up the dispatcher simply does not
+   invoke `live` arms for positions below the boundary.
+
+3. **A rewind command, CLI only, against a stopped process.** It is the only way back to history for a
+   `live` effect: flipping the arm to `on` and redeploying does not help, because the boundary is
+   already persisted. It must **not** be an HTTP endpoint. A `live` effect is by definition one whose
+   author declared that history must not fire, and those are exactly the effects where an accidental
+   rewind re-sends every notification the log has ever seen. The journal will not save you: it is
+   swept on a retention window and bounded by the watermark having moved.
+
+4. **Batching for `latest`.** One invocation per key per dispatch batch, at the newest matching
+   position in that batch. Record which positions were collapsed into the invocation, alongside the
+   existing journal rows, so a re-run reproduces the same grouping and replay equivalence still holds.
 
 ## What the port wrote before rule 12 grew
 
@@ -1010,7 +1213,7 @@ optional-out covers the fold, and narrowing covers the guard.
 ## Checker obligations
 
 **Nothing is deferred any more.** The `@max` tightening invariant recorded in `docs/projectors.md`
-was the last one and it now runs after the passes. Six checks are **implemented**, and the first of
+was the last one and it now runs after the passes. Seven checks are **implemented**, and the first of
 them has a reason to be where it is rather than only a history:
 
 0. **The type check** (`docs/types.md`). It has to run while the program is lowered, because a
@@ -1018,7 +1221,7 @@ them has a reason to be where it is rather than only a history:
    different node than a plain one. Its tables live in `src/types.rs` with no parser state in them,
    so a checker elsewhere can reuse them.
 
-The other five live in the parser only because nothing else exists yet:
+The other six live in the parser only because nothing else exists yet:
 
 1. **Erase-last reachability** (rule 9). Needs one arm's body, so the parser can host it, but it is a
    flow analysis and belongs with the others.
@@ -1033,6 +1236,9 @@ The other five live in the parser only because nothing else exists yet:
    the whole program, because the two declarations it compares can be in any two files, so it moves
    with check 2. The `emit` half is the one rule 12 makes load-bearing: a seal holds what a host
    stored, so a bound on moved content has no runtime left to check it.
+6. **`on latest` never invokes** (rule 15). Interprocedural, but only within one effect, since an
+   effect-local `fn` is invisible outside its braces. The same walk is what check 2 now follows, which
+   closed a hole it had: an `invoke` inside a helper used to be invisible to the cycle check.
 
 The projector half of check 3 landed with it, so `docs/projectors.md` rule 9 no longer records a
 no-op.
@@ -1054,3 +1260,14 @@ it, because a narrowed load lowers differently.
   `reveal` case is now checked where it can be written.
 - **The journal key is a readable description**, not a content hash. It is stable and it prints,
   which is what a harness wants; a real host hashes it.
+- **The disagreeing-keys lint** (rule 15). Arms of one effect keying by different identities is
+  legal and sometimes necessary, and usually means it should have been two effects. It wants a
+  `Severity::Warning`, and heklang has no warning producer yet: `settled` returns the first recorded
+  diagnostic as an error and `check_files` has no channel on the `Ok` path. `docs/diagnostics.md`
+  section 11 is where that lands. It must not become an error: the checker cannot know whether the
+  two remote resources are disjoint.
+- **Testing the live boundary** (rule 15). `deliver` runs an effect over the whole given log, which
+  is all history, so an `on live` arm delivered faithfully would fire for nothing and be untestable.
+  The harness therefore delivers `live` as `on` and says so in `docs/testing.md`. If a real case
+  turns up, the additive move is an `activate <Effect>` statement usable between `given`s, splitting
+  the log into history and live. Nothing needs it yet, and a real case should shape it.

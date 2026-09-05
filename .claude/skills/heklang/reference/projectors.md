@@ -53,6 +53,11 @@ are unrelated.
 destructures payload fields and the second is the body; with one, there is nothing to destructure and
 the block is the body.
 
+An effect arm is nearly the same construct, and parts from it in two places, both rule 15's: an arm
+may carry `latest` or `live` after `on` and a handler may not, and an arm's destructure is mandatory
+because it carries the arm's `@key`. A projector rebuilds from position 0 in one pass, so it has no
+lanes to name and no history to decline.
+
 `as name` binds the envelope and is optional: through it, `.at` (the append timestamp), `.id` (the
 event's stable identity) and `.position` (its position in the log), plus payload access, so `e.total`
 reads a field whether or not it was destructured. There is no implicit binding: a handler with no

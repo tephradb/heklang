@@ -357,7 +357,7 @@ const SEALED: &str = "event @shop.connected {
   token: String @subject(shop_id),
 }
 effect Use {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     fold token: String? = none
       on @shop.connected(shop_id: e.customer_id) { token } => token
 
@@ -499,7 +499,7 @@ impl Calls for Ledger {
 }
 
 const NOTIFY: &str = "effect Notify {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     let response = http.post(\"https://mail.example/confirm\", { \"order\": e.order_id })
     if response.status >= 400 { fail(\"rejected\") }
   }

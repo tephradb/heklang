@@ -133,6 +133,19 @@ effect that fires on three of the given events makes three invocations, and the 
 whole trace across all of them. That is the shape the ported suite needs, and it removes a number
 from the surface that an author would otherwise have to keep in step with the `given` list.
 
+**`deliver` is the whole given log, so it is a catch-up batch.** An `on latest` arm therefore runs
+once per key over it, at the newest matching position, exactly as a dispatcher would
+(`docs/effects.md` rule 15). Three plan edits for one shop are one invocation, and two shops are two.
+The collapsed positions produce no trace entries, so section 7's "ordered and complete" still holds.
+
+**An `on live` arm is delivered as `on`.** Not an oversight and not a simplification: the live
+boundary is a number the runtime resolves once at first activation, and it is a property of a
+deployment rather than of the log. A test constructs its log, so it has nothing to express the
+boundary with, and a faithful `live` arm over a log that is all history would fire for nothing and be
+untestable. What a test can say is what the arm does when it runs, which is what the body is for. If a
+real case for boundary testing turns up, the additive move is an `activate <Effect>` statement usable
+between `given`s, splitting the log into history and live.
+
 ## 5. What `run` expects
 
 | Expectation | Matches |
@@ -238,6 +251,9 @@ only other output is a decision not to call out.
 - **Internals of the runtime.** Slice counts, the append condition, and how many times the fold ran
   are not outputs. What the append condition guarantees is tested by the language's own suite, not by
   an application's.
+- **An effect's live boundary** (`docs/effects.md` rule 15). It is resolved by the runtime at first
+  activation and is not in the log, so a test over a constructed log has nothing to say about it. See
+  section 4.
 
 Everything the runner asserts goes through the same public API an embedder has, which is what keeps
 this list honest: a test cannot see anything a program cannot.

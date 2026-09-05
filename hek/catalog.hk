@@ -180,7 +180,7 @@ effect AuditCatalog {
   // Three event types onto one body. They share `item_id` and `seller_id` and nothing
   // else, and that is exactly what the binding may name: `reason` is on the flag alone
   // and `item` on the listing alone, so neither is reachable here.
-  on @item.listed, @item.delisted, @item.flagged as e { item_id, seller_id } {
+  on latest @item.listed, @item.delisted, @item.flagged as e { item_id, @key seller_id } {
     fold listed: Int = 0
       on @item.listed(seller_id) => listed + 1
       on @item.delisted(seller_id) => listed - 1

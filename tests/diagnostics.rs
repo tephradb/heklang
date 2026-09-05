@@ -374,7 +374,7 @@ fn cases() -> Vec<(Code, String)> {
         ),
         (
             Code::EventShape,
-            "event @a.b { id: Int }\nevent @c.d { other: String }\neffect E {\n  on @a.b, @c.d { log(\"x\") }\n}\n",
+            "event @a.b { id: Int }\nevent @c.d { other: String }\neffect E {\n  on @a.b, @c.d { @key id } { log(\"x\") }\n}\n",
         ),
         (
             Code::RefusalShape,
@@ -425,28 +425,34 @@ fn cases() -> Vec<(Code, String)> {
 }",
         ),
         (
+            Code::ArmShape,
+            "effect E {
+  on @order.placed as e { order_id } { log(\"x\") }
+}",
+        ),
+        (
             Code::ArmOnly,
             "effect E {
   fn helper(e: Int) -> String { return reveal(e) }
-  on @order.placed as e { log(helper(e.customer_id)) }
+  on @order.placed as e { @key order_id } { log(helper(e.customer_id)) }
 }",
         ),
         (
             Code::SealBoundary,
             "effect E {
-  on @order.placed as e { log(\"to {e.email}\") }
+  on @order.placed as e { @key order_id } { log(\"to {e.email}\") }
 }",
         ),
         (
             Code::EraseSubject,
             "effect E {
-  on @order.placed as e { erase(order_id, \"1\") }
+  on @order.placed as e { @key order_id } { erase(order_id, \"1\") }
 }",
         ),
         (
             Code::EraseOrder,
             "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     erase(e.customer_id)
     log(reveal(e.email))
   }
@@ -458,7 +464,7 @@ fn cases() -> Vec<(Code, String)> {
   emit @order.placed { order_id, customer_id, email: \"x\", total: 1.00 }
 }
 effect E {
-  on @order.placed as e { invoke Again { order_id: e.order_id, customer_id: e.customer_id } }
+  on @order.placed as e { @key order_id } { invoke Again { order_id: e.order_id, customer_id: e.customer_id } }
 }",
         ),
         (
@@ -559,7 +565,7 @@ fn an_erase_order_diagnostic_points_at_the_erase() {
     let err = parse(
         "event @order.placed { order_id: Int, customer_id: Int, email: String @subject(customer_id) }
 effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     erase(e.customer_id)
     log(reveal(e.email))
   }
@@ -589,7 +595,12 @@ fn an_undeclared_event_covers_the_path() {
             6,
             8,
         ),
-        ("effect E {\n  on @no.such { log(\"x\") }\n}\n", 2, 6, 8),
+        (
+            "effect E {\n  on @no.such { @key id } { log(\"x\") }\n}\n",
+            2,
+            6,
+            8,
+        ),
         (
             "command C(id: Int) {\n  fold n: Int = 0\n    on @no.such(id) => n\n  return\n}\n",
             3,
@@ -634,7 +645,7 @@ fn a_second_declaration_covers_its_own_name() {
             1,
         ),
         (
-            "event @a.b { id: Int }\neffect E {\n  on @a.b { log(\"x\") }\n}\neffect E {\n  on @a.b { log(\"y\") }\n}\n",
+            "event @a.b { id: Int }\neffect E {\n  on @a.b { @key id } { log(\"x\") }\n}\neffect E {\n  on @a.b { @key id } { log(\"y\") }\n}\n",
             5,
             8,
             1,

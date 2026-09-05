@@ -68,6 +68,12 @@ An `on` header's path list is a list with one difference: **it takes no trailing
 because it has no closing delimiter and a comma there would be followed by `as`. Its
 continuations are indented rather than aligned under the first path.
 
+A delivery modifier (`docs/effects.md` rule 15) stays on the header line with `on`, and is
+measured against the same 90 columns as the rest of it, so the path list is still the group
+that breaks. Inside a destructure, `@key` binds tight to the field it marks: one space,
+never a break between them, and when the destructure breaks the marker travels onto its
+field's own line. It is the same shape `@default Free` takes on an enum variant.
+
 **`record`, `event` and `entity` always break; `enum` does not.** Measured: no `record`,
 `event` or `entity` in the corpus is written on one line, and every `enum` is, seven of seven
 with no multi-line counterexample. That is the corpus telling a type declaration apart from a

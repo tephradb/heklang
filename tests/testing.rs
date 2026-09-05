@@ -48,7 +48,7 @@ const EFFECTS: &str =
 event @shop.sync.requested { shop_id: Int }
 
 effect SyncShop {
-  on @shop.sync.requested { shop_id } {
+  on @shop.sync.requested { @key shop_id } {
     fold domain: String = \"\"
       on @shop.connected(shop_id) { domain } => domain
     fold token: String? = none

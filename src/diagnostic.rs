@@ -61,6 +61,7 @@ pub enum Code {
 
     // The shape of a declaration.
     EmptyDeclaration,
+    ArmShape,
     EntityShape,
     EventShape,
     RefusalShape,
@@ -117,6 +118,7 @@ impl Code {
         Code::UnknownAnnotation,
         Code::BadAnnotation,
         Code::EmptyDeclaration,
+        Code::ArmShape,
         Code::EntityShape,
         Code::EventShape,
         Code::RefusalShape,
@@ -163,6 +165,7 @@ impl Code {
             Code::UnknownAnnotation => "unknown-annotation",
             Code::BadAnnotation => "bad-annotation",
             Code::EmptyDeclaration => "empty-declaration",
+            Code::ArmShape => "arm-shape",
             Code::EntityShape => "entity-shape",
             Code::EventShape => "event-shape",
             Code::RefusalShape => "refusal-shape",

@@ -577,18 +577,61 @@ impl Effect {
     /// The arm one event selects. Rule 1 makes this at most one, so it is a lookup
     /// rather than a filter, even though an arm may now list several paths.
     pub fn arm(&self, event: &EventPath) -> Option<&Arm> {
+        Some(&self.arms[self.arm_index(event)?])
+    }
+
+    /// The same lookup, by position. Rule 15 groups a collapse by the key *within one
+    /// arm*, because two arms have two bodies, so folding one into the other would drop
+    /// work rather than repeat it. [`Effect::arm`] is this plus the indexing, so the arm
+    /// that groups a collapse and the arm that runs go through one predicate and can
+    /// never come out different.
+    pub fn arm_index(&self, event: &EventPath) -> Option<usize> {
         self.arms
             .iter()
-            .find(|arm| arm.events.iter().any(|path| path == event))
+            .position(|arm| arm.events.iter().any(|path| path == event))
     }
 }
 
-/// One `on @path[, @path]* [as name] [{ destructure }] { body }` of an effect. A
-/// command minus its params, plus a trigger binding: the same stages and arena. Several paths may share one arm; the binding then names only what they have
-/// in common.
+/// How much work an arm's events come to. Rule 15: a catchup policy may change how many
+/// invocations happen and may never change what the log says, which is why `Latest` is the
+/// one that cannot `invoke`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Delivery {
+    /// `on`. Every matching event gets an invocation.
+    #[default]
+    Every,
+    /// `on latest`. One invocation per key per batch, at the newest matching position in it.
+    Latest,
+    /// `on live`. Only events appended after the effect's first activation.
+    Live,
+}
+
+impl Delivery {
+    /// The word after `on`, which is also the atom the digest form carries. `Every` writes
+    /// no word in source and still names one here, so an absent modifier and an unknown one
+    /// are never the same thing to a reader of the form.
+    pub fn name(self) -> &'static str {
+        match self {
+            Delivery::Every => "every",
+            Delivery::Latest => "latest",
+            Delivery::Live => "live",
+        }
+    }
+}
+
+/// One `on [latest|live] @path[, @path]* [as name] [{ [@key] field, .. }] { body }` of an
+/// effect. A command minus its params, plus a trigger binding: the same stages and arena.
+/// Several paths may share one arm; the binding then names only what they have in common.
 #[derive(Debug, Clone)]
 pub struct Arm {
     pub events: Vec<EventPath>,
+    /// Rule 15's modifier, `Every` when none was written.
+    pub delivery: Delivery,
+    /// The trigger fields marked `@key`, **in written order**: a composite key is a
+    /// sequence, so `{ @key a, @key b }` and `{ @key b, @key a }` are different lanes.
+    /// Kept apart from `binds` because that list also holds every field reached through the
+    /// `as` binding, and only a destructure entry can carry the marker.
+    pub keys: Vec<Ident>,
     pub binds: Vec<Bind>,
     pub envelope: Vec<EnvBind>,
     pub frame: usize,

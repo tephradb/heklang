@@ -319,7 +319,7 @@ fn arithmetic_on_sealed_content_is_rejected() {
         "event @order.paid { order_id: Int, customer_id: Int, tip: Money(2) @subject(customer_id) }
 
 effect E {
-  on @order.paid as e { tip } {
+  on @order.paid as e { @key order_id, tip } {
     log(\"{reveal(tip) + tip}\")
   }
 }
@@ -528,7 +528,7 @@ command C(id: Int, note: Int) {
   emit @thing.touched { id }
 }
 effect E {
-  on @thing.happened as e { name } {
+  on @thing.happened as e { @key name } {
     let id = name
     invoke Touch { id }
   }

@@ -941,6 +941,11 @@
     }
   },
   {
+    "type": "delivery_keyword",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "destructure",
     "named": true,
     "fields": {},
@@ -950,6 +955,10 @@
       "types": [
         {
           "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "keyed_field",
           "named": true
         }
       ]
@@ -1433,6 +1442,16 @@
         "types": [
           {
             "type": "block",
+            "named": true
+          }
+        ]
+      },
+      "delivery": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "delivery_keyword",
             "named": true
           }
         ]
@@ -2911,6 +2930,32 @@
           }
         ]
       }
+    }
+  },
+  {
+    "type": "keyed_field",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "annotation",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -4955,7 +5000,15 @@
     "named": false
   },
   {
+    "type": "latest",
+    "named": false
+  },
+  {
     "type": "let",
+    "named": false
+  },
+  {
+    "type": "live",
     "named": false
   },
   {

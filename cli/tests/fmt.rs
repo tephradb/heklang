@@ -272,6 +272,48 @@ fn nesting_breaks_outside_in() {
     assert_eq!(fmt(source), source);
 }
 
+/// Rule 15's modifier stays on the header line with `on`, and `@key` binds tight to the
+/// field it marks. Both are already canonical here, so this is a fixed point.
+#[test]
+fn a_delivery_modifier_and_a_key_are_already_canonical() {
+    let source = "effect E {
+  on latest @a.b, @a.c as e { @key id, @key tenant_id, note } {
+    log(\"{id}\")
+  }
+
+  on live @a.d { @key id } {
+    log(\"new\")
+  }
+}
+";
+    assert_eq!(fmt(source), source);
+}
+
+/// The modifier is counted against the same 90 columns as everything else on the header,
+/// so the path list is what breaks, and `@key` travels with its field.
+#[test]
+fn a_long_header_with_a_modifier_breaks_its_paths_and_keeps_the_key_whole() {
+    let source = "effect E {
+  on latest @a.one, @a.two, @a.three, @a.four, @a.five, @a.six, @a.seven, @a.eight, @a.nine as e { @key id } {
+    log(\"{id}\")
+  }
+}
+";
+    let formatted = fmt(source);
+    assert!(
+        formatted.contains("on latest @a.one,\n    @a.two,"),
+        "the modifier rides the first path's line:\n{formatted}"
+    );
+    assert!(
+        formatted.contains("@a.nine as e { @key id } {"),
+        "`@key` stays beside its field:\n{formatted}"
+    );
+    assert!(
+        formatted.lines().all(|line| line.chars().count() <= 90),
+        "nothing should still be over the width:\n{formatted}"
+    );
+}
+
 /// The acceptance fixtures are the formatter's own output, so a change to the printer shows
 /// up as a diff in the repository rather than only in whatever someone happens to run it on.
 #[test]

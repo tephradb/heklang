@@ -342,7 +342,7 @@ command Inner(order_id: Uuid, customer_id: Int) {
   return reject ShopNotFound
 }
 effect E {
-  on @order.placed as e { order_id, customer_id } {
+  on @order.placed as e { @key order_id, customer_id } {
     let r = invoke Inner { order_id, customer_id }
     if r.code().unwrap_or(\"\") == ShopNotFound {
       log(\"refused\")

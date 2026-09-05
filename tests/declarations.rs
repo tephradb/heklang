@@ -197,7 +197,7 @@ command C(y: Int, text: String) {
 #[test]
 fn an_effect_may_precede_the_command_it_invokes() {
     let source = "effect Notify {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     invoke Record { order_id: e.order_id }
   }
 }
@@ -269,7 +269,7 @@ projector Same {
 }
 
 effect Same {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     log(\"placed\")
   }
 }
@@ -285,7 +285,7 @@ effect Same {
         ("projector", "projector Dup { entity R { x: Int @key } }"),
         (
             "effect",
-            "effect Dup { on @order.placed as e { log(\"x\") } }",
+            "effect Dup { on @order.placed as e { @key order_id } { log(\"x\") } }",
         ),
     ] {
         let doubled = format!("event @order.placed {{ order_id: Uuid }}\n{item}\n{item}\n");

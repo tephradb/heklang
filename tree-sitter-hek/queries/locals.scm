@@ -31,6 +31,9 @@
 (destructure
   (identifier) @local.definition.variable.parameter)
 
+(keyed_field
+  name: (identifier) @local.definition.variable.parameter)
+
 (let_statement
   name: (identifier) @local.definition.variable)
 

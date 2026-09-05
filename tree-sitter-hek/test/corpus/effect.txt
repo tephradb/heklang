@@ -5,7 +5,7 @@ an arm on several paths, with a fold and a headers argument
 effect AuditCatalog {
   on @item.listed,
      @item.delisted,
-     @item.flagged as e { item_id, seller_id } {
+     @item.flagged as e { item_id, @key seller_id } {
 
     fold listed: Int = 0
       on @item.listed(seller_id) => listed + 1
@@ -41,7 +41,10 @@ effect AuditCatalog {
       (identifier)
       (destructure
         (identifier)
-        (identifier))
+        (keyed_field
+          (annotation
+            (annotation_name))
+          (identifier)))
       (block
         (fold_declaration
           (identifier)
@@ -357,3 +360,62 @@ effect SyncShop {
             (arguments
               (identifier)
               (identifier))))))))
+
+================================================================================
+delivery modifiers and a composite key
+================================================================================
+
+effect SyncShopPlans {
+  on latest @shop.reconnected,
+     @warranty.plan.updated as e { @key shop_id, @key plan_id, title } {
+    log("{shop_id}")
+  }
+
+  on live @shop.connected { @key shop_id } {
+    log("new")
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (effect_declaration
+    (type_identifier)
+    (event_handler
+      (delivery_keyword)
+      (event_path)
+      (event_path)
+      (identifier)
+      (destructure
+        (keyed_field
+          (annotation
+            (annotation_name))
+          (identifier))
+        (keyed_field
+          (annotation
+            (annotation_name))
+          (identifier))
+        (identifier))
+      (block
+        (expression_statement
+          (call_expression
+            (identifier)
+            (arguments
+              (string
+                (interpolation
+                  (identifier))))))))
+    (event_handler
+      (delivery_keyword)
+      (event_path)
+      (destructure
+        (keyed_field
+          (annotation
+            (annotation_name))
+          (identifier)))
+      (block
+        (expression_statement
+          (call_expression
+            (identifier)
+            (arguments
+              (string
+                (string_content)))))))))

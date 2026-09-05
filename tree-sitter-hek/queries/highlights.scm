@@ -119,6 +119,9 @@
 ; `index` is soft: a name plus a `(`, so it is claimed here rather than reserved.
 (index_keyword) @keyword
 
+; `latest` and `live` are soft too, claimed only between `on` and the first path.
+(delivery_keyword) @keyword
+
 ; Soft inside a test body and an ordinary name everywhere else.
 [
   "given"
@@ -172,6 +175,7 @@
 ; parameter list is; locals.scm carries the same class so their uses match.
 (event_handler binding: (identifier) @variable.parameter)
 (destructure (identifier) @variable.parameter)
+(keyed_field name: (identifier) @variable.parameter)
 
 (enum_variant name: (identifier) @type.enum.variant)
 

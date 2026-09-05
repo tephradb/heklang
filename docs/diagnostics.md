@@ -198,12 +198,13 @@ be the whole of it:
 | `unknown-annotation` | `@nope` |
 | `bad-annotation` | a known annotation in a place or shape it does not take |
 | `empty-declaration` | a declaration whose body would be empty |
+| `arm-shape` | an effect arm with no `@key` |
 | `entity-shape` | an entity with no `@key`, or an index on a field it has not got |
 | `event-shape` | an arm over event types with nothing in common |
 | `refusal-shape` | a refusal named or written in a way its derived code could not survive |
 | `stage-shape` | a `fold` or `guard` written where or how it does not go |
 | `no-zero-value` | a `patch` that would materialise a row it cannot fill |
-| `wrong-context` | a statement in a declaration kind that does not have it |
+| `wrong-context` | a statement in a declaration kind, or an arm, that does not have it |
 | `impure-fn` | a `fn` doing something a pure function cannot |
 | `fold-restriction` | a `fold` calling out or decrypting |
 | `arm-only` | an effect-local `fn` doing what stays in the arm |
@@ -343,3 +344,13 @@ diagnostic one.
 
 Severity is a channel with no producer: nothing is a warning. The lints that need one are
 the next piece of work, and this document is where they land.
+
+There is one waiting: rule 15 of `docs/effects.md` wants to say that two arms of one
+effect keying by different identities usually means it should have been two effects, and
+it must not be an error, because the checker cannot know whether the two remote resources
+are disjoint. Building the channel is more than a `Severity::Warning` at a call site.
+`Parser::settled` returns the first recorded diagnostic as an error, so a warning cannot
+be recorded beside them; and `check_files` answers `Result<Program, Vec<Diagnostic>>`,
+which has nowhere to put one on the way out. Both are small and both are decisions:
+whether the warnings ride on the `Program`, and whether a `hek check` that produced only
+warnings still exits zero.

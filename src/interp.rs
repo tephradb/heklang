@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error;
 use std::fmt;
 use std::sync::Arc;
@@ -10,8 +10,9 @@ use crate::host::{
     AppendCondition, Attempt, Calls, Host, Log, Predicate, Query, Recorded, Request, Rows,
 };
 use crate::ir::{
-    Absent, BinOp, Builtin, Command, Effect, EntityDef, EnvField, EventPath, Expr, ExprId, Exprs,
-    Function, Ident, Iter, Program, Projector, Return, Slice, Slot, Span, Stmt, Type, UnOp,
+    Absent, Arm, BinOp, Builtin, Command, Delivery, Effect, EntityDef, EnvField, EventPath, Expr,
+    ExprId, Exprs, Function, Ident, Iter, Program, Projector, Return, Slice, Slot, Span, Stmt,
+    Type, UnOp,
 };
 use crate::scaled::{self, Rounding};
 use crate::value::{self, Event, Invoked, Json, Key, Record, Value};
@@ -64,6 +65,13 @@ pub enum ErrorKind {
         after: u64,
     },
     BadSubject(Type),
+    /// Rule 15: a `@key` field arrived holding something that cannot name a lane. The
+    /// checker rejects a type that could do this, so reaching here means a host handed
+    /// over a value its own event declaration disagrees with.
+    BadLane {
+        field: Ident,
+        ty: Type,
+    },
     BadUuid(String),
     NoSuchField {
         ty: Type,
@@ -165,6 +173,9 @@ impl fmt::Display for ErrorKind {
             ),
             ErrorKind::BadSubject(ty) => {
                 write!(f, "{} cannot identify a subject", crate::types::a(ty))
+            }
+            ErrorKind::BadLane { field, ty } => {
+                write!(f, "`{field}` holds {ty}, which cannot name a lane")
             }
             ErrorKind::BadUuid(value) => write!(f, "`{value}` is not a uuid"),
             ErrorKind::NoSuchField { ty, field } => write!(f, "no field `{field}` on {ty}"),
@@ -633,6 +644,15 @@ impl<'a, H: Host> Interpreter<'a, H> {
         let Some(arm) = effect.arm(&record.event.path) else {
             return Ok(Invocation::Ignored);
         };
+        // Rule 15: the lane is part of what the arm declared, so an event that cannot
+        // produce one is an event its own declaration disagrees with, and this delivery
+        // wedges rather than running against a key nobody could read. It is also what
+        // lets a walk resolve its collapse set without being able to fail: `collapsed`
+        // stops at such a record and leaves saying so to the delivery that reaches it.
+        // A missing field would already be caught by the bind below; a field holding
+        // something that cannot name a lane would not, because a frame slot takes any
+        // value.
+        partition_key(arm, &record.event)?;
 
         let program = self.program;
         let mut frame = Frame::new(arm.frame);
@@ -744,15 +764,33 @@ impl<'a, H: Host> Interpreter<'a, H> {
 
     /// Runs one effect over the log, following it as an `invoke` lengthens it. A wedge
     /// stops the walk, because a wedged invocation does not advance.
+    ///
+    /// **This is the harness's dispatcher, and it honours one of rule 15's two modifiers.**
+    /// `on latest` collapses here, because the batch it needs is the backlog this walk can
+    /// see. `on live` does not: the boundary is a position a runtime resolves once at first
+    /// activation and keeps, and nothing in a `Program` or a `Log` holds it, so a `live`
+    /// arm is driven exactly as an `on` arm would be and history fires. A host that wants
+    /// the declared meaning keeps that boundary itself and calls `deliver` per position,
+    /// which is the seam `docs/host.md` describes.
     pub fn drive(&mut self, effect: &str) -> Result<Counts, Error> {
         let mut counts = Counts::default();
         let start = self.host.head()? as usize;
+        // Rule 15: an `on latest` arm runs once per key per batch, at the newest matching
+        // position in it. Catching up, the batch is the whole backlog, which is what is in
+        // the log now; an event appended while this walk runs arrives on its own, so it is
+        // a batch of one and collapses with nothing.
+        let collapsed = self.collapsed(effect, start as u64);
         // One entry per event the walk visits. Everything already in the log is a step
         // zero, and an event appended while handling one at step `d` is a `d + 1`.
         let mut steps = vec![0u32; start];
         let mut position = 0u64;
 
         while position < self.host.head()? {
+            if collapsed.contains(&position) {
+                counts.collapsed += 1;
+                position += 1;
+                continue;
+            }
             // One journal per invocation: it is the memory of this position's calls,
             // and nothing carries between positions.
             let mut journal = Journal::default();
@@ -792,6 +830,64 @@ impl<'a, H: Host> Interpreter<'a, H> {
             position += 1;
         }
         Ok(counts)
+    }
+
+    /// The positions in `0..upto` an `on latest` arm selected and will not be invoked for,
+    /// because a later position in the same batch names the same lane.
+    ///
+    /// Grouped by arm as well as by key: rule 1 makes an event select exactly one arm, and
+    /// two arms of one effect may key by different fields, so "the same key" is only a
+    /// question inside one arm. Two events of *different* types do collapse together when
+    /// one arm lists them both, which is the case the rule exists for.
+    ///
+    /// **It answers rather than fails**, and it may only do that because every way it can
+    /// stop early is one the walk stops on too. An unknown effect collapses nothing. A
+    /// record it cannot read, a position with no record, and a key it cannot build all end
+    /// the scan, so nothing past that point collapses; the walk then reaches that same
+    /// position and wedges there, naming it, with everything before it delivered. Failing
+    /// here instead would turn a bad record at position 900 into an error with no counts
+    /// and no partial progress.
+    ///
+    /// The third of those is why `invoke_arm` reads the key it is not otherwise going to
+    /// use: without that, a value that cannot name a lane would bind into a frame slot
+    /// happily, the walk would sail past, and one bad key would quietly downgrade the rest
+    /// of the log from `on latest` to `on`.
+    fn collapsed(&self, effect: &str, upto: u64) -> HashSet<u64> {
+        let mut out = HashSet::new();
+        let Some(target) = self.program.effect(effect) else {
+            return out;
+        };
+        if !target
+            .arms
+            .iter()
+            .any(|arm| arm.delivery == Delivery::Latest)
+        {
+            return out;
+        }
+        // One entry per lane rather than per position: the loser of each pair is known as
+        // soon as the winner replaces it, so nothing has to be kept to compare later.
+        let mut newest: HashMap<(usize, Vec<Key>), u64> = HashMap::new();
+        for position in 0..upto {
+            // A hole stops the scan like an unreadable record does, because the walk
+            // treats it the same way: `invoke_arm` answers `NoSuchPosition`, a wedge.
+            let Ok(Some(record)) = self.host.record(position) else {
+                break;
+            };
+            let Some(index) = target.arm_index(&record.event.path) else {
+                continue;
+            };
+            let arm = &target.arms[index];
+            if arm.delivery != Delivery::Latest {
+                continue;
+            }
+            let Ok(key) = partition_key(arm, &record.event) else {
+                break;
+            };
+            if let Some(earlier) = newest.insert((index, key), position) {
+                out.insert(earlier);
+            }
+        }
+        out
     }
 
     /// Folds the whole log into this projector's read models, in memory.
@@ -1185,6 +1281,38 @@ fn matches(predicate: &Predicate, event: &Event) -> Result<bool, Error> {
         }
     }
     Ok(true)
+}
+
+/// Rule 15's key: the values an arm's `@key` fields hold in one event, in the order the
+/// arm wrote them.
+///
+/// **The one place a partition key is computed.** `drive` collapses an `on latest` arm with
+/// it and a host assigns lanes with it, so the two cannot come to disagree about a
+/// composite or about the order its parts were written in. The checker has already made
+/// every name a field of every listed event type, and every type one that orders and
+/// hashes, which is why this is a read rather than a decision.
+///
+/// **Two things are built from this and they are not the same thing.** A runtime's *lane*,
+/// the unit of mutual exclusion, is the key alone: `docs/effects.md` rule 15 wants two arms
+/// touching one remote resource under one shop id to share a lane, which is the whole
+/// reason arms keying by different identities are worth a warning. Rule 15's *collapse
+/// grouping* is narrower, the key together with the arm that produced it
+/// ([`Effect::arm_index`]), because two arms have two bodies and folding one into the other
+/// would drop work rather than repeat it. `drive` builds the second. A host assigning lanes
+/// wants the first.
+pub fn partition_key(arm: &Arm, event: &Event) -> Result<Vec<Key>, Error> {
+    arm.keys
+        .iter()
+        .map(|name| {
+            let value = field(event, name)?;
+            Key::from_value(value).ok_or_else(|| {
+                Error::new(ErrorKind::BadLane {
+                    field: name.clone(),
+                    ty: value.ty(),
+                })
+            })
+        })
+        .collect()
 }
 
 fn field<'a>(event: &'a Event, name: &str) -> Result<&'a Value, Error> {
@@ -2868,6 +2996,10 @@ fn is_retryable(status: u16) -> bool {
 
 /// What one delivery came to. `Ignored` is not an outcome: no arm selected the event,
 /// so there was no invocation to have one.
+///
+/// Rule 15's collapsing has no variant here, and deliberately: `deliver` names one
+/// position and cannot see the batch it would have to be newest in, so it could never
+/// answer with one. A walk reports the positions it folded away through `Counts::collapsed`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Invocation {
     Done,
@@ -2883,6 +3015,10 @@ pub enum Invocation {
 pub struct Counts {
     pub done: usize,
     pub ignored: usize,
+    /// Rule 15: positions an `on latest` arm selected and did not invoke for, because a
+    /// later position in the same batch had the same key. Counted apart from `ignored`,
+    /// which is the positions no arm wanted at all.
+    pub collapsed: usize,
     pub failures: Vec<String>,
     pub skips: Vec<String>,
     /// A wedge does not advance, so a walk stops at the first one.

@@ -6,11 +6,11 @@ use crate::build::Builder;
 use crate::diagnostic::{Code, Diagnostic, Related};
 use crate::inline;
 use crate::ir::{
-    Absent, Action, Arm, BinOp, Bind, Builtin, Command, ConstDef, Effect, EntityDef, EntityField,
-    EnumDef, EnvField, EventDef, EventPath, Expect, Expr, ExprId, Exprs, FieldDef, Filter,
-    Function, Given, Guard, Handler, Ident, Index, Iter, Literal, MessagePart, Number, Param, Pos,
-    Program, Projector, RecordDef, RecordField, RefusalDef, RefusalParam, ReplySpec, Return, Setup,
-    Slot, Span, Stage, Stmt, Test, Type, UnOp, Update,
+    Absent, Action, Arm, BinOp, Bind, Builtin, Command, ConstDef, Delivery, Effect, EntityDef,
+    EntityField, EnumDef, EnvField, EventDef, EventPath, Expect, Expr, ExprId, Exprs, FieldDef,
+    Filter, Function, Given, Guard, Handler, Ident, Index, Iter, Literal, MessagePart, Number,
+    Param, Pos, Program, Projector, RecordDef, RecordField, RefusalDef, RefusalParam, ReplySpec,
+    Return, Setup, Slot, Span, Stage, Stmt, Test, Type, UnOp, Update,
 };
 use crate::lex::{Keyword, Spanned, Sym, Token, lex};
 use crate::scaled::{self, MAX_SCALE, Rounding};
@@ -2271,6 +2271,10 @@ impl Parser {
 
     fn handler(&mut self, projector: &Ident, events: &[EventDef]) -> Result<Handler, Diagnostic> {
         self.expect_word(Keyword::On)?;
+        self.no_delivery(
+            "a projector handler",
+            "a projector rebuilds from position 0 with no journal to pay for, so every event reaches every handler",
+        )?;
         let at = self.span_here();
         let path = self.expect_path()?;
         let def = self.event_def(events, &path, at)?.clone();
@@ -2286,7 +2290,7 @@ impl Parser {
             None
         };
 
-        self.destructure_block(&mut lower, &def)?;
+        self.destructure_block(&mut lower, &def, None)?;
 
         self.expect_sym(Sym::LBrace)?;
         self.command_end = self.command_end();
@@ -2304,7 +2308,12 @@ impl Parser {
 
     /// The optional `{ field, field }` block, shared by projector handlers and effect
     /// arms so the two kinds cannot drift apart on the same construct.
-    fn destructure_block(&mut self, lower: &mut Lower, def: &EventDef) -> Result<(), Diagnostic> {
+    fn destructure_block(
+        &mut self,
+        lower: &mut Lower,
+        def: &EventDef,
+        mut keys: Option<&mut Vec<Ident>>,
+    ) -> Result<(), Diagnostic> {
         if !self.has_destructure() {
             if self.looks_like_destructure() {
                 return self.fail_hint(
@@ -2319,6 +2328,7 @@ impl Parser {
         let path = &def.path;
         self.expect_sym(Sym::LBrace)?;
         while !self.at_sym(Sym::RBrace) {
+            let marked = self.key_annotation(keys.is_some())?;
             let at = self.span_here();
             let field = self.expect_ident()?;
             let Some(declared) = def.field(&field) else {
@@ -2328,12 +2338,119 @@ impl Parser {
                     at,
                 ));
             };
+            if let Some(mark) = marked {
+                let keys = keys.as_deref_mut().expect("`@key` was allowed here");
+                self.key_field(keys, declared, mark)?;
+                keys.push(field.clone());
+            }
             lower.b.destructure(&field, Some(declared.ty.clone()));
             if !self.eat_sym(Sym::Comma) {
                 break;
             }
         }
         self.expect_sym(Sym::RBrace)
+    }
+
+    /// The optional `@key` before a destructure entry, and its span when there was one.
+    /// Every destructure in the language reads it, so that the two that may not carry one
+    /// answer with the reason rather than with `expected-token`; where it may appear is
+    /// the caller's to say.
+    fn key_marker(&mut self) -> Result<Option<Span>, Diagnostic> {
+        let Token::Path(segments) = self.peek().clone() else {
+            return Ok(None);
+        };
+        // Before the bump: an annotation is one `@name` token, and the cursor is past it
+        // once that is consumed.
+        let mark = self.span_here();
+        self.bump();
+        let [annotation] = segments.as_slice() else {
+            return Err(self.err(
+                Code::BadAnnotation,
+                "an annotation name cannot contain `.`",
+                mark,
+            ));
+        };
+        if annotation != "key" {
+            return Err(self.err(
+                Code::UnknownAnnotation,
+                format!("unknown annotation `@{annotation}`"),
+                mark,
+            ));
+        }
+        Ok(Some(mark))
+    }
+
+    /// Rule 15: `@key` marks the trigger field that names the lane, so it goes on an
+    /// effect arm's trigger destructure and nowhere else. `allowed` is false for a
+    /// projector handler, which rebuilds from position 0 and has no lanes to name.
+    fn key_annotation(&mut self, allowed: bool) -> Result<Option<Span>, Diagnostic> {
+        let marked = self.key_marker()?;
+        match marked {
+            Some(mark) if !allowed => Err(self
+                .err(
+                    Code::BadAnnotation,
+                    "`@key` marks the partition key of an effect arm",
+                    mark,
+                )
+                .with_hint(
+                    "a projector rebuilds from position 0 in one pass, so it has no lanes to name",
+                )),
+            other => Ok(other),
+        }
+    }
+
+    /// The same in a fold arm's destructure, where the reason it does not belong is a
+    /// different one: the two destructures look alike and only one is delivered.
+    fn no_fold_key(&mut self) -> Result<(), Diagnostic> {
+        let Some(mark) = self.key_marker()? else {
+            return Ok(());
+        };
+        Err(self
+            .err(
+                Code::BadAnnotation,
+                "`@key` marks the partition key of an effect arm",
+                mark,
+            )
+            .with_hint(
+                "a fold arm reads the log rather than being delivered, so it has no lane to name; the marker goes on the arm's own trigger destructure",
+            ))
+    }
+
+    /// What a field has to be to name a lane. Rule 15.
+    fn key_field(&self, keys: &[Ident], declared: &FieldDef, mark: Span) -> Result<(), Diagnostic> {
+        let name = &declared.name;
+        if keys.iter().any(|seen| seen == name) {
+            return Err(self.err(
+                Code::DuplicateField,
+                format!("`{name}` is already this arm's key"),
+                mark,
+            ));
+        }
+        if declared.subject.is_some() {
+            return Err(self
+                .err(
+                    Code::SealBoundary,
+                    format!("`{name}` is sealed, so it cannot be a partition key"),
+                    mark,
+                )
+                .with_hint(
+                    "choosing a lane means reading the key, and rule 12 lets sealed content only be moved, asked about or revealed; the subject id it is bound to can be the key instead",
+                ));
+        }
+        if !value::can_key(&declared.ty) {
+            return Err(self
+                .err(
+                    Code::BadAnnotation,
+                    format!(
+                        "`{name}` is {}, which cannot be a partition key",
+                        a(&declared.ty)
+                    ),
+                    mark,
+                )
+                .with_hint("a key is an identity, so it is an Int, a String, a Uuid, a Timestamp or an enum"),
+            );
+        }
+        Ok(())
     }
 
     /// Whether the block starting here is a destructure rather than a body: it is when
@@ -2362,9 +2479,9 @@ impl Parser {
         false
     }
 
-    /// A lone block holding only names and commas is a destructure whose body was
-    /// forgotten, which is worth saying rather than reporting the first name as a bad
-    /// statement.
+    /// A lone block holding only names, `@key` markers and commas is a destructure whose
+    /// body was forgotten, which is worth saying rather than reporting the first name as a
+    /// bad statement.
     fn looks_like_destructure(&self) -> bool {
         if !self.at_sym(Sym::LBrace) {
             return false;
@@ -2373,6 +2490,11 @@ impl Parser {
         for spanned in self.tokens.iter().skip(self.pos + 1) {
             match &spanned.token {
                 Token::Ident(_) => names += 1,
+                // Rule 15's marker, and only it. Counted as no name of its own, so
+                // `{ @key }` is still not a destructure. Any other annotation stays a
+                // token this block cannot hold, so `{ @max id }` keeps reporting the
+                // annotation rather than a body somebody forgot.
+                Token::Path(segments) if segments.as_slice() == ["key"] => {}
                 Token::Sym(Sym::Comma) => {}
                 Token::Sym(Sym::RBrace) => return names > 0,
                 _ => return false,
@@ -2940,6 +3062,10 @@ impl Parser {
             any_arm = true;
             let arm = self.span_here();
             self.bump();
+            self.no_delivery(
+                "a fold arm",
+                "a fold arm reads the log rather than being delivered",
+            )?;
             let at = self.span_here();
             let (path, filters) = self.slice_ref(lower, events)?;
             let def = self.event_def(events, &path, at)?;
@@ -2948,6 +3074,9 @@ impl Parser {
             let mut binds = Vec::new();
             if self.eat_sym(Sym::LBrace) {
                 while !self.at_sym(Sym::RBrace) {
+                    // Rule 15: a fold arm reads the log, it is not delivered, so there is
+                    // no lane here to name.
+                    self.no_fold_key()?;
                     let bind = self.span_here();
                     let field = self.expect_ident()?;
                     let Some(declared) = def.field(&field) else {
@@ -5363,12 +5492,56 @@ impl Parser {
                 format!("effect `{name}` declares no arms"),
             );
         }
-        Ok(Effect {
+        let effect = Effect {
             name,
             module,
             functions,
             arms,
-        })
+        };
+        self.latest_never_invokes(&effect)?;
+        Ok(effect)
+    }
+
+    /// Rule 15: an `on latest` arm may not `invoke`, anywhere it can reach, including
+    /// through an effect-local `fn`. Collapsing keeps one invocation out of N, and whether
+    /// the surviving record still tells the truth depends on whether it described the
+    /// invocation or the events, which spell identically. `on live` is unrestricted,
+    /// because it declines whole invocations and the log truthfully says nothing happened.
+    ///
+    /// Here rather than with the whole-program checks because it needs one effect and no
+    /// more; it moves with the others when the checker splits out.
+    /// The module is the effect's own rather than `self.module_at(self.pos)`: this runs
+    /// after the closing brace, so for an effect that ends its file the cursor is already
+    /// the first token of the next one. Same reason `check_cycles` carries `Edge::module`.
+    fn latest_never_invokes(&self, effect: &Effect) -> Result<(), Diagnostic> {
+        let in_module = |thing: Diagnostic| match &effect.module {
+            Some(module) => thing.in_file(module),
+            None => thing,
+        };
+        for arm in &effect.arms {
+            if arm.delivery != Delivery::Latest {
+                continue;
+            }
+            let Some((command, at)) = invoked_by(effect, arm).first() else {
+                continue;
+            };
+            let related = Related::new("the arm", arm.span);
+            return Err(in_module(
+                Diagnostic::new(
+                    Code::WrongContext,
+                    "an `on latest` arm cannot invoke a command",
+                    at,
+                )
+                .with_hint(format!(
+                    "collapsing drops invocations, so this would drop `{command}`'s events; write `on` instead, or drop the record"
+                ))
+                .with_related(match &effect.module {
+                    Some(module) => related.in_file(module),
+                    None => related,
+                }),
+            ));
+        }
+        Ok(())
     }
 
     /// Sweep one's half of an effect-local `fn`: the signature, and nothing else.
@@ -5416,6 +5589,9 @@ impl Parser {
     fn arm(&mut self, effect: &Ident, events: &[EventDef]) -> Result<Arm, Diagnostic> {
         let span = self.span_here();
         self.expect_word(Keyword::On)?;
+        // Rule 15. Soft rather than reserved: `live` and `latest` are plausible field
+        // names, and only the token after `on` can be one of these.
+        let delivery = self.delivery()?;
 
         // Captured before the path rather than after it: the extent of a path is the
         // path, and `self.span_here()` once it has been consumed is whatever follows.
@@ -5455,7 +5631,17 @@ impl Parser {
         self.envelope = envelope;
         self.kind = Kind::Effect;
 
-        self.destructure_block(&mut lower, &def)?;
+        let mut keys: Vec<Ident> = Vec::new();
+        self.destructure_block(&mut lower, &def, Some(&mut keys))?;
+        // Rule 15: mandatory, with no opt-out. An implicit "no key" is a default of one
+        // global lane and maximum blast radius, which is the failure the rule exists for.
+        if keys.is_empty() {
+            return Err(self
+                .err(Code::ArmShape, "this arm declares no partition key", span)
+                .with_hint(
+                    "mark the trigger binding that identifies the lane: `{ @key shop_id }`",
+                ));
+        }
 
         self.expect_sym(Sym::LBrace)?;
         self.command_end = self.command_end();
@@ -5471,7 +5657,7 @@ impl Parser {
         self.kind = Kind::Command;
 
         self.triggers.clear();
-        let arm = lower.b.finish_arm(paths, span);
+        let arm = lower.b.finish_arm(paths, delivery, keys, span);
         if let Err((erase, reveal)) = erase_last_in(&arm.exprs, &arm.stages) {
             return Err(self
                 .err(
@@ -5485,6 +5671,39 @@ impl Parser {
                 .with_related(self.elsewhere("the `erase`", erase, self.pos)));
         }
         Ok(arm)
+    }
+
+    /// Rule 15's modifier, the word between `on` and the first path. Soft, so `latest` and
+    /// `live` stay writable as names everywhere else; nothing but a modifier can appear
+    /// here, because every other arm form begins with an `@path`.
+    fn delivery(&mut self) -> Result<Delivery, Diagnostic> {
+        if self.eat_soft("latest") {
+            return Ok(Delivery::Latest);
+        }
+        if self.eat_soft("live") {
+            return Ok(Delivery::Live);
+        }
+        Ok(Delivery::Every)
+    }
+
+    /// The same word after an `on` that is not an effect arm's. Both other `on`s in the
+    /// language answer with the reason rather than leaving it to `expected-token`, which
+    /// is the same courtesy `no_fold_key` does for the marker.
+    fn no_delivery(&mut self, what: &str, why: &str) -> Result<(), Diagnostic> {
+        let at = self.span_here();
+        let Token::Ident(word) = self.peek().clone() else {
+            return Ok(());
+        };
+        if word != "latest" && word != "live" {
+            return Ok(());
+        }
+        Err(self
+            .err(
+                Code::WrongContext,
+                format!("{what} cannot be `on {word}`"),
+                at,
+            )
+            .with_hint(format!("{why}; delivery is an effect arm's to declare")))
     }
 
     /// Whether a `return` in a `fn` ends without a value. `http.*` is deliberately not
@@ -7241,7 +7460,9 @@ impl Parser {
         let mut edges: Vec<Edge> = Vec::new();
         for effect in &program.effects {
             for arm in &effect.arms {
-                for command in invoked_in(&arm.exprs, &arm.stages) {
+                // Through the arm's helpers too: an `invoke` a helper makes closes the
+                // loop just as surely as one written in the arm.
+                for (command, _) in invoked_by(effect, arm).all() {
                     let Some(target) = program.command(&command) else {
                         continue;
                     };
@@ -7346,15 +7567,74 @@ fn descend<'a>(
     None
 }
 
-/// Every command an arm invokes, across every stage. A declaration's statements live in
-/// two lists per stage, so anything that has to see all of them goes through this rather
-/// than reaching for one.
-fn invoked_in(exprs: &Exprs, stages: &[Stage]) -> Vec<Ident> {
-    stages
-        .iter()
-        .flat_map(Stage::halves)
-        .flat_map(|part| invoked(exprs, part))
-        .collect()
+/// Every command an arm invokes, with the span of the `invoke`, across every stage **and
+/// through the effect-local `fn`s the arm reaches**.
+///
+/// A declaration's statements live in two lists per stage, so anything that has to see all
+/// of them goes through this rather than reaching for one. Following the helpers matters
+/// for the same reason: `docs/functions.md` lets one `invoke`, so a walk that stopped at
+/// the arm's own statements would answer a different question than rule 15 and the
+/// self-trigger check are asking.
+/// The two are kept apart rather than concatenated because a diagnostic wants the arm's
+/// own first: both are the arm's to fix, and the one it wrote is the one it can see.
+struct Invoked {
+    own: Vec<(Ident, Span)>,
+    through: Vec<(Ident, Span)>,
+}
+
+impl Invoked {
+    /// Every command reached, wherever from. What the cycle check asks.
+    fn all(self) -> Vec<(Ident, Span)> {
+        let mut all = self.own;
+        all.extend(self.through);
+        all
+    }
+
+    /// The earliest of the arm's own, or of the helpers' when it makes none, so a body
+    /// with several says the same thing on every run.
+    fn first(self) -> Option<(Ident, Span)> {
+        let earliest =
+            |found: Vec<(Ident, Span)>| found.into_iter().min_by_key(|(_, span)| span.start);
+        earliest(self.own).or_else(|| earliest(self.through))
+    }
+}
+
+fn invoked_by<'a>(effect: &'a Effect, arm: &'a Arm) -> Invoked {
+    let mut done: BTreeSet<Ident> = BTreeSet::new();
+    let mut pending: Vec<&'a Function> = Vec::new();
+
+    let mut own = Vec::new();
+    for part in arm.stages.iter().flat_map(Stage::halves) {
+        own.extend(invoked(&arm.exprs, part));
+        queue(effect, &arm.exprs, part, &mut done, &mut pending);
+    }
+
+    let mut through = Vec::new();
+    while let Some(def) = pending.pop() {
+        through.extend(invoked(&def.exprs, &def.body));
+        queue(effect, &def.exprs, &def.body, &mut done, &mut pending);
+    }
+    Invoked { own, through }
+}
+
+/// The effect-local helpers a body calls that this walk has not queued yet.
+fn queue<'a>(
+    effect: &'a Effect,
+    exprs: &Exprs,
+    body: &[Stmt],
+    done: &mut BTreeSet<Ident>,
+    pending: &mut Vec<&'a Function>,
+) {
+    for (scope, function) in calls(exprs, body) {
+        // Only the effect's own table: a module `fn` is pure and has no `invoke` to find,
+        // and no other effect's helpers are in scope here.
+        if scope.as_deref() != Some(effect.name.as_str()) || !done.insert(function.clone()) {
+            continue;
+        }
+        if let Some(def) = effect.function(&function) {
+            pending.push(def);
+        }
+    }
 }
 
 /// Every event a command emits, across every stage.
@@ -7391,13 +7671,13 @@ fn emitted(body: &[Stmt]) -> Vec<EventPath> {
     found
 }
 
-fn invoked(exprs: &Exprs, body: &[Stmt]) -> Vec<Ident> {
+fn invoked(exprs: &Exprs, body: &[Stmt]) -> Vec<(Ident, Span)> {
     let mut found = Vec::new();
     walk_stmts(body, &mut |stmt| {
         for root in roots(stmt) {
-            collect(exprs, root, &mut found, &|_, expr, out| {
+            collect(exprs, root, &mut found, &|id, expr, out| {
                 if let Expr::Invoke { command, .. } = expr {
-                    out.push(command.clone());
+                    out.push((command.clone(), exprs.span(id)));
                 }
             });
         }

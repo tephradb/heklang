@@ -7,7 +7,7 @@ with a journal, and most of the rules below are about paying for it honestly.
 
 ```hek
 effect NotifyCustomer {
-  on @order.placed as e {
+  on live @order.placed as e { @key customer_id } {
     fold orders: Int = 0
       on @order.placed(customer_id: e.customer_id) => orders + 1
 
@@ -49,7 +49,7 @@ point there.)
 ```hek
 on @shop.reconnected,
    @warranty.plan.created,
-   @warranty.plan.updated as e { shop_id } { ... }
+   @warranty.plan.updated as e { @key shop_id } { ... }
 ```
 
 The trigger binding then names **only the fields the listed types share**, and a field counts as
@@ -297,8 +297,8 @@ effect SyncShop {
     }
   }
 
-  on @shop.sync.requested as e { shop_id } { ... sync(shop_id, domain, reveal(token)) }
-  on @shop.reconnected as e { shop_id, shop_domain, access_token } {
+  on @shop.sync.requested as e { @key shop_id } { ... sync(shop_id, domain, reveal(token)) }
+  on @shop.reconnected as e { @key shop_id, shop_domain, access_token } {
     sync(shop_id, shop_domain, reveal(access_token))
   }
 }
@@ -424,3 +424,55 @@ projector; a projector has no general read).
 
 Still covered by folding twice and comparing: a subject re-keyed between a run and its replay, a
 journal read back by a different program version, and anything a future builtin adds.
+
+## 15. Delivery is declared, and a key names the lane
+
+```
+on [latest|live] @path[, @path]* [as name] { [@key] field, ... } { body }
+```
+
+Every arm names **at least one `@key`**, marking a destructured trigger field as the identity of the
+lane the event lands in. Mandatory with no opt-out: an implicit "no key" is a default of one global
+lane, which is how one unprocessable event blocks every unrelated aggregate behind it. Marking
+several fields forms a composite, and the order is significant, so `{ @key a, @key b }` and
+`{ @key b, @key a }` are different lanes.
+
+A key may not be a `@subject`-bound field: choosing a lane means reading the key, and rule 12 lets
+sealed content only be moved, asked about or revealed. Key by the subject id instead. A key also has
+to be a type that identifies: `Int`, `String`, `Uuid`, `Timestamp` or an enum.
+
+| Form | Delivery | May `invoke` |
+| --- | --- | --- |
+| `on` | every matching event gets an invocation | yes |
+| `on latest` | one invocation per key per batch, at the newest matching position in it | **no** |
+| `on live` | only events appended after the effect's first activation | yes |
+
+`on latest` is **not** "skip history". History is processed; the arm runs once per key rather than
+once per event, and rule 3 means that one invocation has already seen everything before it. Catching
+up, the batch is the whole backlog. Live, it collapses a burst: a merchant editing six plans in a
+minute gets one publish.
+
+`on live` says history is not news. The runtime resolves it to a position once, at first activation,
+so source states intent and the value cannot rot.
+
+**`latest` may not `invoke`, anywhere it can reach, including through an effect-local `fn`.**
+Collapsing keeps one invocation out of N, so a record it writes may or may not still be true, and only
+the author knows which. `live` declines whole invocations, so nothing is written and the log truthfully
+says nothing happened.
+
+The cost is real: a convergent effect cannot both collapse and record what it did. Before reaching for
+`on latest` on an arm that invokes, ask **whether anything reads what it records**, in this order:
+
+1. the arm's own folds: if it reads the record back to decide whether to act, the record is the
+   convergence rather than an audit trail, and the arm should stay `on` (it is already self-limiting,
+   so it had no reason to collapse);
+2. any other declaration (a guard, a projector, another effect);
+3. the emitting command's own fold, which is how a `Record...` command usually stays idempotent.
+
+If all three answer no, the record is an audit fact, dropping the `invoke` is unobservable, and the
+arm can collapse. In a real 12-effect application one of six candidates was that shape, and it was the
+one with the most to gain: fourteen trigger paths down to one publish per shop.
+
+Modifiers and keys are per arm, not per effect, and an effect may mix them. Under `hek test`,
+`deliver` is a catch-up batch, so an `on latest` arm collapses there too; an `on live` arm is
+delivered as `on`, because the boundary is a runtime fact and not a property of the log.

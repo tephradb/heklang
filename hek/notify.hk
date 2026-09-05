@@ -1,7 +1,7 @@
 // effects/notify.hk
 
 effect NotifyCustomer {
-  on @order.placed as e {
+  on live @order.placed as e { @key customer_id } {
     // Rule 3: folded up to and including this event, so a customer's first order
     // leaves the count at one rather than zero.
     fold orders: Int = 0

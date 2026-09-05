@@ -462,18 +462,22 @@ fn signature(kind: Kind, form: &Sexp, helpers: &HashMap<String, Sexp>) -> Option
         }
         // The read model is the API. What a handler does to get there is not.
         Kind::Projector => parts.extend(form.section("entity").cloned()),
-        // Which events an effect consumes is what a deployment has to know; the calls it
-        // makes are its own business.
+        // What a deployment has to know is which events an effect consumes and how they
+        // reach it: the lanes it wants and whether history fires. The calls it makes and
+        // the names it binds are its own business, so an arm contributes three sections
+        // and not the rest of itself.
+        //
+        // There is no flat event list beside these. It would be derivable from them, and a
+        // second copy of a fact is a second thing to keep true.
         Kind::Effect => {
-            let mut events: Vec<String> = form
-                .section("on")
-                .flat_map(|arm| arm.section("events"))
-                .flat_map(|events| events.rest())
-                .map(Sexp::packed)
-                .collect();
-            events.sort();
-            events.dedup();
-            parts.push(node("events", events.into_iter().map(atom)));
+            for arm in form.section("on") {
+                let seen = arm
+                    .section("events")
+                    .chain(arm.section("delivery"))
+                    .chain(arm.section("key"))
+                    .cloned();
+                parts.push(node("on", seen));
+            }
         }
         // Nothing outside the program can name either.
         Kind::Function | Kind::Test => return None,
@@ -681,7 +685,7 @@ fn effect(def: &Effect) -> Sexp {
     arms.sort_by_key(|arm| paths(arm).packed());
     for arm in arms {
         let mut frame = Frame::new(&arm.exprs);
-        let mut on = vec![paths(arm)];
+        let mut on = vec![paths(arm), delivery(arm), keys(arm)];
         on.extend(frame.trigger(&arm.binds, &arm.envelope));
         on.extend(frame.now(arm.now));
         on.extend(arm.stages.iter().map(|stage| frame.stage(stage)));
@@ -689,6 +693,20 @@ fn effect(def: &Effect) -> Sexp {
     }
 
     node("effect", parts)
+}
+
+/// Rule 15's modifier. Written even when it is the default, unlike `@max` and the rest:
+/// this one is in the signature a deploy gate reads, and there an absent field and a
+/// default one should not have to be told apart.
+fn delivery(arm: &Arm) -> Sexp {
+    node("delivery", [atom(arm.delivery.name())])
+}
+
+/// The arm's partition key, **unsorted**: a composite is a sequence, so writing the two
+/// fields the other way round names a different lane and is a change rather than a way of
+/// writing the same thing.
+fn keys(arm: &Arm) -> Sexp {
+    node("key", arm.keys.iter().cloned().map(atom))
 }
 
 /// The events one arm answers, sorted: several paths may share an arm, and which one is

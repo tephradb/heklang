@@ -217,10 +217,10 @@ impl fmt::Display for Sexp {
 /// here is a value, which is what keeps `(+ (int 1) (int 2))` from reading its operands
 /// as fields.
 const KEYWORDS: &[&str] = &[
-    "acc", "bind", "body", "col", "default", "do", "else", "entity", "env", "events", "expect",
-    "f", "filter", "fold", "given", "index", "in", "item", "key", "load", "max", "now", "of", "on",
-    "p", "params", "post", "pre", "rejects", "respond", "returns", "slice", "stage", "status",
-    "then", "variants", "when", "yield",
+    "acc", "bind", "body", "col", "default", "delivery", "do", "else", "entity", "env", "events",
+    "expect", "f", "filter", "fold", "given", "index", "in", "item", "key", "load", "max", "now",
+    "of", "on", "p", "params", "post", "pre", "rejects", "respond", "returns", "slice", "stage",
+    "status", "then", "variants", "when", "yield",
 ];
 
 fn is_number(text: &str) -> bool {

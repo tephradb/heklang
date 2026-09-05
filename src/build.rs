@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::mem;
 
 use crate::ir::{
-    Arm, BinOp, Bind, Command, EnvBind, EnvField, EventPath, Expr, ExprId, Exprs, Filter, FoldVar,
-    Function, Guard, GuardCall, Handler, Ident, Literal, Number, Param, Slice, SliceId, Slot, Span,
-    Stage, Stmt, Type, UnOp, Update,
+    Arm, BinOp, Bind, Command, Delivery, EnvBind, EnvField, EventPath, Expr, ExprId, Exprs, Filter,
+    FoldVar, Function, Guard, GuardCall, Handler, Ident, Literal, Number, Param, Slice, SliceId,
+    Slot, Span, Stage, Stmt, Type, UnOp, Update,
 };
 use crate::scaled::Rounding;
 
@@ -549,10 +549,18 @@ impl Builder {
         }
     }
 
-    pub fn finish_arm(mut self, events: Vec<EventPath>, span: Span) -> Arm {
+    pub fn finish_arm(
+        mut self,
+        events: Vec<EventPath>,
+        delivery: Delivery,
+        keys: Vec<Ident>,
+        span: Span,
+    ) -> Arm {
         self.seal();
         Arm {
             events,
+            delivery,
+            keys,
             binds: self.binds,
             envelope: self.envelope,
             frame: self.frame as usize,

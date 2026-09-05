@@ -72,7 +72,7 @@ effect CreateMasterProduct {
     invoke RecordMasterProductCreated { shop_id, product_id, default_variant_id }
   }
 
-  on @shop.onboarding.completed, @shop.reconnected as e { shop_id } {
+  on @shop.onboarding.completed, @shop.reconnected as e { @key shop_id } {
     fold token: String = "" on @shop.connected(shop_id) { access_token } => access_token
     ...
     create(shop_id, domain, reveal(token))

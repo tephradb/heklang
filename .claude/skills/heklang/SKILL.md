@@ -192,7 +192,7 @@ effect NotifyCustomer {
     }
   }
 
-  on @order.placed as e { order_id, email } {
+  on live @order.placed as e { @key order_id, email } {
     fold orders: Int = 0
       on @order.placed(customer_id: e.customer_id) => orders + 1
 
@@ -218,7 +218,8 @@ test "a first order is appended as written" {
 Annotations, exhaustively: an **event field** takes `@subject(field)`, `@max(n)` and `@no_index`; an
 **entity field** takes `@key`, `@index` and `@max(n)`, plus `= <literal>` for a default and an
 entity-level `index (a, b)`; a **record field** takes `@max(n)`; an **enum variant** takes
-`@default`. `@max` applies to `String` and `String?` and nothing else.
+`@default`; an **effect arm's trigger destructure** takes `@key`. `@max` applies to `String` and
+`String?` and nothing else.
 
 ### Statements
 
@@ -294,18 +295,22 @@ A comment is `//` to the end of the line. Put one on its own line, leading whate
 9. **No minted identity.** `Uuid.derive(seed, name)` is the whole story, usually
    `Uuid.derive(e.id, "purpose")`, so a retry and a replay produce the same id.
 10. **One arm per event type in an effect.** List several paths on one arm
-    (`on @a, @b as e { shared_field } { .. }`) rather than writing two arms. A projector is the
+    (`on @a, @b as e { @key shared_field } { .. }`) rather than writing two arms. A projector is the
     opposite: fanning one event out to several handlers is the point.
-11. **An effect may not be able to trigger itself**, through any chain of invoked commands and the
+11. **Every effect arm declares a `@key`**, marking the trigger field that identifies its lane. It
+    may not be a sealed field, and it has to be a type that identifies. `on latest` collapses to one
+    invocation per key per batch and so may not `invoke`, even through a helper; `on live` skips
+    history and may.
+12. **An effect may not be able to trigger itself**, through any chain of invoked commands and the
     events they emit.
-12. **`reject` is about the world and carries a code; `invalid` is about the request and does not.**
+13. **`reject` is about the world and carries a code; `invalid` is about the request and does not.**
     A blank address is `invalid` whoever sends it; a blocked customer is `reject`.
-13. **A guard names a proposition, not an entity**: `CourseIsDefined`, not `Course`. It may only
+14. **A guard names a proposition, not an entity**: `CourseIsDefined`, not `Course`. It may only
     `return reject <Name>` or `return invalid(...)`, folds at least one slice, reads the log once,
     and hands nothing back to its caller.
-14. **An idempotent no-op is not a guard.** If a replay must answer `ok`, the check stays inline as a
+15. **An idempotent no-op is not a guard.** If a replay must answer `ok`, the check stays inline as a
     `fold` and an `if`, and so does every refusal below it.
-15. **A refusal's message may name its own fields and nothing else, and must name all of them.** The
+16. **A refusal's message may name its own fields and nothing else, and must name all of them.** The
     code is the name in snake_case, so the name must be capitalised and carry no `_`.
 
 ## Reference

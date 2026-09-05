@@ -23,14 +23,14 @@ pub use host::{
 };
 pub use interp::{
     Counts, Effectful, Error, ErrorKind, Execution, Interpreter, Invocation, Outcome, Projection,
-    Row, Store,
+    Row, Store, partition_key,
 };
 pub use ir::{
-    Absent, Action, Arm, BinOp, Bind, Builtin, Command, ConstDef, Effect, EntityDef, EntityField,
-    EnumDef, EnvBind, EnvField, EventDef, EventPath, Expr, ExprId, Exprs, FieldDef, Filter,
-    FoldVar, Function, Guard, GuardCall, Handler, Ident, Index, Iter, Literal, MessagePart, Number,
-    NumberError, Param, Pos, Program, Projector, RecordDef, RecordField, RefusalDef, RefusalParam,
-    Return, Slice, SliceId, Slot, Span, Stage, Stmt, Type, UnOp, Update,
+    Absent, Action, Arm, BinOp, Bind, Builtin, Command, ConstDef, Delivery, Effect, EntityDef,
+    EntityField, EnumDef, EnvBind, EnvField, EventDef, EventPath, Expr, ExprId, Exprs, FieldDef,
+    Filter, FoldVar, Function, Guard, GuardCall, Handler, Ident, Index, Iter, Literal, MessagePart,
+    Number, NumberError, Param, Pos, Program, Projector, RecordDef, RecordField, RefusalDef,
+    RefusalParam, Return, Slice, SliceId, Slot, Span, Stage, Stmt, Type, UnOp, Update,
 };
 pub use parse::{check_files, parse, parse_files};
 pub use testing::{TestOutcome, TestResult, World, run_tests, run_tests_in};

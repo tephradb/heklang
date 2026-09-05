@@ -954,6 +954,22 @@
           "value": "on"
         },
         {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "FIELD",
+              "name": "delivery",
+              "content": {
+                "type": "SYMBOL",
+                "name": "delivery_keyword"
+              }
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
           "type": "SEQ",
           "members": [
             {
@@ -1049,6 +1065,19 @@
         }
       ]
     },
+    "delivery_keyword": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "latest"
+        },
+        {
+          "type": "STRING",
+          "value": "live"
+        }
+      ]
+    },
     "destructure": {
       "type": "SEQ",
       "members": [
@@ -1060,8 +1089,17 @@
           "type": "SEQ",
           "members": [
             {
-              "type": "SYMBOL",
-              "name": "identifier"
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "identifier"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "keyed_field"
+                }
+              ]
             },
             {
               "type": "REPEAT",
@@ -1073,8 +1111,17 @@
                     "value": ","
                   },
                   {
-                    "type": "SYMBOL",
-                    "name": "identifier"
+                    "type": "CHOICE",
+                    "members": [
+                      {
+                        "type": "SYMBOL",
+                        "name": "identifier"
+                      },
+                      {
+                        "type": "SYMBOL",
+                        "name": "keyed_field"
+                      }
+                    ]
                   }
                 ]
               }
@@ -1096,6 +1143,23 @@
         {
           "type": "STRING",
           "value": "}"
+        }
+      ]
+    },
+    "keyed_field": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "annotation"
+        },
+        {
+          "type": "FIELD",
+          "name": "name",
+          "content": {
+            "type": "SYMBOL",
+            "name": "identifier"
+          }
         }
       ]
     },

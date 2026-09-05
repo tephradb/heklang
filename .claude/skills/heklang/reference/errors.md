@@ -78,9 +78,10 @@ The set is closed: every diagnostic heklang can produce is one of these.
 
 | Code | Means | Fix |
 | --- | --- | --- |
-| `unknown-annotation` | `@nope` | events take `@subject`, `@max`, `@no_index`; entities `@key`, `@index`, `@max`; records `@max`; enum variants `@default` |
-| `bad-annotation` | a known annotation in a place or shape it does not take | `@max` bounds a `String`; a record field cannot be `@subject`; a `@subject` id may not be optional or itself sealed; an optional column may not default to `none` |
+| `unknown-annotation` | `@nope` | events take `@subject`, `@max`, `@no_index`; entities `@key`, `@index`, `@max`; records `@max`; enum variants `@default`; an effect arm's trigger destructure `@key` |
+| `bad-annotation` | a known annotation in a place or shape it does not take | `@max` bounds a `String`; a record field cannot be `@subject`; a `@subject` id may not be optional or itself sealed; an optional column may not default to `none`; `@key` goes on an effect arm's trigger destructure and nowhere else |
 | `empty-declaration` | a declaration whose body would be empty | |
+| `arm-shape` | an effect arm with no `@key` | every arm names the trigger field that identifies its lane: `{ @key shop_id }` |
 | `entity-shape` | an entity with no `@key`, more than one, an unorderable key, or an index on a field it has not got | |
 | `event-shape` | a multi-path arm over event types with nothing in common | a field is shared only when its type and its `@subject` match on every listed path |
 | `refusal-shape` | a refusal named or written so its derived code could not survive | start with a capital, use no `_`, and let the message name every field and nothing else |
@@ -91,7 +92,7 @@ The set is closed: every diagnostic heklang can produce is one of these.
 
 | Code | Means | Fix |
 | --- | --- | --- |
-| `wrong-context` | a statement in a declaration kind that does not have it | see the matrix in `stdlib.md`: `emit` is a command's, the four writes are a projector's, `http`/`invoke`/`log`/`fail` are an effect's |
+| `wrong-context` | a statement in a declaration kind, or an arm, that does not have it | see the matrix in `stdlib.md`: `emit` is a command's, the four writes are a projector's, `http`/`invoke`/`log`/`fail` are an effect's; an `on latest` arm may not `invoke`, and a projector handler has no `latest` or `live` |
 | `impure-fn` | a module `fn` doing something a pure function cannot | move the call to the caller and pass the result in, or make it an effect-local `fn` |
 | `fold-restriction` | a `fold` calling out, invoking, decrypting or reading a clock | a fold has to reproduce without a journal; do it in the body and pass it in |
 | `arm-only` | an effect-local `fn` doing what stays in the arm | `reveal`, `erase`, `now()` and `fold` stay in the arm; pass the revealed value or the moment in as a parameter |
@@ -101,7 +102,7 @@ The set is closed: every diagnostic heklang can produce is one of these.
 
 | Code | Means | Fix |
 | --- | --- | --- |
-| `seal-boundary` | sealed content leaving without `reveal` | move it, ask `.is_some()`/`.is_none()`, or `reveal` it in an effect arm; a `fn` parameter, an interpolation, a comparison, a body and `unwrap_or` all take it out |
+| `seal-boundary` | sealed content leaving without `reveal` | move it, ask `.is_some()`/`.is_none()`, or `reveal` it in an effect arm; a `fn` parameter, an interpolation, a comparison, a body and `unwrap_or` all take it out; a sealed field cannot be an arm's `@key` either |
 | `erase-subject` | an `erase` whose subject or id is not one | the inferring form takes a trigger field; the named form takes a declared subject name and a value of the id's type, with no `reveal` in it |
 | `erase-order` | a `reveal` reachable from an `erase` | move the reveal above the erase, or into a branch the erase cannot reach; inside a `for` body, any erase reaches every reveal |
 

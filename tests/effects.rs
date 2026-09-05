@@ -1,8 +1,8 @@
 //! `docs/effects.md` as executable tests, one test per numbered rule.
 
 use heklang::{
-    Defs, Effectful, Event, EventPath, Interpreter, Invocation, Invoked, Journal, Json, Key,
-    Program, Recorded, Reply, Type, Value, parse,
+    Defs, Delivery, Effectful, Event, EventPath, Interpreter, Invocation, Invoked, Journal, Json,
+    Key, Program, Recorded, Reply, Type, Value, parse, partition_key,
 };
 
 const URL: &str = "https://mail.example/confirm";
@@ -169,8 +169,8 @@ fn posted(journal: &Journal) -> String {
 #[test]
 fn two_arms_on_one_event_are_rejected() {
     let message = err("effect E {
-  on @order.placed as e { log(\"first\") }
-  on @order.placed as e { log(\"second\") }
+  on @order.placed as e { @key order_id } { log(\"first\") }
+  on @order.placed as e { @key order_id } { log(\"second\") }
 }");
     assert!(
         message.contains("already has an arm on @order.placed"),
@@ -186,8 +186,8 @@ fn two_arms_on_one_event_are_rejected() {
 fn one_event_selects_exactly_one_arm() {
     let program = program(
         "effect E {
-  on @order.placed as e { log(\"placed\") }
-  on @order.cancelled as e { log(\"cancelled\") }
+  on @order.placed as e { @key order_id } { log(\"placed\") }
+  on @order.cancelled as e { @key order_id } { log(\"cancelled\") }
 }",
     );
     let mut journal = Journal::default();
@@ -203,7 +203,7 @@ fn one_event_selects_exactly_one_arm() {
 fn an_arm_fold_may_filter_on_the_trigger_binding() {
     let program = program(
         "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     fold mine: Int = 0
       on @order.placed(customer_id: e.customer_id) => mine + 1
 
@@ -226,13 +226,13 @@ fn an_arm_fold_may_filter_on_the_trigger_binding() {
 #[test]
 fn a_fold_is_per_arm_not_per_effect() {
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     fold mine: Int = 0
       on @order.placed(customer_id: e.customer_id) => mine + 1
 
     log(\"first\")
   }
-  on @order.cancelled as e { log(\"seen\" + mine) }
+  on @order.cancelled as e { @key order_id } { log(\"seen\" + mine) }
 }");
     assert_eq!(message, "`mine` is not in scope");
 }
@@ -241,7 +241,7 @@ fn a_fold_is_per_arm_not_per_effect() {
 // Rule 3: the fold stops at the trigger's own position, inclusive.
 
 const COUNTING: &str = "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     fold seen: Int = 0
       on @order.placed(customer_id: e.customer_id) => seen + 1
 
@@ -293,7 +293,7 @@ fn a_first_order_counts_itself() {
 // Rule 4: `fail` is the author's terminal outcome.
 
 const FAILING: &str = "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     let response = http.post(\"https://mail.example/confirm\", { \"to\": \"x\" })
     if response.status >= 400 {
       fail(\"confirmation rejected\")
@@ -388,7 +388,7 @@ fn a_wedge_is_invisible_to_the_script() {
 // Rule 6: `invoke` returns an outcome.
 
 const INVOKING: &str = "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     let result = invoke RecordNotified {
       order_id: e.order_id,
       notification_id: Uuid.derive(e.id, \"confirmation\"),
@@ -448,7 +448,7 @@ fn the_outcome_type_has_no_retryable_case() {
 #[test]
 fn invoke_with_an_unknown_field_fails_at_compile_time() {
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     invoke RecordNotified { order_id: e.order_id, notification: e.order_id }
   }
 }");
@@ -461,7 +461,7 @@ fn invoke_with_an_unknown_field_fails_at_compile_time() {
 #[test]
 fn invoke_needs_every_required_parameter() {
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     invoke RecordNotified { order_id: e.order_id }
   }
 }");
@@ -494,14 +494,14 @@ fn invoke_is_revalidated_at_runtime() {
 #[test]
 fn an_object_literal_is_not_an_invoke_input() {
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     invoke RecordNotified { \"order_id\": e.order_id }
   }
 }");
     assert!(message.contains("expected a name"), "got: {message}");
 
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     let body = { \"order_id\": e.order_id }
   }
 }");
@@ -518,7 +518,7 @@ fn an_object_literal_is_not_an_invoke_input() {
 fn json_accessors_return_optionals() {
     let program = program(
         "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     let response = http.get(\"https://mail.example/confirm\")
     log(response.body.string(\"id\").unwrap_or(\"none\"))
     log(response.body.string(\"missing\").unwrap_or(\"none\"))
@@ -543,7 +543,7 @@ fn json_accessors_return_optionals() {
 fn object_keys_are_sorted() {
     let program = program(
         "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     http.post(\"https://mail.example/confirm\", {
       \"zebra\": 1,
       \"alpha\": 2,
@@ -575,7 +575,7 @@ fn object_keys_are_sorted() {
 fn an_empty_array_reaches_the_body_at_any_depth() {
     let program = program(
         "effect E {
-  on @order.placed as e { customer_id } {
+  on @order.placed as e { @key customer_id } {
     http.post(\"https://mail.example/confirm\", {
       \"tags\": [],
       \"ids\": [customer_id],
@@ -612,7 +612,7 @@ fn a_record_a_list_and_a_map_cross_into_a_body() {
         "record Line { sku: String, qty: Int }
 
 effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     fold skus: List(String) = []
       on @order.placed(order_id: e.order_id) => skus.push(\"a\")
     fold counts: Map(String, Int) = Map.empty
@@ -650,7 +650,7 @@ effect E {
 fn an_array_out_of_a_body_is_a_list_of_json() {
     let program = program(
         "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     let response = http.get(\"https://mail.example/confirm\")
     for problem in response.body.json(\"data\").unwrap_or(Json.empty).array(\"errors\").unwrap_or([]) {
       log(problem.string(\"message\").unwrap_or(\"unknown\"))
@@ -687,7 +687,7 @@ fn an_array_out_of_a_body_is_a_list_of_json() {
 #[test]
 fn a_reveal_after_an_erase_is_rejected() {
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     erase(e.customer_id)
     log(reveal(e.email))
   }
@@ -704,7 +704,7 @@ fn an_erase_on_a_path_that_fails_does_not_poison_the_join() {
     // not fall through. A lexical check rejects this; reachability accepts it.
     program(
         "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     if e.total > 100.00 {
       erase(e.customer_id)
       fail(\"gone\")
@@ -716,7 +716,7 @@ fn an_erase_on_a_path_that_fails_does_not_poison_the_join() {
 
     // The same shape without the `fail` does fall through, so it is rejected.
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     if e.total > 100.00 {
       erase(e.customer_id)
     }
@@ -734,7 +734,7 @@ fn an_erase_on_a_path_that_fails_does_not_poison_the_join() {
 #[test]
 fn an_erase_in_a_loop_reaches_a_reveal_above_it() {
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     fold ids: List(Int) = []
       on @order.placed(customer_id: e.customer_id) { customer_id } => ids.push(customer_id)
 
@@ -753,7 +753,7 @@ fn an_erase_in_a_loop_reaches_a_reveal_above_it() {
     // makes the loop the thing being tested rather than the order.
     program(
         "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     log(reveal(e.email))
     erase(e.customer_id)
   }
@@ -764,7 +764,7 @@ fn an_erase_in_a_loop_reaches_a_reveal_above_it() {
 #[test]
 fn an_erase_is_not_an_expression() {
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     let gone = erase(e.customer_id)
   }
 }");
@@ -777,7 +777,7 @@ fn an_erase_is_not_an_expression() {
 #[test]
 fn the_erase_last_error_explains_the_journal() {
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     erase(e.customer_id)
     log(reveal(e.email))
   }
@@ -794,7 +794,7 @@ fn the_erase_last_error_explains_the_journal() {
 #[test]
 fn reveal_needs_a_subject_bound_field() {
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     log(reveal(e.order_id))
   }
 }");
@@ -821,7 +821,7 @@ fn joined(tenant_id: i64, member_id: i64) -> Event {
 }
 
 const REDACT: &str = "effect E {
-  on @tenant.redacted as e { tenant_id } {
+  on @tenant.redacted as e { @key tenant_id } {
     fold members: List(Int) = []
       on @tenant.member.joined(tenant_id) { member_id } => members.push(member_id)
 
@@ -875,7 +875,7 @@ fn erase_may_name_its_subject() {
 #[test]
 fn a_named_subject_must_be_declared() {
     let message = err("effect E {
-  on @tenant.redacted as e { tenant_id } {
+  on @tenant.redacted as e { @key tenant_id } {
     for id in [1, 2] {
       erase(nobody, id)
     }
@@ -892,7 +892,7 @@ fn a_named_subject_must_be_declared() {
 #[test]
 fn a_named_subject_rejects_a_revealed_id() {
     let message = err("effect E {
-  on @order.placed as e { customer_id } {
+  on @order.placed as e { @key customer_id } {
     erase(customer_id, reveal(e.email).len())
   }
 }");
@@ -909,7 +909,7 @@ fn a_named_subject_rejects_a_revealed_id() {
 #[test]
 fn a_named_subject_checks_the_value_type() {
     let message = err("effect E {
-  on @order.placed as e { customer_id } {
+  on @order.placed as e { @key customer_id } {
     erase(customer_id, e.order_id)
   }
 }");
@@ -928,7 +928,7 @@ fn a_named_subject_checks_the_value_type() {
 fn a_trailing_comma_does_not_make_a_named_subject() {
     program(
         "effect E {
-  on @order.placed as e { customer_id } {
+  on @order.placed as e { @key customer_id } {
     erase(customer_id,)
   }
 }",
@@ -941,7 +941,7 @@ fn a_trailing_comma_does_not_make_a_named_subject() {
 fn journaled_calls_do_not_re_fire_but_reveal_and_log_do() {
     let program = program(
         "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     http.post(\"https://mail.example/confirm\", { \"to\": reveal(e.email) })
     log(\"sent\")
   }
@@ -987,7 +987,7 @@ fn every_http_verb_is_writable() {
     ] {
         program(&format!(
             "effect E {{
-  on @order.placed as e {{
+  on @order.placed as e {{ @key order_id }} {{
     let response = http.{verb}({args})
     if response.status >= 400 {{
       fail(\"rejected\")
@@ -1002,7 +1002,7 @@ fn every_http_verb_is_writable() {
     for name in ["head", "emit"] {
         let message = err(&format!(
             "effect E {{
-  on @order.placed as e {{
+  on @order.placed as e {{ @key order_id }} {{
     let response = http.{name}(\"{URL}\")
   }}
 }}"
@@ -1023,7 +1023,7 @@ fn there_is_no_uuid4_or_random() {
     for name in ["uuid4", "random", "uuid5"] {
         let message = err(&format!(
             "effect E {{
-  on @order.placed as e {{
+  on @order.placed as e {{ @key order_id }} {{
     log(\"x\" + {name}())
   }}
 }}"
@@ -1044,7 +1044,7 @@ fn there_is_no_uuid4_or_random() {
     for member in ["new", "random", "generate", "v4"] {
         let message = err(&format!(
             "effect E {{
-  on @order.placed as e {{
+  on @order.placed as e {{ @key order_id }} {{
     log(\"x\" + Uuid.{member}())
   }}
 }}"
@@ -1062,7 +1062,7 @@ fn there_is_no_uuid4_or_random() {
     }
 
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     log(\"x\" + Uuid.parse(\"7\"))
   }
 }");
@@ -1078,7 +1078,7 @@ fn there_is_no_uuid4_or_random() {
 fn a_local_named_uuid_shadows_the_type() {
     let program = program(
         "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     let Uuid = \"shadowed\"
     log(Uuid)
   }
@@ -1097,7 +1097,7 @@ fn a_local_named_uuid_shadows_the_type() {
 fn derive_produces_the_same_bytes_as_uuid_v5() {
     let program = program(
         "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     invoke RecordNotified {
       order_id: e.order_id,
       notification_id: Uuid.derive(e.order_id, \"confirmation\"),
@@ -1117,7 +1117,7 @@ fn derive_produces_the_same_bytes_as_uuid_v5() {
 #[test]
 fn now_is_absent_from_a_fold_and_a_projector() {
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     fold at: Timestamp = e.at
       on @order.placed(customer_id: e.customer_id) => now()
 
@@ -1186,7 +1186,7 @@ command Give() {
 fn now_is_journaled_in_an_effect() {
     let program = program(
         "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     http.post(\"https://mail.example/confirm\", { \"at\": now() })
   }
 }",
@@ -1211,7 +1211,7 @@ fn now_is_journaled_in_an_effect() {
 // Rule 12: `reveal` fails terminally.
 
 const REVEALING: &str = "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     http.post(\"https://mail.example/confirm\", { \"to\": reveal(e.email) })
     log(\"sent\")
   }
@@ -1265,7 +1265,7 @@ fn the_skip_message_says_the_erase_may_be_non_local() {
 // long before the one being handled, which is the shape every real effect has.
 
 const FOLDING: &str = "effect E {
-  on @order.reviewed as e { customer_id } {
+  on @order.reviewed as e { @key customer_id } {
     fold contact: String? = none
       on @order.placed(customer_id) { email } => email
       on @order.reconfirmed(customer_id) { email } => email
@@ -1335,7 +1335,7 @@ fn a_fold_from_two_events_with_the_same_subject_reveals() {
 fn a_narrowed_optional_can_be_revealed() {
     let program = program(
         "effect E {
-  on @order.reviewed as e { customer_id } {
+  on @order.reviewed as e { @key customer_id } {
     fold contact: String? = none
       on @order.placed(customer_id) { email } => email
 
@@ -1385,7 +1385,7 @@ fn a_narrowed_optional_can_be_revealed() {
 fn a_non_subject_seed_is_accepted() {
     let program = program(
         "effect E {
-  on @order.reviewed as e { customer_id } {
+  on @order.reviewed as e { @key customer_id } {
     fold contact: String = \"nobody\"
       on @order.placed(customer_id) { email } => email
 
@@ -1406,7 +1406,7 @@ fn a_non_subject_seed_is_accepted() {
 #[test]
 fn two_arms_with_different_subjects_are_a_conflict() {
     let message = err("effect E {
-  on @order.reviewed as e { customer_id, order_id } {
+  on @order.reviewed as e { @key customer_id, order_id } {
     fold secret: String? = none
       on @order.placed(customer_id) { email } => email
       on @order.audited(order_id) { note } => note
@@ -1427,7 +1427,7 @@ fn two_arms_with_different_subjects_are_a_conflict() {
 #[test]
 fn a_non_subject_arm_into_a_subject_bound_variable_is_rejected() {
     let subject_first = err("effect E {
-  on @order.reviewed as e { customer_id, order_id } {
+  on @order.reviewed as e { @key customer_id, order_id } {
     fold secret: String? = none
       on @order.placed(customer_id) { email } => email
       on @order.audited(order_id) { tool } => tool
@@ -1436,7 +1436,7 @@ fn a_non_subject_arm_into_a_subject_bound_variable_is_rejected() {
   }
 }");
     let plain_first = err("effect E {
-  on @order.reviewed as e { customer_id, order_id } {
+  on @order.reviewed as e { @key customer_id, order_id } {
     fold secret: String? = none
       on @order.audited(order_id) { tool } => tool
       on @order.placed(customer_id) { email } => email
@@ -1463,7 +1463,7 @@ fn a_non_subject_arm_into_a_subject_bound_variable_is_rejected() {
 #[test]
 fn a_transform_of_sealed_content_is_rejected_where_it_is_written() {
     let message = err("effect E {
-  on @order.reviewed as e { customer_id } {
+  on @order.reviewed as e { @key customer_id } {
     fold contact: String? = none
       on @order.placed(customer_id) { email } => email.trim()
 
@@ -1482,7 +1482,7 @@ fn a_transform_of_sealed_content_is_rejected_where_it_is_written() {
 #[test]
 fn unwrap_or_on_sealed_content_names_the_mixture() {
     let message = err("effect E {
-  on @order.reviewed as e { customer_id } {
+  on @order.reviewed as e { @key customer_id } {
     log(reveal(e.comment.unwrap_or(\"\")))
   }
 }");
@@ -1498,7 +1498,7 @@ fn unwrap_or_on_sealed_content_names_the_mixture() {
 fn a_presence_check_needs_no_reveal() {
     program(
         "effect E {
-  on @order.reviewed as e { customer_id } {
+  on @order.reviewed as e { @key customer_id } {
     if e.comment.is_none() {
       log(\"no comment\")
       return
@@ -1515,7 +1515,7 @@ fn a_presence_check_needs_no_reveal() {
 fn a_let_keeps_the_seal() {
     let program = program(
         "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     let copy = e.email
     log(reveal(copy))
   }
@@ -1568,7 +1568,7 @@ fn the_fold_rules_hold_in_a_command_too() {
 #[test]
 fn the_inferring_erase_stays_on_the_trigger() {
     let message = err("effect E {
-  on @order.reviewed as e { customer_id } {
+  on @order.reviewed as e { @key customer_id } {
     fold who: Int? = none
       on @order.placed(customer_id) { customer_id } => customer_id
 
@@ -1590,7 +1590,7 @@ fn the_inferring_erase_stays_on_the_trigger() {
 // key is gone. Collapsing them either way is the failure this is here to prevent.
 
 const REVIEWING: &str = "effect E {
-  on @order.reviewed as e {
+  on @order.reviewed as e { @key order_id } {
     if reveal(e.comment).is_none() {
       log(\"nothing to moderate\")
       return
@@ -1659,7 +1659,7 @@ fn reveal_on_a_present_optional_hands_back_the_plaintext() {
 fn a_subject_id_is_a_plain_field_that_always_has_a_value() {
     let message = parse(
         "event @e.happened { id: Int?, text: String @subject(id) }
-effect E { on @e.happened as e { log(\"x\") } }
+effect E { on @e.happened as e { @key id } { log(\"x\") } }
 ",
     )
     .expect_err("an optional subject id")
@@ -1671,7 +1671,7 @@ effect E { on @e.happened as e { log(\"x\") } }
 
     let message = parse(
         "event @e.happened { owner: Int, id: Int @subject(owner), text: String @subject(id) }
-effect E { on @e.happened as e { log(\"x\") } }
+effect E { on @e.happened as e { @key id } { log(\"x\") } }
 ",
     )
     .expect_err("an encrypted subject id")
@@ -1683,7 +1683,7 @@ effect E { on @e.happened as e { log(\"x\") } }
 
     let message = parse(
         "event @e.happened { text: String @subject(nope) }
-effect E { on @e.happened as e { log(\"x\") } }
+effect E { on @e.happened as e { @key id } { log(\"x\") } }
 ",
     )
     .expect_err("a subject id that is not a field")
@@ -1700,7 +1700,7 @@ effect E { on @e.happened as e { log(\"x\") } }
 fn a_fold_into_an_optional_holds_an_optional() {
     let program = program(
         "effect E {
-  on @order.reviewed as e { order_id } {
+  on @order.reviewed as e { @key order_id } {
     fold customer: Int? = none
       on @order.placed(order_id) { customer_id } => customer_id
 
@@ -1734,7 +1734,7 @@ fn a_fold_into_an_optional_holds_an_optional() {
 #[test]
 fn a_timeout_is_not_a_call_argument() {
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     http.post(\"https://mail.example/confirm\", { \"to\": \"x\" }, 30)
   }
 }");
@@ -1775,7 +1775,7 @@ command Replace(order_id: Uuid) {
 }
 
 effect Retry {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     invoke Replace { order_id: e.order_id }
   }
 }
@@ -1802,29 +1802,45 @@ fn the_cycle_error_names_the_path() {
 }
 
 // ---------------------------------------------------------------------------------
-// The destructure block is optional, for arms and handlers alike.
+// The destructure block is optional for a projector handler. Rule 15 made it mandatory
+// for an effect arm, because that is where the partition key is written.
 
 #[test]
-fn an_arm_may_omit_the_destructure_block() {
+fn an_arm_names_at_least_its_key_and_may_name_more() {
     let one = program(
         "effect E {
-  on @order.placed as e { log(\"one block\") }
+  on @order.placed as e { @key order_id } { log(\"one field\") }
 }",
     );
-    assert!(one.effects[0].arms[0].binds.is_empty());
+    assert_eq!(one.effects[0].arms[0].binds.len(), 1);
+    assert_eq!(one.effects[0].arms[0].keys, ["order_id"]);
 
     let two = program(
         "effect E {
-  on @order.placed as e { order_id, total } { log(\"two blocks\") }
+  on @order.placed as e { @key order_id, total } { log(\"two fields\") }
 }",
     );
     assert_eq!(two.effects[0].arms[0].binds.len(), 2);
+    assert_eq!(two.effects[0].arms[0].keys, ["order_id"]);
+}
+
+#[test]
+fn a_projector_handler_may_still_omit_the_destructure_block() {
+    let program = parse(&source(
+        "projector P {
+  entity Order { order_id: Uuid @key, seen: Bool = false }
+
+  on @order.placed as e { put Order { order_id: e.id, seen: true } }
+}",
+    ))
+    .expect("a projector handler needs no key, so it needs no destructure");
+    assert!(program.projectors[0].handlers[0].binds.is_empty());
 }
 
 #[test]
 fn a_lone_destructure_block_says_the_body_is_missing() {
     let message = err("effect E {
-  on @order.placed as e { order_id, total }
+  on @order.placed as e { @key order_id, total }
 }");
     assert_eq!(
         message,
@@ -1857,7 +1873,7 @@ fn projector_err(body: &str) -> String {
 #[test]
 fn emit_in_an_effect_points_at_invoke() {
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     emit @order.notified { order_id: e.order_id, notification_id: e.order_id }
   }
 }");
@@ -1870,7 +1886,7 @@ fn emit_in_an_effect_points_at_invoke() {
 #[test]
 fn a_projector_write_in_an_effect_is_rejected() {
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     delete Row[e.order_id]
   }
 }");
@@ -1919,7 +1935,7 @@ fn reveal_outside_an_effect_is_rejected() {
 #[test]
 fn an_effect_has_no_guard() {
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     guard @order.placed(order_id: e.order_id)
     log(\"x\")
   }
@@ -1933,7 +1949,7 @@ fn an_effect_has_no_guard() {
 #[test]
 fn a_command_outcome_is_not_an_effect_outcome() {
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     return reject No
   }
 }");
@@ -1948,7 +1964,7 @@ fn a_command_outcome_is_not_an_effect_outcome() {
 #[test]
 fn a_parenless_field_on_a_non_response_still_suggests_the_method() {
     let message = err("effect E {
-  on @order.audited as e {
+  on @order.audited as e { @key order_id } {
     log(e.tool.trim)
   }
 }");
@@ -1961,7 +1977,7 @@ fn a_parenless_field_on_a_non_response_still_suggests_the_method() {
 #[test]
 fn an_erase_in_a_loop_poisons_the_whole_body() {
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     for x in [1, 2] {
       log(reveal(e.email))
       erase(e.customer_id)
@@ -1977,7 +1993,7 @@ fn an_erase_in_a_loop_poisons_the_whole_body() {
     // makes the loop rule a real rule rather than a restatement of the lexical one.
     program(
         "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     log(reveal(e.email))
     erase(e.customer_id)
   }
@@ -1992,7 +2008,7 @@ fn an_erase_in_a_loop_poisons_the_whole_body() {
 fn an_arm_may_list_several_event_types() {
     let program = program(
         "effect E {
-  on @order.placed, @order.cancelled as e { order_id } {
+  on @order.placed, @order.cancelled as e { @key order_id } {
     log(\"touched {order_id}\")
   }
 }",
@@ -2017,11 +2033,11 @@ fn an_arm_may_list_several_event_types() {
 #[test]
 fn a_path_in_two_arms_is_still_rejected() {
     let message = err("effect E {
-  on @order.placed, @order.cancelled as e { order_id } {
+  on @order.placed, @order.cancelled as e { @key order_id } {
     log(\"one\")
   }
 
-  on @order.cancelled as e {
+  on @order.cancelled as e { @key order_id } {
     log(\"two\")
   }
 }");
@@ -2032,7 +2048,7 @@ fn a_path_in_two_arms_is_still_rejected() {
 
     // And a path listed twice within one arm is caught at the arm.
     let message = err("effect E {
-  on @order.placed, @order.placed as e {
+  on @order.placed, @order.placed as e { @key order_id } {
     log(\"x\")
   }
 }");
@@ -2046,7 +2062,7 @@ fn a_path_in_two_arms_is_still_rejected() {
 fn a_multi_path_binding_names_only_shared_fields() {
     // `email` is on @order.placed and not on @order.cancelled.
     let message = err("effect E {
-  on @order.placed, @order.cancelled as e {
+  on @order.placed, @order.cancelled as e { @key order_id } {
     log(reveal(e.email))
   }
 }");
@@ -2058,7 +2074,7 @@ fn a_multi_path_binding_names_only_shared_fields() {
     // `customer_id` is on both, with the same type, so it is nameable.
     program(
         "effect E {
-  on @order.placed, @order.cancelled as e {
+  on @order.placed, @order.cancelled as e { @key order_id } {
     log(\"{e.customer_id}\")
   }
 }",
@@ -2072,14 +2088,14 @@ fn a_multi_path_binding_names_only_shared_fields() {
 fn two_arms_of_one_effect_are_two_nodes() {
     program(
         "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     invoke RecordNotified {
       order_id: e.order_id,
       notification_id: e.order_id,
     }
   }
 
-  on @order.notified as e {
+  on @order.notified as e { @key order_id } {
     log(\"noticed\")
   }
 }",
@@ -2087,7 +2103,7 @@ fn two_arms_of_one_effect_are_two_nodes() {
 
     // The same arm doing both is the cycle, and it is still caught.
     let message = err("effect E {
-  on @order.notified as e {
+  on @order.notified as e { @key order_id } {
     invoke RecordNotified {
       order_id: e.order_id,
       notification_id: e.order_id,
@@ -2124,7 +2140,7 @@ fn graphql_body() -> Json {
 fn json_steps_down_and_into_an_array() {
     let program = program(
         "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     let response = http.post(\"https://mail.example/confirm\", { \"q\": \"\" })
     let data = response.body.json(\"data\").unwrap_or(Json.empty)
     let errors = data.json(\"productCreate\").unwrap_or(Json.empty).array(\"userErrors\").unwrap_or([])
@@ -2190,7 +2206,7 @@ fn a_response_is_declarable_in_a_fn_signature() {
 }
 
 effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     let response = http.post(\"https://mail.example/confirm\", { \"q\": \"\" })
     log(\"{graphql_error(response, \"productCreate\").unwrap_or(\"ok\")}\")
   }
@@ -2265,7 +2281,7 @@ fn a_container_of_responses_is_rejected() {
 fn json_encode_is_the_same_table_as_a_body() {
     let program = program(
         "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     log(Json.encode({ \"total\": e.total, \"id\": e.order_id }))
   }
 }",
@@ -2280,7 +2296,7 @@ fn json_encode_is_the_same_table_as_a_body() {
     );
 
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     log(Json.nope(1))
   }
 }");
@@ -2295,7 +2311,7 @@ fn json_encode_is_the_same_table_as_a_body() {
 fn headers_are_a_named_argument() {
     let program = program(
         "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     let response = http.post(
       \"https://mail.example/confirm\",
       { \"to\": reveal(e.email) },
@@ -2328,7 +2344,7 @@ fn headers_are_a_named_argument() {
 
     // A positional third argument is still the timeout error.
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     let response = http.post(\"https://x\", { \"a\": 1 }, 30)
     log(\"x\")
   }
@@ -2345,7 +2361,7 @@ fn headers_are_a_named_argument() {
 fn a_changed_header_does_not_re_fire_a_journaled_call() {
     let program = program(
         "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     let response = http.post(
       \"https://mail.example/confirm\",
       { \"to\": \"x\" },
@@ -2385,7 +2401,7 @@ fn auth(token: String) -> Json {{
 }}
 
 effect E {{
-  on @order.placed as e {{
+  on @order.placed as e {{ @key order_id }} {{
     let response = http.get(\"https://x\", headers = auth(\"k\"))
     log(\"{{response.status}}\")
   }}
@@ -2397,7 +2413,7 @@ effect E {{
     // Still rejected where nothing expects a `Json`, which is what keeps rule 7's
     // "an object literal is not an invoke input".
     let message = err("effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     let x = { \"a\": 1 }
     log(\"x\")
   }
@@ -2421,13 +2437,15 @@ fn a_trailing_comma_closes_an_effect_builtin() {
         "let r = http.post(\"https://mail.example/confirm\", { \"to\": \"x\" },)",
         "let r = http.post(\"https://mail.example/confirm\", { \"to\": \"x\" }, headers = { \"K\": \"v\" },)",
     ] {
-        let source = format!("effect E {{\n  on @order.placed as e {{\n    {body}\n  }}\n}}");
+        let source = format!(
+            "effect E {{\n  on @order.placed as e {{ @key order_id }} {{\n    {body}\n  }}\n}}"
+        );
         parse(&self::source(&source)).unwrap_or_else(|err| panic!("for {body}: {err}"));
     }
 
     let third = parse(&source(
         "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     let r = http.post(\"https://mail.example/confirm\", { \"to\": \"x\" }, 5,)
   }
 }",
@@ -2453,7 +2471,7 @@ fn an_effect_local_fn_may_call_out() {
     return response.status
   }
 
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     log(\"status {confirm(reveal(e.email))}\")
   }
 }",
@@ -2484,7 +2502,7 @@ fn an_effect_local_fn_may_invoke() {
     return result.code().unwrap_or(\"ok\")
   }
 
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     log(notify(e.order_id, Uuid.derive(e.id, \"confirmation\")))
   }
 }",
@@ -2509,7 +2527,7 @@ fn a_fail_inside_an_effect_local_fn_ends_the_invocation() {
     return response.status
   }
 
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     log(\"status {confirm(reveal(e.email))}\")
     log(\"unreachable\")
   }
@@ -2551,7 +2569,7 @@ fn the_journal_counts_a_call_across_a_fn_boundary() {
     return http.post(\"https://mail.example/confirm\", { \"to\": \"ada\" }).status
   }
 
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     let first = http.post(\"https://mail.example/confirm\", { \"to\": \"ada\" }).status
     log(\"{first} then {ping()}\")
   }
@@ -2580,7 +2598,7 @@ fn the_journal_counts_a_call_across_a_fn_boundary() {
 fn an_effect_local_fn_may_be_declared_after_its_use() {
     let program = program(
         "effect E {
-  on @order.placed as e { log(greeting(e.customer_id)) }
+  on @order.placed as e { @key order_id } { log(greeting(e.customer_id)) }
 
   fn greeting(customer_id: Int) -> String {
     return \"hello {customer_id}\"
@@ -2600,7 +2618,7 @@ fn an_effect_local_fn_may_call_another() {
   fn outer(customer_id: Int) -> String { return \"[{inner(customer_id)}]\" }
   fn inner(customer_id: Int) -> String { return \"c{customer_id}\" }
 
-  on @order.placed as e { log(outer(e.customer_id)) }
+  on @order.placed as e { @key order_id } { log(outer(e.customer_id)) }
 }",
     );
     let mut journal = Journal::default();
@@ -2615,7 +2633,7 @@ fn a_cycle_between_effect_local_fns_is_rejected() {
   fn a(n: Int) -> Int { return b(n) }
   fn b(n: Int) -> Int { return a(n) }
 
-  on @order.placed as e { log(\"{a(1)}\") }
+  on @order.placed as e { @key order_id } { log(\"{a(1)}\") }
 }");
     assert!(
         message.contains("`a` calls `b` calls `a`"),
@@ -2634,7 +2652,7 @@ fn an_effect_local_fn_may_not_reveal() {
     return http.post(\"https://mail.example/confirm\", { \"to\": reveal(email) }).status
   }
 
-  on @order.placed as e { log(\"{confirm(e.email)}\") }
+  on @order.placed as e { @key order_id } { log(\"{confirm(e.email)}\") }
 }");
     assert!(
         message.contains("an effect-local `fn` cannot decrypt"),
@@ -2658,7 +2676,7 @@ fn an_effect_local_fn_may_not_erase() {
     return true
   }
 
-  on @order.placed as e { log(\"{forget(e.customer_id)}\") }
+  on @order.placed as e { @key order_id } { log(\"{forget(e.customer_id)}\") }
 }");
     assert!(
         message.contains("an effect-local `fn` cannot erase a subject key"),
@@ -2674,10 +2692,10 @@ fn an_effect_local_fn_may_not_erase() {
 fn an_effect_local_fn_is_not_visible_from_another_effect() {
     let message = err("effect E {
   fn shared(n: Int) -> Int { return n }
-  on @order.placed as e { log(\"{shared(1)}\") }
+  on @order.placed as e { @key order_id } { log(\"{shared(1)}\") }
 }
 effect F {
-  on @order.cancelled as e { log(\"{shared(1)}\") }
+  on @order.cancelled as e { @key order_id } { log(\"{shared(1)}\") }
 }");
     assert_eq!(message, "`shared` is not in scope");
 }
@@ -2687,11 +2705,11 @@ fn two_effects_may_each_declare_the_same_helper() {
     let program = program(
         "effect E {
   fn label(n: Int) -> String { return \"E{n}\" }
-  on @order.placed as e { log(label(e.customer_id)) }
+  on @order.placed as e { @key order_id } { log(label(e.customer_id)) }
 }
 effect F {
   fn label(n: Int) -> String { return \"F{n}\" }
-  on @order.cancelled as e { log(label(e.customer_id)) }
+  on @order.cancelled as e { @key order_id } { log(label(e.customer_id)) }
 }",
     );
     let mut journal = Journal::default();
@@ -2706,7 +2724,7 @@ fn an_effect_local_fn_may_not_shadow_a_module_fn() {
     let message = err("fn label(n: Int) -> String { return \"{n}\" }
 effect E {
   fn label(n: Int) -> String { return \"{n}\" }
-  on @order.placed as e { log(label(1)) }
+  on @order.placed as e { @key order_id } { log(label(1)) }
 }");
     assert!(
         message.contains("`label` is already a `fn` at module scope"),
@@ -2720,7 +2738,7 @@ fn one_effect_may_not_declare_a_helper_twice() {
     let message = err("effect E {
   fn label(n: Int) -> String { return \"a{n}\" }
   fn label(n: Int) -> String { return \"b{n}\" }
-  on @order.placed as e { log(label(1)) }
+  on @order.placed as e { @key order_id } { log(label(1)) }
 }");
     assert_eq!(message, "`E` already declares a `fn` named `label`");
 }
@@ -2732,7 +2750,7 @@ fn a_fold_arm_may_not_call_an_effect_local_fn() {
     let message = err("effect E {
   fn bump(n: Int) -> Int { return n + 1 }
 
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     fold seen: Int = 0
       on @order.placed(customer_id: e.customer_id) => bump(seen)
     log(\"{seen}\")
@@ -2753,7 +2771,7 @@ fn an_effect_local_fn_has_no_fold() {
     return seen
   }
 
-  on @order.placed as e { log(\"{count(e.customer_id)}\") }
+  on @order.placed as e { @key order_id } { log(\"{count(e.customer_id)}\") }
 }");
     assert!(
         message.contains("an effect-local `fn` has no `fold` declaration"),
@@ -2771,7 +2789,7 @@ fn an_effect_local_fn_has_no_fold() {
 fn an_effect_local_fn_may_not_read_the_clock() {
     let message = err("effect E {
   fn stamp() -> Timestamp { return now() }
-  on @order.placed as e { log(\"{stamp()}\") }
+  on @order.placed as e { @key order_id } { log(\"{stamp()}\") }
 }");
     assert!(
         message.contains("an effect-local `fn` cannot read a clock"),
@@ -2791,7 +2809,7 @@ fn an_effect_local_fn_cannot_emit() {
     return true
   }
 
-  on @order.placed as e { log(\"{append(e.order_id)}\") }
+  on @order.placed as e { @key order_id } { log(\"{append(e.order_id)}\") }
 }");
     assert!(
         message.contains("an effect never appends events"),
@@ -2812,7 +2830,7 @@ fn an_effect_local_fn_may_return_nothing() {
     log(\"confirmed\")
   }
 
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     confirm(e.order_id, reveal(e.email))
   }
 }",
@@ -2844,7 +2862,7 @@ fn a_bare_return_leaves_the_helper_and_not_the_arm() {
     log(\"confirmed\")
   }
 
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     confirm(reveal(e.email))
     log(\"arm finished\")
   }
@@ -2868,7 +2886,7 @@ fn a_bare_return_leaves_the_helper_and_not_the_arm() {
 fn a_void_call_is_a_statement_rather_than_a_value() {
     let message = err("effect E {
   fn confirm(to: String) { log(to) }
-  on @order.placed as e { let done = confirm(reveal(e.email)) }
+  on @order.placed as e { @key order_id } { let done = confirm(reveal(e.email)) }
 }");
     assert_eq!(
         message,
@@ -2880,7 +2898,7 @@ fn a_void_call_is_a_statement_rather_than_a_value() {
 fn a_return_in_a_void_fn_takes_no_value() {
     let message = err("effect E {
   fn confirm(to: String) { return to }
-  on @order.placed as e { confirm(reveal(e.email)) }
+  on @order.placed as e { @key order_id } { confirm(reveal(e.email)) }
 }");
     assert_eq!(
         message,
@@ -2896,7 +2914,7 @@ fn a_cycle_between_void_helpers_is_rejected() {
   fn a(n: Int) { b(n) }
   fn b(n: Int) { a(n) }
 
-  on @order.placed as e { a(1) }
+  on @order.placed as e { @key order_id } { a(1) }
 }");
     assert!(
         message.contains("`a` calls `b` calls `a`"),
@@ -2919,7 +2937,7 @@ fn reveal_reads_a_seal_back_at_its_declared_type() {
   ref: Uuid @subject(owner),
 }
 effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     fold n: Int? = none
       on @vault.filled(owner: e.customer_id) { count } => count
     fold amount: Money(2)? = none
@@ -2972,7 +2990,8 @@ effect E {
 
 #[test]
 fn a_subject_bound_field_has_a_sealed_type() {
-    let program = program("effect E {\n  on @order.placed as e { log(\"x\") }\n}");
+    let program =
+        program("effect E {\n  on @order.placed as e { @key order_id } { log(\"x\") }\n}");
     let def = program
         .event(&EventPath::new(["order", "placed"]))
         .expect("the prelude declares it");
@@ -2992,7 +3011,8 @@ fn a_subject_bound_field_has_a_sealed_type() {
 /// with one extra unwrap rather than two orderings to remember.
 #[test]
 fn an_optional_subject_bound_field_seals_inside_the_optional() {
-    let program = program("effect E {\n  on @order.placed as e { log(\"x\") }\n}");
+    let program =
+        program("effect E {\n  on @order.placed as e { @key order_id } { log(\"x\") }\n}");
     let def = program
         .event(&EventPath::new(["order", "reviewed"]))
         .expect("the prelude declares it");
@@ -3013,7 +3033,7 @@ fn an_optional_subject_bound_field_seals_inside_the_optional() {
 
 fn leaks(body: &str) -> String {
     err(&format!(
-        "effect E {{\n  on @order.placed as e {{ customer_id }} {{\n    {body}\n  }}\n}}"
+        "effect E {{\n  on @order.placed as e {{ @key customer_id }} {{\n    {body}\n  }}\n}}"
     ))
 }
 
@@ -3112,7 +3132,7 @@ command RecordDone(id: Int) {
 }
 
 effect E {
-  on @tick.happened { id } {
+  on @tick.happened { @key id } {
     invoke RecordDone { id }
   }
 }";
@@ -3368,7 +3388,7 @@ fn an_unknown_variant_is_a_mismatch() {
 fn a_numeric_literal_in_a_body_is_a_json_number() {
     let program = program(
         "effect E {
-  on @order.placed as e { total } {
+  on @order.placed as e { @key order_id, total } {
     let response = http.post(\"https://mail.example/confirm\", {
       \"whole\": 7,
       \"frac\": 10.5,
@@ -3409,7 +3429,7 @@ fn a_numeric_literal_in_a_body_is_a_json_number() {
 fn a_body_number_reads_back_as_its_exact_text() {
     let program = program(
         "effect E {
-  on @order.placed as e {
+  on @order.placed as e { @key order_id } {
     let response = http.get(\"https://mail.example/confirm\")
     log(\"{response.body.number(\"price\").unwrap_or(\"<none>\")}\")
     log(\"{response.body.number(\"whole\").unwrap_or(\"<none>\")}\")
@@ -3441,5 +3461,516 @@ fn a_body_number_reads_back_as_its_exact_text() {
             "-1",
             "<none>",
         ]
+    );
+}
+
+// ---------------------------------------------------------------------------------
+// Rule 15: delivery is declared, and a key names the lane.
+
+#[test]
+fn an_arm_with_no_key_is_rejected() {
+    let message = err("effect E {
+  on @order.placed as e { order_id } { log(\"x\") }
+}");
+    assert_eq!(
+        message,
+        "this arm declares no partition key; mark the trigger binding that identifies the lane: `{ @key shop_id }`"
+    );
+}
+
+#[test]
+fn a_composite_key_keeps_the_order_it_was_written_in() {
+    let one = program(
+        "effect E {
+  on @order.placed as e { @key order_id, @key customer_id } { log(\"x\") }
+}",
+    );
+    assert_eq!(one.effects[0].arms[0].keys, ["order_id", "customer_id"]);
+
+    let two = program(
+        "effect E {
+  on @order.placed as e { @key customer_id, @key order_id } { log(\"x\") }
+}",
+    );
+    assert_eq!(two.effects[0].arms[0].keys, ["customer_id", "order_id"]);
+}
+
+#[test]
+fn the_modifier_is_read_off_the_header() {
+    let program = program(
+        "effect E {
+  on @order.placed as e { @key order_id } { log(\"every\") }
+  on latest @order.cancelled as e { @key order_id } { log(\"latest\") }
+  on live @order.reviewed as e { @key order_id } { log(\"live\") }
+}",
+    );
+    let arms = &program.effects[0].arms;
+    assert_eq!(arms[0].delivery, Delivery::Every);
+    assert_eq!(arms[1].delivery, Delivery::Latest);
+    assert_eq!(arms[2].delivery, Delivery::Live);
+}
+
+/// Soft, not reserved: nothing outside the slot after `on` loses the name.
+#[test]
+fn latest_and_live_are_still_writable_as_names() {
+    parse(
+        "event @a.b { latest: Int, live: String }
+
+command C(latest: Int, live: String) {
+  emit @a.b { latest, live }
+}
+",
+    )
+    .expect("`latest` and `live` are claimed only between `on` and the first path");
+}
+
+#[test]
+fn a_key_may_not_be_sealed() {
+    let message = err("effect E {
+  on @order.placed as e { @key email } { log(\"x\") }
+}");
+    assert!(
+        message.starts_with("`email` is sealed, so it cannot be a partition key"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn a_key_has_to_be_a_type_that_identifies() {
+    let message = err("effect E {
+  on @order.placed as e { @key total } { log(\"x\") }
+}");
+    assert!(
+        message.starts_with("`total` is a Money(2), which cannot be a partition key"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn a_key_names_a_field_the_event_has() {
+    let message = err("effect E {
+  on @order.placed as e { @key nope } { log(\"x\") }
+}");
+    assert_eq!(message, "@order.placed has no field `nope`");
+}
+
+/// A multi-path arm binds only what its types share, so a key is held to the same line
+/// with no new check: the field is not there to mark.
+#[test]
+fn a_key_on_a_multi_path_arm_names_a_shared_field() {
+    program(
+        "effect E {
+  on @order.placed, @order.cancelled as e { @key customer_id } { log(\"x\") }
+}",
+    );
+    let message = err("effect E {
+  on @order.placed, @order.cancelled as e { @key email } { log(\"x\") }
+}");
+    assert_eq!(message, "@order.placed has no field `email`");
+}
+
+#[test]
+fn on_latest_may_not_invoke() {
+    let message = err("effect E {
+  on latest @order.placed as e { @key order_id } {
+    invoke RecordNotified {
+      order_id,
+      notification_id: Uuid.derive(e.id, \"confirmation\"),
+    }
+  }
+}");
+    assert_eq!(
+        message,
+        "an `on latest` arm cannot invoke a command; collapsing drops invocations, so this would drop `RecordNotified`'s events; write `on` instead, or drop the record"
+    );
+}
+
+/// The check is interprocedural: an effect-local `fn` may invoke, so a walk that stopped
+/// at the arm's own statements would let the same program through by moving one line.
+#[test]
+fn on_latest_may_not_invoke_through_a_helper() {
+    let message = err("effect E {
+  fn note_it(id: Uuid, note: Uuid) { invoke RecordNotified { order_id: id, notification_id: note } }
+  on latest @order.placed as e { @key order_id } {
+    note_it(order_id, Uuid.derive(e.id, \"confirmation\"))
+  }
+}");
+    assert!(
+        message.starts_with("an `on latest` arm cannot invoke a command"),
+        "got: {message}"
+    );
+}
+
+/// The asymmetry is the point: `live` declines whole invocations, so the log truthfully
+/// says nothing happened. `latest` keeps one out of N, and only the author knows whether
+/// the survivor described the invocation or the events.
+#[test]
+fn on_live_may_invoke() {
+    program(
+        "effect E {
+  on live @order.placed as e { @key order_id } {
+    invoke RecordNotified {
+      order_id,
+      notification_id: Uuid.derive(e.id, \"confirmation\"),
+    }
+  }
+}",
+    );
+}
+
+#[test]
+fn a_projector_handler_has_no_delivery_to_declare() {
+    let message = parse(&source(
+        "projector P {
+  entity Order { order_id: Uuid @key, seen: Bool = false }
+
+  on latest @order.placed { order_id } { put Order { order_id, seen: true } }
+}",
+    ))
+    .expect_err("a projector rebuilds from position 0")
+    .text();
+    assert!(
+        message.starts_with("a projector handler cannot be `on latest`"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn a_projector_handler_has_no_lane_to_name() {
+    let message = parse(&source(
+        "projector P {
+  entity Order { order_id: Uuid @key, seen: Bool = false }
+
+  on @order.placed { @key order_id } { put Order { order_id, seen: true } }
+}",
+    ))
+    .expect_err("a projector has no lanes")
+    .text();
+    assert!(
+        message.starts_with("`@key` marks the partition key of an effect arm"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn a_fold_arm_has_no_lane_to_name() {
+    let message = err("effect E {
+  on @order.placed as e { @key order_id } {
+    fold seen: Int = 0
+      on @order.placed(customer_id: e.customer_id) { @key order_id } => seen + 1
+    log(\"{seen}\")
+  }
+}");
+    assert!(
+        message.starts_with("`@key` marks the partition key of an effect arm"),
+        "got: {message}"
+    );
+}
+
+/// The test that catches a key-extraction bug, which is why it is here beside the
+/// collapsing one rather than instead of it: two customers are two lanes, so both run.
+#[test]
+fn two_keys_are_two_invocations() {
+    let program = program(
+        "effect E {
+  on latest @order.placed as e { @key customer_id } {
+    log(\"sync {customer_id}\")
+  }
+}",
+    );
+    let mut interpreter =
+        Interpreter::with_log(&program, vec![placed(1, 7, 100), placed(2, 8, 200)]);
+    let counts = interpreter.drive("E").expect("both lanes ran");
+    assert_eq!(counts.done, 2);
+    assert_eq!(counts.collapsed, 0);
+    assert_eq!(interpreter.lines(), ["sync 7", "sync 8"]);
+}
+
+/// Catching up, the batch is the whole backlog, so three edits for one customer are one
+/// invocation, at the newest of them. History is still processed: rule 3 stops the fold
+/// at the trigger's own position, so the one invocation has seen everything before it.
+#[test]
+fn on_latest_runs_once_per_key_over_a_backlog() {
+    let program = program(
+        "effect E {
+  on latest @order.placed as e { @key customer_id } {
+    fold orders: Int = 0
+      on @order.placed(customer_id) => orders + 1
+    log(\"sync {customer_id} after {orders}\")
+  }
+}",
+    );
+    let log = vec![
+        placed(1, 7, 100),
+        placed(2, 8, 200),
+        placed(3, 7, 300),
+        placed(4, 7, 400),
+    ];
+    let mut interpreter = Interpreter::with_log(&program, log);
+    let counts = interpreter.drive("E").expect("collapsed");
+    assert_eq!(counts.done, 2, "one per customer, not one per event");
+    assert_eq!(counts.collapsed, 2, "and the two earlier ones are counted");
+    assert_eq!(
+        interpreter.lines(),
+        ["sync 8 after 1", "sync 7 after 3"],
+        "each survivor runs at its own position, so the fold has seen the whole prefix"
+    );
+}
+
+/// An arm listing several types collapses across them, which is the case the rule exists
+/// for: a shop reconnecting and then editing two plans should publish once.
+#[test]
+fn on_latest_collapses_across_the_types_one_arm_lists() {
+    let program = program(
+        "effect E {
+  on latest @order.placed, @order.cancelled as e { @key customer_id } {
+    log(\"sync {customer_id}\")
+  }
+}",
+    );
+    let log = vec![placed(1, 7, 100), cancelled(2, 7), placed(3, 7, 300)];
+    let mut interpreter = Interpreter::with_log(&program, log);
+    let counts = interpreter.drive("E").expect("collapsed");
+    assert_eq!(counts.done, 1);
+    assert_eq!(counts.collapsed, 2);
+    assert_eq!(interpreter.lines(), ["sync 7"]);
+}
+
+/// A catchup policy may change how much work happens and may never change what the log
+/// says. An `on` arm beside a collapsing one is untouched by it.
+#[test]
+fn a_plain_arm_beside_a_latest_one_still_runs_every_time() {
+    let program = program(
+        "effect E {
+  on latest @order.placed as e { @key customer_id } { log(\"latest {customer_id}\") }
+  on @order.cancelled as e { @key customer_id } { log(\"every {customer_id}\") }
+}",
+    );
+    let log = vec![
+        placed(1, 7, 100),
+        cancelled(2, 7),
+        placed(3, 7, 300),
+        cancelled(4, 7),
+    ];
+    let mut interpreter = Interpreter::with_log(&program, log);
+    let counts = interpreter.drive("E").expect("ran");
+    assert_eq!(counts.done, 3);
+    assert_eq!(counts.collapsed, 1);
+    assert_eq!(
+        interpreter.lines(),
+        ["every 7", "latest 7", "every 7"],
+        "only the `latest` arm collapsed"
+    );
+}
+
+/// `on live` is delivered as `on` under `deliver`. The boundary is a number the runtime
+/// resolves at first activation and is not a property of the log, so a test over a
+/// constructed log has nothing to express it with. See `docs/testing.md`.
+#[test]
+fn on_live_is_delivered_as_on_by_the_harness() {
+    let program = program(
+        "effect E {
+  on live @order.placed as e { @key customer_id } { log(\"live {customer_id}\") }
+}",
+    );
+    let mut interpreter =
+        Interpreter::with_log(&program, vec![placed(1, 7, 100), placed(2, 8, 200)]);
+    let counts = interpreter.drive("E").expect("ran");
+    assert_eq!(counts.done, 2);
+    assert_eq!(counts.collapsed, 0);
+    assert_eq!(interpreter.lines(), ["live 7", "live 8"]);
+}
+
+/// Rule 15 does not reach `deliver`, which names one position and so has no batch to be
+/// newest in. A host keeps the cursor and decides the batch; this is the seam.
+#[test]
+fn deliver_never_collapses_because_it_has_no_batch() {
+    let program = program(
+        "effect E {
+  on latest @order.placed as e { @key customer_id } { log(\"sync {customer_id}\") }
+}",
+    );
+    let mut interpreter =
+        Interpreter::with_log(&program, vec![placed(1, 7, 100), placed(2, 7, 200)]);
+    for position in 0..2 {
+        let outcome = interpreter
+            .deliver("E", position, &mut Journal::default())
+            .expect("delivered");
+        assert_eq!(outcome, Invocation::Done);
+    }
+    assert_eq!(interpreter.lines(), ["sync 7", "sync 7"]);
+}
+
+/// The self-trigger check walks the same interprocedural `invoke` list rule 15 does, so a
+/// loop hidden behind a helper is found. It was not before.
+#[test]
+fn a_cycle_through_an_effect_local_fn_is_found() {
+    let message = err("effect Loop {
+  fn again(id: Uuid) { invoke RecordNotified { order_id: id, notification_id: id } }
+  on @order.notified as e { @key order_id } { again(order_id) }
+}");
+    assert!(
+        message.contains("this effect can trigger itself"),
+        "got: {message}"
+    );
+}
+
+/// The extractor a host reaches for, checked here rather than only through `drive`, since
+/// hekla assigns lanes with the same call and the two must not drift on a composite or on
+/// the order its parts were written in.
+#[test]
+fn the_partition_key_is_read_in_the_order_it_was_written() {
+    let one = program(
+        "effect E {
+  on latest @order.placed as e { @key customer_id, @key order_id } { log(\"x\") }
+}",
+    );
+    let arm = &one.effects[0].arms[0];
+    let event = placed(1, 7, 100);
+    assert_eq!(
+        partition_key(arm, &event).expect("both fields are on the event"),
+        [
+            Key::Int(7),
+            Key::Uuid("0190d1a1-0000-7000-8000-000000000001".into())
+        ]
+    );
+
+    let swapped = program(
+        "effect E {
+  on latest @order.placed as e { @key order_id, @key customer_id } { log(\"x\") }
+}",
+    );
+    let other = partition_key(&swapped.effects[0].arms[0], &event).expect("the same two fields");
+    assert_ne!(
+        partition_key(arm, &event).expect("read twice"),
+        other,
+        "a composite is a sequence, so the two arms name different lanes"
+    );
+}
+
+/// Rule 15's collapse set is resolved before the walk, so it must not be able to fail:
+/// a record the walk cannot read has to reach the walk and be reported there, with the
+/// positions before it delivered and the position named. Resolving it eagerly turned a
+/// bad record at position 900 into an error with no counts and no partial progress.
+#[test]
+fn a_record_the_key_cannot_be_read_from_still_wedges_where_it_is() {
+    let program = program(
+        "effect E {
+  on latest @order.placed as e { @key customer_id } { log(\"sync {customer_id}\") }
+}",
+    );
+    // Both ways a host can hand over an event its own declaration disagrees with: the key
+    // field absent, and the key field holding something that cannot name a lane. The
+    // second is the one a frame slot would otherwise swallow, since `Frame::set` takes any
+    // value, so without a key read at delivery the walk would sail past it and every
+    // position after would quietly stop collapsing.
+    let absent = Event::new(
+        EventPath::new(["order", "placed"]),
+        [(
+            "order_id",
+            Value::uuid("0190d1a1-0000-7000-8000-000000000002"),
+        )],
+    );
+    let unkeyable = Event::new(
+        EventPath::new(["order", "placed"]),
+        [
+            (
+                "order_id",
+                Value::uuid("0190d1a1-0000-7000-8000-000000000002"),
+            ),
+            ("customer_id", Value::Bool(true)),
+        ],
+    );
+    for bad in [absent, unkeyable] {
+        let mut interpreter =
+            Interpreter::with_log(&program, vec![placed(1, 7, 100), bad, placed(3, 7, 300)]);
+
+        let counts = interpreter
+            .drive("E")
+            .expect("a record the key is not in is a wedge, not an abort");
+        assert_eq!(counts.done, 1, "the position before it was delivered");
+        assert_eq!(
+            counts.wedged.map(|(position, _)| position),
+            Some(1),
+            "and the walk stopped at the one it could not read, naming it"
+        );
+        assert_eq!(
+            interpreter.lines(),
+            ["sync 7"],
+            "the position after it never ran, so nothing collapsed silently"
+        );
+    }
+}
+
+/// Driving an effect that is not declared answered with empty counts before rule 15, and
+/// still does: resolving the collapse set is not a second place to fail.
+#[test]
+fn driving_an_unknown_effect_over_an_empty_log_is_no_work() {
+    let program = program(
+        "effect E {
+  on @order.placed as e { @key order_id } { log(\"x\") }
+}",
+    );
+    let mut interpreter = Interpreter::with_log(&program, vec![]);
+    let counts = interpreter.drive("Nonexistent").expect("nothing to do");
+    assert_eq!(counts.done, 0);
+    assert_eq!(counts.collapsed, 0);
+    assert!(counts.wedged.is_none());
+}
+
+/// A lane is the key *within one arm*: two arms of one effect may key by different
+/// fields, and two `Int` keys that read alike are not one lane.
+#[test]
+fn two_arms_keying_alike_are_still_two_groups() {
+    // Both arms key by the one field, and both events carry the same 7, so the key
+    // vectors are equal and only the arm tells the two groups apart. Keying them
+    // differently would have passed whether or not the arm was in the grouping at all.
+    let program = program(
+        "effect E {
+  on latest @order.placed as e { @key customer_id } { log(\"placed {customer_id}\") }
+  on latest @order.cancelled as e { @key customer_id } { log(\"cancelled {customer_id}\") }
+}",
+    );
+    let mut interpreter = Interpreter::with_log(&program, vec![placed(1, 7, 100), cancelled(2, 7)]);
+    let counts = interpreter.drive("E").expect("two arms, two groups");
+    assert_eq!(counts.done, 2, "neither collapsed into the other");
+    assert_eq!(counts.collapsed, 0);
+    assert_eq!(interpreter.lines(), ["placed 7", "cancelled 7"]);
+}
+
+/// A fold arm is not delivered, so it has no delivery to declare, and says so rather than
+/// leaving it to `expected-token`.
+#[test]
+fn a_fold_arm_has_no_delivery_to_declare() {
+    let message = err("effect E {
+  on @order.placed as e { @key order_id } {
+    fold seen: Int = 0
+      on latest @order.placed(customer_id: e.customer_id) => seen + 1
+    log(\"{seen}\")
+  }
+}");
+    assert_eq!(
+        message,
+        "a fold arm cannot be `on latest`; a fold arm reads the log rather than being delivered; delivery is an effect arm's to declare"
+    );
+}
+
+/// The lookahead that says "you forgot the body" counts `@key` and nothing else, so a
+/// wrong annotation is still reported as the annotation it is.
+#[test]
+fn a_wrong_annotation_in_a_destructure_is_not_a_missing_body() {
+    assert_eq!(
+        err("effect E {
+  on @order.placed as e { @max order_id } { log(\"x\") }
+}"),
+        "unknown annotation `@max`"
+    );
+    // And the lone-block case still reads as the destructure it is when the marker is
+    // the one that belongs there.
+    assert_eq!(
+        err("effect E {
+  on @order.placed as e { @key order_id }
+}"),
+        "this looks like a destructure block; a handler with one needs a body block after it"
     );
 }

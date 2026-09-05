@@ -887,7 +887,7 @@ command RecordNotified(order_id: Uuid) {
 /// Rule 9: `erase` is journaled and `reveal` is not, so the replay re-runs the reveal
 /// against a key that is gone.
 const ERASE_LAST: &str = "effect NotifyCustomer {
-  on @order.placed as e {
+  on @order.placed as e { @key customer_id } {
     erase(e.customer_id)
     log(reveal(e.email))
   }
@@ -896,7 +896,7 @@ const ERASE_LAST: &str = "effect NotifyCustomer {
 
 /// Rule 7: checked against the command's declared parameters, at compile time.
 const BAD_INVOKE: &str = "effect NotifyCustomer {
-  on @order.placed as e {
+  on @order.placed as e { @key customer_id } {
     invoke RecordNotified { order: e.order_id }
   }
 }
@@ -904,7 +904,7 @@ const BAD_INVOKE: &str = "effect NotifyCustomer {
 
 /// An effect that reacts to what it causes is an unbounded event stream.
 const SELF_TRIGGER: &str = "effect Loop {
-  on @order.notified as e {
+  on @order.notified as e { @key order_id } {
     invoke RecordNotified { order_id: e.order_id }
   }
 }

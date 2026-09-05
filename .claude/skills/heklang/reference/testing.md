@@ -86,6 +86,12 @@ Exactly one, and it decides which expectations are legal:
 **`deliver` drives, so there is no position to write.** An effect that fires on three of the given
 events makes three invocations, and the expectations are the whole trace across all of them.
 
+**The given log is a catch-up batch**, so an `on latest` arm collapses over it: three events for one
+key are one invocation, at the newest of them, and two keys are two invocations. An `on live` arm is
+delivered as `on`, because its boundary is a position the runtime resolves at first activation and is
+not a property of the log; a test can say what the arm does when it runs, and nothing about when it
+starts running.
+
 ## 5. What `run` expects
 
 | Expectation | Matches |

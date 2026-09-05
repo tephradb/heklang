@@ -77,6 +77,10 @@ impl<'a> Printer<'a> {
             "annotation" => Doc::concat(self.docs(node)),
             "event_handler" => self.handler(node),
             "destructure" => self.list("{", "}", true, &self.kids(node)),
+            // `@key shop_id`, one space and never a break between them: the marker means
+            // nothing apart from the field it is on. The same shape `enum_variant` prints
+            // `@default Free` as.
+            "keyed_field" => Doc::join(Doc::text(" "), self.docs(node)),
 
             // ------------------------------------------------------------- tests
             "test_declaration" => self.keyed("test", node),
@@ -248,25 +252,37 @@ impl<'a> Printer<'a> {
         ])
     }
 
-    /// `on @a, @b as e { fields } { .. }`.
+    /// `on latest @a, @b as e { @key k, field } { .. }`.
     ///
     /// The path list breaks like any other list except that it takes **no trailing comma**:
     /// it has no closing delimiter, so a comma there would be followed by `as` and would
     /// not parse. Its continuations are indented rather than aligned under the first path,
     /// which is what the corpus does by hand; one site writes twelve paths that way, and
     /// flat it would be a 328-column line.
+    ///
+    /// The delivery modifier stays on the header line with `on`. It is taken out before
+    /// the loop below rather than matched inside it, because it is the one child that
+    /// comes *before* the first path: left in, it would make `rest` non-empty and send
+    /// every path down the fallback arm.
     fn handler(&self, node: Node<'a>) -> Doc<'a> {
         let kids = self.kids(node);
+        let mut delivery = None;
         let mut paths = Vec::new();
         let mut rest = Vec::new();
         for &kid in &kids {
             match kid.kind() {
+                "delivery_keyword" if paths.is_empty() && rest.is_empty() => {
+                    delivery = Some(self.text(kid));
+                }
                 "event_path" if rest.is_empty() => paths.push(self.node(kid)),
                 _ => rest.push(kid),
             }
         }
         let mut parts = vec![
-            Doc::text("on "),
+            match delivery {
+                Some(word) => Doc::concat([Doc::text("on "), Doc::text(word), Doc::text(" ")]),
+                None => Doc::text("on "),
+            },
             Doc::group(Doc::indent(Doc::join(
                 Doc::concat([Doc::text(","), Doc::Line]),
                 paths,

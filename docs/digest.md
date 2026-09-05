@@ -98,11 +98,13 @@ clause build the same index at different positions in the list, so without sorti
 of one index would not agree. Each index keeps its own field order, because a composite index is
 ordered.
 
-**Not sorted:** parameters, statements, stages, slices, folds, array items, interpolation parts, and
-a test's `given`, `respond` and `expect` lines. Each is a sequence whose order is part of what it
-means. Slices are the one that could go either way, and they stay written: sorting them would have
-to be settled against the slot numbering their binds hand out, and reordering fold arms is an edit
-rather than another way of writing the same thing.
+**Not sorted:** parameters, statements, stages, slices, folds, array items, interpolation parts, an
+effect arm's partition key, and a test's `given`, `respond` and `expect` lines. Each is a sequence
+whose order is part of what it means. Slices are the one that could go either way, and they stay
+written: sorting them would have to be settled against the slot numbering their binds hand out, and
+reordering fold arms is an edit rather than another way of writing the same thing. An arm's `@key`
+fields are the sharpest case: `docs/effects.md` rule 15 makes `{ @key a, @key b }` a different lane
+from `{ @key b, @key a }`, so sorting them would hash two different programs alike.
 
 ## 6. A field list the target declares is sorted, unless a value calls out
 
@@ -173,7 +175,7 @@ body never has to be decoded to run a compatibility check.
 | `record` | the declaration: fields, types, `@max` |
 | `command` | name, parameters in order with their types, and the refusal codes it can answer with |
 | `projector` | name, and per entity: columns with types, `@max` and defaults, the key, the indexes |
-| `effect` | name, and the events its arms subscribe to |
+| `effect` | name, and per arm: the events it subscribes to, its delivery modifier and its partition key |
 | `fn`, `test` | none; nothing outside the program can name either |
 
 An event, an enum and a record are all shape and no body, so the signature repeats the declaration
@@ -185,6 +187,13 @@ entry of its own (rule 7), so a code is otherwise only findable inside a body. Y
 declared name whose spelling leaves the program, and a client switches on it. So the signature goes
 and collects the codes a command can answer with, **reaching through the `fn`s it calls**, because
 `docs/functions.md` lets a helper decide a refusal on a command's behalf.
+
+**An effect's signature is per arm, and holds only what a deployment can act on.** Which events reach
+it, whether history fires, and which lane each event lands in are all a dispatcher's business
+(`docs/effects.md` rule 15), and all three move when the author changes them. The `as` binding and the
+fields an arm destructures for its own use are not there. There is also no flat list of the effect's
+events beside the arms: it would be derivable from them, and a second copy of a fact is a second thing
+to keep true.
 
 **The digest reports the shape; the caller decides what is breaking.** Whether a removed refusal
 code, a widened `@max` or a new optional field counts as a break is policy, and policy does not
@@ -241,7 +250,7 @@ capitalised, which keeps them apart from the lowercase heads a value uses: `(Mon
 | | Heads |
 | --- | --- |
 | declaration | `event` `enum` `record` `function` `command` `projector` `effect` `test` |
-| structure | `params` `p` `f` `col` `key` `index` `entity` `on` `events` `bind` `env` `now` `stage` `pre` `post` `fold` `slice` `filter` `acc` `variants` `default` `max` `no_index` `returns` `body` `sig` `rejects` |
+| structure | `params` `p` `f` `col` `key` `index` `entity` `on` `events` `delivery` `bind` `env` `now` `stage` `pre` `post` `fold` `slice` `filter` `acc` `variants` `default` `max` `no_index` `returns` `body` `sig` `rejects` |
 | statement | `set` `if` `then` `else` `emit` `put` `patch` `update` `delete` `fail` `log` `erase` `for` `in` `index` `item` `do` `discard` `call` `return` `value` `outcome` |
 | type | `Bool` `Int` `String` `Uuid` `Timestamp` `Rounding` `Json` `Response` `Outcome` `(Decimal n)` `(Money n)` `(Enum N)` `(Record N)` `(List t)` `(Map k v)` `(Opt t)` `(Sealed t subject)` |
 | value | `$n` `bool` `int` `dec` `money` `str` `uuid` `ts` `none` `some` `variant` `rounding` `array` `of` `map-empty` `obj` `json-num` `new` |
@@ -281,6 +290,26 @@ And its signature:
 ```
 (sig command Place (params (p order_id Uuid) (p customer_id Int) (p total (Money 2))) (rejects too_many_open))
 ```
+
+An effect arm carries its delivery and its key beside the events it answers, and its signature keeps
+exactly those three:
+
+```
+(effect Sync
+  (on
+    (events @shop.connected @shop.reconnected)
+    (delivery latest)
+    (key shop_id)
+    (bind shop_id $0)
+    (stage (pre (log (interp (str "sync ") $0 (str "")))))))
+
+(sig effect Sync (on (events @shop.connected @shop.reconnected) (delivery latest) (key shop_id)))
+```
+
+`(delivery every)` is written even though `on` writes no word, which is the one place a default is
+spelled out rather than left absent. Everywhere else an absent `(max ..)` or `no_index` means the
+default; here the form feeds a signature a deploy gate reads, and there an absent field and a default
+one should not have to be told apart.
 
 One child per line when a list has to break, rather than filling the width, because a filled line
 reflows when anything is inserted and a diff should point at what changed.
