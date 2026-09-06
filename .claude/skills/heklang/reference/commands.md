@@ -283,11 +283,12 @@ is checked too:
 ```hek
 let r = invoke ListItem { item_id, seller_id, sku }
 if r.refused(ShopNotFound) { log("the shop went away") }
-if r.code().unwrap_or("") == ShopNotFound { log("the same question, spelled out") }
+if r.code() == ShopNotFound { log("the same question, spelled out") }
 ```
 
-`.code()` is a `String?` and `T?` does not fill `T`, so the `unwrap_or` is load-bearing. An `invalid`
-carries no code, so `refused` answers `false` for it whichever refusal is named.
+`.code()` is a `String?`, and an equality takes one against a bare value, so nothing needs unwrapping:
+a call that did not refuse has no code, and no code is not any name. An `invalid` carries no code, so
+`refused` answers `false` for it whichever refusal is named.
 
 `reject <Name>` and `invalid(msg)` may be written wherever an `Outcome` is expected: as a `return` in
 a command or a guard, and as the value of a `fn` declared `-> Outcome` or `-> Outcome?`. A `fn` that

@@ -44,6 +44,135 @@ fn err(body: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------------
+// Comparing one
+
+/// The answer the whole rule rests on: an absent value is unequal to every present one.
+/// Run rather than parsed, because the type rule passing says nothing about which way
+/// the branch went.
+#[test]
+fn an_absent_value_equals_nothing_present() {
+    const MAKE: &str = "command Make(id: Uuid, text: String?) {
+  if text == \"hello\" {
+    return invalid(\"equal\")
+  }
+  emit @note.made { id, text: \"not equal\" }
+}";
+    assert!(matches!(run(MAKE, Some("hello")), Outcome::Invalid(_)));
+    assert_eq!(made(MAKE, "other"), Value::str("not equal"));
+    // The one that used to need an `unwrap_or` and a sentinel to ask.
+    assert!(matches!(run(MAKE, None), Outcome::Ok(_)));
+}
+
+/// The reading that is easiest to get wrong, so it is written down as a test as well as
+/// in the doc: `!=` is **true** for an absent value.
+#[test]
+fn an_absent_value_is_unequal_under_ne() {
+    const MAKE: &str = "command Make(id: Uuid, text: String?) {
+  if text != \"hello\" {
+    return invalid(\"different\")
+  }
+  emit @note.made { id, text: \"same\" }
+}";
+    assert_eq!(made(MAKE, "hello"), Value::str("same"));
+    assert!(matches!(run(MAKE, Some("other")), Outcome::Invalid(_)));
+    assert!(matches!(run(MAKE, None), Outcome::Invalid(_)));
+}
+
+/// Which side is bare decides nothing. The lift is on whichever operand is not the
+/// optional, so both spellings are the same comparison.
+#[test]
+fn either_operand_may_be_the_bare_one() {
+    const MAKE: &str = "command Make(id: Uuid, text: String?) {
+  if \"hello\" == text {
+    return invalid(\"equal\")
+  }
+  emit @note.made { id, text: \"not equal\" }
+}";
+    assert!(matches!(run(MAKE, Some("hello")), Outcome::Invalid(_)));
+    assert!(matches!(run(MAKE, None), Outcome::Ok(_)));
+}
+
+/// Asking for absence directly still works and still means what it meant. It needs no
+/// lift, both sides being optionals already, which is what keeps every digest that has
+/// one unchanged.
+#[test]
+fn an_optional_still_compares_against_none() {
+    const MAKE: &str = "command Make(id: Uuid, text: String?) {
+  if text == none {
+    return invalid(\"absent\")
+  }
+  emit @note.made { id, text: \"present\" }
+}";
+    assert_eq!(made(MAKE, "hello"), Value::str("present"));
+    assert!(matches!(run(MAKE, None), Outcome::Invalid(_)));
+}
+
+/// A container on both sides, which is where the lift has a type to get wrong: the `[]`
+/// resolves through the optional hint, so the element type on the bare side is the one the
+/// comparison was written for rather than a guess from an empty list.
+///
+/// It does not reach the case the node's `inner` field exists for. An `Expr::Comp` that
+/// yields nothing evaluates to `List(Json)` while its static type says otherwise, and that
+/// disagreement is older than this rule and reaches an `emit` the same way; see the note
+/// in `interp.rs`.
+#[test]
+fn the_lift_takes_its_type_from_the_comparison() {
+    const MAKE: &str = "fn listed(t: String?) -> List(String)? {
+  if t.is_none() {
+    return none
+  }
+  return []
+}
+
+command Make(id: Uuid, text: String?) {
+  if listed(text) == [] {
+    return invalid(\"empty\")
+  }
+  emit @note.made { id, text: \"absent\" }
+}";
+    assert!(matches!(run(MAKE, Some("hello")), Outcome::Invalid(_)));
+    assert!(matches!(run(MAKE, None), Outcome::Ok(_)));
+}
+
+/// `T??` is unspellable, but `List(T?).first()` answers one, so the rule has to hold a
+/// level down as well. It does without a case of its own: the lift is one level at the
+/// outside, the same place the wrap has always been.
+#[test]
+fn an_optional_of_an_optional_compares_the_same_way() {
+    const MAKE: &str = "command Make(id: Uuid, text: String?) {
+  let xs = [text]
+  if xs.first() == text {
+    return invalid(\"head is text\")
+  }
+  emit @note.made { id, text: \"head is not text\" }
+}";
+    // Present or absent, the head of a one-item list is that item: the lift nested the
+    // bare side rather than flattening it.
+    assert!(matches!(run(MAKE, Some("hello")), Outcome::Invalid(_)));
+    assert!(matches!(run(MAKE, None), Outcome::Invalid(_)));
+}
+
+/// A comparison proves the value present in the branch it guards, and deliberately does
+/// not say so. `docs/optionals.md` has the argument; this is the shape it costs.
+#[test]
+fn an_equality_does_not_narrow() {
+    let program = source(
+        "command Make(id: Uuid, text: String?) {
+  if text == \"hello\" {
+    emit @note.made { id, text }
+  }
+}",
+    );
+    let message = parse(&program)
+        .expect_err("an equality narrows nothing")
+        .text();
+    assert!(
+        message.contains("expected String, found String?"),
+        "got: {message}"
+    );
+}
+
+// ---------------------------------------------------------------------------------
 // The two forms
 
 /// The early-return shape. Reaching past the `if` means the condition was false,

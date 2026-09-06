@@ -147,6 +147,18 @@ fn a_comparison_covers_the_pair_rather_than_the_operator() {
     assert_eq!(err.span, at(3, 6, 3, 11), "`a > b`");
 }
 
+/// Rule 5: an ordered optional is a mistake with a shape, so it gets the reason as well
+/// as the pair. The fact alone leaves an author who reached for `>` no way to tell it
+/// from the pairs that simply have no row.
+#[test]
+fn an_ordered_optional_says_why() {
+    let err = error("command A(s: String?) {\n  if s > \"a\" {\n    return\n  }\n}\n");
+    assert_eq!(err.message, "cannot apply `>` to String? and String");
+    assert_eq!(err.span, at(3, 6, 3, 13), "`s > \"a\"`");
+    let hint = err.hint.expect("an ordered optional carries a reason");
+    assert!(hint.contains("an optional does not order"), "got: {hint}");
+}
+
 /// Rule 4: a field the event does not have covers the field's name. It used to report
 /// at the cursor, which by then had moved past the name onto the `:`.
 #[test]

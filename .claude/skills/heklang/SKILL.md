@@ -285,7 +285,9 @@ A comment is `//` to the end of the line. Put one on its own line, leading whate
    errors, and an inexact `total * rate` fails at run time naming `mul`; write
    `total.mul(rate, HalfUp)`. `Int / Int` and `Decimal(s) / Int` truncate instead, with no error.
 6. **`T?` does not fill `T`.** Use `unwrap_or(x)`, or a branch that proves it present (narrowing). A
-   bare `T` does fill a `T?` at every declared position, wrapping once at the outside.
+   bare `T` does fill a `T?` at every declared position, wrapping once at the outside. `==` and `!=`
+   are the one exception to needing either: they take a `T?` against a bare `T`, and an absent value
+   is unequal to every present one. Ordering an optional is still an error.
 7. **Sealed content may only be moved, asked about, or revealed.** A field with `@subject(...)`
    cannot be interpolated, compared, sent in a body, passed to `invoke`, `unwrap_or`ed or read
    through a method. Move it into a same-subject position, ask `.is_some()`, or `reveal(x)` in an

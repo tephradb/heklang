@@ -50,8 +50,7 @@ Three more exist and **cannot be written in a type position**:
 - `Outcome`, the result of an `invoke`. It has no spelling outside a `fn` signature; it is
   otherwise only consumed by `.ok()`, `.code()` and `.message()` on the expression that produced
   it. `.code()` is a `String?`, and a declared refusal name is that code, so
-  `r.refused(ShopNotFound)` and `r.code().unwrap_or("") == ShopNotFound` are both checked
-  (`docs/refusals.md`).
+  `r.refused(ShopNotFound)` and `r.code() == ShopNotFound` are both checked (`docs/refusals.md`).
 - `Rounding`, the mode a `mul` or `div` takes. Its values are the bare words `HalfUp`, `HalfEven`
   and `Down`.
 
@@ -124,6 +123,13 @@ A comparison follows the same table: `==` and `!=` on any two of the same type, 
 `Int`, `Decimal(s)`, `Money(n)`, `String` and `Timestamp`. `Money(2) > Money(3)` is an error for the
 reason `Money(2) + Money(3)` is.
 
+**Equality also takes a `T?` against a bare `T`**, either way round. That is section 3's rule reaching
+a position which declares no type: the target is the other operand, and the bare side wraps exactly as
+it does at a write. An absent value is unequal to every present one, so where `sku` is absent
+`sku == "house"` is `false` and `sku != "house"` is **true**. Ordering does not follow, because an
+absent value is neither before nor after anything: `sku > "house"` is an error that says so.
+`docs/optionals.md` has the argument and the shape of the lift.
+
 **Arithmetic on sealed content is rejected.** A sum of it is plaintext derived from it, so `reveal`
 comes first, the same rule that already covers interpolation and comparison.
 
@@ -152,7 +158,8 @@ an `emit` field, a `put`/`patch`/`update` column and its key, a command paramete
 `invoke`, a `fn` argument and its return, a fold seed and every fold arm, a slice filter value, a
 record literal field, a list element and a comprehension's yield, a method argument, an entity
 default and a `const`, a `given` field and every `expect` value, an `if` condition and both operands
-of `&&`, `||` and `!` (which is where `if owner_email` stops being a program).
+of `&&`, `||` and `!` (which is where `if owner_email` stops being a program), and both operands of
+`==` and `!=`.
 
 Almost all of them are one call site in the parser, so adding a position cannot forget the rule.
 
@@ -186,6 +193,14 @@ Which is this document's opening defect exactly, on the path an author actually 
 uses the shorthand wherever the names line up, so the checked spelling was the rarer one. Both
 checks now run in one helper the seven sites share, `Parser::shorthand`, rather than in seven copies
 that a new site could be added without.
+
+**The equality operands are the third, and a different kind of exception.** Every other position here
+has a declared type: somewhere, something wrote down what goes there. A comparison writes down
+nothing. Its target is whatever the other operand turned out to be, so the rule is met by lifting the
+bare side into the optional its neighbour is, rather than by checking it against a declaration. Same
+relation, same one-level wrap; only where the target comes from is new. It is also the one position
+whose lift is a node of its own rather than a value built at the write, because there is no write:
+see `docs/optionals.md`.
 
 The two flags are what keep it faithful rather than stricter. `check_seal` stands down while
 `folding` and while `propagating`, which is how a slice filter and a projector column already behave

@@ -311,6 +311,139 @@ fn a_comparison_meets_at_one_scale() {
     );
 }
 
+/// Section 3's `T is F?` row, reached where nothing declares a type: the target is the
+/// other operand. Either order, and every shape a bare value comes in, because the wrap
+/// is on the value rather than on the spelling of one kind of literal.
+#[test]
+fn an_equality_takes_an_optional_against_a_bare_value() {
+    for (params, cond) in [
+        (", s: String?", "s == \"cart\""),
+        (", s: String?", "\"cart\" == s"),
+        (", s: String?", "s != \"cart\""),
+        (", n: Int?", "n == 5"),
+        (", n: Int?", "5 == n"),
+        // The literal settles against the neighbour through the optional, which is what
+        // makes the second of these read the same as the first.
+        (", m: Money(2)?", "m == 1.50"),
+        (", m: Money(2)?", "1.50 == m"),
+        (", r: Decimal(4)?", "0.0001 == r"),
+        (", e: Status?", "e == Active"),
+        (", xs: List(String)?", "xs == []"),
+        (", f: Facts?, g: Facts", "f == g"),
+        // Both optional, and an optional against `none`, which always worked.
+        (", a: String?, b: String?", "a == b"),
+        (", s: String?", "s == none"),
+    ] {
+        let source = format!(
+            "command C(id: Int{params}) {{
+  if {cond} {{
+    return
+  }}
+  emit @thing.touched {{ id }}
+}}"
+        );
+        parse(&self::source(&source)).unwrap_or_else(|err| panic!("for `{cond}`: {err}"));
+    }
+}
+
+/// Equality only. An absent value is neither before nor after anything, so the ordering
+/// row is unchanged and says why rather than only naming the pair.
+#[test]
+fn an_optional_does_not_order() {
+    for (params, cond) in [
+        (", s: String?", "s > \"a\""),
+        (", s: String?", "\"a\" > s"),
+        (", s: String?", "s <= \"a\""),
+        (", a: Money(2)?, b: Money(2)", "a > b"),
+        // Two optionals is the same answer, arrived at from the other side.
+        (", s: String?, t: String?", "s > t"),
+    ] {
+        let message = err(&format!(
+            "command C(id: Int{params}) {{
+  if {cond} {{
+    return
+  }}
+  emit @thing.touched {{ id }}
+}}"
+        ));
+        assert!(
+            message.starts_with("cannot apply"),
+            "for `{cond}`: {message}"
+        );
+        assert!(
+            message.contains("an optional does not order"),
+            "for `{cond}`: {message}"
+        );
+        assert!(
+            message.contains("`==` and `!=` do take one"),
+            "for `{cond}`: {message}"
+        );
+    }
+}
+
+/// And the reason is only offered where it leads somewhere. `Uuid` does not order at all,
+/// two scales never meet, and a `String?` against an `Int` is a pair that never met, so in
+/// each of these `unwrap_or` would buy the author a second error rather than a program.
+#[test]
+fn an_optional_is_blamed_only_when_it_is_what_is_wrong() {
+    for (params, cond) in [
+        (", u: Uuid?, v: Uuid", "u > v"),
+        (", xs: List(String)?, ys: List(String)", "xs > ys"),
+        (", s: String?, n: Int", "s > n"),
+        (", a: Money(2)?, b: Money(3)", "a > b"),
+    ] {
+        let message = err(&format!(
+            "command C(id: Int{params}) {{
+  if {cond} {{
+    return
+  }}
+  emit @thing.touched {{ id }}
+}}"
+        ));
+        assert!(
+            message.starts_with("cannot apply"),
+            "for `{cond}`: {message}"
+        );
+        assert!(
+            !message.contains("an optional does not order"),
+            "for `{cond}`, the optional is not what is wrong: {message}"
+        );
+    }
+}
+
+/// One level, at the outside, and the inner types still have to be the same one. The
+/// pair is what is checked; the optional is not a hole anything falls into.
+#[test]
+fn an_equality_across_an_optional_still_needs_the_pair_to_meet() {
+    for (params, cond, expected) in [
+        (", s: String?, n: Int", "s == n", "String? and Int"),
+        (
+            ", xs: List(String?), ys: List(String)",
+            "xs == ys",
+            "List(String?) and List(String)",
+        ),
+        (
+            ", a: Money(2)?, b: Money(3)",
+            "a == b",
+            "Money(2)? and Money(3)",
+        ),
+    ] {
+        let message = err(&format!(
+            "command C(id: Int{params}) {{
+  if {cond} {{
+    return
+  }}
+  emit @thing.touched {{ id }}
+}}"
+        ));
+        assert!(message.contains(expected), "for `{cond}`: {message}");
+        assert!(
+            message.starts_with("cannot apply"),
+            "for `{cond}`: {message}"
+        );
+    }
+}
+
 /// Rule 12 already covers interpolation and comparison. Arithmetic reads its operands
 /// the same way: a sum of sealed content is plaintext derived from it.
 #[test]

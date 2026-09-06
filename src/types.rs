@@ -124,11 +124,23 @@ pub fn arithmetic(op: BinOp, lhs: &Type, rhs: &Type) -> Option<Type> {
     })
 }
 
-/// Whether two types may be compared. Equality is any two of the same type; ordering
-/// also needs one that orders. Scales do not meet here either, for the reason they do
-/// not meet in `arithmetic`: `Money(2)` and `Money(3)` are different types, and a
-/// comparison that rescaled one silently would answer a question nobody asked.
+/// Whether two types may be compared. Equality is any two of the same type, or a `T?`
+/// against a bare `T`; ordering also needs one that orders. Scales do not meet here
+/// either, for the reason they do not meet in `arithmetic`: `Money(2)` and `Money(3)`
+/// are different types, and a comparison that rescaled one silently would answer a
+/// question nobody asked.
 pub fn comparable(op: BinOp, lhs: &Type, rhs: &Type) -> bool {
+    // `fills` is the relation section 3 of `docs/types.md` already has for a bare `T`
+    // written into a `T?`, met here as a comparison rather than as a write: the target
+    // is the other operand rather than a declaration. The parser lifts the bare side,
+    // so what runs is the `Opt` against `Opt` the interpreter already had and neither
+    // it nor this table learns a second rule.
+    //
+    // Equality only. An absent value is neither before nor after anything, so ordering
+    // an optional has no answer to give and `bad_operands` says so.
+    if matches!(op, BinOp::Eq | BinOp::Ne) && (fills(lhs, rhs) || fills(rhs, lhs)) {
+        return true;
+    }
     if lhs != rhs {
         return false;
     }

@@ -56,7 +56,9 @@ The positions this holds at, exhaustively: an `emit` field, a `put`/`patch`/`upd
 key, a command parameter at `run` and at `invoke`, a `fn` argument and its return, a fold seed and
 every fold arm, a slice filter value, a record literal field, a list element and a comprehension's
 yield, a method argument, an entity default, a `const`, a guard argument, a refusal field, a `given`
-field and every `expect` value, an `if` condition and every operand of `&&`, `||` and `!`.
+field and every `expect` value, an `if` condition and every operand of `&&`, `||` and `!`, and both
+operands of `==` and `!=`. The last is the one position with no declared type: the target is the
+other operand, so the bare side wraps into whatever its neighbour turned out to be.
 
 ## 3. What an expression's type is
 
@@ -106,9 +108,12 @@ Anything else with both types known is a compile error naming both operands. **S
 `Money(2) + Money(3)` and `Decimal(2) + Decimal(4)` are errors, because a silent rescale is how a
 total loses a cent. There is no `+` on `String`.
 
-`==` and `!=` take any two values of the same type. `< <= > >=` take `Int`, `Decimal(s)`, `Money(n)`,
-`String` and `Timestamp`. `Uuid` does not order. **Arithmetic on sealed content is rejected**: a sum
-of it is plaintext derived from it, so `reveal` comes first.
+`==` and `!=` take any two values of the same type, and a `T?` against a bare `T` either way round:
+the bare side wraps, and an absent value is unequal to every present one, so `x != "a"` is **true**
+where `x` is absent. `< <= > >=` take `Int`, `Decimal(s)`, `Money(n)`, `String` and `Timestamp`, and
+never an optional, because an absent value is neither before nor after anything. `Uuid` does not
+order. **Arithmetic on sealed content is rejected**: a sum of it is plaintext derived from it, so
+`reveal` comes first.
 
 ### Where rounding happens, and where it does not
 
@@ -196,8 +201,8 @@ Three lines of rule:
 - a narrowing ends where its block does.
 
 **What deliberately does not narrow**: a compound condition (`if a.is_some() && b.is_some()` narrows
-neither), the value-position `if`, and an `else if`. Where narrowing does not reach, `unwrap_or`
-does.
+neither), the value-position `if`, an `else if`, and an equality (`if x == "a"` does prove `x`
+present, and says so nowhere). Where narrowing does not reach, `unwrap_or` does.
 
 ## 6. Strings
 

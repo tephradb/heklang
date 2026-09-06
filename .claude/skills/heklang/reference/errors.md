@@ -65,7 +65,7 @@ The set is closed: every diagnostic heklang can produce is one of these.
 | Code | Means | Fix |
 | --- | --- | --- |
 | `type-mismatch` | a value that does not fill a declared type | `T?` does not fill `T`: use `unwrap_or`, or a branch that proves it present |
-| `bad-operands` | an operator applied to a pair it does not take | scales never meet; `Money` and `Decimal` do not add; there is no `+` on `String` |
+| `bad-operands` | an operator applied to a pair it does not take | scales never meet; `Money` and `Decimal` do not add; there is no `+` on `String`; an optional does not order, though `==` and `!=` do take one |
 | `bad-literal` | a literal that cannot be the type its position declares | usually more decimal places than the target holds, or a malformed uuid or RFC 3339 string |
 | `bad-type` | a type spelled wrong | a scale above 18, or a `Map` key that does not order (`Bool`, `Money(n)`, `Decimal(n)`) |
 | `needs-target-type` | a value whose type nothing decides | `[]`, `Map.empty`, `Money.parse` and `Decimal.parse` take their type from the target; a `let` is not one |

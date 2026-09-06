@@ -57,7 +57,8 @@ looked through a seal at the top and not through one under an `Opt`.
 
 The last two rows are also why the rule now lives in one place. Every literal position funnels
 through one function in the parser, so the wrap happens where a declared type meets a found type and
-nowhere else; adding an arm to that function cannot forget it.
+nowhere else; adding an arm to that function cannot forget it. There is one wrap outside that
+function, and it is outside it because there is no declared type to meet: see **Comparing one**.
 
 **The other direction is now a compile error rather than a runtime one.** A `T?` written where a `T`
 is declared used to reach the interpreter, which reported `expected String, found String?` at the
@@ -79,6 +80,48 @@ A test's expected value is on the list for a different reason. Nothing there is 
 comparison fails loudly. But it fails as `expected "TRK-1", got "TRK-1"`, because an optional prints
 as the value it holds, and a report that shows the same text on both sides is worse than no report.
 See `docs/testing.md`.
+
+## Comparing one
+
+`==` and `!=` take a `T?` against a bare `T`, either way round:
+
+```
+if node.string("apiType") == "cart_transform" {
+```
+
+An absent value is unequal to every present one. Where the accessor found nothing, that condition is
+`false`, and this is the reading worth saying out loud because it is the one people get wrong:
+
+```
+if node.string("apiType") != "cart_transform" {      // true when there is no apiType
+```
+
+Ordering does not follow. An absent value is neither before nor after anything, so `<`, `<=`, `>` and
+`>=` reject an optional and say why. `unwrap_or` gives it a place in the order, or a branch that
+proves it present makes it bare.
+
+**Nothing about the absent case is new.** `x == y` between two optionals, and `x == none`, both
+already answered this question: an `Opt` holding nothing equals an `Opt` holding nothing and nothing
+else. What was missing was the bare operand, and what was rejected was only the pair of types. So the
+comparison the runtime performs is unchanged. The parser lifts the bare side into an optional first,
+and the comparison it built was always the one between two of them.
+
+Either side may be the bare one. What is not symmetric is older than this rule and has nothing to do
+with optionals: a literal that needs a target type to exist at all, such as `[]`, `none` or
+`Map.empty`, still cannot be the **left** operand of any comparison, because the parser reads left to
+right and the right operand is where a hint can reach. `[] == xs` is `needs-target-type` for the same
+reason `[] == ys` between two plain lists is.
+
+The lift is the mirror of narrowing's unwrap: a node no source token spells, holding the type it was
+lifted into, and only ever an operand of the comparison built in the same breath. It carries that
+type rather than rebuilding one from the value, for the reason a comprehension carries one: an empty
+one holds a `List(Json)` at run time and the comparison was written against what it declared.
+
+**Why this is not a row in the table above.** Every row there is a *declared* type: something wrote
+down what goes in that position, and the parser meets a declaration with a found type in one place.
+A comparison declares nothing. Its target is whatever the other operand turned out to be, which is
+why the lift is its own site and its own node rather than an eleventh row. `docs/types.md` section 3
+has the same distinction from the other end.
 
 ## Narrowing
 
@@ -126,6 +169,11 @@ leaving them out is what keeps the rule three lines instead of a paragraph with 
   typed against one target.
 - **An `else if`.** A narrowing proved inside one does not escape the chain, because what the chain
   as a whole proves depends on every arm above it.
+- **An equality against a bare value.** `if x == "a"` does prove `x` present in the branch it
+  guards. Saying so would be a fourth shape and a paragraph of its own, for a value nobody wants
+  after they have matched it against a constant: what the branch knows is which constant it was, and
+  it is holding it. The other two equality shapes prove nothing to decline: `x == none` proves the
+  opposite, and `x != "a"` is true for an absent value and so proves neither way.
 
 Where narrowing does not reach, `unwrap_or` still does, and its fallback is written down.
 

@@ -61,6 +61,32 @@ fn a_local_name_is_not_in_the_form() {
     );
 }
 
+/// The lift a comparison puts on the bare side is a node, so the form says the value was
+/// made into an optional rather than leaving a reader to work it out from the operands.
+/// It appears only where the language grew a form it did not have, which is why no hash
+/// that existed before it moved.
+#[test]
+fn a_lifted_comparison_is_in_the_form() {
+    const LIFTED: &str =
+        "command Place(order_id: Uuid, customer_id: Int, total: Money(2), note: String?) {
+           if note == \"gift\" {
+             return invalid(\"no gifts\")
+           }
+           emit @order.placed { order_id, customer_id, total }
+         }";
+    let place = entry(&with_events(LIFTED), "Place").form.packed();
+    assert!(
+        place.contains("(== $3 (wrap String (str \"gift\")))"),
+        "got: {place}"
+    );
+
+    differs(
+        LIFTED,
+        &LIFTED.replace("== \"gift\"", "== none"),
+        "a lift and an absence are two different questions",
+    );
+}
+
 #[test]
 fn comments_and_layout_are_not_in_the_form() {
     same(

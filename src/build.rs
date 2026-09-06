@@ -246,6 +246,7 @@ impl Builder {
                 Expr::Lit(_) | Expr::Invalid => {}
                 Expr::Unary { operand, .. } => stack.push(*operand),
                 Expr::Unwrap(inner) => stack.push(*inner),
+                Expr::Wrap { value, .. } => stack.push(*value),
                 Expr::Reveal { value, .. } => stack.push(*value),
                 Expr::Refusal { code, message } => {
                     stack.extend(code);
@@ -533,6 +534,15 @@ impl Builder {
 
     pub fn none(&mut self, inner: Type) -> ExprId {
         self.lit(Literal::None(inner))
+    }
+
+    /// An expression lifted into the optional of `inner`, which is `Literal::Some` for a
+    /// value the parser had not already resolved. Named for the node rather than for
+    /// `none` above it, because it is not that function's pair: `Expr::Wrap` is only ever
+    /// an operand of the comparison that made it, and `Parser::lift` is the only caller
+    /// that keeps it one. See `docs/optionals.md`.
+    pub fn wrap(&mut self, value: ExprId, inner: Type) -> ExprId {
+        self.expr(Expr::Wrap { value, inner })
     }
 
     /// Rule 11: one slot for `now()`, however many times the body calls it, filled

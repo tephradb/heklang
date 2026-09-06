@@ -254,7 +254,7 @@ capitalised, which keeps them apart from the lowercase heads a value uses: `(Mon
 | statement | `set` `if` `then` `else` `emit` `put` `patch` `update` `delete` `fail` `log` `erase` `for` `in` `index` `item` `do` `discard` `call` `return` `value` `outcome` |
 | type | `Bool` `Int` `String` `Uuid` `Timestamp` `Rounding` `Json` `Response` `Outcome` `(Decimal n)` `(Money n)` `(Enum N)` `(Record N)` `(List t)` `(Map k v)` `(Opt t)` `(Sealed t subject)` |
 | value | `$n` `bool` `int` `dec` `money` `str` `uuid` `ts` `none` `some` `variant` `rounding` `array` `of` `map-empty` `obj` `json-num` `new` |
-| expression | `neg` `not` `+ - * / % == != < <= > >= && \|\|` `.method` `field` `choose` `interp` `fn` `builtin` `invoke` `unwrap` `reveal` `reject` `invalid` `comp` `when` `yield` `bad` |
+| expression | `neg` `not` `+ - * / % == != < <= > >= && \|\|` `.method` `field` `choose` `interp` `fn` `builtin` `invoke` `unwrap` `wrap` `reveal` `reject` `invalid` `comp` `when` `yield` `bad` |
 | test | `given` `respond` `status` `timeout` `erased` `run` `project` `deliver` `expect` `event` `nothing` `row` `norow` `http` `failed` `skipped` |
 
 The JSON view turns a list into `{"kind": head, ..}`. A child that is itself a list headed by one of

@@ -4550,7 +4550,8 @@ impl Parser {
         self.settle(lower, lhs, rhs);
         // The comparison, not the operator: what is wrong is the pair, and an editor
         // underlining `>` alone says nothing about which two things did not meet.
-        self.check_compare(lower, op, lhs, rhs, Span::new(start, rhs_at.end))?;
+        let pair = self.check_compare(lower, op, lhs, rhs, Span::new(start, rhs_at.end))?;
+        let (lhs, rhs) = Self::lift(lower, op, (lhs, lhs_at), (rhs, rhs_at), pair);
         lower.b.at(lhs_at);
         let value = lower.b.binary(op, lhs, rhs);
         Ok(self.close(lower, value, start))
@@ -4617,6 +4618,9 @@ impl Parser {
 
     /// The same rule for a comparison, which the runtime holds to the same table: two
     /// scales do not meet under `>` any more than under `+`.
+    ///
+    /// The pair comes back so `lift` does not walk both operands a second time to learn
+    /// what this already knows. `None` is the unknown type this returned `Ok` for.
     fn check_compare(
         &self,
         lower: &Lower,
@@ -4624,14 +4628,49 @@ impl Parser {
         lhs: ExprId,
         rhs: ExprId,
         span: Span,
-    ) -> Result<(), Diagnostic> {
+    ) -> Result<Option<(Type, Type)>, Diagnostic> {
         let (Some(left), Some(right)) = (self.type_of(lower, lhs), self.type_of(lower, rhs)) else {
-            return Ok(());
+            return Ok(None);
         };
         if types::comparable(op, &left, &right) {
-            return Ok(());
+            return Ok(Some((left, right)));
         }
         Err(self.advised(Code::BadOperands, bad_operands(op, &left, &right), span))
+    }
+
+    /// The bare side of an equality against an optional, lifted to the optional the other
+    /// side is, so the comparison that runs is the `Opt` against `Opt` the interpreter
+    /// already had. Runs on the pair `check_compare` proved, and after `settle`, which
+    /// finds its operands by id in `defaults` and would stop seeing a lifted literal.
+    ///
+    /// A **new** node, not a patch: the lift holds the operand, so writing it over the
+    /// operand would make the node its own child. It takes the operand's own extent
+    /// rather than the comparison's, so a mismatch reported here underlines the value.
+    fn lift(
+        lower: &mut Lower,
+        op: BinOp,
+        (lhs, lhs_at): (ExprId, Span),
+        (rhs, rhs_at): (ExprId, Span),
+        pair: Option<(Type, Type)>,
+    ) -> (ExprId, ExprId) {
+        let Some((left, right)) = pair else {
+            return (lhs, rhs);
+        };
+        if !matches!(op, BinOp::Eq | BinOp::Ne) || left == right {
+            return (lhs, rhs);
+        }
+        // `fills` rather than a third spelling of it: this is the same relation
+        // `comparable` just accepted the pair under, and one of the two directions holds
+        // because it did. Both cannot: that would need a type that is its own optional.
+        if types::fills(&right, &left) {
+            lower.b.at(rhs_at);
+            return (lhs, lower.b.wrap(rhs, right));
+        }
+        if types::fills(&left, &right) {
+            lower.b.at(lhs_at);
+            return (lower.b.wrap(lhs, left), rhs);
+        }
+        (lhs, rhs)
     }
 
     fn unary_expr(
@@ -5147,7 +5186,11 @@ impl Parser {
         let Some(number) = lower.defaults.get(&id).copied() else {
             return;
         };
-        if let Ok(lit) = number.resolve(ty) {
+        // Through the optional, so a literal settles against a `Money(2)?` neighbour as
+        // readily as against a `Money(2)` one. `resolve` answers only for a numeric type
+        // and an `Opt` is not one, so without this the literal kept its default and
+        // `1.50 == m` failed where `m == 1.50` did not.
+        if let Ok(lit) = number.resolve(inner_of(ty)) {
             lower.b.patch(id, Expr::Lit(lit));
             lower.defaults.remove(&id);
         }
@@ -5199,6 +5242,9 @@ impl Parser {
                 Type::Opt(inner) => Some(*inner),
                 other => Some(other),
             },
+            // The optional it was lifted into, not what it holds. The node carries the
+            // type for exactly this, so nothing is looked up a second time.
+            Expr::Wrap { inner, .. } => Some(Type::opt(inner.clone())),
             Expr::Binary { op, lhs, rhs } => match op {
                 BinOp::Eq
                 | BinOp::Ne
@@ -5336,10 +5382,25 @@ fn no_method(receiver: &Type, name: &str) -> (String, Option<String>) {
 }
 
 /// An operator with no row in the table. The three `docs/money.md` names get the reason
-/// as well as the fact, because each of them is a mistake with a shape: the operator is
-/// not missing, the expression means something the author did not intend.
+/// as well as the fact, and so does an ordered optional, because each of them is a
+/// mistake with a shape: the operator is not missing, the expression means something the
+/// author did not intend.
 fn bad_operands(op: BinOp, lhs: &Type, rhs: &Type) -> (String, Option<String>) {
     let why = match (lhs, op, rhs) {
+        // Equality takes an optional against a bare value; an order does not, and the
+        // difference is worth saying rather than leaving as a bare pair. Only where the
+        // optional is what is wrong, though: `Uuid?` against a `Uuid` does not order
+        // because `Uuid` does not, and a `String?` against an `Int` is a pair that never
+        // met. Both would send an author to `unwrap_or` and a second error, so the guard
+        // asks whether the peeled pair orders before blaming the optional.
+        (left, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge, right)
+            if (matches!(left, Type::Opt(_)) || matches!(right, Type::Opt(_)))
+                && types::comparable(op, inner_of(left), inner_of(right)) =>
+        {
+            Some(
+                "an absent value is neither before nor after anything, so an optional does not order. `unwrap_or` gives it a fallback, or a branch that proves it present orders without one. `==` and `!=` do take one against a bare value",
+            )
+        }
         (Type::Money(_), BinOp::Mul, Type::Money(_)) => Some(
             "two amounts multiplied is not an amount. An amount scales by an `Int` or a `Decimal`",
         ),
@@ -7833,6 +7894,7 @@ pub(crate) fn children(expr: &Expr) -> Vec<ExprId> {
         Expr::Lit(_) | Expr::Load(_) => Vec::new(),
         Expr::Unary { operand, .. } => vec![*operand],
         Expr::Unwrap(inner) => vec![*inner],
+        Expr::Wrap { value, .. } => vec![*value],
         Expr::Binary { lhs, rhs, .. } => vec![*lhs, *rhs],
         Expr::Method { receiver, args, .. } => {
             let mut ids = vec![*receiver];

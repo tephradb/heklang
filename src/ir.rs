@@ -915,6 +915,21 @@ pub enum Expr {
     /// nothing else: no source token spells it, so an absent value here is malformed
     /// IR rather than a runtime case. See `docs/optionals.md`.
     Unwrap(ExprId),
+    /// The bare side of an `==` or `!=` whose other side is a `T?`, lifted to the
+    /// optional it is being compared against. The mirror of `Unwrap`, and synthesised by
+    /// the comparison and by nothing else: no source token spells it, and it is an
+    /// operand of the `Binary` built in the same breath, never a receiver or a root. So
+    /// what runs is the `Opt` against `Opt` the interpreter already had, and its type
+    /// test stays exact.
+    ///
+    /// `inner` is the type it is an optional **of**, taken from the static type the
+    /// comparison just checked rather than from the value, for the reason `Comp` carries
+    /// one: an empty comprehension holds a `List(Json)` at run time and the comparison
+    /// was written against what it declared. See `docs/optionals.md`.
+    Wrap {
+        value: ExprId,
+        inner: Type,
+    },
     /// Rule 12. The field, the subject and its id ride on the value, so subject-ness
     /// travels with a `let`; `ty` does not, because it is the same at every run and a
     /// `Type` on every sealed value grew `Value` by a third. It is the seal's **content**

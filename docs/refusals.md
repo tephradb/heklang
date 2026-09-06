@@ -38,8 +38,8 @@ times.
 Every code was a string literal, so nothing was bought by them being strings. Four messages
 of the 75 interpolated anything, so nothing was bought by them being expressions.
 
-The code is also an API. `Invoked::code()` hands it to a caller, so
-`if r.code().unwrap_or("") == "sku_takn"` compiled, never matched, and never warned.
+The code is also an API. `Invoked::code()` hands it to a caller, so `if r.code() == "sku_takn"`
+compiled, never matched, and never warned.
 
 ## Declaring
 
@@ -133,7 +133,7 @@ checked too:
 
 ```
 let r = invoke ListItem { item_id, seller_id, sku }
-if r.code().unwrap_or("") == ShopNotFound {
+if r.code() == ShopNotFound {
   log("the shop went away")
 }
 ```
@@ -159,10 +159,14 @@ a misspelled one is a parse error rather than a branch that never runs.
 it refuse with this one"; a malformed request did not refuse at all, so the answer is `false`
 whichever refusal is named.
 
-`.code()` is a `String?` and `T?` does not fill a `T` (`docs/types.md`), so the `unwrap_or` is
-load-bearing rather than habit: `r.code() == ShopNotFound` is
-`` cannot apply `==` to String? and String ``, exactly as `r.code() == "shop_not_found"` was
-before this existed. Nothing about refusals bends the optional rule.
+`.code()` is a `String?`, and an equality takes one against a bare value (`docs/optionals.md`), so
+there is nothing to unwrap: a call that did not refuse has no code, and no code is not any name. The
+`unwrap_or("")` this used to need is still legal and now says nothing, and the empty string it
+invented was a sentinel standing in for absence, which is what an optional is for.
+
+Nothing about refusals bends the optional rule to get there. The hint reaches the bare name through
+the optional, exactly as it reaches the `String` parameter `refused` declares, so `ShopNotFound`
+resolves to its code in both and a typo is `` `ShopNotFund` is not in scope `` in both.
 
 ## What this deliberately does not do
 

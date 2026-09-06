@@ -1164,6 +1164,13 @@ impl<'a> Frame<'a> {
                 let inner = self.expr(*inner);
                 node("unwrap", [inner])
             }
+            // Type first, as `Literal::Some` has it: both mean an optional holding this,
+            // and the one that is a value and the one that is an expression should not
+            // read differently.
+            Expr::Wrap { value, inner } => {
+                let value = self.expr(*value);
+                node("wrap", [ty(inner), value])
+            }
             Expr::Reveal { value, ty: content } => {
                 let value = self.expr(*value);
                 node("reveal", [value, ty(content)])

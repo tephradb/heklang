@@ -360,6 +360,35 @@ effect E {
     );
 }
 
+/// The `unwrap_or("")` above is no longer load-bearing: an equality takes the `String?`
+/// against the bare name, and a call that refused with nothing has no code to match. The
+/// name still resolves, because the hint reaches it through the optional.
+#[test]
+fn a_code_compares_against_a_name_without_unwrapping_it() {
+    let source = "refusal ShopNotFound \"shop does not exist\"
+event @order.placed { order_id: Uuid, customer_id: Int }
+command Inner(order_id: Uuid, customer_id: Int) {
+  return reject ShopNotFound
+}
+effect E {
+  on @order.placed as e { @key order_id, customer_id } {
+    let r = invoke Inner { order_id, customer_id }
+    if r.code() == ShopNotFound {
+      log(\"refused\")
+    }
+  }
+}
+";
+    program(source);
+
+    let typo = source.replace("== ShopNotFound", "== ShopNotFund");
+    let message = err(&typo);
+    assert!(
+        message.contains("`ShopNotFund` is not in scope"),
+        "got: {message}"
+    );
+}
+
 /// Asking the question directly, rather than unwrapping the code and comparing it. The
 /// argument is declared `String` in the method table, so a bare refusal name resolves to
 /// its code through the same path the comparison uses and nothing in the parser knows

@@ -2151,6 +2151,36 @@ fn eval(
             Value::Opt { .. } => Err(at(ErrorKind::MalformedIr)),
             other => Ok(other),
         },
+        // The other side of a comparison is an optional, so this side becomes one and
+        // `binary` compares two `Opt`s with the exact type test it always had.
+        //
+        // The check is `has_type` against the inner rather than `fitted` against the
+        // optional, which is the same question one allocation cheaper: `fitted` would box
+        // a `Type::opt` per evaluation, and this node sits inside conditions a fold runs
+        // per event (`docs/fold-cost.md`).
+        //
+        // It can fail, for a reason that is not this rule's: an `Expr::Comp` that yields
+        // nothing evaluates to `List(Json)` (see `inner.unwrap_or` below) while its static
+        // type is what its yield says, and an `emit` of one already reports the same
+        // disagreement. `binary`'s exact test would reject the pair here anyway; catching
+        // it names the operand and the two types rather than the comparison and two
+        // optionals.
+        Expr::Wrap { value, inner } => {
+            let value = eval(program, exprs, frame, *value, ctx)?;
+            if !value.has_type(inner) {
+                return Err(Error::at(
+                    ErrorKind::TypeMismatch {
+                        expected: inner.clone(),
+                        found: value.ty(),
+                    },
+                    span,
+                ));
+            }
+            Ok(Value::Opt {
+                inner: inner.clone(),
+                value: Some(Box::new(value)),
+            })
+        }
         Expr::Reveal { value, ty } => {
             let value = eval(program, exprs, frame, *value, ctx.as_deref_mut())?;
             let Some(ctx) = ctx else {
