@@ -115,9 +115,17 @@ consecutive comments are one block, a comment with nothing after it before the c
 is emitted anyway rather than lost, and **a comment anywhere inside a list forces that list
 to break** because a line comment would otherwise swallow the rest of the line.
 
+An `on` header is the exception, because breaking a group is not what saves the other lists:
+their closing delimiter is what ends the line, and a header has none. A comment written
+anywhere in one therefore takes a **hard** break on both sides, and whatever it leads starts
+the next line. Without that a `//` ran on through the paths, the binding and the block's
+opening brace, and the file `hek fmt` wrote no longer parsed.
+
 A comment written after code on the same line keeps its place. Nothing in the corpus writes
 one, but the grammar allows it, and a comment that migrated below the statement it describes
-would make section 1's claim conditional.
+would make section 1's claim conditional. In an `on` header it keeps that place only while
+another path follows to end the line: after the last one it leads the binding instead, since
+held back it would come out past the block's opening brace and never settle.
 
 ## 7. Some things are copied, not printed
 

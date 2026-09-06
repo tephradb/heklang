@@ -263,7 +263,14 @@ impl<'a> Printer<'a> {
     /// The delivery modifier stays on the header line with `on`. It is taken out before
     /// the loop below rather than matched inside it, because it is the one child that
     /// comes *before* the first path: left in, it would make `rest` non-empty and send
-    /// every path down the fallback arm.
+    /// every path down the fallback arm, commas and all.
+    ///
+    /// Missing that closing delimiter is also why a comment in here needs its own answer
+    /// rather than `list`'s. A list ends its line with the delimiter, so `docs/fmt.md`
+    /// section 6 gets what it needs by breaking the group; a header has nothing to end the
+    /// line, so a `//` written anywhere in it swallowed the paths, the binding and the
+    /// block's opening brace, and the file no longer parsed. Every comment here therefore
+    /// ends its own line with a hard break, and the piece it leads starts the next one.
     fn handler(&self, node: Node<'a>) -> Doc<'a> {
         let kids = self.kids(node);
         let mut delivery = None;
@@ -271,34 +278,78 @@ impl<'a> Printer<'a> {
         let mut rest = Vec::new();
         for &kid in &kids {
             match kid.kind() {
-                "delivery_keyword" if paths.is_empty() && rest.is_empty() => {
-                    delivery = Some(self.text(kid));
-                }
-                "event_path" if rest.is_empty() => paths.push(self.node(kid)),
+                "delivery_keyword" => delivery = Some(self.text(kid)),
+                "event_path" | "comment" if rest.is_empty() => paths.push(kid),
                 _ => rest.push(kid),
             }
+        }
+        // The comma goes on the path rather than in the separator, so that a comment
+        // landing between two paths still gets one and a comment after the last path does
+        // not: `@a.b,` followed by `as` is the shape that does not parse.
+        let last = paths.iter().rposition(|kid| kid.kind() == "event_path");
+        let mut lead = Vec::new();
+        let mut previous: Option<Node<'a>> = None;
+        let mut hanging = false;
+        for (index, &kid) in paths.iter().enumerate() {
+            if kid.kind() == "comment" {
+                let more = paths[index + 1..]
+                    .iter()
+                    .any(|next| next.kind() != "comment");
+                if !hanging && previous.is_some_and(|before| self.trails(kid, before)) && more {
+                    lead.extend(self.suffix(kid));
+                    lead.push(Doc::BreakParent);
+                    continue;
+                }
+                if hanging || previous.is_some() {
+                    lead.push(Doc::Hardline);
+                }
+                lead.push(Doc::text(self.text(kid)));
+                hanging = true;
+                continue;
+            }
+            if hanging {
+                lead.push(Doc::Hardline);
+                hanging = false;
+            } else if previous.is_some() {
+                lead.push(Doc::Line);
+            }
+            lead.push(match last {
+                Some(last) if index < last => Doc::concat([self.node(kid), Doc::text(",")]),
+                _ => self.node(kid),
+            });
+            previous = Some(kid);
+        }
+        if hanging {
+            lead.push(Doc::Hardline);
         }
         let mut parts = vec![
             match delivery {
                 Some(word) => Doc::concat([Doc::text("on "), Doc::text(word), Doc::text(" ")]),
                 None => Doc::text("on "),
             },
-            Doc::group(Doc::indent(Doc::join(
-                Doc::concat([Doc::text(","), Doc::Line]),
-                paths,
-            ))),
+            Doc::group(Doc::indent(Doc::concat(lead))),
         ];
+        // A hard break inside the group left the line already indented, so the binding it
+        // leads takes no space in front of it.
+        let mut fresh = hanging;
         for kid in rest {
-            match kid.kind() {
-                "identifier" => {
-                    parts.push(Doc::text(" as "));
-                    parts.push(self.node(kid));
+            if kid.kind() == "comment" {
+                if !fresh {
+                    parts.push(Doc::Hardline);
                 }
-                _ => {
-                    parts.push(Doc::text(" "));
-                    parts.push(self.node(kid));
-                }
+                parts.push(Doc::text(self.text(kid)));
+                parts.push(Doc::Hardline);
+                fresh = true;
+                continue;
             }
+            if !fresh {
+                parts.push(Doc::text(" "));
+            }
+            fresh = false;
+            parts.push(match kid.kind() {
+                "identifier" => Doc::concat([Doc::text("as "), self.node(kid)]),
+                _ => self.node(kid),
+            });
         }
         Doc::concat(parts)
     }

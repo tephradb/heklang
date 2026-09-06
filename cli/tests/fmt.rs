@@ -314,6 +314,53 @@ fn a_long_header_with_a_modifier_breaks_its_paths_and_keeps_the_key_whole() {
     );
 }
 
+/// An `on` header is the one list in the language with no closing delimiter to end its line,
+/// so section 6's rule needs its own answer here. A `//` written anywhere in one used to run
+/// on and swallow the paths, the binding and the block's opening brace, and `hek fmt` emitted
+/// a file that no longer parsed. Every one of these is already canonical, so the equality is
+/// both halves at once: the comment did not move, and nothing was eaten.
+#[test]
+fn a_comment_anywhere_in_an_on_header_survives_it() {
+    let sources = [
+        "effect E {\n  on // before the first path\n    @a.b,\n    @a.c as e { @key id } {\n    log(\"{id}\")\n  }\n}\n",
+        "effect E {\n  on @a.b,\n    // between two paths\n    @a.c as e { @key id } {\n    log(\"{id}\")\n  }\n}\n",
+        "effect E {\n  on @a.b, // after a path, on its own line\n    @a.c as e { @key id } {\n    log(\"{id}\")\n  }\n}\n",
+        "effect E {\n  on @a.b,\n    @a.c\n    // after the last path\n    as e { @key id } {\n    log(\"{id}\")\n  }\n}\n",
+        "effect E {\n  on latest @a.b as e\n  // between the binding and the destructure\n  { @key id } {\n    log(\"{id}\")\n  }\n}\n",
+        "effect E {\n  on @a.b as e { @key id }\n  // right before the block\n  {\n    log(\"{id}\")\n  }\n}\n",
+        "effect E {\n  on @a.b as e { @key id }\n  // two of them\n  // in a row\n  {\n    log(\"{id}\")\n  }\n}\n",
+    ];
+    for source in sources {
+        assert_eq!(fmt(source), source, "this is the canonical form already");
+    }
+}
+
+/// A comment before the first path rides the `on` line, and it breaks the path list the way
+/// a comment breaks any other list.
+#[test]
+fn a_comment_before_the_first_path_rides_the_on_line() {
+    assert_eq!(
+        fmt(
+            "effect E {\n  on // why these\n    @a.b, @a.c as e { @key id } {\n    log(\"{id}\")\n  }\n}\n"
+        ),
+        "effect E {\n  on // why these\n    @a.b,\n    @a.c as e { @key id } {\n    log(\"{id}\")\n  }\n}\n"
+    );
+}
+
+/// A comment written after code keeps that line only while something follows it that ends
+/// one. After the last path nothing in the header does, so it leads the binding instead: held
+/// back, it would come out past the block's opening brace and stop being a fixed point.
+#[test]
+fn a_trailing_header_comment_with_nothing_after_it_leads_instead() {
+    let formatted =
+        fmt("effect E {\n  on @a.b // note\n    as e { @key id } {\n    log(\"{id}\")\n  }\n}\n");
+    assert_eq!(
+        formatted,
+        "effect E {\n  on @a.b\n    // note\n    as e { @key id } {\n    log(\"{id}\")\n  }\n}\n"
+    );
+    assert_eq!(fmt(&formatted), formatted, "and it settles there");
+}
+
 /// The acceptance fixtures are the formatter's own output, so a change to the printer shows
 /// up as a diff in the repository rather than only in whatever someone happens to run it on.
 #[test]
