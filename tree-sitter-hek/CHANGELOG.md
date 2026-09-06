@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://git.tqwewe.com/tephra/heklang/compare/tree-sitter-hek-v0.2.0...tree-sitter-hek-v0.3.0) - 2026-09-06
+
+### Added
+
+- [**breaking**] an effect arm names the lane it runs in, and says how much of history it wants
+
 ## [0.2.0](https://git.tqwewe.com/tephra/heklang/compare/tree-sitter-hek-v0.1.0...tree-sitter-hek-v0.2.0) - 2026-09-04
 
 ### Added

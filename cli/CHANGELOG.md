@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://git.tqwewe.com/tephra/heklang/compare/v0.2.0...v0.3.0) - 2026-09-06
+
+### Added
+
+- [**breaking**] an effect arm names the lane it runs in, and says how much of history it wants
+
+### Fixed
+
+- a comment in an on header no longer swallows the rest of it
+
 ## [0.2.0](https://git.tqwewe.com/tephra/heklang/compare/v0.1.2...v0.2.0) - 2026-09-04
 
 ### Added
