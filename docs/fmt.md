@@ -121,6 +121,27 @@ anywhere in one therefore takes a **hard** break on both sides, and whatever it 
 the next line. Without that a `//` ran on through the paths, the binding and the block's
 opening brace, and the file `hek fmt` wrote no longer parsed.
 
+**A comment written *inside* a construct is lifted out of it**, because a printer that reads
+its children by position cannot leave one where it was: `extras` land between any two
+children, so a positional reader would take the comment for a structural child and emit it
+where a real token belongs. Since `fmt` writes in place, that is not a layout bug but source
+loss, and it was one: `const A // c` on its own line above `: Int = 1` came back as
+`const A: // c = Int`, with the value gone and the result no longer a program.
+
+Where it is lifted to depends on whether the construct starts a line. A declaration or a
+statement takes it **above**, which is section 6's ordinary rule. An expression, a type or a
+binding takes it at the **end of the line it ends on**, because leading a value that sits
+after a `let x =` puts the comment mid-line, and a re-parse then finds it somewhere else in
+the tree and moves it again.
+
+The split is by construct and not by node kind, and two of them are worth naming because
+they are the ones that got it wrong first. A `reject` and an `invoke` are **values**, so they
+trail even though nine of their siblings under the same printer are statements that lead.
+And a construct whose head is read by position but whose tail is a sequence or a list -- a
+`fold`'s arms, a `slice`'s filters, a declaration's body -- lifts only the comments before
+its head: the tail already places its own, and taking those out would move a comment written
+against one arm up to the construct it belongs under.
+
 A comment written after code on the same line keeps its place. Nothing in the corpus writes
 one, but the grammar allows it, and a comment that migrated below the statement it describes
 would make section 1's claim conditional. In an `on` header it keeps that place only while
@@ -184,6 +205,13 @@ three tokens.
 - **`fmt` reads a file at a time and `check` reads them all at once.** That is right, since
   layout is a property of one file, but it does mean `fmt` cannot use anything the checker
   knows.
+- **A comment inside a construct whose line ends in `{` settles on the second run.** An `if`
+  condition and a command parameter are the two shapes: the comment is emitted at the end of
+  the header line, which puts it after the `{`, so a re-parse finds it inside the block,
+  where it takes a line of its own and stays. No token moves at any point and the run after
+  the first is stable, so rule 1 holds and idempotence is what gives: the test asserts
+  convergence rather than a one-pass fixed point. Nothing in the corpus writes a comment in
+  either position.
 
 ## Related
 

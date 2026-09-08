@@ -62,10 +62,11 @@ impl<'a> Printer<'a> {
             "entity_declaration" => self.headed("entity", node, Self::fields),
             "projector_declaration" => self.headed("projector", node, Self::body),
             "effect_declaration" => self.headed("effect", node, Self::body),
-            "enum_variant" => Doc::join(Doc::text(" "), self.docs(node)),
+            "enum_variant" => self.joined(node, " "),
             "record_field" | "event_field" | "entity_field" => self.field_decl(node),
             "index_clause" => self.index_clause(node),
             "const_declaration" => self.const_decl(node),
+
             "refusal_declaration" => self.refusal(node),
             "function_declaration" => self.function(node),
             "command_declaration" => self.callable("command", node),
@@ -74,13 +75,13 @@ impl<'a> Printer<'a> {
                 self.list("(", ")", false, &self.kids(node))
             }
             "parameter" => self.typed(node),
-            "annotation" => Doc::concat(self.docs(node)),
+            "annotation" => self.joined(node, ""),
             "event_handler" => self.handler(node),
             "destructure" => self.list("{", "}", true, &self.kids(node)),
             // `@key shop_id`, one space and never a break between them: the marker means
             // nothing apart from the field it is on. The same shape `enum_variant` prints
             // `@default Free` as.
-            "keyed_field" => Doc::join(Doc::text(" "), self.docs(node)),
+            "keyed_field" => self.joined(node, " "),
 
             // ------------------------------------------------------------- tests
             "test_declaration" => self.keyed("test", node),
@@ -108,12 +109,12 @@ impl<'a> Printer<'a> {
             "iter_bindings" => self.iter_bindings(node),
             "return_statement" => self.returned(node),
             "outcome_expression" => self.prefixed(node),
-            "refusal_expression" => self.keyed("reject", node),
+            "refusal_expression" => self.keyed_value("reject", node),
             "emit_statement" => self.keyed("emit", node),
             "put_statement" => self.keyed("put", node),
             "patch_statement" => self.keyed_row(node, true),
             "delete_statement" => self.keyed_row(node, false),
-            "expression_statement" => Doc::concat(self.docs(node)),
+            "expression_statement" => self.joined(node, ""),
 
             // -------------------------------------------------------------- types
             "type" => self.optional_type(node),
@@ -121,19 +122,19 @@ impl<'a> Printer<'a> {
             "map_type" => self.map_type(node),
 
             // -------------------------------------------------------- expressions
-            "parenthesized_expression" => self.inline("(", ")", false, &self.kids(node)),
+            "parenthesized_expression" => self.parens(node),
             "unary_expression" => self.prefixed(node),
             "binary_expression" => self.binary(node),
-            "call_expression" => Doc::concat(self.docs(node)),
+            "call_expression" => self.joined(node, ""),
             "method_call" => self.method_call(node),
             "field_expression" | "stored_field" => self.dotted(node),
-            "named_argument" => Doc::join(Doc::text(" = "), self.docs(node)),
+            "named_argument" => self.joined(node, " = "),
             "record_literal" => self.spaced(node),
-            "invoke_expression" => self.keyed("invoke", node),
+            "invoke_expression" => self.keyed_value("invoke", node),
             "field_initializer_list" | "object_literal" => {
                 self.list("{", "}", true, &self.kids(node))
             }
-            "object_entry" => Doc::join(Doc::text(": "), self.docs(node)),
+            "object_entry" => self.joined(node, ": "),
             "list" => self.list("[", "]", false, &self.kids(node)),
             "comprehension" => self.comprehension(node),
             "if_expression" => self.if_expression(node),
@@ -149,39 +150,75 @@ impl<'a> Printer<'a> {
     // -------------------------------------------------------------- declarations
 
     /// `keyword Name <rest>`, where the rest is the braced part.
+    /// Splits a node whose head is read by position but whose tail is not.
+    ///
+    /// Lifts only the comments written before the first `head` structural children;
+    /// everything from there on is handed back untouched, because it goes to a printer
+    /// that places comments itself (`list`, `fields`, `body`, or a sequence of arms).
+    /// Taking those out too would move a comment written against one filter or one fold
+    /// arm up to the construct's header, which is a placement the author did not choose.
+    fn headed_by(&self, node: Node<'a>, head: usize) -> (Vec<Doc<'a>>, Vec<Node<'a>>) {
+        let all = self.all_kids(node);
+        let mut seen = 0;
+        let mut at = 0;
+        for (index, kid) in all.iter().enumerate() {
+            if kid.kind() != "comment" {
+                seen += 1;
+                if seen == head {
+                    at = index;
+                    break;
+                }
+            }
+        }
+        let (before, rest): (Vec<_>, Vec<_>) =
+            all[..at].iter().partition(|kid| kid.kind() == "comment");
+        let mut kids = rest;
+        kids.extend_from_slice(&all[at..]);
+        (self.docs_of(&before), kids)
+    }
+
     fn headed(
         &self,
         keyword: &'a str,
         node: Node<'a>,
         rest: impl Fn(&Self, &[Node<'a>]) -> Doc<'a>,
     ) -> Doc<'a> {
-        let kids = self.kids(node);
+        // Only the comments *before* the name are lifted: everything after it goes to a
+        // printer that places comments itself, and taking those out would move a
+        // comment written inside a body up to the declaration's header.
+        let (leading, kids) = self.headed_by(node, 1);
         let (name, body) = kids.split_at(1);
-        Doc::concat([
-            Doc::text(keyword),
-            Doc::text(" "),
-            self.node(name[0]),
-            Doc::text(" "),
-            rest(self, body),
-        ])
+        Self::led(
+            leading,
+            Doc::concat([
+                Doc::text(keyword),
+                Doc::text(" "),
+                self.node(name[0]),
+                Doc::text(" "),
+                rest(self, body),
+            ]),
+        )
     }
 
     /// `command Name(params) { .. }`, shared with `guard`.
     fn callable(&self, keyword: &'a str, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
-        Doc::concat([
-            Doc::text(keyword),
-            Doc::text(" "),
-            self.node(kids[0]),
-            self.node(kids[1]),
-            Doc::text(" "),
-            self.node(kids[2]),
-        ])
+        let (leading, kids) = self.parted(node);
+        Self::led(
+            leading,
+            Doc::concat([
+                Doc::text(keyword),
+                Doc::text(" "),
+                self.node(kids[0]),
+                self.node(kids[1]),
+                Doc::text(" "),
+                self.node(kids[2]),
+            ]),
+        )
     }
 
     /// `fn name(params) -> Type { .. }`, whose result an effect-local one may omit.
     fn function(&self, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
+        let (leading, kids) = self.parted(node);
         let mut parts = vec![
             Doc::text("fn"),
             Doc::text(" "),
@@ -194,19 +231,90 @@ impl<'a> Printer<'a> {
         }
         parts.push(Doc::text(" "));
         parts.push(self.node(kids[kids.len() - 1]));
-        Doc::concat(parts)
+        Self::led(leading, Doc::concat(parts))
     }
 
     fn const_decl(&self, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
-        Doc::concat([
-            Doc::text("const "),
-            self.node(kids[0]),
-            Doc::text(": "),
-            self.node(kids[1]),
-            Doc::text(" = "),
-            self.node(kids[2]),
-        ])
+        let (leading, kids) = self.parted(node);
+        Self::led(
+            leading,
+            Doc::concat([
+                Doc::text("const "),
+                self.node(kids[0]),
+                Doc::text(": "),
+                self.node(kids[1]),
+                Doc::text(" = "),
+                self.node(kids[2]),
+            ]),
+        )
+    }
+
+    /// A node's structural children, with any comment lifted out ahead of them.
+    ///
+    /// A comment is an `extra`, so it can land between any two children of any node, and
+    /// `kids` keeps it: a printer that then indexes positionally reads the comment as a
+    /// structural child and emits a real token in its place, which for `hek fmt` means
+    /// deleting source. The one-line declarations below take this instead, and a comment
+    /// written inside one leads it on its own line, which is rule 6's shape.
+    fn parted(&self, node: Node<'a>) -> (Vec<Doc<'a>>, Vec<Node<'a>>) {
+        let mut leading = Vec::new();
+        let mut rest = Vec::new();
+        for kid in self.kids(node) {
+            match kid.kind() {
+                "comment" => leading.push(self.node(kid)),
+                _ => rest.push(kid),
+            }
+        }
+        (leading, rest)
+    }
+
+    /// Puts any comment the node carried above the one line it prints as.
+    ///
+    /// For a node that **starts** a line: a declaration, a statement. `docs/fmt.md`
+    /// section 6's rule is that a comment leads whatever follows it, and here it can.
+    fn led(leading: Vec<Doc<'a>>, line: Doc<'a>) -> Doc<'a> {
+        if leading.is_empty() {
+            return line;
+        }
+        let mut parts = Vec::new();
+        for comment in leading {
+            parts.push(comment);
+            parts.push(Doc::Hardline);
+        }
+        parts.push(line);
+        Doc::concat(parts)
+    }
+
+    /// The same for a node that sits **mid-line**: an expression, a type, a binding.
+    ///
+    /// Leading is wrong there and not merely ugly. A comment emitted before the operands
+    /// of `let x = a + 1` lands after the `=`, and re-parsing finds it in a different
+    /// place in the tree, so a second run moves it again and `fmt` has no fixed point.
+    /// A `LineSuffix` defers to the end of whatever line the expression ends on, which
+    /// is where a re-parse finds it, so the second run is the first.
+    fn trailed(&self, trailing: &[Node<'a>], doc: Doc<'a>) -> Doc<'a> {
+        if trailing.is_empty() {
+            return doc;
+        }
+        let mut parts = vec![doc];
+        for &comment in trailing {
+            parts.extend(self.suffix(comment));
+        }
+        Doc::concat(parts)
+    }
+
+    /// A node's structural children, with its comments kept as nodes so a caller can
+    /// choose between [`Self::led`] and [`Self::trailed`].
+    fn split(&self, node: Node<'a>) -> (Vec<Node<'a>>, Vec<Node<'a>>) {
+        let mut comments = Vec::new();
+        let mut rest = Vec::new();
+        for kid in self.all_kids(node) {
+            match kid.kind() {
+                "comment" => comments.push(kid),
+                _ => rest.push(kid),
+            }
+        }
+        (comments, rest)
     }
 
     /// `refusal Name "message"`, or `refusal Name(field: Type) "message"`. Parens
@@ -215,7 +323,7 @@ impl<'a> Printer<'a> {
     /// indexes three children unconditionally and a refusal has two or three, with no
     /// block among them.
     fn refusal(&self, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
+        let (leading, kids) = self.parted(node);
         let mut parts = vec![Doc::text("refusal "), self.node(kids[0])];
         for &rest in &kids[1..] {
             if rest.kind() != "parameters" {
@@ -223,12 +331,12 @@ impl<'a> Printer<'a> {
             }
             parts.push(self.node(rest));
         }
-        Doc::concat(parts)
+        Self::led(leading, Doc::concat(parts))
     }
 
     /// `name: Type @annotation` and, for an entity column, `= default`.
     fn field_decl(&self, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
+        let (leading, kids) = self.parted(node);
         let mut parts = vec![self.node(kids[0]), Doc::text(": "), self.node(kids[1])];
         for &extra in &kids[2..] {
             parts.push(Doc::text(if extra.kind() == "annotation" {
@@ -238,18 +346,21 @@ impl<'a> Printer<'a> {
             }));
             parts.push(self.node(extra));
         }
-        Doc::concat(parts)
+        Self::led(leading, Doc::concat(parts))
     }
 
     /// `index (a, b)`, whose space before the paren is what tells a soft keyword from a
     /// call and is what the corpus writes.
     fn index_clause(&self, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
-        Doc::concat([
-            self.node(kids[0]),
-            Doc::text(" "),
-            self.inline("(", ")", false, &kids[1..]),
-        ])
+        let (leading, kids) = self.parted(node);
+        Self::led(
+            leading,
+            Doc::concat([
+                self.node(kids[0]),
+                Doc::text(" "),
+                self.inline("(", ")", false, &kids[1..]),
+            ]),
+        )
     }
 
     /// `on latest @a, @b as e { @key k, field } { .. }`.
@@ -365,7 +476,7 @@ impl<'a> Printer<'a> {
     }
 
     fn expect(&self, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
+        let (trailing, kids) = self.split(node);
         let mut parts = vec![Doc::text("expect")];
         for word in ["nothing", "skipped"] {
             if self.has_token(node, word) {
@@ -375,14 +486,14 @@ impl<'a> Printer<'a> {
         }
         if !kids.is_empty() {
             parts.push(Doc::text(" "));
-            parts.push(Doc::join(Doc::text(" "), self.docs(node)));
+            parts.push(Doc::join(Doc::text(" "), self.docs_of(&kids)));
         }
-        Doc::concat(parts)
+        self.trailed(&trailing, Doc::concat(parts))
     }
 
     /// `[no] Entity[key] { fields }`.
     fn row(&self, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
+        let (trailing, kids) = self.split(node);
         let mut parts = Vec::new();
         if self.has_token(node, "no") {
             parts.push(Doc::text("no "));
@@ -395,14 +506,19 @@ impl<'a> Printer<'a> {
             parts.push(Doc::text(" "));
             parts.push(self.node(kid));
         }
-        Doc::concat(parts)
+        self.trailed(&trailing, Doc::concat(parts))
     }
 
     // ---------------------------------------------------------------- statements
 
     /// Both shapes: raw slices added to the boundary, or a declared guard called.
+    /// The comment handling here is load-bearing twice over. A comment among the slices
+    /// joined by `", "` swallowed every slice after it and `hek check` still passed, so a
+    /// command silently lost half its append condition; and a comment *before* the first
+    /// slice made `kids.first()` fail the `slice_reference` test, which took the flat
+    /// branch below and **deleted the commas**.
     fn guard(&self, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
+        let (trailing, kids) = self.split(node);
         if kids
             .first()
             .is_some_and(|kid| kid.kind() == "slice_reference")
@@ -410,17 +526,26 @@ impl<'a> Printer<'a> {
             // Flat, and with no trailing comma: `guard_decl` in `parse.rs` is the one
             // comma loop in the language that parses another slice unconditionally after
             // eating a comma, so `guard @a(x),` does not parse.
-            return Doc::concat([
-                Doc::text("guard "),
-                Doc::join(Doc::text(", "), self.docs(node)),
-            ]);
+            return self.trailed(
+                &trailing,
+                Doc::concat([
+                    Doc::text("guard "),
+                    Doc::join(Doc::text(", "), self.docs_of(&kids)),
+                ]),
+            );
         }
-        Doc::concat([Doc::text("guard "), self.spaced(node)])
+        self.trailed(
+            &trailing,
+            Doc::concat([
+                Doc::text("guard "),
+                Doc::join(Doc::text(" "), self.docs_of(&kids)),
+            ]),
+        )
     }
 
     /// `fold x: T = seed` with its arms indented under it.
     fn fold(&self, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
+        let (leading, kids) = self.headed_by(node, 3);
         let mut parts = vec![
             Doc::text("fold "),
             self.node(kids[0]),
@@ -436,31 +561,40 @@ impl<'a> Printer<'a> {
         if !arms.is_empty() {
             parts.push(Doc::indent(Doc::concat(arms)));
         }
-        Doc::concat(parts)
+        Self::led(leading, Doc::concat(parts))
     }
 
     /// `on @path(filters) { fields } => value`, breaking after the arrow if it must.
     fn fold_arm(&self, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
+        let (trailing, kids) = self.split(node);
         let mut head = vec![Doc::text("on "), self.node(kids[0])];
         for &kid in &kids[1..kids.len() - 1] {
             head.push(Doc::text(" "));
             head.push(self.node(kid));
         }
         head.push(Doc::text(" =>"));
-        Doc::group(Doc::concat([
-            Doc::concat(head),
-            Doc::indent(Doc::concat([Doc::Line, self.node(kids[kids.len() - 1])])),
-        ]))
+        self.trailed(
+            &trailing,
+            Doc::group(Doc::concat([
+                Doc::concat(head),
+                Doc::indent(Doc::concat([Doc::Line, self.node(kids[kids.len() - 1])])),
+            ])),
+        )
     }
 
+    /// The filter list is comment-aware (`list` breaks the group and keeps one in place),
+    /// so only the comments before the path are lifted: taking the rest out would move a
+    /// comment written against one filter up to the slice.
     fn slice(&self, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
-        Doc::concat([self.node(kids[0]), self.list("(", ")", false, &kids[1..])])
+        let (leading, kids) = self.headed_by(node, 1);
+        Self::led(
+            leading,
+            Doc::concat([self.node(kids[0]), self.list("(", ")", false, &kids[1..])]),
+        )
     }
 
     fn if_statement(&self, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
+        let (leading, kids) = self.parted(node);
         let mut parts = vec![
             Doc::text("if "),
             self.node(kids[0]),
@@ -471,26 +605,34 @@ impl<'a> Printer<'a> {
             parts.push(Doc::text(" else "));
             parts.push(self.node(alternative));
         }
-        Doc::concat(parts)
+        Self::led(leading, Doc::concat(parts))
     }
 
     fn iter_bindings(&self, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
+        let (trailing, kids) = self.split(node);
         let names = Doc::join(Doc::text(", "), self.docs_of(&kids[..kids.len() - 1]));
-        Doc::concat([names, Doc::text(" in "), self.node(kids[kids.len() - 1])])
+        self.trailed(
+            &trailing,
+            Doc::concat([names, Doc::text(" in "), self.node(kids[kids.len() - 1])]),
+        )
     }
 
+    /// A comment here used to take `kids.first()`'s place, so `return // why` above the
+    /// value printed the comment and **deleted** the value outright.
     fn returned(&self, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
-        match kids.first() {
-            None => Doc::text("return"),
-            Some(&value) => Doc::concat([Doc::text("return "), self.node(value)]),
-        }
+        let (trailing, kids) = self.split(node);
+        self.trailed(
+            &trailing,
+            match kids.first() {
+                None => Doc::text("return"),
+                Some(&value) => Doc::concat([Doc::text("return "), self.node(value)]),
+            },
+        )
     }
 
     /// `patch Entity[key] { fields }`, and `delete Entity[key]` with no fields.
     fn keyed_row(&self, node: Node<'a>, fields: bool) -> Doc<'a> {
-        let kids = self.kids(node);
+        let (leading, kids) = self.parted(node);
         let keyword = if !fields {
             "delete"
         } else if self.has_token(node, "update") {
@@ -510,7 +652,7 @@ impl<'a> Printer<'a> {
             parts.push(Doc::text(" "));
             parts.push(self.node(kid));
         }
-        Doc::concat(parts)
+        Self::led(leading, Doc::concat(parts))
     }
 
     // --------------------------------------------------------------------- types
@@ -524,21 +666,33 @@ impl<'a> Printer<'a> {
         inner
     }
 
+    /// `(a + 1)`, and the three below it: `inline` joins with `", "`, so a comment among
+    /// the children became an item and put a separator after a `//`.
+    fn parens(&self, node: Node<'a>) -> Doc<'a> {
+        let (trailing, kids) = self.split(node);
+        self.trailed(&trailing, self.inline("(", ")", false, &kids))
+    }
+
     /// `Money(2)`, `List(T)`: the constructor is an anonymous token.
     fn applied(&self, node: Node<'a>) -> Doc<'a> {
-        Doc::concat([
-            Doc::text(self.leading_token(node)),
-            self.inline("(", ")", false, &self.kids(node)),
-        ])
+        let (trailing, kids) = self.split(node);
+        self.trailed(
+            &trailing,
+            Doc::concat([
+                Doc::text(self.leading_token(node)),
+                self.inline("(", ")", false, &kids),
+            ]),
+        )
     }
 
     /// Never broken: `map_type` reads its comma with `expect_sym` and has no
     /// trailing-comma escape, so a break that added one would not parse.
     fn map_type(&self, node: Node<'a>) -> Doc<'a> {
-        Doc::concat([
-            Doc::text("Map"),
-            self.inline("(", ")", false, &self.kids(node)),
-        ])
+        let (trailing, kids) = self.split(node);
+        self.trailed(
+            &trailing,
+            Doc::concat([Doc::text("Map"), self.inline("(", ")", false, &kids)]),
+        )
     }
 
     // --------------------------------------------------------------- expressions
@@ -558,14 +712,17 @@ impl<'a> Printer<'a> {
     /// 9,531 ends in `&&` or `||`, because where a condition would be too long its author
     /// extracted a `fn` or a `let` instead of wrapping it.
     fn binary(&self, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
-        Doc::concat([
-            self.node(kids[0]),
-            Doc::text(" "),
-            Doc::text(self.leading_token(node)),
-            Doc::text(" "),
-            self.node(kids[1]),
-        ])
+        let (trailing, kids) = self.split(node);
+        self.trailed(
+            &trailing,
+            Doc::concat([
+                self.node(kids[0]),
+                Doc::text(" "),
+                Doc::text(self.leading_token(node)),
+                Doc::text(" "),
+                self.node(kids[1]),
+            ]),
+        )
     }
 
     /// A chain never breaks at its dots.
@@ -575,27 +732,33 @@ impl<'a> Printer<'a> {
     /// with a dot, so overflowing is both simpler and closer to what the corpus does than
     /// any breaking rule would be. The arguments still break.
     fn method_call(&self, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
-        Doc::concat([
-            self.node(kids[0]),
-            Doc::text("."),
-            self.node(kids[1]),
-            self.node(kids[2]),
-        ])
+        let (trailing, kids) = self.split(node);
+        self.trailed(
+            &trailing,
+            Doc::concat([
+                self.node(kids[0]),
+                Doc::text("."),
+                self.node(kids[1]),
+                self.node(kids[2]),
+            ]),
+        )
     }
 
     /// `a.b`, and `.b` with no receiver at all: the stored row, readable only in the value
     /// of a `patch`.
     fn dotted(&self, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
-        match kids.len() {
-            1 => Doc::concat([Doc::text("."), self.node(kids[0])]),
-            _ => Doc::concat([self.node(kids[0]), Doc::text("."), self.node(kids[1])]),
-        }
+        let (trailing, kids) = self.split(node);
+        self.trailed(
+            &trailing,
+            match kids.len() {
+                1 => Doc::concat([Doc::text("."), self.node(kids[0])]),
+                _ => Doc::concat([self.node(kids[0]), Doc::text("."), self.node(kids[1])]),
+            },
+        )
     }
 
     fn comprehension(&self, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
+        let (trailing, kids) = self.split(node);
         let mut parts = vec![
             Doc::text("["),
             self.node(kids[0]),
@@ -607,20 +770,23 @@ impl<'a> Printer<'a> {
             parts.push(self.node(condition));
         }
         parts.push(Doc::text("]"));
-        Doc::concat(parts)
+        self.trailed(&trailing, Doc::concat(parts))
     }
 
     fn if_expression(&self, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
-        Doc::concat([
-            Doc::text("if "),
-            self.node(kids[0]),
-            Doc::text(" { "),
-            self.node(kids[1]),
-            Doc::text(" } else { "),
-            self.node(kids[2]),
-            Doc::text(" }"),
-        ])
+        let (trailing, kids) = self.split(node);
+        self.trailed(
+            &trailing,
+            Doc::concat([
+                Doc::text("if "),
+                self.node(kids[0]),
+                Doc::text(" { "),
+                self.node(kids[1]),
+                Doc::text(" } else { "),
+                self.node(kids[2]),
+                Doc::text(" }"),
+            ]),
+        )
     }
 
     // ------------------------------------------------------------------- shapes
@@ -777,36 +943,81 @@ impl<'a> Printer<'a> {
     // ------------------------------------------------------------------ fragments
 
     /// `keyword <children separated by spaces>`.
+    /// `keyword rest`, for a construct that **starts** its line.
+    ///
+    /// It cannot go through `spaced`, whose trailing comment is flushed at the end of the
+    /// line the construct *ends* on: for a `test` or a `for`, that is the line after its
+    /// whole body, so the comment came out describing whatever followed the closing
+    /// brace.
     fn keyed(&self, keyword: &'a str, node: Node<'a>) -> Doc<'a> {
-        Doc::concat([Doc::text(keyword), Doc::text(" "), self.spaced(node)])
+        let (comments, kids) = self.split(node);
+        Self::led(
+            self.docs_of(&comments),
+            Doc::concat([
+                Doc::text(keyword),
+                Doc::text(" "),
+                Doc::join(Doc::text(" "), self.docs_of(&kids)),
+            ]),
+        )
+    }
+
+    /// The same where the construct is a **value** and sits mid-line: `return reject X`,
+    /// `let outcome = invoke C { .. }`. Leading there puts a hardline after the `=`.
+    fn keyed_value(&self, keyword: &'a str, node: Node<'a>) -> Doc<'a> {
+        let (trailing, kids) = self.split(node);
+        self.trailed(
+            &trailing,
+            Doc::concat([
+                Doc::text(keyword),
+                Doc::text(" "),
+                Doc::join(Doc::text(" "), self.docs_of(&kids)),
+            ]),
+        )
     }
 
     /// `keyword name = value`.
     fn assignment(&self, keyword: &'a str, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
-        Doc::concat([
-            Doc::text(keyword),
-            Doc::text(" "),
-            self.node(kids[0]),
-            Doc::text(" = "),
-            self.node(kids[1]),
-        ])
+        let (leading, kids) = self.parted(node);
+        Self::led(
+            leading,
+            Doc::concat([
+                Doc::text(keyword),
+                Doc::text(" "),
+                self.node(kids[0]),
+                Doc::text(" = "),
+                self.node(kids[1]),
+            ]),
+        )
     }
 
     /// `name: Type`.
     fn typed(&self, node: Node<'a>) -> Doc<'a> {
-        Doc::join(Doc::text(": "), self.docs(node))
+        self.joined(node, ": ")
+    }
+
+    /// Children with a separator between them, and any comment sent to the end of the
+    /// line.
+    ///
+    /// The separator is what makes this the shape that must not see a comment: joining
+    /// one as though it were a child puts `: ` or `, ` after a `//`, which comments out
+    /// the rest of the line and takes the real children with it.
+    fn joined(&self, node: Node<'a>, separator: &'a str) -> Doc<'a> {
+        let (trailing, kids) = self.split(node);
+        self.trailed(
+            &trailing,
+            Doc::join(Doc::text(separator), self.docs_of(&kids)),
+        )
     }
 
     /// `name` alone, or `name: value`. The shorthand is the common case in both a filter
     /// and a field initializer, and writing `{ order_id }` is writing every name.
     fn optional_value(&self, node: Node<'a>) -> Doc<'a> {
-        Doc::join(Doc::text(": "), self.docs(node))
+        self.joined(node, ": ")
     }
 
     /// Children separated by a single space, which is most of the language.
     fn spaced(&self, node: Node<'a>) -> Doc<'a> {
-        Doc::join(Doc::text(" "), self.docs(node))
+        self.joined(node, " ")
     }
 
     // -------------------------------------------------------------------- tree
@@ -818,12 +1029,14 @@ impl<'a> Printer<'a> {
     /// The named children, which is exactly the content plus the comments: every piece of
     /// punctuation and every keyword in this grammar is an anonymous token.
     fn kids(&self, node: Node<'a>) -> Vec<Node<'a>> {
-        let mut cursor = node.walk();
-        node.named_children(&mut cursor).collect()
+        self.all_kids(node)
     }
 
-    fn docs(&self, node: Node<'a>) -> Vec<Doc<'a>> {
-        self.docs_of(&self.kids(node))
+    /// Every named child, comments included. What a printer that **places** comments
+    /// wants: `sequence`, `list`, `fields` and `handler` each decide where one goes.
+    fn all_kids(&self, node: Node<'a>) -> Vec<Node<'a>> {
+        let mut cursor = node.walk();
+        node.named_children(&mut cursor).collect()
     }
 
     fn docs_of(&self, nodes: &[Node<'a>]) -> Vec<Doc<'a>> {

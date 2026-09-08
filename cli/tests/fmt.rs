@@ -373,3 +373,119 @@ fn the_fixtures_are_their_own_formatters_output() {
         );
     }
 }
+
+/// A comment written *inside* a construct, across the shapes that read their children by
+/// position: a joined pair, a separated list, a positional head with a sequence tail, a
+/// value, a type constructor, and a keyword statement.
+///
+/// `extras` can land between any two children of any node, and the fixtures in `hek/` put
+/// every comment on its own line above a declaration, so the three safety properties above
+/// never met this shape. A printer that indexes its children positionally reads such a
+/// comment as a structural child and emits it where a real token belongs, which for a tool
+/// that writes in place means deleting source.
+const INTERLEAVED: &str = "\
+const A // in a const
+  : Int = 1
+event @a.b { id: Int, n: Int }
+record R {
+  sku // in a field
+    : String,
+}
+refusal Rf // in a refusal
+  \"message\"
+fn f(a: Int) // before a return type
+  -> Int {
+  let x = a // in a binary
+    + 1
+  if x // in a condition
+    > 2 {
+    return x
+  }
+  for i // in a for
+    in [1] {
+    let y = i
+  }
+  return x
+}
+fn g(s: String) -> String {
+  return s // before a method
+    .trim()
+}
+fn h(m: Map( // key then value
+  String, Int)) -> Int {
+  return ( // in parens
+    1)
+}
+enum Tier {
+  @default // in a variant
+    Free,
+}
+event @a.c { id: Int @max( // a bound
+  8) }
+command C(order_id // in a parameter
+  : Int) {
+  guard @a.b(id: order_id), // between slices
+    @a.c(id: order_id)
+  emit @a.b { id: // a field value
+    order_id, n: 1 }
+}
+test \"a case\" {
+  given @a.b { id: 1, n: 1 }
+  project P
+  expect no // in an expectation
+    Row[1]
+}
+projector P {
+  entity Row { id: Int @key, n: Int }
+  on @a.b { id, n } {
+    put Row { id, n }
+  }
+}
+";
+
+/// The safety property, met by the one input shape the corpus does not contain.
+#[test]
+fn a_comment_inside_a_construct_changes_no_token() {
+    let formatted = hek::fmt::format(INTERLEAVED).expect("the source parses");
+    assert_eq!(
+        shape(&formatted),
+        shape(INTERLEAVED),
+        "a comment inside a construct must not move, add or delete a token:\n{formatted}"
+    );
+}
+
+/// And it is still there afterwards. Dropping one is the other half of the same defect:
+/// a printer that skipped comments instead of misreading them would pass the check above.
+#[test]
+fn a_comment_inside_a_construct_survives() {
+    let formatted = hek::fmt::format(INTERLEAVED).expect("the source parses");
+    assert_eq!(
+        formatted.matches("//").count(),
+        INTERLEAVED.matches("//").count(),
+        "every comment survives:\n{formatted}"
+    );
+}
+
+/// The output is a program again, and the layout settles.
+///
+/// The sharpest failures here were `return a.// c` and `if a > // c {`, where the comment
+/// swallowed the rest of the line and what `fmt` wrote no longer parsed at all.
+///
+/// **One pass is not a fixed point for this input, and that is the known gap.** A comment
+/// inside an `if` condition or a `for` binding is emitted at the end of the header line,
+/// which puts it after the `{`; re-parsing therefore finds it inside the block, where it
+/// takes a line of its own and then stays. So the assertion is convergence rather than
+/// idempotence: the run after the first is stable, no token moves at any point, and the
+/// corpus is unaffected because no comment in it is written inside a construct.
+#[test]
+fn a_comment_inside_a_construct_leaves_a_program_and_settles() {
+    let once = hek::fmt::format(INTERLEAVED).expect("the source parses");
+    let twice = hek::fmt::format(&once).expect("what `fmt` wrote is still a program");
+    let thrice = hek::fmt::format(&twice).expect("and again");
+    assert_eq!(twice, thrice, "the layout settles after the first pass");
+    assert_eq!(
+        shape(&twice),
+        shape(INTERLEAVED),
+        "and it settles without moving a token"
+    );
+}
