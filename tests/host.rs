@@ -3,11 +3,12 @@
 //! ship: if any of it needed a `Harness`, the seam would not be one.
 
 use std::cell::RefCell;
+use std::sync::Arc;
 
 use heklang::{
     AppendCondition, Attempt, Calls, Clock, Error, ErrorKind, Event, EventPath, Harness, Http,
     Ident, Interpreter, Key, Keys, Log, Outcome, Predicate, Program, Query, Record, Recorded,
-    Reply, Request, Row, Rows, Span, Value, parse,
+    Reply, Request, Row, Rows, Secrets, Span, Value, parse,
 };
 
 const PRELUDE: &str = "event @order.placed {
@@ -142,6 +143,15 @@ impl Http for Elsewhere {
             status: 200,
             body: heklang::Json::Null,
         }
+    }
+}
+
+/// A deployment that set nothing. The harness answers every declared name with a
+/// stand-in, so this is the only host in the crate that can say `None` and therefore
+/// the only place rule 16's missing-credential backstop is reachable.
+impl Secrets for Elsewhere {
+    fn secret(&self, _name: &str) -> Option<Arc<str>> {
+        None
     }
 }
 
@@ -924,5 +934,42 @@ fn two_stages_read_twice_against_one_pinned_head() {
     assert_eq!(
         second.slices[0].filters,
         vec![("customer_id".to_string(), Value::Int(1))]
+    );
+}
+
+/// `docs/effects.md` rule 16's backstop, and the one seam question it raises: a host is
+/// expected to refuse to start with a required credential unresolved, so this is what
+/// happens when one fails at that. `Elsewhere` sets nothing, which is a deployment the
+/// harness cannot model because it always answers with a stand-in.
+///
+/// It **wedges** rather than skipping. Unlike an erased subject this is recoverable, and
+/// what recovers it is an operator setting the value and the invocation being retried.
+#[test]
+fn a_required_secret_a_host_does_not_set_wedges_and_names_it() {
+    let program = program(
+        "secret DISCORD_WEBHOOK
+effect Alerts {
+  on @order.placed as e { @key order_id } {
+    let sent = http.post(DISCORD_WEBHOOK, { \"id\": e.order_id })
+  }
+}",
+    );
+    let seeded = Elsewhere {
+        records: vec![order(0, 7)],
+        ..Elsewhere::default()
+    };
+    let mut interpreter = Interpreter::with_host(&program, seeded);
+    let mut journal = heklang::Journal::default();
+    let message = interpreter
+        .deliver("Alerts", 0, &mut journal)
+        .expect_err("this deployment set nothing")
+        .to_string();
+    assert!(
+        message.contains("this deployment has not set `DISCORD_WEBHOOK`"),
+        "the operator has to be told which one, got {message}"
+    );
+    assert!(
+        journal.is_empty(),
+        "nothing was sent, so nothing is recorded"
     );
 }

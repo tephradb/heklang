@@ -8,6 +8,8 @@
 //! [`Calls`] and [`Rows`] sit beside the bundle rather than inside it, because a journal
 //! is per invocation and a read model is per projector, while a [`Host`] is per world.
 
+use std::sync::Arc;
+
 use crate::interp::{Error, Row};
 use crate::ir::{EventPath, Ident};
 use crate::value::{Event, Invoked, Json, Key, Record, Value};
@@ -153,14 +155,56 @@ pub trait Keys {
     fn erase(&mut self, subject: &str, id: &str) -> Result<(), Error>;
 }
 
-/// One request as it left, so a test can assert what was sent rather than only what
-/// came back. The `Idempotency-Key` case is why headers are worth seeing.
+/// Deployment credentials, as values rather than as a source.
+///
+/// Where they come from is a host's business, the same way a key store is:
+/// `docs/effects.md` rule 16 says which declarations may read one and says nothing
+/// about environments, files or vaults. Asked lazily rather than resolved when an
+/// interpreter is built, so a remote provider is a host change and not a language one;
+/// a host reading an environment caches trivially.
+pub trait Secrets {
+    /// The value behind a declared name, or `None` when this deployment has not set it.
+    ///
+    /// `None` is only meant to be reachable for a `secret NAME?`. A host is expected to
+    /// refuse to start when a required one is unset, so a program that reads one is
+    /// answering a question the deployment already settled; heklang's backstop for a
+    /// host that fails at that is `ErrorKind::MissingSecret`, which wedges the
+    /// invocation and names the declaration rather than panicking.
+    ///
+    /// `&self` for the reason `Keys::decrypt` is: reading a credential does not spend
+    /// it.
+    fn secret(&self, name: &str) -> Option<Arc<str>>;
+}
+
+/// The three parts of a request that can carry a deployment credential, in one of its
+/// two renderings. See [`Request`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Request {
-    pub verb: &'static str,
+pub struct Parts {
     pub url: String,
     pub body: Option<Json>,
     pub headers: Json,
+}
+
+/// One request as it left, so a test can assert what was sent rather than only what
+/// came back. The `Idempotency-Key` case is why headers are worth seeing.
+///
+/// **Two renderings, and reading the wrong one is a compile error rather than a leak.**
+/// A `secret` (`docs/effects.md` rule 16) may sit in the url, in a header value or in
+/// the body, and those three cross here. `wire` is what the credential actually is and
+/// `shown` names it instead, so a host sends one and prints the other. They are separate
+/// fields rather than one field plus a convention because a program holding no secret
+/// makes them identical: a host that read the wrong one would be wrong only for the
+/// programs that use the feature, and would never find out. The flat `url`, `body` and
+/// `headers` fields are gone for exactly that reason, so the choice is made once, at
+/// the compiler's insistence. `docs/host.md` has the rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Request {
+    pub verb: &'static str,
+    /// What goes on the wire. Read this to send.
+    pub wire: Parts,
+    /// The same request with every credential named rather than spelled. Read this to
+    /// print, trace, log, or key a journal.
+    pub shown: Parts,
 }
 
 /// What one attempt came to. A transport failure is not an error: it is the retryable
@@ -226,6 +270,6 @@ pub trait Rows {
 /// One bundle because `Effects` holds one trait object, and four traits because the
 /// seams have genuinely different shapes: a `Clock` is three lines and a `Keys` is a
 /// key management service.
-pub trait Host: Log + Clock + Keys + Http {}
+pub trait Host: Log + Clock + Keys + Http + Secrets {}
 
-impl<T: Log + Clock + Keys + Http> Host for T {}
+impl<T: Log + Clock + Keys + Http + Secrets> Host for T {}

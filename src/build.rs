@@ -243,7 +243,7 @@ impl Builder {
                         return Some((*slot, id));
                     }
                 }
-                Expr::Lit(_) | Expr::Invalid => {}
+                Expr::Lit(_) | Expr::Invalid | Expr::Secret { .. } => {}
                 Expr::Unary { operand, .. } => stack.push(*operand),
                 Expr::Unwrap(inner) => stack.push(*inner),
                 Expr::Wrap { value, .. } => stack.push(*value),

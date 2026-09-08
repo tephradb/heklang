@@ -206,10 +206,11 @@ be the whole of it:
 | `no-zero-value` | a `patch` that would materialise a row it cannot fill |
 | `wrong-context` | a statement in a declaration kind, or an arm, that does not have it |
 | `impure-fn` | a `fn` doing something a pure function cannot |
-| `fold-restriction` | a `fold` calling out or decrypting |
+| `fold-restriction` | a `fold` calling out, decrypting, or reading a secret |
 | `arm-only` | an effect-local `fn` doing what stays in the arm |
 | `return-shape` | a `return` that does not match the signature it is in |
 | `seal-boundary` | rule 12: sealed content leaving without `reveal` |
+| `secret-boundary` | rule 16: a deployment credential reaching something that observes it |
 | `erase-subject` | an `erase` whose subject or id is not one |
 | `erase-order` | rule 9: a `reveal` reachable from an `erase` |
 | `test-shape` | a test body out of order, or an expectation its action cannot produce |
@@ -340,7 +341,19 @@ coherent to check the body against, so those keep returning. So does a syntax er
 is what every compiler does: recovering from one is a parser question rather than a
 diagnostic one.
 
-## 11. What this is not, yet
+## 11. A boundary gets its own code
+
+`seal-boundary` and `secret-boundary` are two codes rather than one `boundary`, because they are two
+rules that happen to be enforced in the same place. A seal says content may be **moved** and not
+read; a credential says it may be **read** and not written anywhere observable. The messages give
+opposite advice -- `reveal` it first, versus do not take it out of the request -- so collapsing them
+would produce a code whose meaning depends on which half fired.
+
+Both suppress the generic message that would otherwise follow. A seal does it by being transparent
+to the type check; a credential is deliberately opaque, so `type-mismatch` and `bad-operands` stand
+down explicitly when the specific one has already fired. Either way one mistake is one diagnostic.
+
+## 12. What this is not, yet
 
 Severity is a channel with no producer: nothing is a warning. The lints that need one are
 the next piece of work, and this document is where they land.

@@ -517,6 +517,14 @@ duplicated.
 members, or sooner if one arrives whose name does not announce that it is special. The argument above
 is about a small set of well-named things, and it stops holding when either half stops being true.
 
+**Reading a `secret` is the third, and it is the first that is not a call.** Rule 16's credentials
+re-execute on a replay for the same reason `reveal` does: the value is not a fact about the world
+that happened, and a replay after a rotation should send the new credential rather than the old one.
+It does not push this rule over, because the expiry clause is about *builtins* an author might
+mistake for journaled ones. A bare name is not a call, there is no per-call sigil it could carry,
+and the question a marker would answer -- "is this recorded?" -- has the same answer for every read
+of every secret. What it does do is put a third entry in rule 14's list of what verify still covers.
+
 ## 11. Builtins
 
 | Builtin | Returns | Journaled |
@@ -852,6 +860,13 @@ that recomputes a different idempotency key, or a deploy that adds one, must sti
 that already recorded the send. Keying on headers would turn "the same call with a new key" into a
 new call, which is exactly the second send the key exists to prevent.
 
+**Rule 16 is the case that argument did not cover**, and it gets the same answer by a different
+route. A credential can be *in* the url or the body, where this rule does key, so a rotated webhook
+would move every past entry onto a string that no longer exists. The url and the body therefore
+enter the key in their redacted rendering: `{SECRET:DISCORD_WEBHOOK}` rather than the address. So a
+rotation moves no key, and the key never holds a credential in the first place, which matters
+because it is a readable description by design.
+
 Headers are always present in the IR and empty when unwritten, so the interpreter reads one shape
 rather than two.
 
@@ -884,6 +899,10 @@ what remains.
 
 - *A subject re-keyed between a run and its replay.* `reveal` is not journaled by design, so its
   result is whatever the key store says at the time. Nothing static catches this and nothing should.
+- *A deployment secret rotated between a run and its replay* (rule 16). The same shape one level
+  over, and the same answer: a credential is not journaled, so a replay sends whatever the
+  deployment holds now. This is why the journal key is built from the redaction rather than the
+  value -- the key has to stay put across a rotation even though what goes on the wire does not.
 - *A journal read back by a different program version* (rule 7). Replay equivalence is exactly the
   check that notices a handler no longer making the calls it recorded.
 - *Anything a future builtin adds.* The list above is short because the builtin set is closed. It
@@ -1056,6 +1075,228 @@ should have been two effects, since lanes are mutual exclusion and two arms touc
 resource want one lane space; that is a lint waiting on a warning channel rather than an error, since
 the checker cannot know whether the two resources are disjoint. See "Known gaps".
 
+## 16. A deployment secret is readable where the network is
+
+heklang could hold one kind of credential and not the other, and the two get confused, so the split
+comes first.
+
+**Per-tenant credentials are already solved.** A shop's OAuth token arrives as a command, lands in
+the log as a `@subject` field, and an effect folds it out and `reveal`s it. Rule 12 is built around
+exactly that. Nothing here changes it.
+
+**Per-deployment credentials had no answer.** A Discord webhook, a Stripe key, a SendGrid key. They
+are not domain facts, they rotate out of band, they differ between dev, staging and production, and
+there is one of each per deployment rather than one per tenant. The only way to write one was
+`const WEBHOOK: String = "https://..."`, which is in git, in every surface that renders a
+declaration, and **in the digest hash**, because a `const` is inlined at its use site and its text
+goes into the packed form. A runtime records that hash as an invocation's `script_hash`, so
+rotating the credential would cost replay coverage on every past invocation.
+
+Putting the second kind in the log is the wrong log: "ops pasted a new Stripe key" is not something
+that happened in the domain, it is permanent once written, it costs a fold per invocation, and an
+empty database bootstraps to nothing, so "deploy is restart" becomes "deploy is restart plus a
+runbook".
+
+Everything below serves one sentence:
+
+> **A secret is readable exactly where the network is reachable, and it may not be observed
+> anywhere else.**
+
+That is one rule covering both halves of the split, and it happens to be the `http.*` row of rule
+11's table, so no new capability is introduced. A secret with nowhere to send it is pointless, and a
+secret that can reach a log line, an event, a read model or a fold is a leak or a determinism break.
+
+### The declaration
+
+```
+secret DISCORD_WEBHOOK
+secret STRIPE_KEY
+secret SENTRY_DSN?          // this deployment may not set it
+```
+
+**No type annotation**, because every real credential is text: a URL, a bearer token, an API key.
+An annotation would be noise at best and would invite `secret PORT: Int`, which needs parsing and a
+boot-time error path for something nothing wants. The declaration names a thing; its type is always
+`Secret`.
+
+**`secret` is soft**, claimed only where a top-level item begins. This document declares
+`fn sync(shop_id: Int, domain: String, secret: String)` a few sections up and the language's own
+tests declare an event field called `secret`; a hard keyword breaks both, for nothing. Nothing else
+at top level is a bare word followed by a name, so the position is unambiguous.
+
+**`secret NAME?` is an optional**, and non-optional is the default because a missing credential
+should fail the deploy rather than be discovered at 3am. `Opt` composes for free, so the effect
+branches:
+
+```
+let dsn = SENTRY_DSN
+if dsn.is_some() { alert(dsn, "...") }
+```
+
+**The `let` is not decoration.** Narrowing (`docs/optionals.md`) is a property of a *slot*, and a
+secret read is not one, the same way an inlined `const` is not. Read it into a `let` and the branch
+narrows as it does for everything else.
+
+Screaming case is convention, not enforcement, matching `const`.
+
+### `Secret` is a taint, not a wall
+
+This is the decision everything else follows from, and it is the deliberate difference from
+`Sealed`.
+
+`Sealed` is a wall: content may only be moved, asked about or `reveal`ed, because a runtime
+genuinely cannot read it without a key. A secret is not like that. The runtime holds the plaintext
+and is meant to. What must be true is that it never leaves through an **observable** channel. So the
+rule is about sinks rather than about operations, and it is met wherever a type meets a value.
+
+| Position | `Secret` |
+| --- | --- |
+| an `http.*` url argument | **yes**, a webhook address is itself a credential |
+| an `http.*` header value | **yes** |
+| an `http.*` body, at a member of the **literal** object, at any depth | **yes** |
+| a `Secret` parameter or return of an effect-local `fn` | yes |
+| a `let` in an arm or in an effect-local `fn` | yes |
+| string interpolation | **yes, and the whole interpolation becomes a `Secret`** |
+| `.is_some()` / `.is_none()` on a `secret NAME?` | yes, presence is not content |
+| an *un-narrowed* `secret NAME?`, anywhere but those two | no |
+| a boolean operand, a comprehension's yielded element | no |
+| a `List`, a `Map`, a record field, an array inside a body | no |
+| `log(..)`, `fail(..)` | no |
+| `emit`, `put` / `patch` / `update`, `invoke` | no |
+| a `fold` seed, arm or filter | **no**, and this one is correctness |
+| `==`, `!=`, ordering, arithmetic | no |
+| any method on one, and `Json.encode` | no |
+| a `const`, an entity column, a command parameter | no |
+| read outside an effect arm or an effect-local `fn` | no |
+
+**Interpolation taint is what makes it usable.** `"Bearer {STRIPE_KEY}"` is the single most common
+shape a credential takes, and a wall would forbid it, leaving `Authorization` unwritable. Taint also
+gives `"https://{host}/hooks/{HOOK_PATH}"` for free, and the result is still a `Secret`, so it still
+reaches no sink. It survives a `let`, which is the same argument rule 12 makes for a seal: a type
+composes where a spelling does not.
+
+**"At any depth" means the literal object, and the allowance travels nowhere else.** A body is
+written as an object, and an object written inside it is part of the same document, so a
+credential may sit at either. Anything else in a member position is an ordinary declared
+position that happens to be written inside a body: an `invoke` argument, a `fn` argument, a
+`Json.encode`. Letting those inherit the allowance is not a near-miss, it is the whole rule
+failing at once, because `invoke C { doc: { "k": KEY } }` inside a body puts the credential in
+the **log**, where it is permanent and no rotation can reach it. So the allowance is granted to
+an object literal in the argument itself, and re-granted only to an object literal directly
+inside one.
+
+**An optional must be narrowed before it is used for anything but presence.** An absent one has
+no rendering, and the conversion table would give the literal text `null`: an interpolation
+would build a url pointing somewhere else, silently. `.is_some()` and `.is_none()` ask about
+presence and are always fine; every other position takes the `Secret` a narrowing proves, which
+is the `let` the declaration section already shows.
+
+**The `fold` prohibition is the sharp one, and it is the only sink whose reason is correctness
+rather than disclosure.** A fold is a pure function of the log prefix and the trigger's own
+position, which is what buys replay equivalence and verify mode (rules 3 and 14). A secret is not in
+the log. A fold whose seed or arm read one would fold differently after a rotation, and `verify`
+would be right to call that corruption. It is rejected where it is written, with rule 3's message
+naming the fold rather than the read.
+
+**A container may not hold one, and that is a decision rather than an omission.** The simplest rule
+would be that containers carry the taint and every sink walks a value. It loses on a specific
+ground: `Secret` is spellable in a `fn` signature and nowhere else, exactly as `Response` and
+`Outcome` are, so `List(Secret)` cannot be written. Letting one be *inferred* would mean a
+diagnostic that reads `expected List(String), found List(Secret)`, naming a type its reader has no
+way to write. Rule 12 made the same call on measured evidence, and it holds here: no real credential
+is one of several.
+
+**`reveal` is deliberately not tainted.** A revealed email is meant to be compared, interpolated and
+sent as data, and this document shows `log(reveal(copy))` as a working example. `Sealed` protects
+content at rest and after erasure; `Secret` protects content in observable output. Different
+threats, different mechanisms. The consequence is real and is in Known gaps: an author can still put
+a revealed email in a log line, and nothing here changes that.
+
+**Rejected: tainting `reveal`'s result.** Symmetric, and wrong for the reason above, and a breaking
+change to every effect that reveals.
+
+### The value carries its own redaction
+
+A `Secret` holds **two renderings rather than one**: `plain` is what goes on the wire, and
+`redacted` is what anything else is allowed to see, spelled `{SECRET:STRIPE_KEY}`. Interpolation
+builds both in one walk, so an ordinary hole renders as itself in each and only the credential is
+named.
+
+The payoff is that the list of consumers is short and nobody has to remember a rule:
+
+| Consumer | Reads |
+| --- | --- |
+| the wire, through `Http::send` | `plain` |
+| the journal key | `redacted` |
+| a transport failure's message | `redacted` |
+| a `Display`, a diagnostic, a runtime error | `redacted` |
+
+**Redaction is a property of the value, so every printing surface is fixed at once, including ones
+nobody has written yet.** The obvious alternative, a host holding a list of credential strings and
+scrubbing its own output, is O(secrets × output), fails on any encoded form, and needs a
+minimum-length guard so a short credential does not redact half the log. It is a reasonable backstop
+for a runtime to add; it is not the mechanism.
+
+**The journal key is what this buys.** The Headers section below already argued that a replay which
+recomputes a different idempotency key must still land on the entry that recorded the send. A
+credential in the url or the body is the case that argument did not yet cover: rotate a Discord
+webhook and every past entry keys on a string that no longer exists, so a crash-replay misses and
+re-fires the POST, and every historical invocation reports a replay divergence. The key is built
+from the redaction, so it is stable across a rotation. It never holds plaintext either, which
+matters because the key is a readable description by design and a host may store it.
+
+**A request therefore crosses the host seam in two renderings**, as separate fields rather than one
+plus a convention, so a host sends one and prints the other and cannot pick wrong without the
+compiler saying so. `docs/host.md` has the rule.
+
+**Nothing is zeroized, and that is said rather than implied.** A `Value` shares its strings so a
+program can be parsed once and served from many threads, and a shared buffer cannot be wiped. A
+partial guarantee here would be worse than an honest absence, because it would read as a guarantee.
+A host may zeroize the source it resolved from; heklang holds the plaintext for the life of the
+invocation.
+
+### What a host owes, and what it does not
+
+One trait beside `Keys`, answering a value rather than a source: where credentials come from is a
+host's business the way a key store is, and this document says nothing about environments, files or
+vaults. `Program::secrets` is the deployment surface, so a runtime can answer "does this deploy need
+a credential the last one did not" without decoding a digest.
+
+A required secret a host cannot answer is a **wedge** that names the declaration, not a panic and
+not a skip. A host is expected to make it unreachable by refusing to start; this is the backstop for
+when it fails at that, and it wedges rather than skipping because unlike an erased subject it is
+recoverable, and what recovers it is an operator setting the value.
+
+**There is no `_PREVIOUS` list**, and this is worth saying out loud because a master key needs one
+and someone will copy the shape. A master key wraps stored data, so both must be readable during a
+rotation. A secret wraps nothing, so create-new, deploy, revoke-old is handled by a restart alone.
+
+### Rejected alternatives
+
+- **An `env("NAME")` builtin returning `String`.** One builtin, one host method, no type work, and
+  wrong. It returns a plain string, so `log(env("X"))` compiles; it fixes neither the journal key
+  nor the error text; the set of credentials is undeclared, so no host can fail fast and no plan can
+  report; and a typo is a runtime wedge instead of a check error. In a language whose thesis is that
+  the restrictions are the point, this is the shape that has none.
+- **A `[config]` table in the runtime's own config file.** Everything above, plus the value is in a
+  committed file.
+- **Credentials in the event log under a reserved subject.** Genuinely tempting: it reuses
+  `@subject`, erasure, rotation and the master key, gives an audit trail for free, and rotates
+  without a restart. It is also already the right answer for the *per-tenant* kind. For deploy
+  secrets it is the wrong log, per the split at the top of this rule. Keep both, and keep the split
+  written down, because this is the alternative that will keep coming back.
+- **A generic `config` declaration covering non-secret deployment values** (a base URL, a feature
+  flag). A different requirement: those should be loggable, and lumping them in would make the type
+  either over-redact or under-redact. If a case appears, `config NAME: String` is the additive
+  sibling.
+- **Secrets readable in a command.** The motivating case is verifying an inbound webhook HMAC, and
+  the honest reasons to say no are not about determinism, since a command is not replayed. They are:
+  a command's whole surface is HTTP-facing and a credential one typo from a refusal message is a bad
+  place to be; there is no crypto in heklang for the case to be written against; and "readable
+  exactly where the network is reachable" keeps this rule to one sentence. An effect verifies, then
+  `invoke`s.
+
+
 ---
 
 ## The three kinds are deliberately not unified
@@ -1143,6 +1384,7 @@ These are places the *language* differs from hekla. `docs/host.md` is the other 
 | self-triggering | rejected statically | unguarded |
 | `erase` | a statement, no result (rule 9) | an expression returning a bool |
 | delivery | declared per arm (rule 15) | one global lane, replaying from position 0 |
+| deploy credentials | declared, typed and unobservable (rule 16) | a `const` in the source, or nothing |
 
 ## What the runtime owes rule 15
 
@@ -1239,6 +1481,15 @@ The other six live in the parser only because nothing else exists yet:
 6. **`on latest` never invokes** (rule 15). Interprocedural, but only within one effect, since an
    effect-local `fn` is invisible outside its braces. The same walk is what check 2 now follows, which
    closed a hole it had: an `invoke` inside a helper used to be invisible to the cycle check.
+7. **The credential boundary** (rule 16). A type rule like check 4 and in the same place, running
+   just before it at every position that declares a type, plus the handful that declare none: a
+   comparison, an array element, an object member outside a request. It is the mirror of the decrypt
+   boundary rather than a copy of it, and the asymmetry is the point: a seal may be **written**
+   wherever the same seal is declared and may not be read, while a credential may be **read** freely
+   and may not be written anywhere that could observe it. The one position that escapes is an
+   `http.*` url, which is checked on its own rather than through a flag, because a flag would be
+   inherited by everything nested inside a body and `http.post(url, { "x": leak(KEY) })` would
+   launder through a helper's parameter.
 
 The projector half of check 3 landed with it, so `docs/projectors.md` rule 9 no longer records a
 no-op.
@@ -1260,11 +1511,28 @@ it, because a narrowed load lowers differently.
   `reveal` case is now checked where it can be written.
 - **The journal key is a readable description**, not a content hash. It is stable and it prints,
   which is what a harness wants; a real host hashes it.
+- **A revealed value is not a credential** (rule 16). `reveal` is deliberately untainted, so an
+  author can still put a revealed email in a log line. That is rule 12's boundary working as
+  designed rather than rule 16's failing: the two protect different things, and tainting `reveal`
+  would be a breaking change to every effect that reveals for no gain in either.
+- **A credential cannot be one of several** (rule 16). A `List(Secret)` is not spellable and not
+  inferrable, so `{ "keys": [A, B] }` in a body is rejected, and so is a comprehension that would
+  yield one. Nothing real wants it, and allowing it would put a type in diagnostics that no author
+  could have written -- and `.contains` over such a list would answer, in a loggable `Bool`,
+  whether two credentials are equal.
+- **A `const` named `secret` collides with the declaration** (rule 16). `secret` is a soft word
+  claimed by two tokens, so `const B: Int = secret` immediately above a `secret FOO` reads as a
+  declaration and the parse stops with an unhelpful message. It is loud rather than silent, and it
+  needs a const named `secret` in a language whose consts are screaming case, so it is recorded
+  rather than fixed.
+- **Journaled response bodies are stored in the clear.** An OAuth token exchange writes its access
+  token into whatever a host keeps as the recorded result. That is a host's retention question and
+  not a language one, and it is listed here so it is not mistaken for something rule 16 covers.
 - **The disagreeing-keys lint** (rule 15). Arms of one effect keying by different identities is
   legal and sometimes necessary, and usually means it should have been two effects. It wants a
   `Severity::Warning`, and heklang has no warning producer yet: `settled` returns the first recorded
   diagnostic as an error and `check_files` has no channel on the `Ok` path. `docs/diagnostics.md`
-  section 11 is where that lands. It must not become an error: the checker cannot know whether the
+  section 12 is where that lands. It must not become an error: the checker cannot know whether the
   two remote resources are disjoint.
 - **Testing the live boundary** (rule 15). `deliver` runs an effect over the whole given log, which
   is all history, so an `on live` arm delivered faithfully would fire for nothing and be untestable.

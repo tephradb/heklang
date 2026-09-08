@@ -80,6 +80,9 @@ pub enum Code {
     EraseSubject,
     EraseOrder,
 
+    // The credential boundary.
+    SecretBoundary,
+
     // A test body.
     TestShape,
 
@@ -132,6 +135,7 @@ impl Code {
         Code::SealBoundary,
         Code::EraseSubject,
         Code::EraseOrder,
+        Code::SecretBoundary,
         Code::TestShape,
         Code::RecursiveFn,
         Code::RecursiveGuard,
@@ -177,6 +181,7 @@ impl Code {
             Code::ArmOnly => "arm-only",
             Code::ReturnShape => "return-shape",
             Code::SealBoundary => "seal-boundary",
+            Code::SecretBoundary => "secret-boundary",
             Code::EraseSubject => "erase-subject",
             Code::EraseOrder => "erase-order",
             Code::TestShape => "test-shape",

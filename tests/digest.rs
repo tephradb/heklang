@@ -1154,3 +1154,113 @@ fn an_effect_signature_moves_when_its_lanes_do() {
         "and the body is still the effect's own business"
     );
 }
+
+/// Rule 7, met by a fourth declaration kind: a `secret` runs nothing on its own, so it
+/// has no entry. Its **name** is at every read site instead, which is what buys the two
+/// properties a deploy gate needs from it.
+#[test]
+fn a_secret_has_no_entry_and_its_name_is_at_the_read_site() {
+    let form = with_events(
+        "secret DISCORD_WEBHOOK
+effect Alerts {
+  on @order.placed as e { @key order_id } {
+    let a = http.post(DISCORD_WEBHOOK, { \"id\": e.order_id })
+  }
+}",
+    );
+    assert!(
+        !form.packed().contains("(secret DISCORD_WEBHOOK)\n"),
+        "a declaration that runs nothing is not an entry, the same reason a `const` is not"
+    );
+    assert!(
+        entry(&form, "Alerts")
+            .form
+            .packed()
+            .contains("(secret DISCORD_WEBHOOK)"),
+        "the name is at the read site: {}",
+        entry(&form, "Alerts").form.packed()
+    );
+
+    // Reading a *different* credential is a behaviour change and moves the hash.
+    differs(
+        "secret A
+secret B
+effect E { on @order.placed as e { @key order_id } { let r = http.get(A) } }",
+        "secret A
+secret B
+effect E { on @order.placed as e { @key order_id } { let r = http.get(B) } }",
+        "an effect that starts reading a different credential decides differently",
+    );
+
+    // And renaming or moving the declaration is not, exactly as for a `const`.
+    same(
+        "secret A
+effect E { on @order.placed as e { @key order_id } { log(\"x\") } }",
+        "effect E { on @order.placed as e { @key order_id } { log(\"x\") } }",
+        "an unread secret is invisible, the same as an unused const",
+    );
+}
+
+/// The load-bearing half, and the reason a credential is not a `const`: `digest_hash`
+/// is what a runtime records as an invocation's `script_hash`, so a hash that moved on
+/// a rotation would cost replay coverage on every past invocation. A `const` holding the
+/// same URL puts its text in the form and does exactly that.
+#[test]
+fn a_secret_holds_no_value_so_a_rotation_cannot_move_a_hash() {
+    let packed = with_events(
+        "secret HOOK
+effect E { on @order.placed as e { @key order_id } { let r = http.get(HOOK) } }",
+    )
+    .packed();
+    assert!(
+        !packed.contains("https"),
+        "there is no value in the program to put in the form"
+    );
+
+    // The contrast, spelled out: the same address as a `const` is inlined at the use
+    // site, so editing it moves the effect's hash.
+    differs(
+        "const HOOK: String = \"https://one.example/hook\"
+effect E { on @order.placed as e { @key order_id } { let r = http.get(HOOK) } }",
+        "const HOOK: String = \"https://two.example/hook\"
+effect E { on @order.placed as e { @key order_id } { let r = http.get(HOOK) } }",
+        "a const's value is in the form, which is what a rotation must not be",
+    );
+}
+
+/// The two properties the read-site atom has to carry, and the one thing it must not.
+#[test]
+fn a_secret_in_the_form_carries_its_shape_and_never_a_value() {
+    // `secret X` and `secret X?` behave differently at a read site -- one wedges when a
+    // deployment cannot answer, the other branches -- so they must not hash alike.
+    // A bare read into a `let` takes either, so the two programs differ in the `?` and
+    // nothing else. (Every position that *uses* the value rejects an un-narrowed
+    // optional, which is the point of carrying the flag.)
+    differs(
+        "secret A
+effect E { on @order.placed as e { @key order_id } { let a = A } }",
+        "secret A?
+effect E { on @order.placed as e { @key order_id } { let a = A } }",
+        "the `?` is part of what runs, so a deploy gate must see the edit",
+    );
+
+    // A test's own setup line reports that it set one, never what it set. The digest is
+    // a published artifact and `SecretDef` holds no value precisely so that no path puts
+    // a credential into it.
+    let form = digest(&format!(
+        "{EVENTS}secret HOOK
+effect E {{ on @order.placed as e {{ @key order_id }} {{ let r = http.get(HOOK) }} }}
+test \"one\" {{
+  given @order.placed {{ order_id: \"0190d1a1-0000-7000-8000-000000000001\", customer_id: 1, total: 1.00 }}
+  secret HOOK = \"sk_live_TOPSECRET\"
+  deliver E
+  expect nothing
+}}"
+    ));
+    let packed = form.packed_with_tests();
+    assert!(
+        !packed.contains("sk_live_TOPSECRET"),
+        "a test's value must not reach the form: {packed}"
+    );
+    assert!(packed.contains("(secret HOOK set)"), "{packed}");
+}

@@ -73,6 +73,25 @@ pub enum Value {
         /// `Type` on every sealed value made `Value` a third larger for everything.
         content: Arc<str>,
     },
+    /// A deployment credential, carrying **two renderings rather than one**: `plain` is
+    /// what goes on the wire, `redacted` is what anything else is allowed to see.
+    ///
+    /// Two renderings rather than a rule each printing surface has to remember. A
+    /// redacted form built here is a property of the value, so a journal key, an error
+    /// message and a surface nobody has written yet are all fixed at once. Interpolation
+    /// builds both, which is what lets `"Bearer {STRIPE_KEY}"` be written at all.
+    ///
+    /// **Nothing here is zeroized, and that is stated rather than implied.** The two
+    /// strings are `Arc<str>` for the reason `Str` gives above, and a shared buffer
+    /// cannot be wiped; a partial guarantee would be worse than an honest absence. A
+    /// host may zeroize the source it resolved from, and heklang holds plaintext for the
+    /// life of the invocation. See `docs/effects.md` rule 16.
+    Secret {
+        plain: Arc<str>,
+        /// `{SECRET:STRIPE_KEY}` for a bare read; for an interpolation, the same text
+        /// with every secret hole named and every ordinary hole rendered as itself.
+        redacted: Arc<str>,
+    },
 }
 
 impl Value {
@@ -184,6 +203,7 @@ impl Value {
             // keeps one out of every position that asks this, so it is reached by error
             // paths rather than by a program.
             Value::Sealed { subject, .. } => Type::sealed(Type::String, subject.clone()),
+            Value::Secret { .. } => Type::Secret,
         }
     }
 
@@ -269,6 +289,10 @@ impl fmt::Display for Value {
             // Never the content. A checked program cannot print one, so this is what a
             // debug print of an intermediate frame shows rather than program output.
             Value::Sealed { subject, .. } => write!(f, "<sealed under {subject}>"),
+            // The same rule, and the reason a `Secret` carries its redaction: whatever
+            // reaches a `Display` is a surface that may be read, so it gets the form
+            // that names the credential rather than the one that spells it.
+            Value::Secret { redacted, .. } => f.write_str(redacted),
             Value::Bool(value) => write!(f, "{value}"),
             Value::Int(value) => write!(f, "{value}"),
             Value::Decimal { units, scale } => scaled::write(f, *units, *scale),
@@ -431,7 +455,7 @@ pub fn zero(ty: &Type, defs: Defs<'_>) -> Option<Value> {
         Type::Uuid | Type::Timestamp | Type::Rounding => return None,
         // Never reachable from a declaration: there is no syntax that writes one of
         // these as an entity field type.
-        Type::Json | Type::Response | Type::Outcome => return None,
+        Type::Json | Type::Response | Type::Outcome | Type::Secret => return None,
     })
 }
 
@@ -608,6 +632,10 @@ fn shape(json: &Json) -> &'static str {
         Json::Str(_) => "a string",
         Json::Arr(_) => "an array",
         Json::Obj(_) => "an object",
+        // Not reachable: this describes a value read back out of a store, and a
+        // `Secret` only ever goes outbound. A category word carries no content either
+        // way, so the safe answer costs nothing to give.
+        Json::Secret { .. } => "a string",
     }
 }
 
@@ -779,6 +807,18 @@ pub enum Json {
     Str(String),
     Arr(Vec<Json>),
     Obj(BTreeMap<String, Json>),
+    /// A deployment credential inside a document, carrying the same two renderings
+    /// [`Value::Secret`] does. It exists only between an object literal and the request
+    /// it is built into: [`Json::wire`] and [`Json::shown`] each replace it with a
+    /// `Str`, so **a host never sees one** and neither does a response body.
+    ///
+    /// Without it a body's redaction has nowhere to live, because an object literal
+    /// collapses to a `Json` before the journal key is built. See `docs/effects.md`
+    /// rule 16.
+    Secret {
+        plain: String,
+        redacted: String,
+    },
 }
 
 impl Json {
@@ -824,6 +864,42 @@ impl Json {
         }
     }
 
+    /// This document with every [`Json::Secret`] spelled out: what goes on the wire.
+    ///
+    /// The pair with [`Json::shown`] is the whole of rule 16's body half. Both are
+    /// taken before a `Request` is built, so the variant never leaves this module's
+    /// idea of a request and nothing downstream has to know it exists.
+    pub fn wire(&self) -> Json {
+        self.rendered(true)
+    }
+
+    /// This document with every [`Json::Secret`] named rather than spelled: what a
+    /// journal key, a trace and an error message get.
+    pub fn shown(&self) -> Json {
+        self.rendered(false)
+    }
+
+    fn rendered(&self, plain: bool) -> Json {
+        match self {
+            Json::Secret {
+                plain: sent,
+                redacted,
+            } => Json::Str(if plain {
+                sent.clone()
+            } else {
+                redacted.clone()
+            }),
+            Json::Arr(items) => Json::Arr(items.iter().map(|item| item.rendered(plain)).collect()),
+            Json::Obj(fields) => Json::Obj(
+                fields
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.rendered(plain)))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+
     /// Rule 8's conversion table, total so that an object literal always serialises.
     /// `Money` and `Decimal` become strings at their scale rather than numbers, so no
     /// precision is lost to a float on the far side.
@@ -834,6 +910,15 @@ impl Json {
             // things that reach this are the writing paths and a leak that could not
             // have been checked, and neither wants the plaintext heklang has not got.
             Value::Sealed { content, .. } => Json::Str(content.to_string()),
+            // Both renderings, for the reason the `Sealed` arm above gives about a
+            // total table: refusing here would break the totality an object literal
+            // depends on, and would make interpolation unwritable. Rule 16 rejects a
+            // secret in every position but a request at parse time, and `wire` and
+            // `shown` are what take this leaf back off again.
+            Value::Secret { plain, redacted } => Json::Secret {
+                plain: plain.to_string(),
+                redacted: redacted.to_string(),
+            },
             Value::Bool(value) => Json::Bool(*value),
             Value::Int(value) => Json::int(*value),
             Value::Decimal { units, scale } | Value::Money { units, scale } => {
@@ -881,6 +966,24 @@ impl Json {
 pub fn text(value: &Value) -> String {
     match Json::from_value(value) {
         Json::Str(text) => text,
+        // The plain rendering, because `text` is by definition what a value looks like
+        // when it *leaves* the process: a header value crosses through here. The other
+        // rendering is `redacted_text`, and rule 16's interpolation builds both.
+        Json::Secret { plain, .. } => plain,
+        other => other.to_string(),
+    }
+}
+
+/// The same text with every credential named rather than spelled: what a journal key,
+/// a trace and an error message get. The pair with [`text`], and the reason a
+/// `Value::Secret` carries two renderings instead of each printing surface carrying a
+/// rule. See `docs/effects.md` rule 16.
+pub fn redacted_text(value: &Value) -> String {
+    match Json::from_value(value) {
+        Json::Str(text) => text,
+        Json::Secret { redacted, .. } => redacted,
+        // `Display` already writes a `Secret` leaf as its redaction, at any depth, so
+        // this needs no second walk of the document to rebuild one.
         other => other.to_string(),
     }
 }
@@ -892,6 +995,10 @@ impl fmt::Display for Json {
             Json::Bool(value) => write!(f, "{value}"),
             Json::Num(value) => f.write_str(value),
             Json::Str(value) => write_json_str(f, value),
+            // The belt to `wire` and `shown`'s braces. Both take this variant off
+            // before a request exists, so nothing on the wire arrives here; what does
+            // is a debug or diagnostic print, and those get the redaction.
+            Json::Secret { redacted, .. } => write_json_str(f, redacted),
             Json::Arr(items) => {
                 f.write_str("[")?;
                 for (i, item) in items.iter().enumerate() {

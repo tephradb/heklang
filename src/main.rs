@@ -336,6 +336,8 @@ fn main() -> ExitCode {
 
     println!("\neffect NotifyCustomer");
     // The runtime absorbs the 503 and re-sends, so the handler only ever sees the 200.
+    // The deployment supplies the address; the journal key below names it instead.
+    interpreter.set_secret("CONFIRM_URL", CONFIRM);
     interpreter.script(CONFIRM, [Reply::Status(503), Reply::Status(200)]);
     let mut journal = Journal::default();
     notify(&mut interpreter, "notify order 1", 0, &mut journal);
@@ -561,7 +563,7 @@ fn shop_demo(program: &Program) {
     // The one request that went out, carrying a credential nothing else in the log
     // could have produced.
     if let Some(sent) = interpreter.requests().first() {
-        println!("\n  {} sent {}", sent.url, sent.headers);
+        println!("\n  {} sent {}", sent.shown.url, sent.shown.headers);
     }
 }
 
@@ -799,7 +801,7 @@ fn catalog_demo(program: &Program) {
         }
     }
     if let Some(sent) = interpreter.requests().first() {
-        println!("  headers {}", sent.headers);
+        println!("  headers {}", sent.shown.headers);
     }
 }
 
@@ -812,6 +814,7 @@ fn counters(program: &Program) {
         placed(31, 21, "rejected@example.com", 1_000),
     ];
     let mut interpreter = Interpreter::with_log(program, log);
+    interpreter.set_secret("CONFIRM_URL", CONFIRM);
     interpreter.script(CONFIRM, [Reply::Status(200), Reply::Status(422)]);
 
     match interpreter.drive("NotifyCustomer") {

@@ -298,7 +298,9 @@ a rule of its own.
 **Every path must return**: an `if` with no `else` does not count, and neither does a `for` body,
 because a container can be empty.
 
-A `fn` may take and return a `Response` or an `Outcome`, and nothing else may name either type. A
+A `fn` may take and return a `Response` or an `Outcome`, and an **effect-local** one may also take
+or return a `Secret`; nothing else may name any of the three, so `List(Response)` and `List(Secret)`
+are both rejected as unknown types. A
 `fn` declared `-> Outcome?` is how two commands share one refusal ladder:
 
 ```hek
@@ -328,7 +330,7 @@ values, no generics and no overloading. A trailing comma closes an argument list
 ## 9. `const`
 
 ```hek
-const WEBHOOK: String = "https://webhooks.example.com"
+const RETRY_BUDGET: Int = 3
 const FREE_TIER_LIMIT: Int = 15
 const NAMESPACE: Uuid = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
 const LAUNCH: Timestamp = "2026-01-01T00:00:00Z"
@@ -345,6 +347,48 @@ a chain, is rejected by naming the chain.
 
 Order is irrelevant, so a const may name one declared below it or in another file. A const is inlined
 at every use rather than being a runtime lookup.
+
+**A deployment credential is not a `const`.** Because a const is inlined, its text is in the digest
+hash, so rotating a webhook or an API key would move every hash that names it and cost replay
+coverage on every invocation already journaled against one. Use `secret` below. A `const` stays right
+for a value that is part of the program: a limit, a namespace uuid, a launch date.
+
+## 9a. `secret`
+
+```hek
+secret DISCORD_WEBHOOK
+secret STRIPE_KEY
+secret SENTRY_DSN?
+```
+
+`secret NAME`, with no type and no value: every real credential is text, and the value belongs to the
+deployment rather than to the program. `secret NAME?` says this deployment may not set it and reads
+as an optional. Order and file are irrelevant, as for a `const`. `secret` is soft, so a field,
+parameter or local of that name still works.
+
+Only an effect arm or an effect-local `fn` may read one, and it may only reach the network: a url, a
+header value, a body member, an interpolation (which becomes a `Secret` itself), or a `Secret`
+parameter. Everything else -- `log`, `fail`, `emit`, `invoke`, a comparison, a container, a `fold`,
+any method -- is a `secret-boundary` error. `effects.md` rule 16 has the reasons.
+
+```hek
+effect SendAlerts {
+  fn alert(url: Secret, text: String) {
+    let response = http.post(url, { "content": text })
+  }
+
+  on live @claim.filed as e { @key shop_id, claim_id } {
+    alert(DISCORD_WEBHOOK, "claim {claim_id} filed")
+
+    let charged = http.post("https://api.stripe.com/v1/charges", { "amount": 1 },
+      headers = { "Authorization": "Bearer {STRIPE_KEY}" })
+
+    // An optional one narrows through a `let`, the same as any other optional.
+    let dsn = SENTRY_DSN
+    if dsn.is_some() { alert(dsn, "filed") }
+  }
+}
+```
 
 ## 10. `record`
 

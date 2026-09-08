@@ -59,6 +59,7 @@ module.exports = grammar({
         $.enum_declaration,
         $.record_declaration,
         $.const_declaration,
+        $.secret_declaration,
         $.function_declaration,
         $.event_declaration,
         $.refusal_declaration,
@@ -108,6 +109,13 @@ module.exports = grammar({
         '=',
         field('value', $._expression),
       ),
+
+    // Like a `const`, no closing token: it ends at its name, or at the `?` that makes it
+    // optional. `secret` stays soft the way `latest` and `live` do (`delivery_keyword`
+    // below): `word` is `identifier`, so keyword extraction claims it only where a rule
+    // expects it, and a field or parameter of that name still lexes as an identifier.
+    secret_declaration: ($) =>
+      seq('secret', field('name', $.identifier), optional('?')),
 
     // The result is optional because an effect-local `fn` may omit it: `fail` is its
     // only other way out, so there is nothing for a caller to decide from. A module
@@ -260,7 +268,7 @@ module.exports = grammar({
       seq(
         '{',
         repeat($.given_clause),
-        repeat(choice($.respond_clause, $.erased_clause)),
+        repeat(choice($.respond_clause, $.erased_clause, $.secret_clause)),
         optional($._action_clause),
         repeat($.expect_clause),
         '}',
@@ -281,6 +289,12 @@ module.exports = grammar({
 
     erased_clause: ($) =>
       seq('erased', field('subject', $.identifier), field('id', $._expression)),
+
+    // The fourth setup lever (docs/testing.md section 3). It shares its word with the
+    // declaration above, which is the one word this construct does not reserve for
+    // itself; both are soft.
+    secret_clause: ($) =>
+      seq('secret', field('name', $.identifier), '=', field('value', $._expression)),
 
     _action_clause: ($) =>
       choice($.run_clause, $.project_clause, $.deliver_clause),

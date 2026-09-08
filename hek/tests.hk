@@ -181,6 +181,9 @@ test "confirming an order reveals the address and records the notification" {
     notes: "",
   }
 
+  // The override, for when the value's shape matters. It sits beside the `respond` that
+  // answers it, which is the reason it is a setup line rather than a `given`.
+  secret CONFIRM_URL = "https://mail.example/confirm"
   respond "https://mail.example/confirm" 200
 
   deliver NotifyCustomer
@@ -207,12 +210,14 @@ test "an absorbed retry never reaches the arm" {
     notes: "",
   }
 
-  respond "https://mail.example/confirm" 503
-  respond "https://mail.example/confirm" 200
+  // No setup line: a declared secret answers `secret:NAME`, so a test that does not
+  // care about the value names the stand-in and moves on.
+  respond "secret:CONFIRM_URL" 503
+  respond "secret:CONFIRM_URL" 200
 
   deliver NotifyCustomer
 
-  expect http.post("https://mail.example/confirm")
+  expect http.post("secret:CONFIRM_URL")
   expect log("confirmed an order")
   expect invoke RecordNotified {
     order_id: ADA,
@@ -231,11 +236,11 @@ test "a 4xx is a decision the arm makes, and it fails terminally" {
     notes: "",
   }
 
-  respond "https://mail.example/confirm" 422
+  respond "secret:CONFIRM_URL" 422
 
   deliver NotifyCustomer
 
-  expect http.post("https://mail.example/confirm")
+  expect http.post("secret:CONFIRM_URL")
   expect fail("confirmation rejected")
 }
 

@@ -433,6 +433,9 @@ fn counts(program: &Program) -> String {
     count(program.records.len(), "record", "records");
     count(program.enums.len(), "enum", "enums");
     count(program.consts.len(), "const", "consts");
+    // What a deployment owes this program, which is the one count an operator reads for
+    // something other than curiosity.
+    count(program.secrets.len(), "secret", "secrets");
     count(program.tests.len(), "test", "tests");
     if parts.is_empty() {
         return "nothing declared".to_string();

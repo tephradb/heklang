@@ -68,10 +68,23 @@ There is no way to seed a fold directly. A folded value is derived from the log.
 | `respond "<url>" <status> { <json> }` | the same, with a body |
 | `respond "<url>" timeout` | a transport failure, which the runtime absorbs and retries |
 | `erased <subject> "<id>"` | that subject's key is already destroyed |
+| `secret <NAME> = "<value>"` | this deployment holds that credential |
+| `secret <NAME> = none` | this deployment does not set it |
 
 Replies are a **queue per URL**, taken in order, so `respond url 503` then `respond url 200` is how a
 test says the first attempt was absorbed. `erased` is the only way to write a shredded-key test,
 since a test cannot call `erase` itself. The URL may be a `const`.
+
+A declared `secret` needs **no** setup line: it answers `secret:NAME`, so a test that does not care
+about the value writes `respond "secret:HOOK" 200` and expects `http.post("secret:HOOK")`. The
+directive is the override, for a value that has to parse as a URL or carry a prefix an arm branches
+on, and it goes next to the `respond` that answers it. `= none` is the only way to reach the absent
+branch of a `secret NAME?` or the wedge a missing required one causes.
+
+```hek
+secret CONFIRM_URL = "https://mail.example/confirm"
+respond "https://mail.example/confirm" 200
+```
 
 ## 4. The action
 

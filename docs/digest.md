@@ -123,7 +123,7 @@ A JSON object's keys are quoted, unlike every other field name, because they are
 rather than identifiers: without the quotes `{"a=1,b": 2}` and `{"a": 1, "b": 2}` could pack to the
 same bytes.
 
-## 7. `const`, `refusal` and `guard` are not in it
+## 7. `const`, `refusal`, `guard` and `secret` are not in it
 
 All three are inlined by the parser, so a declaration of any of them runs nothing and its content is
 already at every site that uses it. Printing the declaration as well would count it twice and would
@@ -140,6 +140,20 @@ What that buys, and what it costs:
   Extracting a `guard` is **not** free, though, because the splice materialises its parameters as
   assignments in the caller. What the rule buys here is that a guard is never counted twice.
 - An unused `const`, `refusal` or `guard` is invisible, so deleting one is not a change.
+
+**A `secret` is the fourth, for the first half of that reason and not the second.** It runs nothing,
+so it has no entry. It is not inlined either, because there is no value in the program to inline:
+what appears at a read site is the **name**, as `(secret DISCORD_WEBHOOK)`. That is what makes the
+two properties a deploy gate needs fall out of one atom. An effect that starts reading a *different*
+credential moves its hash, because reading a different credential is a behaviour change. And a
+**rotation cannot move any hash**, because the value was never in the program. The second is
+load-bearing: an effect's hash is what a runtime records as an invocation's `script_hash`, so a hash
+that moved on a rotation would cost replay coverage on every past invocation. That is exactly what a
+`const` holding the same address does, and it is why a credential is not one (`docs/effects.md`
+rule 16).
+
+A runtime that wants the deployment surface reads `Program::secrets` rather than the digest, so
+"does this deploy need a credential the last one did not" needs no entry either.
 
 ## 8. Every entry carries its own hash
 
@@ -252,9 +266,9 @@ capitalised, which keeps them apart from the lowercase heads a value uses: `(Mon
 | declaration | `event` `enum` `record` `function` `command` `projector` `effect` `test` |
 | structure | `params` `p` `f` `col` `key` `index` `entity` `on` `events` `delivery` `bind` `env` `now` `stage` `pre` `post` `fold` `slice` `filter` `acc` `variants` `default` `max` `no_index` `returns` `body` `sig` `rejects` |
 | statement | `set` `if` `then` `else` `emit` `put` `patch` `update` `delete` `fail` `log` `erase` `for` `in` `index` `item` `do` `discard` `call` `return` `value` `outcome` |
-| type | `Bool` `Int` `String` `Uuid` `Timestamp` `Rounding` `Json` `Response` `Outcome` `(Decimal n)` `(Money n)` `(Enum N)` `(Record N)` `(List t)` `(Map k v)` `(Opt t)` `(Sealed t subject)` |
+| type | `Bool` `Int` `String` `Uuid` `Timestamp` `Rounding` `Json` `Response` `Outcome` `Secret` `(Decimal n)` `(Money n)` `(Enum N)` `(Record N)` `(List t)` `(Map k v)` `(Opt t)` `(Sealed t subject)` |
 | value | `$n` `bool` `int` `dec` `money` `str` `uuid` `ts` `none` `some` `variant` `rounding` `array` `of` `map-empty` `obj` `json-num` `new` |
-| expression | `neg` `not` `+ - * / % == != < <= > >= && \|\|` `.method` `field` `choose` `interp` `fn` `builtin` `invoke` `unwrap` `wrap` `reveal` `reject` `invalid` `comp` `when` `yield` `bad` |
+| expression | `neg` `not` `+ - * / % == != < <= > >= && \|\|` `.method` `field` `choose` `interp` `fn` `builtin` `invoke` `unwrap` `wrap` `reveal` `secret` `reject` `invalid` `comp` `when` `yield` `bad` |
 | test | `given` `respond` `status` `timeout` `erased` `run` `project` `deliver` `expect` `event` `nothing` `row` `norow` `http` `failed` `skipped` |
 
 The JSON view turns a list into `{"kind": head, ..}`. A child that is itself a list headed by one of

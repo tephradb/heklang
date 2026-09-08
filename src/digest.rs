@@ -746,6 +746,18 @@ fn test(def: &Test) -> Sexp {
                 let id = frame.expr(*id);
                 node("erased", [atom(subject.clone()), id])
             }
+            // The name and whether this world holds one, never the value. A `SecretDef`
+            // carries no value for exactly this reason (`ir.rs`), and a test that wrote
+            // `secret STRIPE_KEY = "sk_live_..."` would otherwise put the literal into a
+            // published, hashed artifact through the back door. What a test asserts is
+            // still decided by the value; what the digest reports is that it set one.
+            Setup::Secret { name, value, .. } => {
+                let held = match def.exprs.get(*value) {
+                    Some(Expr::Lit(Literal::None { .. })) => "unset",
+                    _ => "set",
+                };
+                node("secret", [atom(name.clone()), atom(held)])
+            }
         });
     }
     parts.push(match &def.action {
@@ -1058,6 +1070,17 @@ impl<'a> Frame<'a> {
             return node("bad", []);
         };
         match found {
+            // The name, never a value: there is none in the program. So an effect that
+            // starts reading a different credential moves its hash, and a rotation
+            // moves nothing, which is what `script_hash` depends on.
+            // The `?` is part of what runs: a required credential a deployment cannot
+            // answer wedges, and an optional one is a branch. Two reads that behave
+            // differently must not hash alike, or a deploy gate would claim replay
+            // coverage across the edit that changed one into the other.
+            Expr::Secret { name, optional } => match optional {
+                true => node("secret", [atom(name.clone()), atom("optional")]),
+                false => node("secret", [atom(name.clone())]),
+            },
             Expr::Lit(value) => literal(value),
             // A bare `$n` in a value position is a load; in a binding position it is the
             // slot itself. Nothing else spells a slot, so the two never meet.
@@ -1309,6 +1332,7 @@ fn ty(value: &Type) -> Sexp {
         Type::Map(key, value) => node("Map", [ty(key), ty(value)]),
         Type::Opt(inner) => node("Opt", [ty(inner)]),
         Type::Sealed(inner, subject) => node("Sealed", [ty(inner), atom(subject.clone())]),
+        Type::Secret => atom("Secret"),
     }
 }
 

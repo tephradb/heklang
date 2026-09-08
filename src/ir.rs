@@ -97,6 +97,11 @@ pub enum Type {
     /// always outermost, so `String? @subject(x)` is `Opt(Sealed(String, x))`.
     /// See `docs/effects.md` rule 12.
     Sealed(Box<Type>, Ident),
+    /// A deployment credential: what a `secret` declaration reads as. Spellable in a
+    /// `fn` signature and nowhere else, the way `Response` and `Outcome` are, so it
+    /// never appears under a `List`, a `Map` or a record and no diagnostic ever prints
+    /// a type an author could not have written. See `docs/effects.md` rule 16.
+    Secret,
 }
 
 impl Type {
@@ -182,6 +187,7 @@ impl fmt::Display for Type {
             Type::Json => f.write_str("Json"),
             Type::Response => f.write_str("Response"),
             Type::Outcome => f.write_str("Outcome"),
+            Type::Secret => f.write_str("Secret"),
             Type::List(inner) => write!(f, "List({inner})"),
             Type::Map(key, value) => write!(f, "Map({key}, {value})"),
             Type::Opt(inner) => write!(f, "{inner}?"),
@@ -230,6 +236,8 @@ pub struct Program {
     pub enums: Vec<EnumDef>,
     pub records: Vec<RecordDef>,
     pub consts: Vec<ConstDef>,
+    /// Deployment credentials, in declaration order. See `docs/effects.md` rule 16.
+    pub secrets: Vec<SecretDef>,
     pub functions: Vec<Function>,
     /// Application tests, in declaration order. See `docs/testing.md`.
     pub tests: Vec<Test>,
@@ -268,6 +276,10 @@ impl Program {
 
     pub fn constant(&self, name: &str) -> Option<&ConstDef> {
         self.consts.iter().find(|def| def.name == name)
+    }
+
+    pub fn secret(&self, name: &str) -> Option<&SecretDef> {
+        self.secrets.iter().find(|def| def.name == name)
     }
 
     pub fn function(&self, name: &str) -> Option<&Function> {
@@ -333,6 +345,32 @@ pub struct ConstDef {
     pub module: Option<Ident>,
     pub ty: Type,
     pub value: Literal,
+}
+
+/// A deployment credential this program expects to be given. It holds no value: a
+/// credential rotates out of band and differs between deployments, so the value is a
+/// host's to supply through [`Secrets`](crate::host::Secrets) and never the program's
+/// to carry. That is the whole difference from a [`ConstDef`], and it is why a rotation
+/// cannot move a digest hash.
+///
+/// `Program::secrets` is what a runtime reads to know what a deploy needs.
+/// See `docs/effects.md` rule 16.
+#[derive(Debug, Clone)]
+pub struct SecretDef {
+    pub name: Ident,
+    pub module: Option<Ident>,
+    /// `secret NAME?`. An optional one may be unset, and the read is an `Opt(Secret)`
+    /// the program branches on; a required one that a host cannot answer is a wedge,
+    /// because a deployment was supposed to have settled it.
+    pub optional: bool,
+    /// Where the name was written.
+    ///
+    /// For the consumer rather than for the checker: `Program::secrets` is the surface a
+    /// runtime reads to say what a deploy needs, and telling an operator *which file*
+    /// declares an unresolved credential is most of what makes that report actionable.
+    /// Nothing in heklang reports about a `secret` after the passes, so no diagnostic
+    /// here needs it.
+    pub span: Span,
 }
 
 /// One piece of a refusal's message: literal text, or the parameter whose value goes
@@ -939,6 +977,18 @@ pub enum Expr {
         value: ExprId,
         ty: Type,
     },
+    /// Reading a `secret` declaration: a deployment credential, by name.
+    ///
+    /// The name and not a value, because there is no value in the program to inline.
+    /// That is the whole difference from a `const`, and it is what makes a rotation
+    /// invisible to the digest while an effect that starts reading a *different*
+    /// credential still moves its hash. See `docs/effects.md` rule 16.
+    Secret {
+        name: Ident,
+        /// The declaration was `secret NAME?`, so this reads as an `Opt(Secret)` and a
+        /// host answering `None` is an answer rather than a failure.
+        optional: bool,
+    },
     /// `reject(code, message)` or, with no code, `invalid(message)`. An `Outcome` as a
     /// value, so a `fn` can decide a refusal and a command can return what it decided.
     /// See `docs/functions.md`.
@@ -1361,6 +1411,18 @@ pub enum Setup {
     Erased {
         subject: Ident,
         id: ExprId,
+        span: Span,
+    },
+    /// One deployment credential this world holds, or does not.
+    ///
+    /// The fourth lever, beside the three above: a secret reaches the interpreter
+    /// through a host trait exactly as a reply does through `Http` and a shredded key
+    /// does through `Keys`, so it scripts the same world an embedder brings. The value
+    /// is an `Opt(String)`, so `= none` is a deployment that did not set it.
+    /// See `docs/testing.md` section 3 and `docs/effects.md` rule 16.
+    Secret {
+        name: Ident,
+        value: ExprId,
         span: Span,
     },
 }

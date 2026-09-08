@@ -455,6 +455,15 @@ fn cases() -> Vec<(Code, String)> {
   on @order.placed as e { @key order_id } { log(\"to {e.email}\") }
 }",
         ),
+        // Rule 16's boundary, met at the same shape the seal one is: an interpolation
+        // holding a credential is a credential, and a log line observes it.
+        (
+            Code::SecretBoundary,
+            "secret STRIPE_KEY
+effect E {
+  on @order.placed as e { @key order_id } { log(\"Bearer {STRIPE_KEY}\") }
+}",
+        ),
         (
             Code::EraseSubject,
             "effect E {

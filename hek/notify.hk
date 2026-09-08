@@ -1,5 +1,11 @@
 // effects/notify.hk
 
+// Rule 16: a deployment credential, not a `const`. The value differs between dev,
+// staging and production and rotates out of band, so it is not part of the program:
+// a `const` here would put the address in git and in the digest hash, and rotating it
+// would cost replay coverage on every invocation already journaled against that hash.
+secret CONFIRM_URL
+
 effect NotifyCustomer {
   on live @order.placed as e { @key customer_id } {
     // Rule 3: folded up to and including this event, so a customer's first order
@@ -7,8 +13,11 @@ effect NotifyCustomer {
     fold orders: Int = 0
       on @order.placed(customer_id: e.customer_id) => orders + 1
 
+    // The url may be the credential itself, which is what a webhook address is. It
+    // reaches the wire spelled out and the journal key named, so a rotation lands on
+    // the entry that already recorded the send.
     let response = http.post(
-      "https://mail.example/confirm",
+      CONFIRM_URL,
       { "to": reveal(e.email), "order_id": e.order_id, "first_order": orders == 1 },
     )
 

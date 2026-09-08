@@ -1,8 +1,8 @@
 # The host
 
-A **host** is the world an interpreter runs against: an event log, a clock, a key store and a
-network. heklang ships one, `Harness`, which is entirely in memory, and every one of its parts is a
-stand-in for something a real runtime owns.
+A **host** is the world an interpreter runs against: an event log, a clock, a key store, a network
+and a set of deployment credentials. heklang ships one, `Harness`, which is entirely in memory, and
+every one of its parts is a stand-in for something a real runtime owns.
 
 This document is the contract for the other kind of host, the real one. `src/host.rs` is the seam,
 `src/harness.rs` is the reference implementation, and `tests/host.rs` is the same set of rules as
@@ -11,8 +11,8 @@ executable tests, driven by a host the crate does not ship.
 ## Shape
 
 ```rust
-pub trait Host: Log + Clock + Keys + Http {}
-impl<T: Log + Clock + Keys + Http> Host for T {}
+pub trait Host: Log + Clock + Keys + Http + Secrets {}
+impl<T: Log + Clock + Keys + Http + Secrets> Host for T {}
 
 let mut interpreter = Interpreter::with_host(&program, my_runtime);
 interpreter.run("PlaceOrder", args)?;
@@ -28,7 +28,7 @@ from as many threads as it likes. That is why the string inside a `Value` is an 
 and `src/lib.rs` asserts it at compile time because nothing else would notice if it stopped being
 true. The interpreter itself is single-threaded: one per request, or one per invocation.
 
-## 1. Four traits, and where the line is
+## 1. Five traits, and where the line is
 
 The cut is the one `docs/effects.md` rule 11 already makes with its journaled column. **Reading the
 log is redone on every attempt and must be**, because that is what makes a retry see the new log. A
@@ -40,9 +40,10 @@ side effect, or an unrepeatable observation, is done once and remembered.
 | `Clock` | `now` | no state and no failure mode; three lines to implement |
 | `Keys` | `decrypt`, `erase` | a lifecycle, and in a real host a key management service |
 | `Http` | `send` | one attempt, and the only place bytes leave |
+| `Secrets` | `secret` | a deployment's, not a program's, and not in the log |
 
 They bundle into `Host` because `Effects` holds one trait object and Rust has no `dyn A + B`. The
-bundle is the plumbing; the four are the meaning.
+bundle is the plumbing; the five are the meaning.
 
 **`Keys` is asked one question and it is a lifecycle one.** `decrypt` answers with the plaintext or
 with `None`, and `None` is the key being gone. It is not an `Err`: an erased subject is an outcome
@@ -54,6 +55,27 @@ survives because an absent optional never reaches here at all.
 **It is called once per `reveal`.** A seal is opaque and heklang keeps it that way, so a fold walks
 its whole boundary without asking for a key: only the content a handler actually reveals costs one.
 A host that decrypts on the way in instead pays per record for content nothing reads.
+
+**`Secrets` answers with a value and never with a source.** Where a credential comes from is a
+host's business the way a key store is: `docs/effects.md` rule 16 says which declarations may read
+one and says nothing about environments, files or vaults. It is asked lazily rather than resolved
+when an interpreter is built, so a remote provider is a host change and not a language one, and a
+host reading an environment caches trivially. `None` means this deployment did not set it, and a
+host is expected to make that unreachable for a required one by refusing to start; heklang's
+backstop when a host fails at that is `ErrorKind::MissingSecret`, which **wedges** rather than
+skipping, because unlike an erased subject this is recoverable by an operator.
+
+**A request crosses in two renderings, and reading the wrong one is a compile error.** A `secret`
+may sit in a url, in a header value or in a body, so `Request` carries `wire` and `shown` rather
+than one set of fields: `wire` is what the credential actually is, `shown` names it instead. Send
+the first, print the second, key a journal with the second.
+
+The reason it is two fields and not one field plus a convention is that a program holding no secret
+makes them identical. A host that read the wrong one would be wrong only for the programs that use
+the feature, and would never find out from its own tests. So the flat `url`, `body` and `headers`
+fields are gone, and the choice is made once, at the compiler's insistence. Neither rendering ever
+contains a `Json::Secret`: that variant lives between an object literal and the request built from
+it, and both renderings take it off.
 
 **State is deliberately not among them.** An effect reads state by folding its boundary off the log
 (`docs/effects.md` rule 3), and a projector's rows are its output rather than anyone's input
@@ -273,6 +295,14 @@ position; `deliver` is the host-facing primitive.
 **`log` output.** Rule 10 says it is not journaled. A host that wants the lines reads
 `Effectful::Log` out of the trace, which is ordered and complete.
 
+**The trace is the wire form, and a host must not publish it.** `Effectful::Http` carries the url
+and body that actually went out, because a test names the value it supplied and has no other
+rendering to assert against (`docs/testing.md` section 7). It is therefore the one surface here that
+is **not** redacted: a host that logs or `Debug`-prints a whole trace publishes any credential rule
+16 kept out of the journal key, the error text and every `Display`. Read `Effectful::Log` for lines,
+and `Request::shown` for a request; take the trace as a test-facing observation rather than an
+operational one.
+
 ## 9. Converting at the boundary
 
 The traits speak heklang's model. A host whose model differs converts on the way in and out, rather
@@ -284,6 +314,7 @@ than the language reshaping itself to match one runtime.
 | `Outcome`, three variants | its own outcome type, with conflict and unavailable added back |
 | `ErrorKind::Conflict` | the retry signal its own loop reads |
 | a readable journal key | a content hash of that key |
+| `Request`, in two renderings | one request, built from `wire` |
 | `now()` pinned once per invocation | one journal entry, however many times the body reads it |
 | `update` | the runtime's skipping partial write |
 | `patch` | a whole-row write plus the zero values |
@@ -296,6 +327,10 @@ than the language reshaping itself to match one runtime.
   `@subject(...)` field crosses as plaintext for a host to seal, because that is the direction where
   the content is in hand. A host therefore sees two shapes at a write for one field: fresh plaintext
   to seal, and a `Value::Sealed` that was moved and is already sealed under the name it carries.
+- **Nothing is zeroized.** A `Value::Secret` holds two `Arc<str>`, for the reason every other
+  string in a `Value` is one, and a shared buffer cannot be wiped. A partial guarantee here would
+  be worse than an honest absence, because it would read as one: a host may zeroize the source it
+  resolved a credential from, and heklang holds the plaintext for the life of the invocation.
 - **`head` and `read` are not atomic together.** A host whose log grows between them hands the fold a
   longer prefix than `after` claims. That is exactly what the append condition catches, which is why
   it is the one thing here that a host must implement rather than approximate.
@@ -303,6 +338,7 @@ than the language reshaping itself to match one runtime.
 ## Related
 
 - `docs/commands.md`: the append condition, and why a `fold` is a read declaration.
-- `docs/effects.md`: rules 3, 5, 10, 11 and 12, which are the reasons this seam is cut where it is.
+- `docs/effects.md`: rules 3, 5, 10, 11 and 12, which are the reasons this seam is cut where it is,
+  and rule 16 for what a `Secrets` is asked and why a request has two renderings.
 - `docs/projectors.md`: the other reader of the log, and the one writer of a read model.
 - `docs/testing.md`: `given`, `respond` and `erased`, which are how the language scripts a harness.

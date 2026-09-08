@@ -18,8 +18,8 @@ pub use diagnostic::{Code, Diagnostic, Related, Severity};
 pub use digest::{Digest, Entry, Hash, Kind, Sexp, SexpError};
 pub use harness::{Harness, Journal, Reply, Sandbox};
 pub use host::{
-    AppendCondition, Attempt, Calls, Clock, Host, Http, Keys, Log, Predicate, Query, Recorded,
-    Request, Rows,
+    AppendCondition, Attempt, Calls, Clock, Host, Http, Keys, Log, Parts, Predicate, Query,
+    Recorded, Request, Rows, Secrets,
 };
 pub use interp::{
     Counts, Effectful, Error, ErrorKind, Execution, Interpreter, Invocation, Outcome, Projection,
@@ -30,7 +30,7 @@ pub use ir::{
     EntityField, EnumDef, EnvBind, EnvField, EventDef, EventPath, Expr, ExprId, Exprs, FieldDef,
     Filter, FoldVar, Function, Guard, GuardCall, Handler, Ident, Index, Iter, Literal, MessagePart,
     Number, NumberError, Param, Pos, Program, Projector, RecordDef, RecordField, RefusalDef,
-    RefusalParam, Return, Slice, SliceId, Slot, Span, Stage, Stmt, Type, UnOp, Update,
+    RefusalParam, Return, SecretDef, Slice, SliceId, Slot, Span, Stage, Stmt, Type, UnOp, Update,
 };
 pub use parse::{check_files, parse, parse_files};
 pub use testing::{TestOutcome, TestResult, World, run_tests, run_tests_in};

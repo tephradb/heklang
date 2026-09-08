@@ -66,7 +66,8 @@ impl<'a> Printer<'a> {
             "record_field" | "event_field" | "entity_field" => self.field_decl(node),
             "index_clause" => self.index_clause(node),
             "const_declaration" => self.const_decl(node),
-
+            "secret_declaration" => self.secret_decl(node),
+            "secret_clause" => self.secret_clause(node),
             "refusal_declaration" => self.refusal(node),
             "function_declaration" => self.function(node),
             "command_declaration" => self.callable("command", node),
@@ -315,6 +316,39 @@ impl<'a> Printer<'a> {
             }
         }
         (comments, rest)
+    }
+
+    /// `secret NAME`, or `secret NAME?`. A one-line shape beside `const`: it holds no
+    /// list, so there is nothing that could break.
+    ///
+    /// The `?` is read from the source rather than from a child, because the grammar
+    /// carries it as an anonymous token and `kids` keeps only the named ones.
+    fn secret_decl(&self, node: Node<'a>) -> Doc<'a> {
+        let (leading, kids) = self.parted(node);
+        let optional = self.text(node).trim_end().ends_with('?');
+        Self::led(
+            leading,
+            Doc::concat([
+                Doc::text("secret "),
+                self.node(kids[0]),
+                Doc::text(if optional { "?" } else { "" }),
+            ]),
+        )
+    }
+
+    /// `secret NAME = <value>` in a test's setup section: the same word, and the same
+    /// one-line shape, with a value after it.
+    fn secret_clause(&self, node: Node<'a>) -> Doc<'a> {
+        let (leading, kids) = self.parted(node);
+        Self::led(
+            leading,
+            Doc::concat([
+                Doc::text("secret "),
+                self.node(kids[0]),
+                Doc::text(" = "),
+                self.node(kids[1]),
+            ]),
+        )
     }
 
     /// `refusal Name "message"`, or `refusal Name(field: Type) "message"`. Parens

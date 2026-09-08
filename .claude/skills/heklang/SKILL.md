@@ -60,7 +60,8 @@ the readable one.
 
 Every `.hk` file under the path is one program. There is no import syntax, no manifest, no header
 item, and **declaration order does not matter** anywhere, across files or within one. Event paths,
-command, projector, effect, guard, refusal, record, enum, const, `fn` and test names are all global.
+command, projector, effect, guard, refusal, record, enum, const, secret, `fn` and test names are all
+global.
 A module name is a label for diagnostics, not a namespace.
 
 The only scoped names: entities and enums declared inside a projector belong to that projector, and
@@ -83,6 +84,7 @@ Directories beginning with `.` and any `target` directory are skipped.
 | a named product type that travels as a value | `record` |
 | a closed set of values | `enum` |
 | a literal named once | `const` |
+| a deployment credential: a webhook url, an API key | `secret` |
 | state a case: a log, one action, expectations | `test` |
 
 ## What each kind may do
@@ -95,6 +97,7 @@ Directories beginning with `.` and any `target` directory are skipped.
 | `http.*`, `invoke` | no | no | no | yes | yes | no | no |
 | `log`, `fail` | no | no | no | yes | yes | no | no |
 | `reveal`, `erase` | no | no | no | yes | **no** | no | no |
+| read a `secret` | no | no | no | yes | yes | no | **no** |
 | `now()` | yes, pinned once | no | no | yes, journaled | no | no | no |
 | `reject` / `invalid` | yes | yes, only these | no | no | no | only if `-> Outcome` | no |
 | call a module `fn` | yes | yes | yes | yes | yes | yes | yes |
@@ -132,6 +135,11 @@ const LIMIT: Int = 15
 const NAMESPACE: Uuid = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
 const LAUNCH: Timestamp = "2026-01-01T00:00:00Z"
 const NO_SKU: String? = none
+
+// A credential the deployment supplies, never a `const`: a const is inlined, so its
+// text lands in the digest hash and rotating it would cost replay coverage.
+secret DISCORD_WEBHOOK
+secret SENTRY_DSN?
 
 event @order.placed {
   order_id: Uuid,

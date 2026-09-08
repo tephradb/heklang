@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::harness::{Harness, Journal, Reply};
 use crate::host::{
-    AppendCondition, Attempt, Calls, Host, Log, Predicate, Query, Recorded, Request, Rows,
+    AppendCondition, Attempt, Calls, Host, Log, Parts, Predicate, Query, Recorded, Request, Rows,
 };
 use crate::ir::{
     Absent, Arm, BinOp, Builtin, Command, Delivery, Effect, EntityDef, EnvField, EventPath, Expr,
@@ -44,6 +44,14 @@ pub enum ErrorKind {
         subject: Ident,
         id: String,
     },
+    /// A required `secret` this deployment did not set (`docs/effects.md` rule 16).
+    ///
+    /// A **wedge**, not a skip: unlike an erased subject, this is recoverable, and it is
+    /// recovered by an operator setting the credential and the invocation being retried.
+    /// It is a backstop rather than a path a running deployment should reach, because a
+    /// host is expected to refuse to start with one unresolved; it names the declaration
+    /// so an operator can act on it either way.
+    MissingSecret(Ident),
     /// Rule 4's terminal outcome, raised inside an effect-local `fn`. A call is an
     /// expression, so a `Flow` cannot carry it out; `run_arm` catches this exactly
     /// where it catches the direct `fail`, and reports the same thing.
@@ -160,6 +168,13 @@ impl fmt::Display for ErrorKind {
                  The erase need not be in this effect; another effect or a concurrent invocation \
                  can erase a subject between the original run and a replay, and nothing static \
                  catches that"
+            ),
+            ErrorKind::MissingSecret(name) => write!(
+                f,
+                "this deployment has not set `{name}`. A required secret is the \
+                 deployment's to settle before the process starts, so nothing in the \
+                 program can proceed without it; set it and retry, or declare it \
+                 `secret {name}?` if it is genuinely optional"
             ),
             ErrorKind::Failed(message) => write!(f, "{message}"),
             ErrorKind::Unreachable(url) => {
@@ -555,6 +570,18 @@ impl<'a> Interpreter<'a, Harness> {
     /// position so a run is reproducible; a real host stamps its own.
     pub fn append(&mut self, event: Event) {
         self.host.push(event);
+    }
+
+    /// One deployment credential, overriding the harness's `secret:NAME` stand-in. The
+    /// same lever `docs/testing.md`'s `secret NAME = "..."` pulls.
+    pub fn set_secret(&mut self, name: &str, value: impl Into<Arc<str>>) {
+        self.host.set_secret(name, value);
+    }
+
+    /// A deployment that did not set one, which is how a required secret reaches
+    /// `ErrorKind::MissingSecret` and an optional one reaches its absent branch.
+    pub fn unset_secret(&mut self, name: &str) {
+        self.host.unset_secret(name);
     }
 
     /// Queues the replies one URL will answer with.
@@ -1887,6 +1914,32 @@ fn eval(
     match exprs.get(id).ok_or_else(|| at(ErrorKind::MalformedIr))? {
         Expr::Lit(lit) => Ok(value::literal(lit)),
         Expr::Load(slot) => frame.get(*slot).cloned().map_err(at),
+        // Rule 16. The `ctx` is what makes the restriction structural as well as
+        // checked: a command, a projector and a fold all evaluate with `None`, so there
+        // is no host to ask and no credential to be had. The redaction is built here,
+        // once, and every surface downstream reads it rather than remembering a rule.
+        Expr::Secret { name, optional } => {
+            let Some(ctx) = ctx else {
+                return Err(at(ErrorKind::MalformedIr));
+            };
+            match ctx.secret(name) {
+                Some(plain) => {
+                    let held = Value::Secret {
+                        redacted: Arc::from(format!("{{SECRET:{name}}}")),
+                        plain,
+                    };
+                    Ok(match optional {
+                        true => Value::some(held),
+                        false => held,
+                    })
+                }
+                // A required one is the deployment's to settle before the process
+                // starts, so this wedges rather than skipping: an operator setting it
+                // is what makes the retry succeed.
+                None if !*optional => Err(at(ErrorKind::MissingSecret(name.clone()))),
+                None => Ok(Value::none(Type::Secret)),
+            }
+        }
         Expr::Unary { op, operand } => {
             let value = eval(program, exprs, frame, *operand, ctx)?;
             unary(*op, value).map_err(at)
@@ -2050,13 +2103,31 @@ fn eval(
                 fields: values,
             })
         }
+        // Rule 16's taint, built as the two renderings rather than recovered later.
+        // Both strings are accumulated in one walk, so `"https://{host}/hooks/{PATH}"`
+        // comes out spelled for the wire and named for everything else, and the result
+        // is a `Secret` exactly when a hole was one.
         Expr::Interp(parts) => {
             let mut text = String::new();
+            let mut redacted = String::new();
+            let mut tainted = false;
             for part in parts {
                 let value = eval(program, exprs, frame, *part, ctx.as_deref_mut())?;
+                // Through the same table the two renderings come from, rather than a
+                // `matches!` on the variant: an `Opt(Secret)` holds one and is one, and
+                // the parser counts it as tainted, so a bare match let a present
+                // optional through as a plain `Str` carrying the credential.
+                tainted |= matches!(Json::from_value(&value), Json::Secret { .. });
                 text.push_str(&value::text(&value));
+                redacted.push_str(&value::redacted_text(&value));
             }
-            Ok(Value::str(text))
+            Ok(match tainted {
+                true => Value::Secret {
+                    plain: Arc::from(text),
+                    redacted: Arc::from(redacted),
+                },
+                false => Value::str(text),
+            })
         }
         Expr::Call { builtin, args } => {
             let mut values = Vec::new();
@@ -2116,8 +2187,18 @@ fn eval(
             let Some(ctx) = ctx else {
                 return Err(at(ErrorKind::MalformedIr));
             };
-            let Some(Value::Str(url)) = values.first().cloned() else {
-                return Err(at(ErrorKind::MalformedIr));
+            // Rule 16: a url may be a credential, so it crosses as its two renderings
+            // rather than as one string. A `String` is both of them.
+            // Named, not a tuple read back as `.0` and `.1`. `docs/host.md` argues that
+            // two renderings a caller can confuse are identical for every program that
+            // holds no secret, so a mix-up would never show up in a test; that argument
+            // does not stop at the crate boundary.
+            let (wire_url, shown_url) = match values.first() {
+                Some(Value::Str(url)) => (url.to_string(), url.to_string()),
+                Some(Value::Secret { plain, redacted }) => {
+                    (plain.to_string(), redacted.to_string())
+                }
+                _ => return Err(at(ErrorKind::MalformedIr)),
             };
             // The headers are the last argument and always present, so the shape is
             // (url, headers) or (url, body, headers).
@@ -2127,7 +2208,7 @@ fn eval(
             } else {
                 None
             };
-            ctx.http(*builtin, &url, body, headers)
+            ctx.http(*builtin, &wire_url, &shown_url, body, headers)
                 .map_err(|err| err.located(span))
         }
         Expr::Invoke { command, args } => {
@@ -2309,6 +2390,11 @@ fn seal(program: &Program, event: &Event, name: &Ident, value: Value) -> Result<
                 content: stored_text(&stored),
             })),
         },
+        // Rule 16: a secret may not be emitted, so nothing checked can reach here. It
+        // refuses rather than sealing, because the catch-all below it would take
+        // `stored_text` of the plaintext and file it in the log under a subject key,
+        // which is the one laundering path a wrong arm here would open.
+        Value::Secret { .. } => return Err(Error::at(ErrorKind::MalformedIr, span)),
         stored => Value::Sealed {
             field: name.clone(),
             subject,
@@ -3132,21 +3218,46 @@ impl Effects<'_> {
         &mut self,
         builtin: Builtin,
         url: &str,
+        shown_url: &str,
         body: Option<Json>,
         headers: Json,
     ) -> Result<Value, Error> {
-        let call = match &body {
-            Some(body) => format!("{} {url} {body}", builtin.name()),
-            None => format!("{} {url}", builtin.name()),
+        // Rule 16: the key is built from the **redacted** rendering, which is what makes
+        // it survive a rotation. Keying on the credential would make every entry for a
+        // rotated webhook key on a string that no longer exists, so a crash-replay would
+        // miss and re-fire the send, and `verify` would report a divergence for every
+        // historical invocation. It also keeps the plaintext out of a string that is a
+        // readable description by design and that a host may store.
+        // Each rendering is walked once, here, and both are carried down rather than
+        // rebuilt: `wire` and `shown` each deep-clone the document, and a request with a
+        // body was paying for four walks.
+        let wire = Parts {
+            url: url.to_string(),
+            body: body.as_ref().map(Json::wire),
+            headers: headers.wire(),
+        };
+        let shown = Parts {
+            url: shown_url.to_string(),
+            body: body.as_ref().map(Json::shown),
+            headers: headers.shown(),
+        };
+        let call = match &shown.body {
+            Some(body) => format!("{} {shown_url} {body}", builtin.name()),
+            None => format!("{} {shown_url}", builtin.name()),
         };
         let (ordinal, found) = self.recorded(&call)?;
         if let Some(Recorded::Response { status, body }) = found {
             return Ok(Value::Response { status, body });
         }
 
-        let sent = body.clone();
-        let Some((status, body)) = self.send(builtin, url, body.clone(), headers) else {
-            return Err(Error::new(ErrorKind::Unreachable(url.to_string())));
+        // The trace is the harness's own observation, and a test names the value it
+        // supplied with `secret NAME = "..."`, so it holds what went out. Redaction is
+        // about a *runtime's* observable output; see `docs/testing.md`.
+        let sent = wire.body.clone();
+        let Some((status, body)) = self.send(builtin, wire, shown) else {
+            // Rule 16: for a webhook the url *is* the credential, so the first outage
+            // would otherwise publish it through `/status`, `/admin` and `tracing`.
+            return Err(Error::new(ErrorKind::Unreachable(shown_url.to_string())));
         };
         // One entry per logical call, so the retries rule 5 absorbed do not show up as
         // calls a test has to expect.
@@ -3203,9 +3314,18 @@ impl Effects<'_> {
         Ok(Value::Invoked(outcome))
     }
 
+    /// One deployment credential, asked of the host each time rather than resolved once,
+    /// so where they come from stays a host's business. Unjournaled, like `reveal`: the
+    /// value is not a fact about the world that happened, and a replay after a rotation
+    /// should send the new one.
+    fn secret(&self, name: &str) -> Option<Arc<str>> {
+        self.host.secret(name)
+    }
+
     /// Rule 12. Not journaled, so it re-runs on every attempt, which is exactly why
     /// rule 9 forbids reaching one after an `erase`.
-    /// Rule 12. The field, the subject and the id ride on the value; `ty` comes from the
+    ///
+    /// The field, the subject and the id ride on the value; `ty` comes from the
     /// `reveal` node, because a seal holds text and only the declaration says what that
     /// text was.
     ///
@@ -3259,18 +3379,16 @@ impl Effects<'_> {
     /// Rule 5: a retryable status or a transport error is absorbed and retried with the
     /// same request, so only a decidable result reaches the handler. `None` is every
     /// attempt retryable, which wedges.
-    fn send(
-        &mut self,
-        builtin: Builtin,
-        url: &str,
-        body: Option<Json>,
-        headers: Json,
-    ) -> Option<(i64, Json)> {
+    fn send(&mut self, builtin: Builtin, wire: Parts, shown: Parts) -> Option<(i64, Json)> {
+        // Both renderings arrive already built, with the `Json::Secret` leaves an object
+        // literal produced already taken off by `wire` and `shown`, so a host is handed
+        // two ordinary documents and never meets the variant. They are identical
+        // whenever the program holds no secret, which is why `Request` makes a host name
+        // the one it wants rather than leaving it to a convention.
         let request = Request {
             verb: builtin.name(),
-            url: url.to_string(),
-            body,
-            headers,
+            wire,
+            shown,
         };
         for _ in 0..ATTEMPTS {
             self.traffic.performed += 1;

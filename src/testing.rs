@@ -8,7 +8,7 @@ use std::fmt;
 
 use crate::harness::{Reply, Sandbox};
 use crate::host::{Host, Rows};
-use crate::interp::{Effectful, Error, Interpreter, Outcome, Row, coerce};
+use crate::interp::{Effectful, Error, ErrorKind, Interpreter, Outcome, Row, coerce};
 use crate::ir::{Action, Expect, ExprId, Exprs, Ident, Program, ReplySpec, Setup, Test, Type};
 use crate::value::{Event, Json, Key, Value};
 
@@ -66,6 +66,21 @@ pub trait World: Sized {
     fn respond(&mut self, url: &str, reply: Reply) -> Result<(), Error>;
     /// A subject whose key is already destroyed.
     fn erased(&mut self, subject: &str, id: &str) -> Result<(), Error>;
+
+    /// One deployment credential, or `None` for a deployment that did not set it.
+    ///
+    /// Defaulted so that an out-of-repo world is not broken by rule 16 arriving: a world
+    /// that does not implement it simply answers whatever its own [`Secrets`] does, and
+    /// a test that writes the directive against one gets told so rather than silently
+    /// getting the default.
+    ///
+    /// [`Secrets`]: crate::host::Secrets
+    fn secret(&mut self, name: &str, _value: Option<&str>) -> Result<(), Error> {
+        Err(Error::new(ErrorKind::Host(format!(
+            "this world cannot set `{name}`: it does not implement `World::secret`"
+        ))))
+    }
+
     /// Setup is finished; hand over what the action runs against.
     fn open(self) -> Result<(Self::Host, Self::Rows), Error>;
 }
@@ -148,6 +163,15 @@ fn check<W: World>(program: &Program, test: &Test, mut world: W) -> Result<Optio
                 let id = values.text(*id)?;
                 world
                     .erased(subject, &id)
+                    .map_err(|err: Error| err.to_string())?;
+            }
+            Setup::Secret { name, value, .. } => {
+                // `none` is a deployment that did not set it, which is the only way to
+                // reach the absent branch of an optional and the missing-credential
+                // wedge: every other name answers with the harness's stand-in.
+                let value = values.optional_text(*value)?;
+                world
+                    .secret(name, value.as_deref())
                     .map_err(|err: Error| err.to_string())?;
             }
         }
@@ -564,6 +588,15 @@ impl<'a> Values<'a> {
     fn json(&mut self, id: ExprId) -> Result<Json, String> {
         Ok(Json::from_value(&self.eval(id)?))
     }
+
+    /// The same as [`Self::text`] where the position takes a `String?`, so `none` stays
+    /// absent instead of becoming the text `"null"`.
+    fn optional_text(&mut self, id: ExprId) -> Result<Option<String>, String> {
+        Ok(match self.eval(id)? {
+            Value::Opt { value: None, .. } => None,
+            held => Some(crate::value::text(&held)),
+        })
+    }
 }
 
 fn key_of(value: Value) -> Result<Key, String> {
@@ -583,6 +616,11 @@ fn show(key: &Key) -> String {
 fn shown(value: &Value) -> String {
     match value {
         Value::Sealed { content, .. } => format!("{content:?}"),
+        // Rule 16 keeps a secret out of every event field and every column, which is
+        // all this renders, so nothing reaches here. Left as a panic rather than given
+        // a plausible rendering: a wrong answer would be invisible, and the two
+        // candidates (the value a test supplied, or its redaction) differ.
+        Value::Secret { .. } => unreachable!("rule 16 keeps a secret out of a row and an event"),
         Value::Opt {
             value: Some(held), ..
         } => shown(held),

@@ -10,7 +10,7 @@ use crate::ir::{
     EntityField, EnumDef, EnvField, EventDef, EventPath, Expect, Expr, ExprId, Exprs, FieldDef,
     Filter, Function, Given, Guard, Handler, Ident, Index, Iter, Literal, MessagePart, Number,
     Param, Pos, Program, Projector, RecordDef, RecordField, RefusalDef, RefusalParam, ReplySpec,
-    Return, Setup, Slot, Span, Stage, Stmt, Test, Type, UnOp, Update,
+    Return, SecretDef, Setup, Slot, Span, Stage, Stmt, Test, Type, UnOp, Update,
 };
 use crate::lex::{Keyword, Spanned, Sym, Token, lex};
 use crate::scaled::{self, MAX_SCALE, Rounding};
@@ -142,6 +142,22 @@ struct Parser {
     consts: Vec<ConstDef>,
     /// Every const before its value has been read: pass C0's output.
     shells: Vec<ConstShell>,
+    /// Whether this object literal is on its way to an `http.*` rather than to a
+    /// `Json.encode` or a `Json` parameter. Rule 16 lets a credential be an object
+    /// member only here.
+    ///
+    /// It is safe for this to cover the whole subtree, unlike a general "a secret is
+    /// allowed here" flag would be, because it gates exactly one **untyped** position.
+    /// Every typed position inside a body — a `fn` argument, a method argument — runs
+    /// `check_secret` against its own declared type and never consults this, so
+    /// `http.post(url, { "x": leak(STRIPE_KEY) })` is still rejected at `leak`'s
+    /// parameter.
+    in_request: bool,
+    /// Every declared deployment credential. Collected in pass C0 beside the consts,
+    /// because a read has to resolve against a declaration in any file in any order,
+    /// which is the same requirement a const has. There is no second pass and nothing
+    /// to resolve: a `secret` has no value in the program.
+    secrets: Vec<SecretDef>,
     /// The consts whose values are being parsed right now, outermost first, so a
     /// const that names itself is caught with the chain that reached it.
     resolving: Vec<Ident>,
@@ -260,6 +276,8 @@ impl Parser {
             records: Vec::new(),
             consts: Vec::new(),
             shells: Vec::new(),
+            in_request: false,
+            secrets: Vec::new(),
             resolving: Vec::new(),
             no_record_literal: false,
             narrowings: Vec::new(),
@@ -722,6 +740,7 @@ impl Parser {
             enums: self.module_enums.clone(),
             records: self.records.clone(),
             consts: self.consts.clone(),
+            secrets: self.secrets.clone(),
             functions: bodies.functions,
             tests: Vec::new(),
         };
@@ -865,8 +884,13 @@ impl Parser {
         Ok(())
     }
 
-    /// Pass C0: a const's name and type, and where its value starts.
+    /// Pass C0: a const's name and type, and where its value starts, and beside it every
+    /// `secret` declaration. They share a pass because they share a requirement: a use
+    /// site has to resolve against a declaration in any file in any order.
     fn const_item(&mut self) -> Result<(), Diagnostic> {
+        if self.at_secret_item() {
+            return self.secret_item();
+        }
         match self.peek() {
             Token::Word(Keyword::Const) => {
                 let named = self.pos + 1;
@@ -893,6 +917,9 @@ impl Parser {
         events: &mut Vec<EventDef>,
         projectors: &mut Vec<Projector>,
     ) -> Result<(), Diagnostic> {
+        if self.at_secret_item() {
+            return self.skip_item();
+        }
         match self.peek() {
             Token::Word(Keyword::Enum) | Token::Word(Keyword::Record) => self.skip_item()?,
             Token::Word(Keyword::Const) => self.skip_item()?,
@@ -942,6 +969,9 @@ impl Parser {
         projectors: &mut [Projector],
         out: &mut Bodies,
     ) -> Result<(), Diagnostic> {
+        if self.at_secret_item() {
+            return self.skip_item();
+        }
         match self.peek() {
             Token::Word(Keyword::Event)
             | Token::Word(Keyword::Enum)
@@ -1008,7 +1038,7 @@ impl Parser {
         }
         self.declare("command", &name, named);
 
-        let params = self.param_list(false)?;
+        let params = self.param_list(None)?;
         self.commands.push(Signature {
             name,
             params,
@@ -1034,7 +1064,7 @@ impl Parser {
         }
         self.declare("guard", &name, named);
 
-        let params = self.param_list(false)?;
+        let params = self.param_list(None)?;
         self.guards.push(Signature {
             name,
             params,
@@ -1094,7 +1124,7 @@ impl Parser {
         }
 
         let params = if self.at_sym(Sym::LParen) {
-            self.param_list(false)?
+            self.param_list(None)?
         } else {
             Vec::new()
         };
@@ -1213,15 +1243,36 @@ impl Parser {
     /// transport and a refusal is a decision, and neither is data. See
     /// `docs/functions.md`. It sits above `type_ref` rather than inside it, so
     /// `List(Response)` stays rejected along with every other position.
-    fn fn_type(&mut self) -> Result<Type, Diagnostic> {
+    fn fn_type(&mut self, kind: Kind) -> Result<Type, Diagnostic> {
         let Token::Ident(name) = self.peek() else {
             return self.type_ref();
         };
         let ty = match name.as_str() {
             "Response" => Type::Response,
             "Outcome" => Type::Outcome,
+            // Rule 16. Here rather than in `type_ref` for the reason the other two are:
+            // `List(Secret)` and `Map(String, Secret)` stay rejected, so a `Secret` never
+            // appears under a constructor and no diagnostic prints a type an author could
+            // not have written.
+            "Secret" => Type::Secret,
             _ => return self.type_ref(),
         };
+        // A module `fn` is callable from a command and a projector, so a `Secret` there
+        // would be a credential in a signature nothing could ever fill, and rule 16's
+        // one sentence would need a second clause. An effect-local one is where it goes.
+        if ty == Type::Secret && kind != Kind::EffectFn {
+            let at = self.span_here();
+            self.bump();
+            return Err(self
+                .err(
+                    Code::WrongContext,
+                    "only an effect-local `fn` can take a `Secret`".to_string(),
+                    at,
+                )
+                .with_hint(
+                    "a credential is readable exactly where the network is, and a module `fn` is callable from a command and a projector; declare this helper inside the effect that calls out",
+                ));
+        }
         self.bump();
         if self.eat_sym(Sym::Question) {
             return Ok(Type::opt(ty));
@@ -1243,9 +1294,9 @@ impl Parser {
             ));
         }
         self.declare("fn", &name, named);
-        let params = self.param_list(true)?;
+        let params = self.param_list(Some(Kind::Function))?;
         self.expect_sym(Sym::To)?;
-        let ret = self.fn_type()?;
+        let ret = self.fn_type(Kind::Function)?;
         self.functions.push(Signature {
             name,
             params,
@@ -1255,17 +1306,17 @@ impl Parser {
     }
 
     /// Shared with `command`, whose parameters are application input and so may not be
-    /// a `Response`. Only a `fn` passes `true`.
-    fn param_list(&mut self, response_ok: bool) -> Result<Vec<(Ident, Type)>, Diagnostic> {
+    /// a `Response`. `None` is that case; a `fn` passes the kind it is, because an
+    /// effect-local one may also take a `Secret` and a module one may not.
+    fn param_list(&mut self, fn_kind: Option<Kind>) -> Result<Vec<(Ident, Type)>, Diagnostic> {
         let mut params = Vec::new();
         self.expect_sym(Sym::LParen)?;
         while !self.at_sym(Sym::RParen) {
             let param = self.expect_ident()?;
             self.expect_sym(Sym::Colon)?;
-            let ty = if response_ok {
-                self.fn_type()?
-            } else {
-                self.type_ref()?
+            let ty = match fn_kind {
+                Some(kind) => self.fn_type(kind)?,
+                None => self.type_ref()?,
             };
             params.push((param, ty));
             if !self.eat_sym(Sym::Comma) {
@@ -1289,7 +1340,7 @@ impl Parser {
         };
         lower.b.in_module(module.as_deref());
 
-        for (param, ty) in self.param_list(true)? {
+        for (param, ty) in self.param_list(Some(kind))? {
             lower.b.param(&param, ty);
         }
         let ret = self.fn_result(kind)?;
@@ -1325,7 +1376,7 @@ impl Parser {
             return Ok(None);
         }
         self.expect_sym(Sym::To)?;
-        Ok(Some(self.fn_type()?))
+        Ok(Some(self.fn_type(kind)?))
     }
 
     /// A `fn` in scope here: the enclosing effect's own before module scope. The two
@@ -1437,7 +1488,7 @@ impl Parser {
 
     fn expected_item(found: &Token) -> String {
         format!(
-            "expected `enum`, `record`, `const`, `fn`, `event`, `refusal`, `command`, `guard`, `projector`, `effect` or `test`, found {found}"
+            "expected `enum`, `record`, `const`, `secret`, `fn`, `event`, `refusal`, `command`, `guard`, `projector`, `effect` or `test`, found {found}"
         )
     }
 
@@ -1544,6 +1595,50 @@ impl Parser {
         Ok(fields)
     }
 
+    /// Whether the cursor is on a `secret` declaration.
+    ///
+    /// The word is **soft**, claimed only here, so `fn sync(.., secret: String)` and an
+    /// event field called `secret` stay writable; making it a `Keyword` would break both,
+    /// and both are written in this repo already. Two tokens is what makes the position
+    /// unambiguous: nothing else at top level is a bare word followed by a name.
+    fn at_secret_item(&self) -> bool {
+        self.at_soft("secret")
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|spanned| &spanned.token),
+                Some(Token::Ident(_))
+            )
+    }
+
+    /// Pass C0: one deployment credential's name. Unlike a const there is no value to
+    /// read and so no second pass to resolve one: a `secret` declares that a deployment
+    /// owes this program a credential, and the value never enters the program at all.
+    /// See `docs/effects.md` rule 16.
+    fn secret_item(&mut self) -> Result<(), Diagnostic> {
+        let module = self.module_at(self.pos).map(str::to_string);
+        let named = self.pos + 1;
+        self.bump();
+        let name = self.expect_ident()?;
+        // `secret NAME?`: an `Opt(Secret)` the program branches on, for a credential a
+        // deployment may legitimately not set.
+        let optional = self.eat_sym(Sym::Question);
+        if self.secret_def(&name).is_some() {
+            return Err(self.declared_twice(
+                "secret",
+                &name,
+                format!("secret `{name}` is declared twice"),
+                self.token_span(named),
+            ));
+        }
+        self.declare("secret", &name, named);
+        self.secrets.push(SecretDef {
+            name,
+            module,
+            optional,
+            span: self.token_span(named),
+        });
+        Ok(())
+    }
+
     /// `const NAME: Type =`, and where the value begins. The value is left unread,
     /// because it may name a const declared below this one or in another file, and
     /// pass C0 has not seen those yet.
@@ -1613,6 +1708,7 @@ impl Parser {
         // and would never see a trailing `+ 1`.
         if !matches!(self.peek(), Token::End)
             && !matches!(self.peek(), Token::Word(word) if starts_item(*word))
+            && !self.at_secret_item()
         {
             return self.fail(Code::ExpectedToken, Self::expected_item(self.peek()));
         }
@@ -1634,6 +1730,10 @@ impl Parser {
 
     fn const_def(&self, name: &str) -> Option<&ConstDef> {
         self.consts.iter().find(|def| def.name == name)
+    }
+
+    fn secret_def(&self, name: &str) -> Option<&SecretDef> {
+        self.secrets.iter().find(|def| def.name == name)
     }
 
     fn shell_of(&self, name: &str) -> Option<&ConstShell> {
@@ -1804,6 +1904,13 @@ impl Parser {
         if self.at_word(Keyword::Refusal) {
             return self.skip_refusal();
         }
+        // A third: `secret NAME` has no body either, and it is two or three tokens.
+        if self.at_secret_item() {
+            self.bump();
+            self.bump();
+            self.eat_sym(Sym::Question);
+            return Ok(());
+        }
         self.bump();
         self.skip_braced()
     }
@@ -1835,6 +1942,11 @@ impl Parser {
                 Token::Sym(Sym::LBrace | Sym::LBracket | Sym::LParen) => depth += 1,
                 Token::Sym(Sym::RBrace | Sym::RBracket | Sym::RParen) => depth -= 1,
                 Token::Word(word) if depth == 0 && starts_item(*word) => return,
+                // The soft one. Without this a `const` declared above a `secret` runs
+                // straight through it: `starts_item` only sees hard keywords, and a
+                // value that swallowed the next declaration would take it out of the
+                // program silently rather than loudly.
+                Token::Ident(_) if depth == 0 && self.at_secret_item() => return,
                 _ => {}
             }
             self.bump();
@@ -3425,11 +3537,13 @@ impl Parser {
         }
 
         let mut setup = Vec::new();
-        while self.at_soft("respond") || self.at_soft("erased") {
+        while self.at_soft("respond") || self.at_soft("erased") || self.at_soft("secret") {
             setup.push(if self.at_soft("respond") {
                 self.respond_decl(&mut lower)?
-            } else {
+            } else if self.at_soft("erased") {
                 self.erased_decl(&mut lower)?
+            } else {
+                self.secret_decl(&mut lower, program)?
             });
         }
 
@@ -3555,6 +3669,34 @@ impl Parser {
             ReplySpec::Status(status)
         };
         Ok(Setup::Respond { url, reply, span })
+    }
+
+    /// `secret NAME = <value>`: one deployment credential this world holds.
+    ///
+    /// A setup line rather than a `given`, because a `given` is a log and a credential
+    /// is not in one. It also wants to sit beside the `respond` it pairs with: a
+    /// secret's value is usually the url the next line answers, and a form that
+    /// separated them by the whole log would make the pair unreadable.
+    ///
+    /// The value is parsed against `String?`, so `= none` is a deployment that did not
+    /// set it and is the only way to reach the absent branch of a `secret NAME?` or the
+    /// missing-credential wedge, since the harness answers every other name with a
+    /// stand-in.
+    fn secret_decl(&mut self, lower: &mut Lower, program: &Program) -> Result<Setup, Diagnostic> {
+        let span = self.span_here();
+        self.bump();
+        let at = self.span_here();
+        let name = self.expect_ident()?;
+        if program.secret(&name).is_none() {
+            return Err(self.err(
+                Code::NotDeclared,
+                format!("secret `{name}` is not declared"),
+                at,
+            ));
+        }
+        self.expect_sym(Sym::Assign)?;
+        let value = self.expr(lower, Some(Type::opt(Type::String)))?;
+        Ok(Setup::Secret { name, value, span })
     }
 
     /// Rule 3: the only way to write a shredded-key test, since a test cannot call
@@ -4474,9 +4616,33 @@ impl Parser {
         // sealed content in a plain position is a `reveal` that is missing, not a type
         // that is wrong.
         if let Some(want) = &expect {
+            self.check_secret(lower, value, want, at);
             self.check_seal(lower, value, want, at);
             self.check_type(lower, value, want, at);
         }
+        Ok(value)
+    }
+
+    /// An `http.*` url: a `String`, or a `Secret` because a webhook address is itself a
+    /// credential.
+    ///
+    /// Parsed with no target type and checked here rather than through [`Self::expr`],
+    /// which is what keeps the allowance to **this** position: an escape that `expr`
+    /// read from a flag would be inherited by every nested position too, and
+    /// `http.post(url, { "x": leak(STRIPE_KEY) })` would launder through `leak`'s
+    /// parameter. A url needs no hint, since a string literal and an interpolation are
+    /// each a `String` on their own.
+    fn url_arg(&mut self, lower: &mut Lower) -> Result<ExprId, Diagnostic> {
+        let start = self.here();
+        let value = self.expr(lower, None)?;
+        let at = self.span_from(start);
+        match self.type_of(lower, value) {
+            Some(Type::String | Type::Secret) | None => {}
+            Some(found) => {
+                self.note(self.advised(Code::TypeMismatch, mismatch(&found, &Type::String), at));
+            }
+        }
+        self.no_seal(lower, value, "be a url", at);
         Ok(value)
     }
 
@@ -4547,6 +4713,10 @@ impl Parser {
         // sides, or compare something plaintext.
         self.no_seal(lower, lhs, "be compared", lhs_at);
         self.no_seal(lower, rhs, "be compared", rhs_at);
+        // Rule 16. Comparing a credential is observing it one bit at a time, and there
+        // is nothing to compare it against that a program is allowed to be holding.
+        self.no_secret(lower, lhs, "be compared", lhs_at);
+        self.no_secret(lower, rhs, "be compared", rhs_at);
         self.settle(lower, lhs, rhs);
         // The comparison, not the operator: what is wrong is the pair, and an editor
         // underlining `>` alone says nothing about which two things did not meet.
@@ -4607,10 +4777,16 @@ impl Parser {
         // gets to run first.
         self.no_seal(lower, lhs, "be used in arithmetic", span);
         self.no_seal(lower, rhs, "be used in arithmetic", span);
+        self.no_secret(lower, lhs, "be used in arithmetic", span);
+        self.no_secret(lower, rhs, "be used in arithmetic", span);
         let (Some(left), Some(right)) = (self.type_of(lower, lhs), self.type_of(lower, rhs)) else {
             return Ok(());
         };
         if types::arithmetic(op, &left, &right).is_some() {
+            return Ok(());
+        }
+        // Reported already, and more usefully, by `no_secret` above.
+        if holds_secret(&left) || holds_secret(&right) {
             return Ok(());
         }
         Err(self.advised(Code::BadOperands, bad_operands(op, &left, &right), span))
@@ -4634,6 +4810,10 @@ impl Parser {
         };
         if types::comparable(op, &left, &right) {
             return Ok(Some((left, right)));
+        }
+        // Reported already, and more usefully, by `no_secret` above.
+        if holds_secret(&left) || holds_secret(&right) {
+            return Ok(None);
         }
         Err(self.advised(Code::BadOperands, bad_operands(op, &left, &right), span))
     }
@@ -5022,6 +5202,10 @@ impl Parser {
                     let value = def.value.clone();
                     return Ok(lower.b.lit(value));
                 }
+                if let Some(def) = self.secret_def(&name) {
+                    let optional = def.optional;
+                    return self.secret_read(lower, name, optional, span);
+                }
                 if let Some(Type::Enum(enum_name)) = expect.as_ref().map(inner_of)
                     && let Some(def) = self.enum_def(enum_name)
                 {
@@ -5284,7 +5468,19 @@ impl Parser {
                 _ => None,
             },
             Expr::Object(_) => Some(Type::Json),
-            Expr::Interp(_) => Some(Type::String),
+            // Rule 16's taint, and the reason it is a taint rather than a wall.
+            // `"Bearer {STRIPE_KEY}"` is the single most common shape a credential
+            // takes, and a wall would leave `Authorization` unwritable. The result is
+            // still a `Secret`, so it still cannot reach a sink.
+            Expr::Interp(parts) => Some(
+                match parts.iter().any(|part| {
+                    self.type_of(lower, *part)
+                        .is_some_and(|ty| holds_secret(&ty))
+                }) {
+                    true => Type::Secret,
+                    false => Type::String,
+                },
+            ),
             Expr::List { items, inner } => Some(Type::list(match inner {
                 Some(declared) => declared.clone(),
                 None => items.first().and_then(|id| self.type_of(lower, *id))?,
@@ -5316,6 +5512,10 @@ impl Parser {
             // Rule 12: an optional in, an optional out, and the seal comes off.
             Expr::Reveal { value, .. } => Some(self.type_of(lower, *value)?.unsealed()),
             Expr::Refusal { .. } => Some(Type::Outcome),
+            Expr::Secret { optional, .. } => Some(match optional {
+                true => Type::opt(Type::Secret),
+                false => Type::Secret,
+            }),
             // The poison. `docs/types.md` says an unknown type is never checked, which
             // is what keeps one rejected value from becoming twenty diagnostics.
             Expr::Invalid => None,
@@ -5641,7 +5841,7 @@ impl Parser {
             });
         }
         self.declare(&scope, &name, named);
-        let params = self.param_list(true)?;
+        let params = self.param_list(Some(Kind::EffectFn))?;
         let ret = self.fn_result(Kind::EffectFn)?;
         self.local_fns.push(Signature { name, params, ret });
         self.skip_braced()
@@ -6089,6 +6289,12 @@ impl Parser {
     /// position gets. They used to get neither: `Bool` was threaded down as an inference
     /// hint, and nothing downstream of `expr` ever compared anything to it.
     fn check_bool(&self, lower: &Lower, value: ExprId, at: Span) {
+        // Every check `expr` runs at a declared position, because a boolean operand is
+        // one that never reaches it: `or_expr` and `and_expr` call each other directly.
+        // `check_secret` in particular, or `check_type`'s stand-down below suppresses
+        // the generic message on the assumption this one already fired, and `if K` is
+        // accepted and wedges at run time.
+        self.check_secret(lower, value, &Type::Bool, at);
         self.check_seal(lower, value, &Type::Bool, at);
         self.check_type(lower, value, &Type::Bool, at);
     }
@@ -6098,6 +6304,19 @@ impl Parser {
             return;
         };
         if fills(&found.unsealed(), &want.unsealed()) {
+            return;
+        }
+        // `check_secret` has already reported this pair, with the message that says
+        // what is actually wrong. The seal avoids the same collision by being
+        // transparent to `fills` above; a `Secret` is deliberately opaque, so the
+        // second message has to be suppressed here instead.
+        //
+        // One direction only, and that is the whole of it: the case `check_secret`
+        // reports is a credential reaching a position that is not one. The reverse --
+        // a plain value written where a `Secret` is declared -- is an ordinary mismatch
+        // that nothing else would report, so suppressing it too made every declared
+        // `Secret` position accept anything.
+        if holds_secret(&found) && !holds_secret(want) {
             return;
         }
         self.note(self.advised(Code::TypeMismatch, mismatch(&found, want), at));
@@ -6119,9 +6338,67 @@ impl Parser {
     fn shorthand(&self, lower: &mut Lower, name: &str, want: &Type, at: Span) -> ExprId {
         lower.b.at(at);
         let value = lower.b.load(name);
+        // Every check `expr` runs at a declared position has to run here too: this is
+        // the other code path to the same slot, and a rule enforced on only one of them
+        // is a rule an author turns off by deleting six characters.
+        self.check_secret(lower, value, want, at);
         self.check_seal(lower, value, want, at);
         self.check_type(lower, value, want, at);
         value
+    }
+
+    /// Rule 16 at a position that declares a type. The mirror of [`Self::check_seal`],
+    /// and it runs first for the same reason that one runs before `check_type`: a
+    /// credential in a plain position is a specific mistake, and `expected String,
+    /// found Secret` would describe it as a generic one.
+    ///
+    /// It is the *opposite* of the seal rule, which is why it is a second function and
+    /// not a case in the first: a seal may be written wherever the same seal is
+    /// declared and may not be read, while a secret may be read freely and may not be
+    /// written anywhere that could observe it.
+    fn check_secret(&self, lower: &Lower, value: ExprId, want: &Type, at: Span) {
+        let Some(found) = self.type_of(lower, value) else {
+            return;
+        };
+        if !holds_secret(&found) || holds_secret(want) {
+            return;
+        }
+        self.note(
+            self.err(
+                Code::SecretBoundary,
+                format!("this is a deployment secret and {} is not", a(want)),
+                at,
+            )
+            .with_hint(
+                "a secret is readable exactly where the network is reachable: it may be a url, a header value or a request body, and nothing else may observe it",
+            ),
+        )
+    }
+
+    /// The same rule where nothing declares a type: a comparison, an interpolation hole
+    /// that is not on its way out, a list element. Reading a credential into any of
+    /// them is observing it.
+    fn no_secret(&self, lower: &Lower, value: ExprId, what: &str, at: Span) {
+        let Some(found) = self.type_of(lower, value) else {
+            return;
+        };
+        if !holds_secret(&found) {
+            return;
+        }
+        // `none` takes its type from the other operand, so `SENTRY_DSN == none` typed
+        // this literal `Opt(Secret)`. It holds no credential and reporting it as one
+        // points at the wrong half of the comparison.
+        if matches!(
+            lower.b.exprs().get(value),
+            Some(Expr::Lit(Literal::None { .. }))
+        ) {
+            return;
+        }
+        self.note(self.err(
+            Code::SecretBoundary,
+            format!("this is a deployment secret, so it cannot {what}"),
+            at,
+        ))
     }
 
     /// The same rule where nothing declares a type: an interpolation hole, a
@@ -6301,13 +6578,22 @@ impl Parser {
         self.not_in_fold("call out", span)?;
 
         self.expect_sym(Sym::LParen)?;
-        let mut args = vec![self.expr(lower, Some(Type::String))?];
+        // Rule 16: a webhook address is itself a credential, so this position takes a
+        // `Secret` as readily as a `String`.
+        let mut args = vec![self.url_arg(lower)?];
         if builtin.has_body() {
             self.expect_sym(Sym::Comma)?;
             let outer = self.in_body;
+            // Only a literal body object is the request. A `fn` call or a `Json.encode`
+            // in this position returns an ordinary `Json` that anything could have
+            // built, so letting it inherit the allowance would put a credential
+            // wherever that value went next.
+            let literal = self.at_sym(Sym::LBrace);
+            let sending = mem::replace(&mut self.in_request, literal);
             self.in_body = true;
             args.push(self.expr(lower, Some(Type::Json))?);
             self.in_body = outer;
+            self.in_request = sending;
         }
 
         // Named, because the existing positional-third-argument error teaches rule 13
@@ -6320,9 +6606,12 @@ impl Parser {
             self.bump();
             self.expect_sym(Sym::Assign)?;
             let outer = self.in_body;
+            let literal = self.at_sym(Sym::LBrace);
+            let sending = mem::replace(&mut self.in_request, literal);
             self.in_body = true;
             headers = Some(self.expr(lower, Some(Type::Json))?);
             self.in_body = outer;
+            self.in_request = sending;
             self.eat_sym(Sym::Comma);
         }
         // A trailing comma closes the list; only a real third argument reaches rule 13.
@@ -6351,6 +6640,49 @@ impl Parser {
         });
         lower.b.at(span);
         Ok(lower.b.expr(Expr::Call { builtin, args }))
+    }
+
+    /// Reading a `secret` declaration. Rule 16's one sentence, enforced at the read:
+    /// a credential is readable exactly where the network is reachable.
+    ///
+    /// Unlike `reveal` this is legal in an effect-local `fn` as well as in an arm,
+    /// because the whole point of one is to be handed a credential and call out with
+    /// it. The `fold` restriction is rule 3's rather than this rule's, and it says so:
+    /// a fold has to reproduce itself from the log on every replay, and a credential is
+    /// not in the log, so a rotation would make a fold answer differently and `verify`
+    /// would be right to call that corruption.
+    fn secret_read(
+        &mut self,
+        lower: &mut Lower,
+        name: Ident,
+        optional: bool,
+        span: Span,
+    ) -> Result<ExprId, Diagnostic> {
+        self.gate(
+            (
+                "only an effect reads a deployment secret",
+                Some("a command's whole surface is HTTP-facing; verify inbound, then `invoke`"),
+            ),
+            (
+                "only an effect reads a deployment secret",
+                Some("a projector is a pure fold over the log, so it has nothing to send"),
+            ),
+            "read a secret",
+            span,
+        )?;
+        if self.folding {
+            return Err(self
+                .err(
+                    Code::FoldRestriction,
+                    format!("a `fold` cannot read `{name}`"),
+                    span,
+                )
+                .with_hint(
+                    "a fold is a pure function of the log prefix, and a secret is not in the log, so rotating one would make this fold answer differently on a replay",
+                ));
+        }
+        lower.b.at(span);
+        Ok(lower.b.expr(Expr::Secret { name, optional }))
     }
 
     fn reveal_call(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, Diagnostic> {
@@ -6429,6 +6761,27 @@ impl Parser {
             let at = self.span_here();
             let hole = self.expr(lower, None)?;
             self.no_seal(lower, hole, "be interpolated into a string", at);
+            // Rule 16: an *optional* credential has no rendering when it is absent, and
+            // the table would give the literal text `null` -- silently, into whatever
+            // the interpolation becomes. A url built that way is a request to the wrong
+            // address with no diagnostic behind it. Narrowing is what the bare position
+            // already asks for, so it asks here too.
+            if self
+                .type_of(lower, hole)
+                .is_some_and(|ty| matches!(&ty, Type::Opt(inner) if holds_secret(inner)))
+            {
+                self.note(
+                    self.err(
+                        Code::SecretBoundary,
+                        "this is an optional deployment secret, so it cannot be interpolated"
+                            .to_string(),
+                        at,
+                    )
+                    .with_hint(
+                        "an absent one would render as `null` into whatever this builds; read it into a `let` and narrow it with `.is_some()` first",
+                    ),
+                );
+            }
             parts.push(hole);
             let spanned = self.bump();
             match spanned.token {
@@ -6507,7 +6860,12 @@ impl Parser {
 
         let mut items = Vec::new();
         loop {
+            let at = self.span_here();
             let item = self.expr(lower, inner.clone())?;
+            // Rule 16: a credential is never one of several. A `List(Secret)` would be
+            // a type the checker could infer and no author could spell, since `Secret`
+            // lives in a `fn` signature and a list's element goes through `type_ref`.
+            self.no_secret(lower, item, "be an element of a list", at);
             // An array in a body is JSON too, so its numbers follow the same rule its
             // sibling members do. Outside one `in_body` is false and a list of
             // `Decimal(2)` stays a list of `Decimal(2)`.
@@ -6564,7 +6922,12 @@ impl Parser {
         let end = self.pos;
 
         self.pos = start;
+        let yielded = self.span_here();
         let yields = self.expr(lower, inner.clone())?;
+        // Rule 16, the same as a list literal's element: without it `[KEY for i in xs]`
+        // synthesises `List(Secret)`, and `.contains` on one is an equality oracle over
+        // two credentials that answers in a loggable `Bool`.
+        self.no_secret(lower, yields, "be an element of a list", yielded);
         if self.pos != at {
             return self.fail(
                 Code::ExpectedToken,
@@ -6725,9 +7088,19 @@ impl Parser {
                 // that only the outermost brace had a target, and a nested object or
                 // an empty array failed on a rule about declarations it has none of.
                 let body = mem::replace(&mut self.in_body, true);
+                // Not a request, whatever led here: `Json.encode` produces a `String`
+                // for a program to hold, not bytes on their way out.
+                let request = mem::replace(&mut self.in_request, false);
                 let hint = self.at_sym(Sym::LBrace).then_some(Type::Json);
+                let at = self.span_here();
                 let value = self.expr(lower, hint)?;
+                // Rule 16: this is the body table pointed at a `String` instead of a
+                // socket, so it would launder a credential into one in a single call.
+                // It takes no target type when the argument is not an object, so the
+                // funnel in `expr` never sees this position.
+                self.no_secret(lower, value, "be encoded into a string", at);
                 self.in_body = body;
+                self.in_request = request;
                 self.no_record_literal = outer;
                 self.end_args()?;
                 lower.b.at(span);
@@ -6905,6 +7278,10 @@ impl Parser {
         // body rather than only the outermost brace, which is what lets a nested object
         // and an empty array be written at any depth.
         let body = mem::replace(&mut self.in_body, true);
+        // Whether *this* object is the request. Taken once, here, because the flag is
+        // cleared for every member below: it may travel into a directly nested object
+        // literal and nowhere else.
+        let request = self.in_request;
         let mut fields: Vec<(Ident, ExprId)> = Vec::new();
         while !self.at_sym(Sym::RBrace) {
             let at = self.span_here();
@@ -6923,9 +7300,30 @@ impl Parser {
             }
             self.expect_sym(Sym::Colon)?;
             let at = self.span_here();
+            // The allowance travels only into a member that *is* another object
+            // literal, which is what "at any depth" means. Anything else -- an
+            // `invoke` argument, a `fn` argument, a `Json.encode` -- is an ordinary
+            // position that happens to be written inside a body, and letting it
+            // inherit the request put a credential into the event log, permanently,
+            // through `invoke C { doc: { "k": KEY } }`.
+            let nested = request && self.at_sym(Sym::LBrace);
+            let outer_request = mem::replace(&mut self.in_request, nested);
             let value = self.expr(lower, None)?;
+            self.in_request = outer_request;
             self.as_json_number(lower, value);
             self.no_seal(lower, value, "be sent in a request body", at);
+            // Rule 16: the one untyped position a credential may occupy, and only when
+            // this document is actually going out. A `Json.encode` or a `Json`
+            // parameter is an ordinary object and would launder the taint into a
+            // `String` in one call.
+            if !request {
+                self.no_secret(
+                    lower,
+                    value,
+                    "be put in an object that is not an `http.*` body",
+                    at,
+                );
+            }
             fields.push((key, value));
             if !self.eat_sym(Sym::Comma) {
                 break;
@@ -7799,6 +8197,17 @@ fn folded_from<'a>(
     sources
 }
 
+/// Whether this type is, or wraps, a deployment credential. Only `Opt` wraps one: rule
+/// 16 keeps a `Secret` out of every container, so there is no deeper case to walk and
+/// every sink check is a match rather than a traversal.
+fn holds_secret(ty: &Type) -> bool {
+    match ty {
+        Type::Secret => true,
+        Type::Opt(inner) => holds_secret(inner),
+        _ => false,
+    }
+}
+
 /// The frame slot an expression loads, if it is exactly a load. A narrowed load is
 /// still that load, the same reason `trigger_field` peels one.
 fn loaded_slot(exprs: &Exprs, value: ExprId) -> Option<Slot> {
@@ -7891,7 +8300,7 @@ fn roots(stmt: &Stmt) -> Vec<ExprId> {
 
 pub(crate) fn children(expr: &Expr) -> Vec<ExprId> {
     match expr {
-        Expr::Lit(_) | Expr::Load(_) => Vec::new(),
+        Expr::Lit(_) | Expr::Load(_) | Expr::Secret { .. } => Vec::new(),
         Expr::Unary { operand, .. } => vec![*operand],
         Expr::Unwrap(inner) => vec![*inner],
         Expr::Wrap { value, .. } => vec![*value],

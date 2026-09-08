@@ -173,7 +173,7 @@ local binding already has over a builtin name, so it is one rule rather than a n
 ## `const`
 
 ```
-const WEBHOOK_ADDRESS: String = "https://webhooks.example.com"
+const RETRY_BUDGET: Int = 3
 const FREE_TIER_LIMIT: Int = 15
 const NAMESPACE: Uuid = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
 ```
@@ -191,6 +191,43 @@ runtime lookup.
 `Map.empty` and `Json.empty` are spellable here for that same reason: both are literals in the IR
 rather than calls, so they construct nothing and read nothing. It is also why both may be a `fold`
 seed and an entity default.
+
+### A credential is not a `const`
+
+This example used to be `const WEBHOOK_ADDRESS: String = "https://webhooks.example.com"`, and it was
+the wrong advice in a specific way. A const is **inlined at every use**, so its text is in the
+digest form and therefore in the hash a deployment records for each of its invocations. Rotating a
+webhook would move that hash and cost replay coverage on every past invocation, quite apart from the
+value being in git and in every surface that renders a declaration.
+
+A deployment credential is a `secret` instead (`docs/effects.md` rule 16), which declares the name
+and leaves the value to the deployment:
+
+```
+secret WEBHOOK_ADDRESS
+```
+
+A `const` is still right for a value that is **part of the program**: a free-tier limit, a namespace
+uuid, a launch date. The test is whether changing it should count as changing what the program does.
+For a limit it should. For a credential it must not.
+
+## `secret`
+
+```
+secret DISCORD_WEBHOOK
+secret STRIPE_KEY
+secret SENTRY_DSN?
+```
+
+`secret NAME`, with no type and no value: every real credential is text, and the value belongs to
+the deployment rather than to the program. `secret NAME?` says this deployment may legitimately not
+set it, and reads as an optional the effect branches on. `docs/effects.md` rule 16 is the contract:
+which declarations may read one, what may be done with it, and why a rotation moves no hash.
+
+`secret` is a **soft** word, claimed only where a top-level declaration begins, so a field, a
+parameter or a local called `secret` stays writable. Order and file are irrelevant here as
+everywhere else (`docs/modules.md`), because the declaration is collected in the same early pass a
+`const` is.
 
 ### A string literal resolves against a `Uuid` or `Timestamp` target
 

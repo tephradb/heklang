@@ -245,3 +245,53 @@ test "confirming an order records the notification" {
               (identifier)
               (identifier)))))
       (expect_clause))))
+
+================================================================================
+the secret setup lever, with a value and with none
+================================================================================
+
+test "an alert goes to the configured hook" {
+  given @order.placed { order_id: ADA }
+
+  secret DISCORD_WEBHOOK = "https://example.test/hook"
+  secret SENTRY_DSN = none
+  respond "https://example.test/hook" 200
+
+  deliver Alerts
+
+  expect http.post("https://example.test/hook")
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (test_declaration
+    (string
+      (string_content))
+    (test_body
+      (given_clause
+        (event_path)
+        (field_initializer_list
+          (field_initializer
+            (identifier)
+            (identifier))))
+      (secret_clause
+        (identifier)
+        (string
+          (string_content)))
+      (secret_clause
+        (identifier)
+        (none_literal))
+      (respond_clause
+        (string
+          (string_content))
+        (integer_literal))
+      (deliver_clause
+        (identifier))
+      (expect_clause
+        (method_call
+          (identifier)
+          (identifier)
+          (arguments
+            (string
+              (string_content))))))))

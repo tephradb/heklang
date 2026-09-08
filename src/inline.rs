@@ -294,7 +294,9 @@ fn shift_iter(iter: &mut Iter, expr_off: u32, slot_off: u32) {
 fn shift_expr(expr: &mut Expr, expr_off: u32, slot_off: u32) {
     let one = |id: &mut ExprId| *id = shift_expr_id(*id, expr_off);
     match expr {
-        Expr::Lit(_) | Expr::Invalid => {}
+        // A secret read holds neither an `ExprId` nor a `Slot`: it is a name, and a
+        // name does not move when a guard's frame does.
+        Expr::Lit(_) | Expr::Invalid | Expr::Secret { .. } => {}
         Expr::Load(slot) => *slot = shift_slot(*slot, slot_off),
         Expr::Unary { op: _, operand } => one(operand),
         Expr::Binary { op: _, lhs, rhs } => {

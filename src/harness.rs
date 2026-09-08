@@ -6,9 +6,10 @@
 //! depends on.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 
 use crate::host::{
-    AppendCondition, Attempt, Calls, Clock, Http, Keys, Log, Query, Recorded, Request,
+    AppendCondition, Attempt, Calls, Clock, Http, Keys, Log, Query, Recorded, Request, Secrets,
 };
 use crate::interp::{Error, ErrorKind, Store};
 use crate::ir::Ident;
@@ -73,6 +74,14 @@ pub struct Harness {
     /// is what rules 9 and 12 turn on. Ciphertext is not modelled; see `docs/effects.md`.
     keys: BTreeSet<(Ident, String)>,
     scripted: BTreeMap<String, VecDeque<Reply>>,
+    /// Deployment credentials a test supplied. Empty is the common case: a name nothing
+    /// mentions answers `secret:NAME` rather than nothing, so no test needs setup to run
+    /// an effect that reads one.
+    ///
+    /// The value is itself an `Option` so that "a test gave this one a value" and "a
+    /// test said this deployment does not set it" are one entry rather than two
+    /// collections with an invariant between them. See `docs/testing.md`.
+    secrets: BTreeMap<String, Option<Arc<str>>>,
 }
 
 impl Harness {
@@ -114,6 +123,20 @@ impl Harness {
     /// 12's message is about: the erase is usually not local.
     pub fn erase_subject(&mut self, subject: &str, id: &str) {
         self.keys.insert((subject.to_string(), id.to_string()));
+    }
+
+    /// Gives one deployment credential the value a test wrote, overriding the
+    /// `secret:NAME` stand-in. For when the shape matters: a value that has to parse as
+    /// a URL, or carry a prefix an arm branches on.
+    pub fn set_secret(&mut self, name: &str, value: impl Into<Arc<str>>) {
+        self.secrets.insert(name.to_string(), Some(value.into()));
+    }
+
+    /// Declares that this deployment does not set one, which is how a test reaches the
+    /// absent branch of a `secret NAME?` that the stand-in would otherwise always
+    /// answer, and the missing-credential backstop for a required one.
+    pub fn unset_secret(&mut self, name: &str) {
+        self.secrets.insert(name.to_string(), None);
     }
 
     /// Queues the replies one URL will answer with.
@@ -188,6 +211,18 @@ impl Clock for Harness {
     }
 }
 
+/// The stand-in a declared credential resolves to when nothing supplied one, so no test
+/// needs setup to run an effect that reads a secret. Deterministic and obviously not a
+/// real value, and it is what a `respond` and an `expect http.*` in such a test name.
+impl Secrets for Harness {
+    fn secret(&self, name: &str) -> Option<Arc<str>> {
+        match self.secrets.get(name) {
+            Some(supplied) => supplied.clone(),
+            None => Some(Arc::from(format!("secret:{name}"))),
+        }
+    }
+}
+
 impl Keys for Harness {
     /// The harness's ciphertext is its plaintext. It models the key lifecycle and not
     /// crypto, so "decrypt" is the lifecycle question and nothing else: content behind
@@ -218,7 +253,7 @@ impl Http for Harness {
     fn send(&mut self, request: &Request) -> Attempt {
         let reply = self
             .scripted
-            .get_mut(&request.url)
+            .get_mut(&request.wire.url)
             .and_then(VecDeque::pop_front)
             .unwrap_or(Reply::Status(404));
         match reply {
@@ -247,6 +282,14 @@ impl World for Sandbox {
 
     fn given(&mut self, event: Event) -> Result<(), Error> {
         self.harness.push(event);
+        Ok(())
+    }
+
+    fn secret(&mut self, name: &str, value: Option<&str>) -> Result<(), Error> {
+        match value {
+            Some(value) => self.harness.set_secret(name, value),
+            None => self.harness.unset_secret(name),
+        }
         Ok(())
     }
 

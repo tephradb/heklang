@@ -83,6 +83,10 @@
   "test"
 ] @keyword.storage.type
 
+; Soft, and claimed in two places: a top-level declaration and a test's setup section.
+; One pattern covers both, because it is one word meaning one thing.
+"secret" @keyword.storage.type
+
 [
   "fn"
   "command"

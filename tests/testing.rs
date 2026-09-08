@@ -923,3 +923,164 @@ test \"a sealed numeric column takes a bare literal\" {
         program.err().map(|err| err.text()).unwrap_or_default()
     );
 }
+
+// Rule 3: the fourth lever. `docs/effects.md` rule 16 is the language side.
+
+const CREDENTIALS: &str = "secret ALERT_HOOK
+secret SENTRY_DSN?
+
+effect Alerts {
+  on @plan.sold { @key plan_id } {
+    let sent = http.post(ALERT_HOOK, { \"plan\": plan_id })
+    let dsn = SENTRY_DSN
+    if dsn.is_none() {
+      log(\"no dsn\")
+    }
+  }
+}
+";
+
+fn credential_verdicts(body: &str) -> Vec<TestResult> {
+    let source = format!("{PRELUDE}\n{CREDENTIALS}\n{body}");
+    let program = parse(&source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+    run_tests(&program)
+}
+
+/// The default: a declared credential resolves to `secret:NAME`, so an effect that reads
+/// one runs with no setup line and the expectation reads as itself.
+#[test]
+fn a_secret_needs_no_setup() {
+    let results = credential_verdicts(
+        "test \"an alert goes out\" {
+  given @plan.sold { plan_id: 1, price: 19.99 }
+  respond \"secret:ALERT_HOOK\" 200
+  deliver Alerts
+  expect http.post(\"secret:ALERT_HOOK\", { \"plan\": 1 })
+}",
+    );
+    assert!(
+        matches!(only(&results).outcome, TestOutcome::Passed),
+        "{:?}",
+        only(&results).outcome
+    );
+}
+
+/// The override, for a value whose shape matters, and the reason it is a setup line:
+/// it sits beside the `respond` that answers it rather than above the whole log.
+#[test]
+fn a_secret_directive_supplies_the_value() {
+    let results = credential_verdicts(
+        "test \"an alert goes to the configured hook\" {
+  given @plan.sold { plan_id: 1, price: 19.99 }
+
+  secret ALERT_HOOK = \"https://example.test/hook\"
+  respond \"https://example.test/hook\" 200
+
+  deliver Alerts
+
+  expect http.post(\"https://example.test/hook\", { \"plan\": 1 })
+}",
+    );
+    assert!(
+        matches!(only(&results).outcome, TestOutcome::Passed),
+        "{:?}",
+        only(&results).outcome
+    );
+}
+
+/// `= none` is a deployment that did not set it, and the only way to reach the absent
+/// branch of an optional: every other name answers with the stand-in.
+#[test]
+fn none_is_a_deployment_that_did_not_set_one() {
+    let results = credential_verdicts(
+        "test \"an unset dsn is a branch\" {
+  given @plan.sold { plan_id: 1, price: 19.99 }
+
+  secret SENTRY_DSN = none
+  respond \"secret:ALERT_HOOK\" 200
+
+  deliver Alerts
+
+  expect http.post(\"secret:ALERT_HOOK\", { \"plan\": 1 })
+  expect log(\"no dsn\")
+}",
+    );
+    assert!(
+        matches!(only(&results).outcome, TestOutcome::Passed),
+        "{:?}",
+        only(&results).outcome
+    );
+
+    // And the stand-in answers when nothing says otherwise, so the branch is not taken.
+    let results = credential_verdicts(
+        "test \"a set dsn is not\" {
+  given @plan.sold { plan_id: 1, price: 19.99 }
+  respond \"secret:ALERT_HOOK\" 200
+  deliver Alerts
+  expect http.post(\"secret:ALERT_HOOK\", { \"plan\": 1 })
+}",
+    );
+    assert!(
+        matches!(only(&results).outcome, TestOutcome::Passed),
+        "{:?}",
+        only(&results).outcome
+    );
+}
+
+/// A required one the deployment did not set is the wedge `docs/effects.md` rule 16
+/// describes, and it reads as **errored** rather than failed: the program could not run
+/// at all, which is not the same as an expectation not matching.
+#[test]
+fn a_required_secret_set_to_none_wedges() {
+    let results = credential_verdicts(
+        "test \"nothing set it\" {
+  given @plan.sold { plan_id: 1, price: 19.99 }
+  secret ALERT_HOOK = none
+  deliver Alerts
+  expect nothing
+}",
+    );
+    let TestOutcome::Errored(why) = &only(&results).outcome else {
+        panic!("expected an error, got {:?}", only(&results).outcome);
+    };
+    assert!(
+        why.contains("this deployment has not set `ALERT_HOOK`"),
+        "the operator has to be told which one, got {why}"
+    );
+}
+
+/// The name is checked against the declarations, so a typo is a check error rather than
+/// a test that silently scripts nothing.
+#[test]
+fn the_directive_names_a_declared_secret() {
+    let source = format!(
+        "{PRELUDE}\n{CREDENTIALS}\ntest \"typo\" {{
+  given @plan.sold {{ plan_id: 1, price: 19.99 }}
+  secret ALERT_HOK = \"https://example.test/hook\"
+  deliver Alerts
+  expect nothing
+}}"
+    );
+    let message = parse(&source)
+        .expect_err("an undeclared credential is not scriptable")
+        .text();
+    assert_eq!(message, "secret `ALERT_HOK` is not declared");
+}
+
+/// The word stays soft in a test body too, so the construct costs no name: a local
+/// called `secret` in an effect is what the `EFFECTS` prelude above already writes.
+#[test]
+fn secret_is_soft_in_a_test_body() {
+    let results = effect_verdicts(
+        "test \"a shop that never connected is skipped\" {
+  given @shop.sync.requested { shop_id: 1 }
+  deliver SyncShop
+  expect log(\"shop 1 has never connected\")
+}",
+    );
+    assert!(
+        matches!(only(&results).outcome, TestOutcome::Passed),
+        "{:?}",
+        only(&results).outcome
+    );
+}

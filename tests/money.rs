@@ -207,8 +207,8 @@ fn there_is_no_currency_item() {
         .text();
     assert_eq!(
         message,
-        "expected `enum`, `record`, `const`, `fn`, `event`, `refusal`, `command`, `guard`, \
-         `projector`, `effect` or `test`, found `currency`"
+        "expected `enum`, `record`, `const`, `secret`, `fn`, `event`, `refusal`, `command`, \
+         `guard`, `projector`, `effect` or `test`, found `currency`"
     );
 }
 

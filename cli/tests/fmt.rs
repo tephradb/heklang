@@ -374,6 +374,46 @@ fn the_fixtures_are_their_own_formatters_output() {
     }
 }
 
+/// A `secret` is a one-line shape beside `const` (rule 4): it holds no list, so there is
+/// nothing that could break, and the `?` binds to the name.
+#[test]
+fn a_secret_is_one_line_and_keeps_its_question_mark() {
+    assert_eq!(
+        fmt("secret     DISCORD_WEBHOOK\nsecret   SENTRY_DSN ?\n"),
+        "secret DISCORD_WEBHOOK\nsecret SENTRY_DSN?\n"
+    );
+    // And it does not move: rule 1 is whitespace and nothing else, so a `secret` written
+    // between two consts stays between them.
+    let source = "const A: Int = 1\nsecret K\nconst B: Int = 2\n";
+    assert_eq!(fmt(source), source);
+}
+
+/// A comment is an `extra` and can land between any two children, so a one-line
+/// declaration that indexed its children positionally would print the comment where a
+/// token belongs and **delete** that token. `hek fmt` writes in place, so this is the
+/// one bug class here that loses source.
+#[test]
+fn a_comment_inside_a_secret_deletes_nothing() {
+    assert_eq!(
+        fmt("secret // which one\n  K\n"),
+        "// which one\nsecret K\n",
+        "the comment leads the declaration and the name survives"
+    );
+    assert_eq!(
+        fmt("test \"x\" {\n  secret K // the hook\n    = \"v\"\n  project P\n}\n"),
+        "test \"x\" {\n  // the hook\n  secret K = \"v\"\n  project P\n}\n"
+    );
+}
+
+/// The same word as a setup lever in a test body, laid out like the directive it is.
+#[test]
+fn a_secret_setup_line_is_one_line() {
+    assert_eq!(
+        fmt("test \"x\" {\n  secret    K=\"v\"\n  secret  J   =   none\n  project P\n}\n"),
+        "test \"x\" {\n  secret K = \"v\"\n  secret J = none\n  project P\n}\n"
+    );
+}
+
 /// A comment written *inside* a construct, across the shapes that read their children by
 /// position: a joined pair, a separated list, a positional head with a sequence tail, a
 /// value, a type constructor, and a keyword statement.

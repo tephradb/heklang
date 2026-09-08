@@ -224,3 +224,34 @@ fn effective_sku(sku: String?, item_id: Uuid) -> String {
                 (identifier))))))
       (return_statement
         (identifier)))))
+
+================================================================================
+secret, required and optional, beside a name that is still an identifier
+================================================================================
+
+secret DISCORD_WEBHOOK
+secret SENTRY_DSN?
+
+fn sign(secret: String) -> String {
+  return secret
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (secret_declaration
+    (identifier))
+  (secret_declaration
+    (identifier))
+  (function_declaration
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (type
+          (primitive_type))))
+    (type
+      (primitive_type))
+    (block
+      (return_statement
+        (identifier)))))

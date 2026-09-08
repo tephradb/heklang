@@ -2335,8 +2335,8 @@ fn headers_are_a_named_argument() {
 
     let sent = &interpreter.requests()[0];
     assert_eq!(sent.verb, "http.post");
-    let Json::Obj(headers) = &sent.headers else {
-        panic!("expected an object, got {:?}", sent.headers);
+    let Json::Obj(headers) = &sent.wire.headers else {
+        panic!("expected an object, got {:?}", sent.wire.headers);
     };
     assert_eq!(headers.get("Authorization"), Some(&Json::str("Bearer k")));
     // The case that matters beyond convenience: this is what stops a second send.
@@ -3413,6 +3413,7 @@ fn a_numeric_literal_in_a_body_is_a_json_number() {
     outcome.expect("delivered");
 
     let body = interpreter.requests()[0]
+        .wire
         .body
         .clone()
         .expect("a post has a body");
@@ -3972,5 +3973,568 @@ fn a_wrong_annotation_in_a_destructure_is_not_a_missing_body() {
   on @order.placed as e { @key order_id }
 }"),
         "this looks like a destructure block; a handler with one needs a body block after it"
+    );
+}
+
+// ---------------------------------------------------------------------------------
+// Rule 16: a secret is readable exactly where the network is reachable.
+
+/// The prelude these use: two credentials and an effect that sends all three ways a
+/// real one does, so one delivery exercises the url, a header and a body member.
+const SECRETS: &str = "secret DISCORD_WEBHOOK
+secret STRIPE_KEY
+secret SENTRY_DSN?
+";
+
+fn secret_program(body: &str) -> Program {
+    parse(&format!("{PRELUDE}{SECRETS}{body}\n"))
+        .unwrap_or_else(|err| panic!("expected this effect to parse: {err}"))
+}
+
+fn secret_err(body: &str) -> String {
+    parse(&format!("{PRELUDE}{SECRETS}{body}\n"))
+        .expect_err("expected this effect to be rejected")
+        .text()
+}
+
+/// The three positions a credential may occupy, in one arm: a url, a header value
+/// through an interpolation, and a body member. Nothing here is a leak, and all three
+/// are what a real integration needs.
+#[test]
+fn a_secret_may_be_a_url_a_header_and_a_body_member() {
+    let program = secret_program(
+        "effect E {
+  on @order.placed as e { @key order_id } {
+    let a = http.post(DISCORD_WEBHOOK, { \"content\": \"filed\" })
+    let b = http.post(\"https://api.example/charge\", { \"amount\": 1 },
+      headers = { \"Authorization\": \"Bearer {STRIPE_KEY}\" })
+    let c = http.post(\"https://events.example/enqueue\", { \"routing_key\": STRIPE_KEY })
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let mut interpreter = Interpreter::with_log(&program, vec![placed(1, 7, 100)]);
+    interpreter.set_secret("DISCORD_WEBHOOK", "https://hooks.example/abc");
+    interpreter.script("https://hooks.example/abc", [Reply::Status(200)]);
+    interpreter.script("https://api.example/charge", [Reply::Status(200)]);
+    interpreter.script("https://events.example/enqueue", [Reply::Status(200)]);
+    interpreter
+        .deliver("E", 0, &mut journal)
+        .expect("delivered");
+
+    // The wire carries the credential, because that is the whole point of having one.
+    let sent = interpreter.requests();
+    assert_eq!(sent[0].wire.url, "https://hooks.example/abc");
+    assert_eq!(
+        sent[1].wire.headers,
+        Json::obj([("Authorization", Json::str("Bearer secret:STRIPE_KEY"))])
+    );
+    assert_eq!(
+        sent[2].wire.body,
+        Some(Json::obj([("routing_key", Json::str("secret:STRIPE_KEY"))]))
+    );
+}
+
+/// The property the journal exists for: a rotation must land on the entry that already
+/// recorded the send. Keying on the credential would make every past entry key on a
+/// string that no longer exists, so a crash-replay would miss and re-fire the request.
+#[test]
+fn the_journal_key_names_a_secret_rather_than_spelling_it() {
+    let program = secret_program(
+        "effect E {
+  on @order.placed as e { @key order_id } {
+    let a = http.post(DISCORD_WEBHOOK, { \"routing_key\": STRIPE_KEY })
+  }
+}",
+    );
+
+    let key = |webhook: &str, stripe: &str| {
+        let mut journal = Journal::default();
+        let mut interpreter = Interpreter::with_log(&program, vec![placed(1, 7, 100)]);
+        interpreter.set_secret("DISCORD_WEBHOOK", webhook);
+        interpreter.set_secret("STRIPE_KEY", stripe);
+        interpreter.script(webhook, [Reply::Status(200)]);
+        interpreter
+            .deliver("E", 0, &mut journal)
+            .expect("delivered");
+        posted(&journal)
+    };
+
+    let before = key("https://hooks.example/one", "sk_live_one");
+    let after = key("https://hooks.example/two", "sk_live_two");
+    assert_eq!(
+        before, after,
+        "rotating either credential must not move the journal key"
+    );
+    assert_eq!(
+        before,
+        "http.post {SECRET:DISCORD_WEBHOOK} {\"routing_key\":\"{SECRET:STRIPE_KEY}\"}"
+    );
+    assert!(
+        !before.contains("sk_live_one") && !before.contains("hooks.example"),
+        "the key is a readable description a host may store, so no credential is in it"
+    );
+}
+
+/// For a webhook the url *is* the credential, so the first outage would otherwise
+/// publish it: a transport failure's message is served at `/status`, at `/admin` and
+/// through `tracing`.
+#[test]
+fn an_unreachable_url_names_the_secret_rather_than_spelling_it() {
+    let program = secret_program(
+        "effect E {
+  on @order.placed as e { @key order_id } {
+    let a = http.post(DISCORD_WEBHOOK, { \"content\": \"filed\" })
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let mut interpreter = Interpreter::with_log(&program, vec![placed(1, 7, 100)]);
+    interpreter.set_secret("DISCORD_WEBHOOK", "https://hooks.example/abc");
+    interpreter.script(
+        "https://hooks.example/abc",
+        [
+            Reply::Transport("no route".into()),
+            Reply::Transport("no route".into()),
+            Reply::Transport("no route".into()),
+            Reply::Transport("no route".into()),
+        ],
+    );
+    let message = interpreter
+        .deliver("E", 0, &mut journal)
+        .expect_err("every attempt was retryable, so this wedges")
+        .to_string();
+    assert!(
+        message.contains("{SECRET:DISCORD_WEBHOOK} did not answer"),
+        "got {message}"
+    );
+    assert!(!message.contains("hooks.example"), "got {message}");
+}
+
+/// The taint, and why it is a taint rather than a wall: `"Bearer {KEY}"` is the single
+/// most common shape a credential takes, and a wall would leave `Authorization`
+/// unwritable. Both renderings are built in one walk, so the ordinary holes stay
+/// themselves in each.
+#[test]
+fn an_interpolation_holding_a_secret_is_one() {
+    let program = secret_program(
+        "effect E {
+  on @order.placed as e { @key order_id } {
+    let auth = \"Bearer {STRIPE_KEY} for {e.customer_id}\"
+    let a = http.post(\"https://api.example/charge\", { \"a\": 1 },
+      headers = { \"Authorization\": auth })
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let mut interpreter = Interpreter::with_log(&program, vec![placed(1, 7, 100)]);
+    interpreter.set_secret("STRIPE_KEY", "sk_live_abc");
+    interpreter.script("https://api.example/charge", [Reply::Status(200)]);
+    interpreter
+        .deliver("E", 0, &mut journal)
+        .expect("delivered");
+    let sent = &interpreter.requests()[0];
+    assert_eq!(
+        sent.wire.headers,
+        Json::obj([("Authorization", Json::str("Bearer sk_live_abc for 7"))])
+    );
+    assert_eq!(
+        sent.shown.headers,
+        Json::obj([(
+            "Authorization",
+            Json::str("Bearer {SECRET:STRIPE_KEY} for 7")
+        )]),
+        "an ordinary hole renders as itself in both, and only the secret one is named"
+    );
+}
+
+/// The taint survives a `let`, which is what makes it a type rule rather than a rule
+/// about how an expression is spelled. This is the same argument rule 12 makes for a
+/// seal, met one boundary over.
+#[test]
+fn the_taint_survives_a_let() {
+    assert_eq!(
+        secret_err(
+            "effect E {
+  on @order.placed as e { @key order_id } {
+    let auth = \"Bearer {STRIPE_KEY}\"
+    log(auth)
+  }
+}"
+        ),
+        "this is a deployment secret and a String is not; a secret is readable exactly where the network is reachable: it may be a url, a header value or a request body, and nothing else may observe it"
+    );
+}
+
+/// The sharp one, and the only sink whose reason is correctness rather than disclosure:
+/// a fold is a pure function of the log prefix and a credential is not in the log, so a
+/// rotation would make one answer differently on a replay.
+#[test]
+fn a_fold_cannot_read_a_secret() {
+    assert_eq!(
+        secret_err(
+            "effect E {
+  on @order.placed as e { @key order_id } {
+    fold seen: String = STRIPE_KEY
+      on @order.placed(customer_id: e.customer_id) => seen
+    log(\"x\")
+  }
+}"
+        ),
+        "a `fold` cannot read `STRIPE_KEY`; a fold is a pure function of the log prefix, and a secret is not in the log, so rotating one would make this fold answer differently on a replay"
+    );
+}
+
+/// Rule 16's one sentence, met from the other side. A command's whole surface is
+/// HTTP-facing and there is no crypto to write the motivating case against, so the
+/// path is: an effect verifies, then `invoke`s.
+#[test]
+fn only_an_effect_reads_a_secret() {
+    assert_eq!(
+        secret_err("command C(order_id: Uuid) { let key = STRIPE_KEY }"),
+        "only an effect reads a deployment secret; a command's whole surface is HTTP-facing; verify inbound, then `invoke`"
+    );
+}
+
+/// Every observable sink, one message each. `emit` and `invoke` would put a credential
+/// in the log, which is permanent; the rest publish it.
+#[test]
+fn a_secret_reaches_no_observable_sink() {
+    let sink = |body: &str| {
+        secret_err(&format!(
+            "effect E {{
+  on @order.placed as e {{ @key order_id }} {{ {body} }}
+}}"
+        ))
+    };
+    for statement in [
+        "log(STRIPE_KEY)",
+        "fail(STRIPE_KEY)",
+        "invoke RecordNotified { order_id: e.order_id, notification_id: STRIPE_KEY }",
+    ] {
+        assert!(
+            sink(statement).starts_with("this is a deployment secret and"),
+            "{statement} should not have been allowed"
+        );
+    }
+    assert!(
+        sink("if STRIPE_KEY == \"x\" { log(\"y\") }")
+            .starts_with("this is a deployment secret, so it cannot be compared")
+    );
+    assert!(
+        sink("let xs = [STRIPE_KEY]")
+            .starts_with("this is a deployment secret, so it cannot be an element of a list")
+    );
+    assert_eq!(
+        sink("log(STRIPE_KEY.trim())"),
+        "no method `trim` on Secret",
+        "no method reads one, which the method table gives for free"
+    );
+}
+
+/// An object literal is a body only when it is going out. Anywhere else it is an
+/// ordinary `Json`, and `Json.encode` would launder the taint into a `String` in one
+/// call.
+#[test]
+fn an_object_that_is_not_a_request_body_may_not_hold_one() {
+    assert!(
+        secret_err(
+            "effect E {
+  on @order.placed as e { @key order_id } { log(Json.encode({ \"k\": STRIPE_KEY })) }
+}"
+        )
+        .starts_with(
+            "this is a deployment secret, so it cannot be put in an object that is not an `http.*` body"
+        )
+    );
+    // And the bare form, which takes no target type and so never reaches the funnel
+    // every declared position goes through.
+    assert_eq!(
+        secret_err(
+            "effect E {
+  on @order.placed as e { @key order_id } { log(Json.encode(STRIPE_KEY)) }
+}"
+        ),
+        "this is a deployment secret, so it cannot be encoded into a string"
+    );
+}
+
+/// `Secret` is spellable in exactly one signature, which is what keeps it from ever
+/// appearing under a `List` or a `Map`: a diagnostic naming a type an author cannot
+/// write would be worse than the restriction.
+#[test]
+fn secret_is_spellable_only_in_an_effect_local_fn() {
+    assert_eq!(
+        secret_err("fn f(k: Secret) -> String { return \"x\" }"),
+        "only an effect-local `fn` can take a `Secret`; a credential is readable exactly where the network is, and a module `fn` is callable from a command and a projector; declare this helper inside the effect that calls out"
+    );
+    assert_eq!(
+        secret_err(
+            "effect E {
+  fn f(k: List(Secret)) { log(\"x\") }
+  on @order.placed as e { @key order_id } { log(\"x\") }
+}"
+        ),
+        "unknown type `Secret`",
+        "a list's element goes through the ordinary type parser, which is how `List(Response)` is rejected too"
+    );
+    // And the position it is for.
+    secret_program(
+        "effect E {
+  fn alert(url: Secret, text: String) {
+    let r = http.post(url, { \"content\": text })
+  }
+  on @order.placed as e { @key order_id } { alert(DISCORD_WEBHOOK, \"filed\") }
+}",
+    );
+}
+
+/// A deployment that did not set a required one. hekla's job is to make this
+/// unreachable by refusing to boot; this is the backstop for when it fails at that, and
+/// it wedges rather than skipping because an operator setting the value is what makes
+/// the retry succeed.
+#[test]
+fn a_required_secret_a_host_cannot_answer_wedges() {
+    let program = secret_program(
+        "effect E {
+  on @order.placed as e { @key order_id } {
+    let a = http.post(DISCORD_WEBHOOK, { \"content\": \"filed\" })
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let mut interpreter = Interpreter::with_log(&program, vec![placed(1, 7, 100)]);
+    interpreter.unset_secret("DISCORD_WEBHOOK");
+    let message = interpreter
+        .deliver("E", 0, &mut journal)
+        .expect_err("a required secret this deployment did not set")
+        .to_string();
+    assert!(
+        message.contains("this deployment has not set `DISCORD_WEBHOOK`"),
+        "got {message}"
+    );
+}
+
+/// An optional one is an ordinary branch instead. `Opt` composes for free, and the
+/// `let` is what a narrowing needs: narrowing is about a slot, so a bare read narrows
+/// no more than an inlined `const` does.
+#[test]
+fn an_optional_secret_is_a_branch() {
+    let program = secret_program(
+        "effect E {
+  on @order.placed as e { @key order_id } {
+    let dsn = SENTRY_DSN
+    if dsn.is_some() {
+      let a = http.post(dsn, { \"content\": \"filed\" })
+    } else {
+      log(\"no dsn\")
+    }
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let mut interpreter = Interpreter::with_log(&program, vec![placed(1, 7, 100)]);
+    interpreter.unset_secret("SENTRY_DSN");
+    interpreter
+        .deliver("E", 0, &mut journal)
+        .expect("an unset optional is an answer, not a failure");
+    assert_eq!(interpreter.lines(), ["no dsn"]);
+}
+
+/// The taint is carried by the value, so it has to survive a narrowing: the value a
+/// narrowed slot loads is still an `Opt` at run time, and a taint test that matched only
+/// the bare variant would build a plain string holding the credential and hand it to the
+/// url, the trace and the journal key.
+#[test]
+fn an_optional_secret_taints_an_interpolation_it_is_in() {
+    let program = secret_program(
+        "effect E {
+  on @order.placed as e { @key order_id } {
+    let dsn = SENTRY_DSN
+    if dsn.is_some() {
+      let a = http.post(\"https://x.example/{dsn}\", { \"a\": 1 })
+    }
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let mut interpreter = Interpreter::with_log(&program, vec![placed(1, 7, 100)]);
+    interpreter.set_secret("SENTRY_DSN", "dsn_abc");
+    interpreter.script("https://x.example/dsn_abc", [Reply::Status(200)]);
+    interpreter
+        .deliver("E", 0, &mut journal)
+        .expect("delivered");
+
+    let sent = &interpreter.requests()[0];
+    assert_eq!(sent.wire.url, "https://x.example/dsn_abc");
+    assert_eq!(sent.shown.url, "https://x.example/{SECRET:SENTRY_DSN}");
+    assert!(
+        !posted(&journal).contains("dsn_abc"),
+        "the key would otherwise move on a rotation, and hold the credential: {}",
+        posted(&journal)
+    );
+}
+
+/// `{ note }` and `{ note: note }` are two code paths to one slot, and rule 16 has to
+/// hold on both: a rule enforced on only the long form is a rule an author turns off by
+/// deleting six characters.
+#[test]
+fn the_field_shorthand_is_checked_like_the_long_form() {
+    let arm = |field: &str| {
+        secret_err(&format!(
+            "effect E {{
+  on @order.placed as e {{ @key order_id }} {{
+    let notification_id = STRIPE_KEY
+    invoke RecordNotified {{ order_id: e.order_id, {field} }}
+  }}
+}}"
+        ))
+    };
+    let expected = "this is a deployment secret and a Uuid is not; a secret is readable exactly where the network is reachable: it may be a url, a header value or a request body, and nothing else may observe it";
+    assert_eq!(arm("notification_id"), expected, "the shorthand");
+    assert_eq!(
+        arm("notification_id: notification_id"),
+        expected,
+        "the long form"
+    );
+}
+
+/// The allowance for an object member is a subtree flag, so it has to be taken off again
+/// at every position that is not a request. A `Json.encode` written inside a body is the
+/// case that finds it.
+#[test]
+fn a_json_encode_inside_a_body_is_still_not_a_body() {
+    assert!(
+        secret_err(
+            "effect E {
+  on @order.placed as e { @key order_id } {
+    let sent = http.post(\"https://x.example/h\", { \"a\": Json.encode({ \"b\": STRIPE_KEY }) })
+  }
+}"
+        )
+        .starts_with(
+            "this is a deployment secret, so it cannot be put in an object that is not an `http.*` body"
+        )
+    );
+}
+
+/// The suppression that keeps one mistake to one diagnostic runs in one direction only.
+/// A plain value written where a `Secret` is declared is an ordinary mismatch that
+/// nothing else reports, so suppressing it too made every declared `Secret` position
+/// accept anything at all.
+#[test]
+fn a_declared_secret_position_still_checks_its_type() {
+    assert_eq!(
+        secret_err(
+            "effect E {
+  fn alert(url: Secret) { let r = http.post(url, { \"a\": 1 }) }
+  on @order.placed as e { @key order_id } { alert(\"https://x.example/h\") }
+}"
+        ),
+        "expected Secret, found String"
+    );
+}
+
+/// The allowance for a body member travels into a nested object literal and **nowhere
+/// else**. An `invoke` argument that happens to be written inside a body is an ordinary
+/// declared position, and inheriting the request put a credential into the log, where it
+/// is permanent and a rotation cannot reach it.
+#[test]
+fn the_request_allowance_does_not_travel_into_a_typed_position() {
+    let arm = |body: &str| {
+        secret_err(&format!(
+            "effect E {{
+  fn wrap(doc: Json) -> Json {{ return doc }}
+  on @order.placed as e {{ @key order_id }} {{
+    let sent = http.post(\"https://x.example/h\", {body})
+  }}
+}}"
+        ))
+    };
+    // Into the log, through a command that takes a `Json`.
+    assert!(
+        arm(
+            "{ \"a\": invoke RecordNotified { order_id: e.order_id, notification_id: STRIPE_KEY } }"
+        )
+        .starts_with("this is a deployment secret and"),
+        "an invoke argument is a declared position wherever it is written"
+    );
+    // Into a value a `fn` hands back, which anything may then do anything with.
+    assert!(
+        arm("wrap({ \"b\": STRIPE_KEY })").starts_with(
+            "this is a deployment secret, so it cannot be put in an object that is not an `http.*` body"
+        ),
+        "only a literal body object is the request"
+    );
+    // And the shape it is all for still works, at depth.
+    secret_program(
+        "effect E {
+  on @order.placed as e { @key order_id } {
+    let sent = http.post(\"https://x.example/h\", { \"outer\": { \"inner\": STRIPE_KEY } })
+  }
+}",
+    );
+}
+
+/// `&&`, `||` and `!` reach their operands without going through `expr`, so `check_bool`
+/// is their compensating check and has to carry every rule `expr` runs. It did not carry
+/// rule 16's, and `check_type`'s stand-down then suppressed the generic message too, so
+/// `if KEY { .. }` was accepted and wedged at run time.
+#[test]
+fn a_secret_is_not_a_boolean_operand() {
+    let arm = |cond: &str| {
+        secret_err(&format!(
+            "effect E {{
+  on @order.placed as e {{ @key order_id }} {{ if {cond} {{ log(\"x\") }} }}
+}}"
+        ))
+    };
+    for condition in ["STRIPE_KEY && true", "!STRIPE_KEY", "true || STRIPE_KEY"] {
+        assert!(
+            arm(condition).starts_with("this is a deployment secret and a Bool is not"),
+            "{condition} should have been rejected"
+        );
+    }
+}
+
+/// The other untyped element position. Without this a comprehension synthesises
+/// `List(Secret)` -- a type rule 16 promises never to print -- and `.contains` on one is
+/// an equality oracle over two credentials that answers in a loggable `Bool`.
+#[test]
+fn a_comprehension_cannot_yield_a_secret() {
+    assert!(
+        secret_err(
+            "effect E {
+  on @order.placed as e { @key order_id } { let xs = [STRIPE_KEY for i in [1, 2]] }
+}"
+        )
+        .starts_with("this is a deployment secret, so it cannot be an element of a list")
+    );
+}
+
+/// An absent optional has no rendering, and the conversion table would give the literal
+/// text `null`. Silently, into whatever the interpolation builds -- a url pointing
+/// somewhere else, with no diagnostic behind it. Narrowing is what every other position
+/// already asks for.
+#[test]
+fn an_optional_secret_must_be_narrowed_before_it_is_interpolated() {
+    assert_eq!(
+        secret_err(
+            "effect E {
+  on @order.placed as e { @key order_id } {
+    let a = http.get(\"https://x.example/{SENTRY_DSN}\")
+  }
+}"
+        ),
+        "this is an optional deployment secret, so it cannot be interpolated; an absent one would render as `null` into whatever this builds; read it into a `let` and narrow it with `.is_some()` first"
+    );
+    // `none` is not a credential, so a comparison names the operand that is.
+    assert_eq!(
+        secret_err(
+            "effect E {
+  on @order.placed as e { @key order_id } { if SENTRY_DSN == none { log(\"x\") } }
+}"
+        ),
+        "this is a deployment secret, so it cannot be compared"
     );
 }

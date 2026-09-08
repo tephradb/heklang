@@ -321,6 +321,35 @@ effects and no result is honest. A call to a void one is a **statement**, never 
 
 **A fold arm may not call an effect-local `fn`**, because a fold must reproduce without a journal.
 
+## 16. Deployment secrets
+
+`secret NAME` declares a credential the deployment owes the program; `secret NAME?` one it may not
+set. See `language.md` §9a for the declaration. Two kinds of credential, and only the second is new:
+
+- **Per-tenant** (a shop's OAuth token) arrives as a command, lands in the log as a `@subject` field,
+  and an effect folds it out and `reveal`s it. That is rule 12 and it is unchanged.
+- **Per-deployment** (a Discord webhook, a Stripe key) is not a domain fact, rotates out of band and
+  differs between environments. It is a `secret`, never a `const` and never an event.
+
+One rule: **readable exactly where the network is reachable, and observable nowhere else.**
+
+| May be | May not be |
+| --- | --- |
+| an `http.*` url, header value or body member | `log`, `fail`, `emit`, `put`, `invoke` |
+| a `Secret` parameter or return of an effect-local `fn` | a `fold` seed, arm or filter |
+| a `let`, and a string interpolation (which becomes a `Secret`) | compared, in arithmetic, or in a `List`/`Map`/record |
+| asked `.is_some()` / `.is_none()` | read outside an effect arm or effect-local `fn` |
+
+An optional one narrows through a `let`, not from a bare read: `let dsn = SENTRY_DSN` then
+`if dsn.is_some()`.
+
+**A secret carries two renderings.** The credential goes on the wire; everything else -- the journal
+key, a transport failure's message, any print -- gets `{SECRET:NAME}`. So a rotation cannot move a
+journal key or a digest hash, which is what keeps replay coverage on invocations already recorded.
+
+In a test, a declared secret answers `secret:NAME` with no setup, and
+`secret NAME = "value"` (or `= none`) in the setup section overrides it. See `testing.md`.
+
 ## 12. `reveal` and the seal
 
 `@subject(customer_id)` on an event field is the authored form; `Sealed(String, customer_id)` is what

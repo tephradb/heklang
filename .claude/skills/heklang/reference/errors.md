@@ -105,6 +105,7 @@ The set is closed: every diagnostic heklang can produce is one of these.
 | `seal-boundary` | sealed content leaving without `reveal` | move it, ask `.is_some()`/`.is_none()`, or `reveal` it in an effect arm; a `fn` parameter, an interpolation, a comparison, a body and `unwrap_or` all take it out; a sealed field cannot be an arm's `@key` either |
 | `erase-subject` | an `erase` whose subject or id is not one | the inferring form takes a trigger field; the named form takes a declared subject name and a value of the id's type, with no `reveal` in it |
 | `erase-order` | a `reveal` reachable from an `erase` | move the reveal above the erase, or into a branch the erase cannot reach; inside a `for` body, any erase reaches every reveal |
+| `secret-boundary` | a deployment credential reaching something that observes it | send it instead: a url, a header value, a body member, or an interpolation that becomes one. `log`, `fail`, `emit`, `invoke`, a comparison, a list, a record, `Json.encode` and every method are all out; a `fold` reading one is `fold-restriction`, and reading one outside an effect is `wrong-context` |
 
 ### Whole-program (these report one at a time, after the passes)
 

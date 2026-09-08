@@ -67,7 +67,9 @@ action and in `expect invoke` alike. Parentheses stay positional.
 ### `test` is the only word this construct reserves
 
 `given`, `respond`, `erased`, `run`, `project`, `deliver`, `expect`, `no`, `nothing` and `skipped`
-are claimed **only inside a test body**. A construct that only tests use should cost no name anywhere
+are claimed **only inside a test body**. `secret` is the one word this construct shares with a
+declaration rather than reserving for itself (`docs/effects.md` rule 16), and it is soft in both
+places, so a field or a parameter of that name stays writable. A construct that only tests use should cost no name anywhere
 else, and an entity field called `given` or a command parameter called `no` stays writable. This is
 the same device the soft builtin names use (`docs/effects.md` rule 11).
 
@@ -109,14 +111,47 @@ produces.
 | `respond "<url>" <status> { <json> }` | the same, with a body |
 | `respond "<url>" timeout` | a transport failure, which rule 5 of `docs/effects.md` absorbs and retries |
 | `erased <subject> "<id>"` | that subject's key is already destroyed |
+| `secret <NAME> = "<value>"` | this deployment holds that credential |
+| `secret <NAME> = none` | this deployment does not set it |
 
 Replies are a queue per URL, taken in order, so scripting a 503 then a 200 is how a test says "the
 first attempt was absorbed". `erased` is the only way to write a shredded-key test, since a test
 cannot call `erase` itself.
 
-All three script the **harness**, which is the in-memory host `docs/host.md` describes. That is what
-keeps rule 8 honest from the other side too: a test writes a world with the same three levers an
-embedder has, and no more.
+All four script the **harness**, which is the in-memory host `docs/host.md` describes. That is what
+keeps rule 8 honest from the other side too: a test writes a world with the same four levers an
+embedder has, and no more. Each one is a host trait met from the test side: a reply is `Http`, a
+shredded key is `Keys`, and a credential is `Secrets`.
+
+### A secret needs no setup, and the override is for when the shape matters
+
+A declared `secret NAME` resolves in the harness to the literal `secret:NAME`. Deterministic and
+obviously not a real value, so an effect that reads one runs with no setup line at all and the
+expectation reads as itself:
+
+```
+given @claim.filed { shop_id: 7, claim_id: 1 }
+respond "secret:DISCORD_WEBHOOK" 200
+
+deliver SendDiscordAlerts
+
+expect http.post("secret:DISCORD_WEBHOOK", { "content": "claim 1 filed" })
+```
+
+The directive is the override, for a value that has to parse as a URL or carry a prefix an arm
+branches on. It is **a setup line rather than a `given`**, and the reason is section 2: a `given` is
+a log, and a credential is not in one. It is also where it wants to be read, because a secret's value
+is usually the URL the next line answers, and a form that separated the two by the whole log would
+make the pair unreadable:
+
+```
+secret DISCORD_WEBHOOK = "https://example.test/hook"
+respond "https://example.test/hook" 200
+```
+
+`= none` is a deployment that did not set it, and it is the only way to reach two things: the absent
+branch of a `secret NAME?`, and the missing-credential wedge for a required one, since every other
+name answers with the stand-in.
 
 ## 4. The action
 
@@ -233,6 +268,16 @@ same JSON, so an expectation writes what the wire carries. That is `docs/effects
 fidelity met from the test side: the rule that keeps `10.50` from becoming `10.5` is the same rule
 that keeps `3.0` from becoming `3`. The failure names both, so it says what to write.
 
+**A credential is compared as the value the test supplied, not as its redaction.** `docs/effects.md`
+rule 16 gives a secret two renderings, and a runtime prints the one that names it. A test is the
+other case: it wrote the value with `secret NAME = "..."`, or it got the stand-in, so the only
+rendering it can name is the one it put in. Redaction is about a **runtime's** observable output, and
+a test asserting on a redaction would be asserting on a constant.
+
+That is the same rule section 6 already states for sealed content one boundary over: the harness
+stores content as it was given, and the test meets it there. Someone will read `Effectful::Http`
+holding a plaintext url and file it as a leak, so it is written down here.
+
 **`erase` reads the same here as in an arm.** The expectation names the subject and the id, and so
 does the statement's named form (`erase(customer_id, id)` in `docs/effects.md` rule 9), so the two
 are one spelling met twice rather than two spellings met once.
@@ -254,6 +299,9 @@ only other output is a decision not to call out.
 - **An effect's live boundary** (`docs/effects.md` rule 15). It is resolved by the runtime at first
   activation and is not in the log, so a test over a constructed log has nothing to say about it. See
   section 4.
+- **What a deployment resolved a secret from.** A test says which value a world holds, never whether
+  it came from an environment, a file or a vault: that is a host's business (`docs/host.md`), and a
+  program cannot see it either.
 
 Everything the runner asserts goes through the same public API an embedder has, which is what keeps
 this list honest: a test cannot see anything a program cannot.
@@ -281,6 +329,11 @@ being unable to run at all, and collapsing them makes a broken command look like
 A test runs against a fresh interpreter with only its own `given` log, so tests cannot affect each
 other and the order they are declared in does not matter, which is the same property
 `docs/modules.md` claims for every other declaration.
+
+`World::secret` is **defaulted**, unlike the other three, so a world written before rule 16 existed
+still compiles. Its default refuses and says so, which is the right answer: a test that writes the
+directive against a world that cannot honour it should be told, not silently given the world's own
+answer.
 
 `run_tests_in(&program, &mut fresh)` is the same run against a `World` an embedder brings: its log,
 its read models, its key store. `fresh` is called once per test rather than once per run, because

@@ -47,6 +47,10 @@ Three more exist and **cannot be written in a type position**:
 
 - `Response`, spellable in a `fn` signature and nowhere else (`docs/functions.md`), because a
   transport result is not data an event or a column may hold.
+- `Secret`, a deployment credential (`docs/effects.md` rule 16), spellable in an **effect-local**
+  `fn` signature and nowhere else. A module `fn` is callable from a command and a projector, so one
+  taking a credential would have a parameter nothing could ever fill. Like the two below it, it is
+  kept out of `List` and `Map` by living above the ordinary type parser rather than in it.
 - `Outcome`, the result of an `invoke`. It has no spelling outside a `fn` signature; it is
   otherwise only consumed by `.ok()`, `.code()` and `.message()` on the expression that produced
   it. `.code()` is a `String?`, and a declared refusal name is that code, so
