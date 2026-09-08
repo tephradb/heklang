@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://git.tqwewe.com/tephra/heklang/compare/tree-sitter-hek-v0.3.0...tree-sitter-hek-v0.4.0) - 2026-09-08
+
+### Added
+
+- [**breaking**] a deployment secret is readable where the network is
+
 ## [0.3.0](https://git.tqwewe.com/tephra/heklang/compare/tree-sitter-hek-v0.2.0...tree-sitter-hek-v0.3.0) - 2026-09-06
 
 ### Added

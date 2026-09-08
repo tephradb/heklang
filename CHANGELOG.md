@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://git.tqwewe.com/tephra/heklang/compare/heklang-v0.4.0...heklang-v0.5.0) - 2026-09-08
+
+### Added
+
+- [**breaking**] a deployment secret is readable where the network is
+
+### Fixed
+
+- *(fmt)* a comment inside a construct no longer deletes source
+
 ## [0.4.0](https://git.tqwewe.com/tephra/heklang/compare/heklang-v0.3.0...heklang-v0.4.0) - 2026-09-06
 
 ### Added
