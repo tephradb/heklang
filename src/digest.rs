@@ -156,6 +156,29 @@ impl Entry {
         }
     }
 
+    /// The field names an `event` or a `record` form declares, sorted, as the form holds
+    /// them. Empty for every other kind.
+    ///
+    /// A host comparing a declaration it recorded against the one it is being asked to
+    /// deploy has only the packed form to read the old side from, and what it usually
+    /// wants to know is which fields are new. Written here because the shape of an
+    /// `(f <name> <type> ..)` node belongs to this module: a caller picking it apart
+    /// from outside would be a second copy of the digest format, free to drift.
+    pub fn field_names(&self) -> Vec<&str> {
+        if !matches!(self.kind, Kind::Event | Kind::Record) {
+            return Vec::new();
+        }
+        self.form
+            .rest()
+            .iter()
+            .filter(|part| part.head() == Some("f"))
+            .filter_map(|part| match part.rest().first() {
+                Some(Sexp::Atom(name)) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Reads one stored row back. The signature is passed rather than re-derived so that
     /// what was stored is what comes back, even across a version where derivation changed.
     pub fn from_packed(form: &str, signature: Option<&str>) -> Result<Self, SexpError> {
@@ -537,6 +560,12 @@ fn event(def: &EventDef) -> Sexp {
         if let Some(max) = field.max_len {
             part.push(node("max", [atom(max.to_string())]));
         }
+        // What a reader gets out of a payload that predates the field, so it is part of
+        // the shape rather than of a body: changing it changes every historical event
+        // this declaration describes.
+        if let Some(value) = &field.absent {
+            part.push(node("absent", [literal(value)]));
+        }
         if !field.indexed {
             part.push(atom("no_index"));
         }
@@ -567,6 +596,9 @@ fn record(def: &RecordDef) -> Sexp {
         let mut part = vec![atom(field.name.clone()), ty(&field.ty)];
         if let Some(max) = field.max_len {
             part.push(node("max", [atom(max.to_string())]));
+        }
+        if let Some(value) = &field.absent {
+            part.push(node("absent", [literal(value)]));
         }
         parts.push(node("f", part));
     }

@@ -3,7 +3,8 @@ use std::fmt::{self, Write as _};
 use std::sync::Arc;
 
 use crate::ir::{
-    EntityField, EnumDef, EventPath, Ident, Literal, Number, Program, Projector, RecordDef, Type,
+    EntityField, EnumDef, EventPath, FieldDef, Ident, Literal, Number, Program, Projector,
+    RecordDef, Type,
 };
 use crate::scaled::{self, Rounding};
 
@@ -156,8 +157,10 @@ impl Value {
     /// rather than two kept in step. It takes the type rather than inferring one,
     /// because a `Money(2)` and a `Money(3)` are different types that read different
     /// values out of the same string and only a declaration knows which was written.
+    /// A missing key is a mismatch: this is the reading of a body that has to satisfy
+    /// the declaration as it stands today. [`stored_field`] is the other reading.
     pub fn from_json(json: &Json, ty: &Type, defs: Defs<'_>) -> Result<Value, Mismatch> {
-        read_json(json, ty, defs, &mut Vec::new())
+        read_json(json, ty, defs, Origin::Body, &mut Vec::new())
     }
 
     /// The plaintext behind a seal, read back as the type the declaration gave it.
@@ -597,6 +600,11 @@ pub fn parse_scaled(text: &str, ty: &Type) -> Option<Value> {
     Some(literal(&lit))
 }
 
+/// The word [`Mismatch::found`] carries when the payload held no key at all. Named
+/// rather than written twice, because [`Mismatch::is_absence`] is a contract a bare
+/// string literal in two places would not keep.
+const NOTHING: &str = "nothing";
+
 /// What a stored value was not.
 ///
 /// Rule 8's table read backwards can fail, and it fails on **data** rather than on a
@@ -612,6 +620,19 @@ pub struct Mismatch {
     /// What was stored instead, as a shape rather than as content: a mismatch is
     /// reported to an operator, and the content may be personal.
     pub found: String,
+}
+
+impl Mismatch {
+    /// Whether the payload had no key for this field at all, rather than a key holding
+    /// the wrong shape.
+    ///
+    /// The one fault a declaration can answer for itself: a field younger than the log
+    /// reads as its `@absent` value. A host deciding whether a deployment can read its
+    /// own history asks this to tell "give this field an absent value" from "this value
+    /// never fitted", which are different faults with different fixes.
+    pub fn is_absence(&self) -> bool {
+        self.found == NOTHING
+    }
 }
 
 impl fmt::Display for Mismatch {
@@ -662,10 +683,80 @@ fn key_from_text(text: &str, ty: &Type, defs: Defs<'_>) -> Option<Key> {
     })
 }
 
+/// Where a JSON value came from, which is what decides what a missing key means.
+///
+/// A log is append-only, so a payload in one was written under whatever declaration was
+/// current at the time and may predate a field the declaration carries now. A body
+/// arriving over a wire was written against the declaration as it stands. Those are
+/// different questions, and only the first may be answered by `@absent`: relaxing the
+/// second would let a caller omit a field and be given a value it never sent.
+///
+/// Internal on purpose: which reading a call is doing is the call's own name, not a
+/// parameter. [`Value::from_json`] is the body one and [`stored_field`] is the stored one,
+/// so there is nothing for a caller outside the crate to pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Origin {
+    /// A body that has to satisfy the declaration as it stands: a missing key is a
+    /// mismatch, whatever `@absent` says.
+    Body,
+    /// A payload a host stored, possibly under an older declaration.
+    Stored,
+}
+
+/// One stored field as its declaration reads it.
+///
+/// `stored` is `None` when the payload holds no such key at all, and that is the whole
+/// distinction this exists for. A key that is there holding `null` is a value a producer
+/// wrote; a key that is not there is a field the payload predates. A host that flattened
+/// the two would read an absent optional and a field older than the log the same way, and
+/// `@absent` would have nothing to key on.
+pub fn stored_field(
+    field: &FieldDef,
+    stored: Option<&Json>,
+    defs: Defs<'_>,
+) -> Result<Value, Mismatch> {
+    // Empty, and the field's own name is put on the front only if something went wrong,
+    // so a mismatch inside a record still reads `note.kind: ...` without the success
+    // path paying for a `Vec` and a clone per field. A host decodes every field of every
+    // event it reads, so this is the hottest allocation in the crate.
+    let mut path = Vec::new();
+    let read = match stored {
+        Some(json) => read_json(json, &field.ty, defs, Origin::Stored, &mut path),
+        None => missing(field.absent.as_ref(), &field.ty, Origin::Stored, &path),
+    };
+    read.map_err(|mut why| {
+        why.path.insert(0, field.name.clone());
+        why
+    })
+}
+
+/// What a key the payload does not hold reads as.
+///
+/// Reported as `nothing` rather than `null` when there is no answer, because the two are
+/// different faults: `null` is a producer writing the wrong shape, and `nothing` is a
+/// declaration that has moved on from what is stored.
+fn missing(
+    absent: Option<&Literal>,
+    ty: &Type,
+    origin: Origin,
+    path: &[Ident],
+) -> Result<Value, Mismatch> {
+    match (absent, ty) {
+        (Some(value), _) if origin == Origin::Stored => Ok(literal(value)),
+        (_, Type::Opt(inner)) => Ok(Value::none(inner.as_ref().clone())),
+        _ => Err(Mismatch {
+            path: path.to_vec(),
+            expected: ty.clone(),
+            found: NOTHING.into(),
+        }),
+    }
+}
+
 fn read_json(
     json: &Json,
     ty: &Type,
     defs: Defs<'_>,
+    origin: Origin,
     path: &mut Vec<Ident>,
 ) -> Result<Value, Mismatch> {
     let wrong = |found: String, path: &Vec<Ident>| Mismatch {
@@ -693,7 +784,7 @@ fn read_json(
         // survives verbatim: `Opt(Sealed(String, x))` must not come back as `Opt(String)`.
         (Type::Opt(inner), _) => Value::Opt {
             inner: inner.as_ref().clone(),
-            value: Some(Box::new(read_json(json, inner, defs, path)?)),
+            value: Some(Box::new(read_json(json, inner, defs, origin, path)?)),
         },
 
         (Type::Bool, Json::Bool(value)) => Value::Bool(*value),
@@ -747,11 +838,14 @@ fn read_json(
             };
             let mut built = BTreeMap::new();
             for field in &def.fields {
-                // An absent key reads as `null`, so a missing optional is absent and a
-                // missing required field is the mismatch it actually is.
-                let found = fields.get(&field.name).unwrap_or(&Json::Null);
                 path.push(field.name.clone());
-                let value = read_json(found, &field.ty, defs, path)?;
+                // A record inside a stored event carries that event's history, so a key
+                // that is not there is the same question one level up: the declaration
+                // answers it, or it is the mismatch it actually is.
+                let value = match fields.get(&field.name) {
+                    Some(found) => read_json(found, &field.ty, defs, origin, path)?,
+                    None => missing(field.absent.as_ref(), &field.ty, origin, path)?,
+                };
                 path.pop();
                 built.insert(field.name.clone(), value);
             }
@@ -764,7 +858,7 @@ fn read_json(
             let mut built = Vec::with_capacity(items.len());
             for (index, item) in items.iter().enumerate() {
                 path.push(index.to_string());
-                built.push(read_json(item, inner, defs, path)?);
+                built.push(read_json(item, inner, defs, origin, path)?);
                 path.pop();
             }
             Value::list(inner.as_ref().clone(), built)
@@ -778,7 +872,7 @@ fn read_json(
                     return Err(wrong("a key it cannot hold".into(), path));
                 };
                 path.push(text.clone());
-                let held = read_json(held, value, defs, path)?;
+                let held = read_json(held, value, defs, origin, path)?;
                 path.pop();
                 built.insert(at, held);
             }

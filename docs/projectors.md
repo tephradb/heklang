@@ -355,6 +355,12 @@ succeeds. `tests/projectors.rs` asserts it directly.
 carry its own expression arena for a feature nothing yet uses. Literals cover the cases that come up,
 and relaxing this later is purely additive.
 
+**A column's `=` is not an event field's `@absent`.** They resolve their literal by the same rule and
+they mean different things. `=` is a **write**: the value a `patch` materialises a new row at, reached
+whenever a row is created. `@absent` is a **read**: what a stored event that predates the field is taken
+to have said (`docs/declarations.md`). A read model is rebuilt from the log, so a column has no history
+of its own to answer for, which is why `@absent` on one is not an annotation.
+
 ## 6. Enum defaults
 
 An enum used as a non-optional entity field needs a `@default` variant marked in its declaration.

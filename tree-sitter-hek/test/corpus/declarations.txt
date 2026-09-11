@@ -173,6 +173,87 @@ event @shop.connected {
           (integer_literal))))))
 
 ================================================================================
+an absent value is an annotation argument of any literal shape
+================================================================================
+
+record Note {
+  body: String @absent("none given"),
+}
+
+event @order.placed {
+  order_id: Uuid,
+  note: String @absent(""),
+  discount: Money(2) @absent(0.00) @no_index,
+  meta: Json @absent(Json.empty),
+  tags: List(String) @absent([]),
+  detail: Note,
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (record_declaration
+    (type_identifier)
+    (record_field
+      (identifier)
+      (type
+        (primitive_type))
+      (annotation
+        (annotation_name)
+        (annotation_arguments
+          (string
+            (string_content))))))
+  (event_declaration
+    (event_path)
+    (event_field
+      (identifier)
+      (type
+        (primitive_type)))
+    (event_field
+      (identifier)
+      (type
+        (primitive_type))
+      (annotation
+        (annotation_name)
+        (annotation_arguments
+          (string))))
+    (event_field
+      (identifier)
+      (type
+        (scaled_type
+          (integer_literal)))
+      (annotation
+        (annotation_name)
+        (annotation_arguments
+          (decimal_literal)))
+      (annotation
+        (annotation_name)))
+    (event_field
+      (identifier)
+      (type
+        (primitive_type))
+      (annotation
+        (annotation_name)
+        (annotation_arguments
+          (field_expression
+            (identifier)
+            (identifier)))))
+    (event_field
+      (identifier)
+      (type
+        (list_type
+          (type
+            (primitive_type))))
+      (annotation
+        (annotation_name)
+        (annotation_arguments
+          (list))))
+    (event_field
+      (identifier)
+      (type
+        (type_identifier)))))
+
+================================================================================
 fn with a return type
 ================================================================================
 

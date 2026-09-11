@@ -2055,9 +2055,10 @@ fn a_path_in_two_arms_is_still_rejected() {
     assert_eq!(message, "this arm already lists @order.placed");
 }
 
-/// Only what every listed type shares, checked on name, type and `@subject`, so a
-/// `reveal` through a multi-path binding cannot reach a field that is encrypted on one
-/// path and plain on another.
+/// Only what every listed type shares, checked on name, type, `@subject` and `@absent`,
+/// so a `reveal` through a multi-path binding cannot reach a field that is encrypted on
+/// one path and plain on another, and a bind cannot read one value on one path and a
+/// different one on another for the same missing key.
 #[test]
 fn a_multi_path_binding_names_only_shared_fields() {
     // `email` is on @order.placed and not on @order.cancelled.
@@ -2068,7 +2069,7 @@ fn a_multi_path_binding_names_only_shared_fields() {
 }");
     assert_eq!(
         message,
-        "`email` is not shared by @order.placed, @order.cancelled, so an arm listing them cannot name it; a binding names only what every listed type has, with the same type and the same `@subject`"
+        "`email` is not shared by @order.placed, @order.cancelled, so an arm listing them cannot name it; a binding names only what every listed type has, and reads it the same way: the same type, the same `@subject` and the same `@absent`"
     );
 
     // `customer_id` is on both, with the same type, so it is nameable.
@@ -3298,8 +3299,13 @@ fn a_stored_value_of_the_wrong_shape_names_where_it_was() {
     assert!(rendered.ends_with("stored a string"), "{rendered}");
 }
 
-/// An absent key reads as `null`, so a missing optional is absent and a missing required
-/// field is the mismatch it actually is rather than a zero quietly standing in.
+/// A missing optional is absent and a missing required field is the mismatch it actually
+/// is rather than a zero quietly standing in.
+///
+/// It is reported as `nothing` rather than as `null`, because the two are different
+/// faults: a stored `null` is a producer writing the wrong shape, and a key that is not
+/// there at all is a payload written before the field existed. Only the second is a
+/// question `@absent` may answer, and only for a stored payload rather than a body.
 #[test]
 fn an_absent_key_fills_an_optional_and_fails_a_required_field() {
     let program = shapes();
@@ -3321,6 +3327,13 @@ fn an_absent_key_fills_an_optional_and_fails_a_required_field() {
     let err = Value::from_json(&short, &Type::Record("Line".to_string()), defs)
         .expect_err("qty is missing");
     assert_eq!(err.path, vec!["qty".to_string()]);
+    assert_eq!(err.found, "nothing");
+
+    // And a key that *is* there holding a null is the other fault, still reported as the
+    // shape it holds.
+    let nulled = Json::obj([("sku", Json::str("A1")), ("qty", Json::Null)]);
+    let err = Value::from_json(&nulled, &Type::Record("Line".to_string()), defs)
+        .expect_err("a null is not an Int");
     assert_eq!(err.found, "null");
 }
 

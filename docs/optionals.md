@@ -16,6 +16,13 @@ Three methods read one:
 default-on-absent coercion, because each of those is a way to read an absent value without having
 written down what to do about it.
 
+**One thing `T?` is not for**, and it is easy to reach for: a field that is only absent on the events
+that predate it. A log is append-only, so adding a field to an event leaves every event already in the
+log without one, and `T?` does make those readable. What it costs is that every handler deals forever
+with an optional it will only ever see absent on history, and the declaration can no longer say which
+of the two reasons it is optional for. `@absent(<literal>)` says the same thing without giving up the
+type (`docs/declarations.md`). Keep `T?` for absence that is part of the domain.
+
 ## Where a bare `T` fills a `T?`
 
 Writing a `T` into a position declared `T?` wraps it. This is one rule, not a list of special cases,

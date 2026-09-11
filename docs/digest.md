@@ -176,6 +176,13 @@ Two deploys then compare with a join on `(kind, name)`: rows only on the left we
 the right were added, a differing `signature_hash` is a compatibility question and a differing
 `hash` alone is a change of behaviour. Expand only the rows that differ.
 
+**Keep the superseded rows.** A host deciding whether a deployment can still read its own log needs
+every shape the log was ever written under, not the latest: a field removed in one deploy and put
+back in the next leaves events in between that neither end resembles, and a comparison against the
+current row alone sees the two ends agree. `Entry::field_names` reads the field list back off a
+stored `event` or `record` form for exactly that comparison, so the shape of an `(f ..)` node stays
+this crate's to know.
+
 ## 9. The signature is what is visible outside the program
 
 A second, smaller form per entry holding only what something outside could notice, with its own
@@ -184,9 +191,9 @@ body never has to be decoded to run a compatibility check.
 
 | Kind | Signature |
 | --- | --- |
-| `event` | the declaration: path, fields, types, `@subject`, `@max`, `@no_index` |
+| `event` | the declaration: path, fields, types, `@subject`, `@max`, `@absent`, `@no_index` |
 | `enum` | the declaration: variants and the default, by name |
-| `record` | the declaration: fields, types, `@max` |
+| `record` | the declaration: fields, types, `@max`, `@absent` |
 | `command` | name, parameters in order with their types, and the refusal codes it can answer with |
 | `projector` | name, and per entity: columns with types, `@max` and defaults, the key, the indexes |
 | `effect` | name, and per arm: the events it subscribes to, its delivery modifier and its partition key |
@@ -264,7 +271,7 @@ capitalised, which keeps them apart from the lowercase heads a value uses: `(Mon
 | | Heads |
 | --- | --- |
 | declaration | `event` `enum` `record` `function` `command` `projector` `effect` `test` |
-| structure | `params` `p` `f` `col` `key` `index` `entity` `on` `events` `delivery` `bind` `env` `now` `stage` `pre` `post` `fold` `slice` `filter` `acc` `variants` `default` `max` `no_index` `returns` `body` `sig` `rejects` |
+| structure | `params` `p` `f` `col` `key` `index` `entity` `on` `events` `delivery` `bind` `env` `now` `stage` `pre` `post` `fold` `slice` `filter` `acc` `variants` `default` `absent` `max` `no_index` `returns` `body` `sig` `rejects` |
 | statement | `set` `if` `then` `else` `emit` `put` `patch` `update` `delete` `fail` `log` `erase` `for` `in` `index` `item` `do` `discard` `call` `return` `value` `outcome` |
 | type | `Bool` `Int` `String` `Uuid` `Timestamp` `Rounding` `Json` `Response` `Outcome` `Secret` `(Decimal n)` `(Money n)` `(Enum N)` `(Record N)` `(List t)` `(Map k v)` `(Opt t)` `(Sealed t subject)` |
 | value | `$n` `bool` `int` `dec` `money` `str` `uuid` `ts` `none` `some` `variant` `rounding` `array` `of` `map-empty` `obj` `json-num` `new` |
@@ -321,9 +328,14 @@ exactly those three:
 ```
 
 `(delivery every)` is written even though `on` writes no word, which is the one place a default is
-spelled out rather than left absent. Everywhere else an absent `(max ..)` or `no_index` means the
-default; here the form feeds a signature a deploy gate reads, and there an absent field and a default
-one should not have to be told apart.
+spelled out rather than left absent. Everywhere else an absent `(max ..)`, `(absent ..)` or `no_index`
+means the default; here the form feeds a signature a deploy gate reads, and there an absent field and a
+default one should not have to be told apart.
+
+Writing a node only when it is there is also what lets a new one be added at all. A field carrying no
+`@absent` renders exactly as it did before the annotation existed, so its hash does not move and a
+deployment does not read every event in every project as changed the first time a newer version loads
+it. That is why `VERSION` did not need to move for it.
 
 One child per line when a list has to break, rather than filling the width, because a filled line
 reflows when anything is inserted and a diff should point at what changed.

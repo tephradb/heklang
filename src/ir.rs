@@ -335,6 +335,17 @@ pub struct RecordField {
     /// The only place a string inside a record can be bounded: an entity column of
     /// record type has nothing to put a length on. See `docs/declarations.md`.
     pub max_len: Option<usize>,
+    /// `@absent(<literal>)`: what this field reads as in a stored payload written
+    /// before the field existed. See [`FieldDef::absent`].
+    pub absent: Option<Literal>,
+}
+
+impl RecordField {
+    /// See [`FieldDef::answers_absence`]. A record reached from an event carries the
+    /// same history one level down, so it answers the question the same way.
+    pub fn answers_absence(&self) -> bool {
+        self.absent.is_some() || matches!(self.ty, Type::Opt(_))
+    }
 }
 
 /// A module-scope constant. The value is a literal, so the declaration needs no
@@ -441,6 +452,15 @@ pub struct FieldDef {
     pub subject: Option<Ident>,
     pub indexed: bool,
     pub max_len: Option<usize>,
+    /// `@absent(<literal>)`: what this field reads as in a stored event written before
+    /// the field existed.
+    ///
+    /// A log is append-only, so a field added today is missing from every event already
+    /// in it, and a host reading one back has nothing to put in the slot. An optional
+    /// type answers that on its own; this is the answer for a field that should stay
+    /// required. It is a read-time fallback and nothing else: an `emit` names every
+    /// field, so no append can ever reach it.
+    pub absent: Option<Literal>,
 }
 
 impl FieldDef {
@@ -451,6 +471,7 @@ impl FieldDef {
             subject: None,
             indexed: true,
             max_len: None,
+            absent: None,
         }
     }
 
@@ -467,6 +488,20 @@ impl FieldDef {
     pub fn max_len(mut self, len: usize) -> Self {
         self.max_len = Some(len);
         self
+    }
+
+    pub fn absent(mut self, value: Literal) -> Self {
+        self.absent = Some(value);
+        self
+    }
+
+    /// Whether a stored event written before this field existed can still be read.
+    ///
+    /// Either the type can say the value is absent, or `@absent` says what absence
+    /// reads as. Spelled once, here, because a host deciding whether a deployment can
+    /// read its own history asks exactly this question.
+    pub fn answers_absence(&self) -> bool {
+        self.absent.is_some() || matches!(self.ty, Type::Opt(_))
     }
 }
 

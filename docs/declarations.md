@@ -130,6 +130,70 @@ an oversight of the same shape as `@max`: `docs/effects.md` rule 12 recovers sub
 schema path, and a record reached through a container has no path the parser can name. Nothing needs
 it yet, so it stays recorded rather than designed.
 
+### `@absent` on a field younger than the log
+
+A log is append-only. A field added to an event today is missing from every event already in it, and a
+host reading one of those back has nothing to put in the slot. An optional type answers that on its
+own, because a missing key reads as `none`. `@absent(<literal>)` is the answer for a field that should
+stay required:
+
+```
+event @item.flagged {
+  item_id: Uuid,
+  seller_id: Int,
+  reason: String @max(60) @absent("unspecified"),
+}
+```
+
+Read it as: *an event written before `reason` existed reads as `"unspecified"`*. Without it, adding
+`reason` makes every `@item.flagged` already in the log undecodable, and the host reports
+`reason: expected String, stored nothing` on the first read that reaches one.
+
+**It is a read-time fallback and nothing else.** An `emit` names every field, so no append can reach
+the value: there is no way to write an event that leaves `reason` out. The annotation only ever answers
+for a payload that was written when the declaration was shorter.
+
+**Absence is a key that is not there, never a key holding `null`.** `{"reason": null}` is a producer
+writing the wrong shape and stays the mismatch it is; a payload with no `reason` key at all is history.
+A reader that flattened the two could not tell an absent optional from a field younger than the log.
+
+A record field takes it for the same reason and with the same meaning, because a record reached from an
+event is stored inside that event's payload and has the same history one level down.
+
+**It applies to a stored payload and never to a request body.** A body arriving over a wire is read
+against the declaration as it stands, so a caller that omits a field is told so rather than handed a
+value it never sent. `docs/host.md` is where that split lives.
+
+Four things are refused, all at parse time:
+
+- **On an optional field.** A payload that predates a `String?` already reads as `none`, so an absence
+  value would be a second spelling of an answer the type gives for free. This is the same refusal an
+  entity column makes about `= none` (`docs/projectors.md`).
+- **On a `@subject(...)` field.** A seal holds ciphertext and the language cannot produce any, so there
+  is no literal that could stand in for one. Sealed content evolves by being optional, which is what an
+  erased subject reads back as anyway.
+- **A literal past the field's own `@max`.** `@max` is enforced where a value is *written*, and this
+  value is never written, so parse time is the only place the bound can reach it at all.
+- **A literal that is not of the field's type**, resolved by the same rule as an entity column's
+  default and a `const`: a literal, resolved against the declared type at the point of parse, so
+  nothing unresolved reaches the IR.
+
+**It is not spelled `= <literal>`, and that is deliberate.** An entity column's `=` is a write-time
+default: what a `patch` materialises a new row at. This is a read-time answer for a payload that
+predates the field. Two different meanings sharing one syntax would make the shorter of the two
+declarations the ambiguous one.
+
+**Why not `String?` for everything.** It works, and for a field whose absence is part of the domain it
+is the right answer. What it costs when absence is only an artefact of *when the field arrived* is that
+every handler, forever, deals with an optional it will only ever see absent on history, and the
+declaration can no longer say which of the two reasons a field is optional for.
+
+**Rejected: an upcast hook.** The general form of this is a function from an old payload to a new one,
+run on read. It needs to know which declaration wrote each event, and an append-only log written before
+the hook existed cannot say: the absence of a field is the only signal there is. Once absence is the
+signal, a declared literal is the whole feature, and it costs no code that has to be kept correct
+forever. A field whose *meaning* changed is a different event type rather than an upcast.
+
 ### Reading `Name {` as a literal
 
 A record literal is claimed only when `Name` is a declared record, is not shadowed by a local, and no

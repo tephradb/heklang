@@ -6,9 +6,9 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use heklang::{
-    AppendCondition, Attempt, Calls, Clock, Error, ErrorKind, Event, EventPath, Harness, Http,
-    Ident, Interpreter, Key, Keys, Log, Outcome, Predicate, Program, Query, Record, Recorded,
-    Reply, Request, Row, Rows, Secrets, Span, Value, parse,
+    AppendCondition, Attempt, Calls, Clock, Defs, Error, ErrorKind, Event, EventPath, Harness,
+    Http, Ident, Interpreter, Json, Key, Keys, Log, Mismatch, Outcome, Predicate, Program, Query,
+    Record, Recorded, Reply, Request, Row, Rows, Secrets, Span, Type, Value, parse,
 };
 
 const PRELUDE: &str = "event @order.placed {
@@ -972,4 +972,189 @@ effect Alerts {
         journal.is_empty(),
         "nothing was sent, so nothing is recorded"
     );
+}
+
+// --- Rule 8: a key the payload does not hold -------------------------------------
+
+/// A log is append-only, so a field added to an event today is missing from every event
+/// already in it. This is what a host gets back for one, and the whole reason the two
+/// readings are separate calls: `stored_field` may answer from the declaration, and
+/// `Value::from_json` may not.
+const EVOLVED: &str = "record Note {
+  kind: String,
+  body: String @absent(\"none given\"),
+  tag: String?,
+  extra: Json @absent(Json.empty),
+}
+
+event @order.evolved {
+  order_id: Uuid,
+  note: String @absent(\"\"),
+  memo: String?,
+  channel: String,
+  meta: Json,
+  detail: Note,
+}
+";
+
+fn evolved() -> Program {
+    parse(EVOLVED).expect("parses")
+}
+
+fn read(program: &Program, field: &str, stored: Option<&Json>) -> Result<Value, Mismatch> {
+    let declared = program
+        .event(&EventPath::new(["order", "evolved"]))
+        .expect("declared")
+        .field(field)
+        .expect("declared");
+    heklang::value::stored_field(declared, stored, Defs::of(program))
+}
+
+#[test]
+fn a_field_the_payload_does_not_hold_reads_as_its_absent_value() {
+    let program = evolved();
+    assert_eq!(read(&program, "note", None), Ok(Value::str("")));
+    // And a key that is there wins: the annotation is a fallback, never an override.
+    assert_eq!(
+        read(&program, "note", Some(&Json::str("written"))),
+        Ok(Value::str("written"))
+    );
+}
+
+/// The answer a type gives for free, which is why `@absent` on an optional is refused
+/// rather than merely redundant.
+#[test]
+fn an_optional_field_the_payload_does_not_hold_reads_as_none() {
+    let program = evolved();
+    assert_eq!(read(&program, "memo", None), Ok(Value::none(Type::String)));
+}
+
+/// The case this whole annotation exists to make impossible to reach by accident. It is
+/// reported as `nothing` rather than `null`, because the two are different faults: a
+/// `null` is a producer writing the wrong shape, and nothing at all is a declaration that
+/// has moved on from what is stored.
+#[test]
+fn a_required_field_the_payload_does_not_hold_is_a_mismatch_naming_nothing() {
+    let program = evolved();
+    let err = read(&program, "channel", None).expect_err("nothing to read and nothing declared");
+    assert_eq!(err.to_string(), "channel: expected String, stored nothing");
+
+    // A `Json` field is no exception. It accepts any shape that is *there*, and rule 8
+    // leaves that unchecked, but a key that is not there is still absence.
+    let err = read(&program, "meta", None).expect_err("a Json field is not exempt");
+    assert_eq!(err.to_string(), "meta: expected Json, stored nothing");
+}
+
+/// A stored `null` is a value a producer wrote, not a field the payload predates. The
+/// distinction is the foundation the annotation rests on: flattening the two would read
+/// an absent optional and a field older than the log the same way.
+#[test]
+fn a_stored_null_is_a_value_rather_than_an_absence() {
+    let program = evolved();
+    assert_eq!(
+        read(&program, "meta", Some(&Json::Null)),
+        Ok(Value::Json(Json::Null)),
+        "rule 8 leaves a Json field's shape unchecked, so a written null is a written null"
+    );
+    assert_eq!(
+        read(&program, "memo", Some(&Json::Null)),
+        Ok(Value::none(Type::String))
+    );
+    // Not the absent value: `note` holds a null, which is the wrong shape for a String,
+    // and answering with the annotation would paper over a broken producer.
+    let err = read(&program, "note", Some(&Json::Null)).expect_err("a null is not a String");
+    assert_eq!(err.to_string(), "note: expected String, stored null");
+}
+
+/// A host refusing a deployment has two faults to tell apart and two different things to
+/// say about them, so the distinction is the language's to draw rather than a string
+/// comparison on the far side of the crate boundary.
+#[test]
+fn a_mismatch_says_whether_the_key_was_there_at_all() {
+    let program = evolved();
+
+    let absence = read(&program, "channel", None).expect_err("no key at all");
+    assert!(absence.is_absence());
+
+    // The key is there, holding the wrong shape. No annotation can answer this: the
+    // fault is the value, not the declaration having moved on.
+    let wrong = read(&program, "note", Some(&Json::Null)).expect_err("a null is not a String");
+    assert!(!wrong.is_absence());
+}
+
+/// A record inside a stored payload carries that payload's history, so the same question
+/// gets the same answer one level down. The path says which field of which record.
+#[test]
+fn a_record_inside_a_stored_payload_answers_absence_the_same_way() {
+    let program = evolved();
+    let stored = Json::obj([("kind", Json::str("gift"))]);
+    let read_note = read(&program, "detail", Some(&stored));
+    assert_eq!(
+        read_note,
+        Ok(Value::record(
+            "Note",
+            [
+                ("body", Value::str("none given")),
+                ("extra", Value::Json(Json::obj([] as [(&str, Json); 0]))),
+                ("kind", Value::str("gift")),
+                ("tag", Value::none(Type::String)),
+            ]
+        ))
+    );
+
+    let missing_kind = Json::obj([("body", Json::str("here"))]);
+    let err = read(&program, "detail", Some(&missing_kind))
+        .expect_err("`kind` answers absence with nothing");
+    assert_eq!(
+        err.to_string(),
+        "detail.kind: expected String, stored nothing"
+    );
+}
+
+/// A `Json` field is the one whose absence used to read as `null`, which made it the one
+/// type that could lose the difference between a producer sending null and there being no
+/// such field when the payload was written. Rule 8 leaves a `Json` value's *shape*
+/// unchecked; whether there is a value at all is a different question, and `Json` answers
+/// it the way every other type does.
+#[test]
+fn a_json_field_is_not_exempt_from_answering_absence() {
+    let program = parse(
+        "record Bare { kind: String, extra: Json }
+event @order.bare { order_id: Uuid, detail: Bare }
+",
+    )
+    .expect("parses");
+    let defs = Defs::of(&program);
+    let ty = Type::Record("Bare".into());
+
+    let err = Value::from_json(&Json::obj([("kind", Json::str("g"))]), &ty, defs)
+        .expect_err("`extra` is declared and the object has no such key");
+    assert_eq!(err.to_string(), "extra: expected Json, stored nothing");
+
+    // A key that is there holding null is still a value, and still unchecked.
+    let nulled = Json::obj([("kind", Json::str("g")), ("extra", Json::Null)]);
+    Value::from_json(&nulled, &ty, defs).expect("a written null is a written null");
+}
+
+/// The other half of rule 8, and the reason the two readings are separate calls. A body
+/// arriving over a wire is read against the declaration as it stands, so a caller that
+/// omits a field is told so rather than handed a value it never sent. Only a stored
+/// payload may predate a declaration.
+#[test]
+fn a_body_is_read_strictly_however_a_stored_payload_is_read() {
+    let program = evolved();
+    let defs = Defs::of(&program);
+    let ty = Type::Record("Note".into());
+
+    let whole = Json::obj([
+        ("kind", Json::str("gift")),
+        ("body", Json::str("here")),
+        ("extra", Json::Null),
+    ]);
+    Value::from_json(&whole, &ty, defs).expect("a body naming every required field is fine");
+
+    let partial = Json::obj([("kind", Json::str("gift"))]);
+    let err = Value::from_json(&partial, &ty, defs)
+        .expect_err("`body` carries `@absent`, and a body is still not history");
+    assert_eq!(err.to_string(), "body: expected String, stored nothing");
 }

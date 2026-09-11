@@ -276,6 +276,14 @@ be spelled. An **object literal** is therefore legal anywhere a `Json` is expect
 request body; rule 7 is unaffected, because `invoke` checks its fields against declared parameter
 types and an object only reaches a parameter that is a `Json`.
 
+**Unchecked is about a value's shape, not about whether there is one.** A `Json` position accepts
+anything that is *there*, `null` included. A key that is not there at all is a different question, and
+`Json` answers it exactly as every other type does: a missing key is a mismatch unless the field is
+optional or declares `@absent` (`docs/declarations.md`). That makes a `Json` field inside a record
+behave like its siblings, where it used to be the one type whose absence read as `null` and therefore
+the one type that could quietly lose the difference between "the producer sent null" and "there was no
+such field when this was written".
+
 **`Json.encode(value) -> String`** is the table below pointed at a string instead of a socket. A
 Shopify metafield of type `json` takes its value as a *string*, and the original carried a whole
 hand-written encoder for that one call. Because it is the same table, a value encoded here and the

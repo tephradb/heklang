@@ -3880,17 +3880,8 @@
               "type": "SEQ",
               "members": [
                 {
-                  "type": "CHOICE",
-                  "members": [
-                    {
-                      "type": "SYMBOL",
-                      "name": "integer_literal"
-                    },
-                    {
-                      "type": "SYMBOL",
-                      "name": "identifier"
-                    }
-                  ]
+                  "type": "SYMBOL",
+                  "name": "_expression"
                 },
                 {
                   "type": "REPEAT",
@@ -3902,17 +3893,8 @@
                         "value": ","
                       },
                       {
-                        "type": "CHOICE",
-                        "members": [
-                          {
-                            "type": "SYMBOL",
-                            "name": "integer_literal"
-                          },
-                          {
-                            "type": "SYMBOL",
-                            "name": "identifier"
-                          }
-                        ]
+                        "type": "SYMBOL",
+                        "name": "_expression"
                       }
                     ]
                   }

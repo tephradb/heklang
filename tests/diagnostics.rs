@@ -297,6 +297,36 @@ fn a_dotted_annotation_name_covers_the_whole_path() {
     assert_eq!(err.span, at(1, 36, 1, 40));
 }
 
+/// The same rule for the two refusals that cannot be decided until the rest of the
+/// field is in. Both are reported once the cursor has left the field, so the span is
+/// carried from the annotation rather than read off the cursor, and it does not move when
+/// the annotations are written in the other order.
+#[test]
+fn an_absent_refusal_covers_the_absent_annotation() {
+    for (source, col) in [
+        (
+            "event @a.b { id: Int, email: String @subject(id) @absent(\"x\") }\n",
+            50,
+        ),
+        (
+            "event @a.b { id: Int, email: String @absent(\"x\") @subject(id) }\n",
+            37,
+        ),
+        (
+            "event @a.b { id: Int, note: String @max(1) @absent(\"xx\") }\n",
+            44,
+        ),
+        (
+            "event @a.b { id: Int, note: String @absent(\"xx\") @max(1) }\n",
+            36,
+        ),
+        ("record R { note: String @absent(\"xx\") @max(1) }\n", 25),
+    ] {
+        let err = parse(source).expect_err("an `@absent` that cannot stand");
+        assert_eq!(err.span, at(1, col, 1, col + 7), "{source}");
+    }
+}
+
 // ---------------------------------------------------------------------------------
 // Rule 7: the code table. A diagnostic says what kind of thing is wrong, and the set of
 // kinds is closed.

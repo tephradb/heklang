@@ -49,5 +49,7 @@ command RecordConfirmed(booking_id: Uuid, notification_id: Uuid) {
     return reject AlreadyConfirmed
   }
 
-  emit @booking.confirmed { booking_id, notification_id, at: now() }
+  // Every field, `channel` included: an `@absent` value is what a *reader* gets for an
+  // event that predates the field, never a hole an append may leave.
+  emit @booking.confirmed { booking_id, notification_id, at: now(), channel: "email" }
 }

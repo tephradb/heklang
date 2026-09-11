@@ -319,6 +319,34 @@ than the language reshaping itself to match one runtime.
 | `update` | the runtime's skipping partial write |
 | `patch` | a whole-row write plus the zero values |
 
+### A stored payload is read differently from a body
+
+A host builds a `Record` out of whatever its store holds, and one thing is true of that store and not
+of a request body: it is append-only, so a payload in it was written under whatever the declaration was
+at the time and may predate a field the declaration carries now. Those are two different readings, and
+they are two different calls:
+
+| call | a key the JSON does not hold |
+| --- | --- |
+| `Value::from_json(json, ty, defs)` | a mismatch reporting `nothing`, because a body has to satisfy the declaration as it stands |
+| `value::stored_field(field, stored, defs)` | the field's `@absent` literal when it declares one, `none` when the type is optional, otherwise that same mismatch |
+
+`stored` is an `Option<&Json>`, and that is the whole point of the signature. **A key that is there
+holding `null` is a value a producer wrote; a key that is not there is a field the payload predates.** A
+host that passed `Some(&Json::Null)` for a missing key would collapse the two, and every `@absent` in
+the program would stop being reachable. Read the key; hand over what was there, or `None`.
+
+The split is not a convenience. Applying an absence literal to a body would let a caller omit a field
+and be handed a value it never sent, which is a different decision from letting history read.
+
+`Mismatch::is_absence()` is how a host tells the two failures apart afterwards. A key that was never
+there is the one fault a declaration can answer for itself, so a host refusing a deployment can name
+`@absent` as the fix; a key holding the wrong shape has no such answer and must not be offered one.
+
+Nothing else about the seam moves: the `Record` a host builds is still whole. A missing field in a
+`Record` that reached the interpreter is still a broken host rather than a narrower read, because this
+is the call that decides it.
+
 ## 10. What this is not, yet
 
 - **No cursor and no checkpoint.** Neither an effect's position nor a projector's watermark is

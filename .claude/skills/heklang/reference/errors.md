@@ -78,12 +78,12 @@ The set is closed: every diagnostic heklang can produce is one of these.
 
 | Code | Means | Fix |
 | --- | --- | --- |
-| `unknown-annotation` | `@nope` | events take `@subject`, `@max`, `@no_index`; entities `@key`, `@index`, `@max`; records `@max`; enum variants `@default`; an effect arm's trigger destructure `@key` |
-| `bad-annotation` | a known annotation in a place or shape it does not take | `@max` bounds a `String`; a record field cannot be `@subject`; a `@subject` id may not be optional or itself sealed; an optional column may not default to `none`; `@key` goes on an effect arm's trigger destructure and nowhere else |
+| `unknown-annotation` | `@nope` | events take `@subject`, `@max`, `@absent`, `@no_index`; entities `@key`, `@index`, `@max`; records `@max`, `@absent`; enum variants `@default`; an effect arm's trigger destructure `@key` |
+| `bad-annotation` | a known annotation in a place or shape it does not take | `@max` bounds a `String`; a record field cannot be `@subject`; a `@subject` id may not be optional or itself sealed; an optional column may not default to `none`; an optional or `@subject` field takes no `@absent`, nor does one whose value is past its own `@max`; `@key` goes on an effect arm's trigger destructure and nowhere else |
 | `empty-declaration` | a declaration whose body would be empty | |
 | `arm-shape` | an effect arm with no `@key` | every arm names the trigger field that identifies its lane: `{ @key shop_id }` |
 | `entity-shape` | an entity with no `@key`, more than one, an unorderable key, or an index on a field it has not got | |
-| `event-shape` | a multi-path arm over event types with nothing in common | a field is shared only when its type and its `@subject` match on every listed path |
+| `event-shape` | a multi-path arm over event types with nothing in common | a field is shared only when its type, its `@subject` and its `@absent` match on every listed path |
 | `refusal-shape` | a refusal named or written so its derived code could not survive | start with a capital, use no `_`, and let the message name every field and nothing else |
 | `stage-shape` | a `fold` or `guard` written where or how it does not go | declarations come before the first statement of their stage, never inside an `if` or a `for`; a seed or filter may not read a `fold` beside it; a guard is one read |
 | `no-zero-value` | a `patch` that would materialise a row it cannot fill | give the column a default, make it optional, or make the write an `update` |

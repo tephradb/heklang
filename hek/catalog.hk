@@ -95,7 +95,11 @@ event @item.delisted {
 event @item.flagged {
   item_id: Uuid,
   seller_id: Int,
-  reason: String @max(60),
+  // The flag came first and the reason came later, so the events already in the log do
+  // not carry one. `@absent` is what a reader gets for those, which keeps the field
+  // required for every flag since without making every handler deal with a `none` it
+  // would only ever see on history.
+  reason: String @max(60) @absent("unspecified"),
 }
 
 // commands/list_item.hk

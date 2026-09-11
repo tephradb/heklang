@@ -710,8 +710,16 @@ module.exports = grammar({
         optional($.annotation_arguments),
       ),
 
-    annotation_arguments: ($) =>
-      seq('(', commaSep(choice($.integer_literal, $.identifier)), ')'),
+    // An expression rather than the two shapes `@max` and `@subject` take, because
+    // `@absent` takes a literal and a literal is as wide as a record holding a list.
+    // Widening to `_expression` rather than enumerating the literal rules is the same
+    // choice an entity column's `= default` already makes, and it keeps this rule from
+    // needing an edit every time a literal gains a spelling. The parser is what decides
+    // which of these an annotation actually accepts.
+    //
+    // `@subject(x)` and `@max(255)` still yield `(identifier)` and `(integer_literal)`:
+    // `_expression` is hidden, so it adds no node of its own.
+    annotation_arguments: ($) => seq('(', commaSep($._expression), ')'),
 
     // Unicode, matching `is_alphabetic`/`is_alphanumeric` in lex.rs.
     identifier: (_) => /[_\p{L}][_\p{L}\p{N}]*/,

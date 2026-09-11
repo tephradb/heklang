@@ -1264,3 +1264,150 @@ test \"one\" {{
     );
     assert!(packed.contains("(secret HOOK set)"), "{packed}");
 }
+
+// ---------------------------------------------------------------------------
+// Rule 8, continued: `@absent` is part of an event's shape
+// ---------------------------------------------------------------------------
+
+/// It renders as a child node holding a literal, the way an entity column's default
+/// does, and the literal is the resolved one rather than the text that was written.
+#[test]
+fn an_absent_value_is_part_of_a_field_form() {
+    let packed = digest(
+        "event @order.placed {
+           order_id: Uuid,
+           note: String @absent(\"\"),
+           discount: Money(2) @absent(0.00) @no_index,
+         }",
+    )
+    .packed();
+
+    assert!(
+        packed.contains("(f note String (absent (str \"\")))"),
+        "the field carries its absent value: {packed}"
+    );
+    assert!(
+        packed.contains("(f discount (Money 2) (absent (money 2 0)) no_index)"),
+        "beside the other annotations, and holding the resolved literal: {packed}"
+    );
+}
+
+/// A record reached from an event is stored inside that event's payload, so its fields
+/// carry the same node for the same reason.
+#[test]
+fn a_record_field_carries_its_absent_value_too() {
+    let packed = digest(
+        "record Note { kind: String, body: String @max(20) @absent(\"none given\") }
+         event @order.placed { order_id: Uuid, detail: Note }",
+    )
+    .packed();
+
+    assert!(
+        packed.contains("(f body String (max 20) (absent (str \"none given\")))"),
+        "a record field carries it: {packed}"
+    );
+}
+
+/// What a reader gets out of a payload that predates the field is part of the shape, not
+/// of a body: changing it changes every historical event the declaration describes, and a
+/// deployment has to be told.
+#[test]
+fn an_absent_value_moves_the_signature_as_well_as_the_hash() {
+    let event = |absent: &str| {
+        digest(&format!(
+            "event @order.placed {{ order_id: Uuid, note: String{absent} }}"
+        ))
+    };
+    let plain = event("");
+    let empty = event(" @absent(\"\")");
+    let dash = event(" @absent(\"-\")");
+
+    for (one, two, why) in [
+        (&plain, &empty, "gaining an absent value"),
+        (&empty, &dash, "changing one"),
+    ] {
+        assert_ne!(
+            entry(one, "@order.placed").hash,
+            entry(two, "@order.placed").hash,
+            "{why} changes what the declaration does"
+        );
+        assert_ne!(
+            entry(one, "@order.placed").signature_hash,
+            entry(two, "@order.placed").signature_hash,
+            "{why} is visible to every reader of the log"
+        );
+    }
+}
+
+/// The rollout property, and the reason the node is written only when it is there: a
+/// declaration that does not use the annotation has to hash exactly as it did before the
+/// annotation existed, or every event in every project would read as changed the first
+/// time this version is deployed.
+#[test]
+fn a_field_without_an_absent_value_renders_as_it_always_did() {
+    let packed = digest(
+        "record Line { title: String @max(20) }
+         event @order.placed { order_id: Uuid, total: Money(2), note: String @no_index }",
+    )
+    .packed();
+
+    assert!(
+        !packed.contains("absent"),
+        "nothing to say, nothing said: {packed}"
+    );
+    assert!(packed.contains("(f note String no_index)"), "{packed}");
+    assert!(packed.contains("(f title String (max 20))"), "{packed}");
+    assert!(packed.contains("(f total (Money 2))"), "{packed}");
+    assert_eq!(
+        VERSION, "hek-digest 2",
+        "an optional node is not a new digest version"
+    );
+}
+
+/// `absent` names a part of its parent rather than a value in it, so the JSON form has to
+/// read it as a structure head like `max` and `default`.
+#[test]
+fn an_absent_node_is_a_structure_head_in_the_json_form() {
+    let digest = digest("event @order.placed { order_id: Uuid, note: String @absent(\"x\") }");
+    let json = entry(&digest, "@order.placed").form.json().to_string();
+    assert!(
+        json.contains("\"absent\""),
+        "the head is a key rather than a positional value: {json}"
+    );
+}
+
+/// A host holds a recorded declaration as packed text and has to ask which fields it
+/// had, so the shape of an `(f ..)` node is read back here rather than picked apart by
+/// whoever stored it.
+#[test]
+fn a_stored_event_form_says_which_fields_it_declared() {
+    let made = digest(
+        r#"
+record Note { kind: String, weight: Int }
+
+event @order.placed {
+  order_id: Uuid,
+  total: Int,
+  detail: Note,
+}
+
+command Place(order_id: Uuid) {
+  emit @order.placed { order_id, total: 1, detail: Note { kind: "gift", weight: 2 } }
+}
+"#,
+    );
+
+    let event = entry(&made, "@order.placed");
+    assert_eq!(event.field_names(), ["detail", "order_id", "total"]);
+
+    let record = entry(&made, "Note");
+    assert_eq!(record.field_names(), ["kind", "weight"]);
+
+    // Read back through the packed form, which is the way a host actually has it.
+    let packed = Entry::from_packed(&event.form.packed(), None).unwrap();
+    assert_eq!(packed.field_names(), ["detail", "order_id", "total"]);
+
+    // Nothing else has fields in this sense, and answering with a guess would be worse
+    // than answering with nothing.
+    assert!(entry(&made, "Place").field_names().is_empty());
+}

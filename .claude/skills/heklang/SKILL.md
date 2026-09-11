@@ -223,11 +223,30 @@ test "a first order is appended as written" {
 }
 ```
 
-Annotations, exhaustively: an **event field** takes `@subject(field)`, `@max(n)` and `@no_index`; an
-**entity field** takes `@key`, `@index` and `@max(n)`, plus `= <literal>` for a default and an
-entity-level `index (a, b)`; a **record field** takes `@max(n)`; an **enum variant** takes
-`@default`; an **effect arm's trigger destructure** takes `@key`. `@max` applies to `String` and
-`String?` and nothing else.
+Annotations, exhaustively: an **event field** takes `@subject(field)`, `@max(n)`, `@absent(<literal>)`
+and `@no_index`; an **entity field** takes `@key`, `@index` and `@max(n)`, plus `= <literal>` for a
+default and an entity-level `index (a, b)`; a **record field** takes `@max(n)` and
+`@absent(<literal>)`; an **enum variant** takes `@default`; an **effect arm's trigger destructure**
+takes `@key`. `@max` applies to `String` and `String?` and nothing else.
+
+**Adding a field to an event that already has history.** A log is append-only, so every event already
+in it lacks the new field and a host reading one back has nothing to put in the slot. Either make the
+field optional, or give it `@absent(<literal>)`, which is what a stored event written before the field
+existed reads as:
+
+```hek
+event @item.flagged {
+  item_id: Uuid,
+  reason: String @max(60) @absent("unspecified"),
+}
+```
+
+Without one of the two, every stored `@item.flagged` becomes undecodable and the host reports
+`reason: expected String, stored nothing`. Prefer `@absent` when the absence is only an artefact of
+when the field arrived, and `String?` when absence is part of the domain. It is a read-time fallback
+only: an `emit` still names every field. It is refused on an optional field, on a `@subject` field
+(sealed content has no plaintext literal, so use an optional), and with a literal past the field's own
+`@max`. `= <literal>` on an entity column is a different thing: a write-time default for a new row.
 
 ### Statements
 

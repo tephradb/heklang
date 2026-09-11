@@ -176,6 +176,11 @@ empty-string-means-nothing, no zero-means-nothing, no `unwrap`, no `?` operator 
 | `x.is_none()` | `Bool` |
 | `x.unwrap_or(fallback)` | `T` |
 
+**Not for a field younger than the log.** Adding a field to an event leaves every event already in the
+log without one, and `T?` does make those readable, but then every handler deals forever with an
+optional it only ever sees absent on history. `@absent(<literal>)` covers that case without giving up
+the type. Keep `T?` for absence that is part of the domain.
+
 ### Narrowing
 
 A branch that proves an optional present makes it its inner type for as long as the proof holds:
@@ -408,8 +413,10 @@ The literal is `Name { field: value }`, with the same bare-name shorthand `emit`
 field is read with `.field`. **Every field must be given.** There is no record update
 (`base with { .. }`) and no partial literal.
 
-`@max(n)` is the only annotation a record field takes. **A record field cannot be `@subject`**, so a
-record cannot carry subject-bound personal data.
+`@max(n)` and `@absent(<literal>)` are the annotations a record field takes. **A record field cannot be
+`@subject`**, so a record cannot carry subject-bound personal data. `@absent` means here exactly what it
+means on an event field, because a record reached from an event is stored inside that event's payload
+and so has the same history one level down.
 
 A `Name {` is read as a record literal only when `Name` is a declared record, is not shadowed by a
 local, and no `if` or `for` header is waiting for its block. Inside parentheses the restriction

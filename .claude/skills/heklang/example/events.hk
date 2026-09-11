@@ -29,4 +29,10 @@ event @booking.confirmed {
   booking_id: Uuid,
   notification_id: Uuid,
   at: Timestamp,
+  // Added once confirmations were already in the log, which is the one thing an
+  // append-only log cannot go back and fill in. `@absent` says what those events read
+  // as, so the field stays required for every new one and no handler has to deal with an
+  // optional it would only ever see absent on history. Make it `String?` instead when
+  // absence is part of the domain rather than an artefact of when the field arrived.
+  channel: String @max(20) @absent("email"),
 }

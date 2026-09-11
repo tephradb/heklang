@@ -142,6 +142,9 @@ struct Parser {
     consts: Vec<ConstDef>,
     /// Every const before its value has been read: pass C0's output.
     shells: Vec<ConstShell>,
+    /// Every record field's `@absent` before its value has been read: pass B's output,
+    /// resolved by `resolve_absences` once record bodies and const shells are both in.
+    pending_absent: Vec<PendingAbsence>,
     /// Whether this object literal is on its way to an `http.*` rather than to a
     /// `Json.encode` or a `Json` parameter. Rule 16 lets a credential be an object
     /// member only here.
@@ -182,6 +185,23 @@ struct Parser {
     /// declaration and never named the first, because the lists these checks walk carry
     /// no position. One map beside them rather than a span on every IR declaration.
     declared: HashMap<(String, Ident), Related>,
+}
+
+/// A record field's `@absent` with its value still unread: which field it is on and
+/// where to find the tokens, which is all pass B can know before every record body and
+/// every const shell exists. See `Parser::length_annotations`.
+#[derive(Debug, Clone)]
+struct PendingAbsence {
+    record: Ident,
+    /// The field's position in its record, rather than its name: the record is not in
+    /// `Parser::records` yet when this is pushed, so there is nothing to key on but the
+    /// order the fields were read in, which is the order they are stored in.
+    position: usize,
+    /// The annotation's opening paren, so resolution can seek back to it.
+    at: usize,
+    /// The `@absent` token, so a diagnostic covers what an author has to change rather
+    /// than wherever the cursor reached.
+    mark: Span,
 }
 
 /// A const with its value still unread: enough to say what type it is and where to
@@ -276,6 +296,7 @@ impl Parser {
             records: Vec::new(),
             consts: Vec::new(),
             shells: Vec::new(),
+            pending_absent: Vec::new(),
             in_request: false,
             secrets: Vec::new(),
             resolving: Vec::new(),
@@ -711,6 +732,10 @@ impl Parser {
                 .position(|shell| shell.name == def.name)
                 .unwrap_or(usize::MAX)
         });
+
+        // Every record field's `@absent`, which pass B located and left unread: here is
+        // where both of the things one may name exist, every record body and every const.
+        self.resolve_absences()?;
 
         // C: everything whose declaration is a signature rather than a body.
         let mut events: Vec<EventDef> = Vec::new();
@@ -1492,10 +1517,29 @@ impl Parser {
         )
     }
 
-    /// The annotations a record field takes, which is `@max` and nothing else so far.
+    /// The annotations a record field takes, which is `@max` and `@absent`.
     /// `@subject` gets its own message because it is the obvious next thing to try and
     /// the reason it is absent is not obvious; see `docs/declarations.md`.
-    fn length_annotations(&mut self, ty: &Type, field: &str) -> Result<Option<usize>, Diagnostic> {
+    ///
+    /// `@absent` is here and not only on an event field because a record reached from an
+    /// event is stored inside that event's payload, so it has the same history and the
+    /// same gap when a field is added to it.
+    ///
+    /// **Its value is not read here**, only located. This runs in pass B, which is the
+    /// pass filling record bodies, so a literal here may name a record whose own fields
+    /// are not in yet, and pass C0 has collected no `const`. Reading it now resolved a
+    /// forward-referenced record against an empty shell, which made `default_literal`'s
+    /// every-field check pass vacuously and stored a `Value::Record` with no fields in it;
+    /// and it reported a perfectly good `const` as a type error. Both are gone by the time
+    /// `resolve_absences` seeks back to these tokens. Same device as [`ConstShell`], for
+    /// the same reason.
+    fn length_annotations(
+        &mut self,
+        record: &str,
+        ty: &Type,
+        field: &str,
+        position: usize,
+    ) -> Result<Option<usize>, Diagnostic> {
         let mut max_len = None;
         while let Token::Path(segments) = self.peek().clone() {
             let at = self.span_here();
@@ -1509,6 +1553,18 @@ impl Parser {
             };
             match annotation.as_str() {
                 "max" => max_len = Some(self.max_annotation(ty, field)?),
+                "absent" => {
+                    if !self.at_sym(Sym::LParen) {
+                        return self.fail(Code::BadAnnotation, "`@absent` takes a value");
+                    }
+                    self.pending_absent.push(PendingAbsence {
+                        record: record.to_string(),
+                        position,
+                        at: self.pos,
+                        mark: at,
+                    });
+                    self.skip_group();
+                }
                 "subject" => {
                     return Err(self.err(Code::BadAnnotation, format!("a record field cannot be `@subject`, so `{field}` cannot carry personal data"), at).with_hint("a subject-bound value is recovered from the schema path, and a record reached through a container has no path to recover it from"));
                 }
@@ -1522,6 +1578,57 @@ impl Parser {
             }
         }
         Ok(max_len)
+    }
+
+    /// Every record field's `@absent`, now that every record body and every `const` shell
+    /// is in. Run between pass C0 and pass C, which is the first point where both are
+    /// true. See [`Parser::length_annotations`].
+    fn resolve_absences(&mut self) -> Result<(), Diagnostic> {
+        let saved = self.pos;
+        for pending in std::mem::take(&mut self.pending_absent) {
+            // Pass A names every record and pass B fills it, and a body that failed to
+            // parse stopped the run before this, so the lookup holds. Skipped rather than
+            // asserted because error recovery is what decides that, not this loop.
+            let Some(record) = self
+                .records
+                .iter()
+                .position(|def| def.name == pending.record)
+            else {
+                continue;
+            };
+            let field = &self.records[record].fields[pending.position];
+            let (name, ty, max_len) = (field.name.clone(), field.ty.clone(), field.max_len);
+            self.pos = pending.at;
+            let value = self.absent_annotation(&ty, &name, pending.mark)?;
+            // A record field cannot be `@subject`, so there is no seal to refuse here.
+            self.check_absent(&name, None, max_len, &value, pending.mark)?;
+            self.records[record].fields[pending.position].absent = Some(value);
+        }
+        self.pos = saved;
+        Ok(())
+    }
+
+    /// Consume a balanced `(..)` from its opening paren, for an annotation argument that
+    /// a later pass reads. Unlike [`Parser::skip_value`] this stops at its own closing
+    /// paren rather than at the next declaration, because what it skips is nested inside
+    /// one.
+    fn skip_group(&mut self) {
+        let mut depth = 0i32;
+        loop {
+            match self.peek() {
+                Token::End => return,
+                Token::Sym(Sym::LParen | Sym::LBrace | Sym::LBracket) => depth += 1,
+                Token::Sym(Sym::RParen | Sym::RBrace | Sym::RBracket) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.bump();
+                        return;
+                    }
+                }
+                _ => {}
+            }
+            self.bump();
+        }
     }
 
     /// `@max(n)`, and the check that there is something to bound. A length on anything
@@ -1548,6 +1655,127 @@ impl Parser {
         self.expect_sym(Sym::RParen)?;
         Ok(max)
     }
+
+    /// `@absent(<literal>)`: what a stored payload written before this field existed
+    /// reads as.
+    ///
+    /// The literal resolves against the declared type here, exactly as an entity
+    /// column's default does, so nothing unresolved reaches the IR. `mark` is the
+    /// annotation's own span, because that is what an author has to change.
+    fn absent_annotation(
+        &mut self,
+        ty: &Type,
+        field: &str,
+        mark: Span,
+    ) -> Result<Literal, Diagnostic> {
+        // The mirror of the entity column's refusal of `= none`: an optional already
+        // reads as `none` when it is missing, so an absence value would be a second
+        // spelling of an answer the type gives for free.
+        if matches!(ty, Type::Opt(_)) {
+            return Err(self
+                .err(
+                    Code::BadAnnotation,
+                    format!("`{field}` is optional, so a payload that predates it already reads as `none`"),
+                    mark,
+                )
+                .with_hint("`@absent` is for a field that stays required"));
+        }
+        self.expect_sym(Sym::LParen)?;
+        let value = self.default_literal("absent value", ty)?;
+        self.expect_sym(Sym::RParen)?;
+        Ok(value)
+    }
+
+    /// The two things about an `@absent` that need the rest of the field, so neither can
+    /// be decided while the annotation itself is being read.
+    ///
+    /// Run once the field's annotations are all in, which is what makes it
+    /// order-independent: `@absent("x") @max(1)` and `@max(1) @absent("x")` are the same
+    /// declaration and fail the same way. `at` is the annotation's own span rather than
+    /// the cursor's, because the cursor has left the field by now and the `@absent` is
+    /// what an author has to change.
+    fn check_absent(
+        &self,
+        field: &str,
+        subject: Option<&str>,
+        max_len: Option<usize>,
+        absent: &Literal,
+        at: Span,
+    ) -> Result<(), Diagnostic> {
+        // Rule 12: a seal holds ciphertext and the language cannot produce any, so
+        // there is no literal that could stand in for one. The absent case for sealed
+        // content is an optional, which is also what an erased subject reads back as.
+        if let Some(subject) = subject {
+            return Err(self
+                .err(
+                    Code::BadAnnotation,
+                    format!("`@absent` on `{field}`, which is sealed under `{subject}`"),
+                    at,
+                )
+                .with_hint(
+                    "sealed content has no plaintext literal: make the field optional instead",
+                ));
+        }
+        self.check_absent_bounds(field, max_len, absent, at)
+    }
+
+    /// Every string inside an absent value, against the bound of the position it sits in.
+    ///
+    /// `@max` is checked where a value is written (`interp::bounded`), and a value this
+    /// annotation produces is never written: it is read out of a payload that does not hold
+    /// it. Parse time is the only place it can be caught at all.
+    ///
+    /// It recurses for the reason `bounded` does: `@max` is declared per field, so a string
+    /// inside a record is bounded by the record's declaration rather than by the field the
+    /// literal sits in. The path is built the same way too, so a list element says which
+    /// one it was.
+    fn check_absent_bounds(
+        &self,
+        at_path: &str,
+        max_len: Option<usize>,
+        absent: &Literal,
+        at: Span,
+    ) -> Result<(), Diagnostic> {
+        match absent {
+            Literal::Str(text) => {
+                let Some(max) = max_len else {
+                    return Ok(());
+                };
+                let len = text.chars().count();
+                if len > max {
+                    return Err(self.err(
+                        Code::BadAnnotation,
+                        format!(
+                            "`{at_path}` is bounded at {max} and its absent value is {len} long"
+                        ),
+                        at,
+                    ));
+                }
+            }
+            Literal::Some { value, .. } => self.check_absent_bounds(at_path, max_len, value, at)?,
+            Literal::Record { ty, fields } => {
+                for (name, held) in fields {
+                    // The record's own declaration carries the bound, which is the whole
+                    // reason this cannot be decided from the outer field alone.
+                    let bound = self
+                        .record_def(ty)
+                        .and_then(|def| def.field(name))
+                        .and_then(|field| field.max_len);
+                    self.check_absent_bounds(&format!("{at_path}.{name}"), bound, held, at)?;
+                }
+            }
+            Literal::List { items, .. } => {
+                for (index, item) in items.iter().enumerate() {
+                    // An element has no bound of its own: `@max` on a `List(String)` field
+                    // is refused, so the only bound below here is a record's.
+                    self.check_absent_bounds(&format!("{at_path}[{index}]"), None, item, at)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Pass B. The name was taken in pass A, so this reads only the body.
     fn record_fields(&mut self) -> Result<Vec<RecordField>, Diagnostic> {
         self.expect_word(Keyword::Record)?;
@@ -1575,11 +1803,14 @@ impl Parser {
             field_at.push(at);
             self.expect_sym(Sym::Colon)?;
             let ty = self.type_ref()?;
-            let max_len = self.length_annotations(&ty, &field)?;
+            let max_len = self.length_annotations(&name, &ty, &field, fields.len())?;
             fields.push(RecordField {
                 name: field,
                 ty,
                 max_len,
+                // Located by the line above and read by `resolve_absences`, which is the
+                // first point where a literal here can name everything it may name.
+                absent: None,
             });
             if !self.eat_sym(Sym::Comma) {
                 break;
@@ -2655,7 +2886,7 @@ impl Parser {
                     at,
                 )
                 .with_hint(
-                    "a binding names only what every listed type has, with the same type and the same `@subject`",
+                    "a binding names only what every listed type has, and reads it the same way: the same type, the same `@subject` and the same `@absent`",
                 ));
         }
         let Some(declared) = def.field(&field) else {
@@ -2681,6 +2912,7 @@ impl Parser {
             self.expect_sym(Sym::Colon)?;
             let ty = self.type_ref()?;
             let mut field = FieldDef::new(&name, ty);
+            let mut absent_at = None;
 
             while let Token::Path(segments) = self.peek().clone() {
                 let mark = self.span_here();
@@ -2702,6 +2934,11 @@ impl Parser {
                         let max = self.max_annotation(&field.ty.clone(), &name)?;
                         field = field.max_len(max);
                     }
+                    "absent" => {
+                        let value = self.absent_annotation(&field.ty.clone(), &name, mark)?;
+                        field = field.absent(value);
+                        absent_at = Some(mark);
+                    }
                     "no_index" => field = field.no_index(),
                     other => {
                         return Err(self.err(
@@ -2711,6 +2948,10 @@ impl Parser {
                         ));
                     }
                 }
+            }
+
+            if let (Some(value), Some(at)) = (&field.absent, absent_at) {
+                self.check_absent(&name, field.subject.as_deref(), field.max_len, value, at)?;
             }
 
             // Rule 12: the annotation is the authored form and the type is what
@@ -6024,9 +6265,14 @@ impl Parser {
         for field in &first.fields {
             let mut shared = true;
             for other in &rest {
-                let matches = other
-                    .field(&field.name)
-                    .is_some_and(|found| found.ty == field.ty && found.subject == field.subject);
+                // `absent` counts as much as the type does: two fields that read back
+                // differently from a payload that predates them are not one field, and
+                // an arm binding the name would get whichever event arrived.
+                let matches = other.field(&field.name).is_some_and(|found| {
+                    found.ty == field.ty
+                        && found.subject == field.subject
+                        && found.absent == field.absent
+                });
                 if !matches {
                     shared = false;
                     break;

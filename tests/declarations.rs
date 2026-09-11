@@ -1,4 +1,4 @@
-use heklang::{Code, Command, Pos, parse};
+use heklang::{Code, Command, EventPath, Literal, Pos, parse};
 
 /// Every slice a command declares, across its stages. A command whose declarations are
 /// all at the top is one stage, which is every command in this file.
@@ -294,4 +294,314 @@ effect Same {
             .text();
         assert_eq!(message, format!("{kind} `Dup` is declared twice"));
     }
+}
+
+// --- @absent ---------------------------------------------------------------
+
+/// The annotation resolves its literal against the declared type at parse time, exactly
+/// as an entity column's default does, so nothing unresolved reaches the IR.
+#[test]
+fn an_absent_value_resolves_against_the_declared_type() {
+    let source = "record Note {
+  kind: String,
+  body: String @absent(\"none given\"),
+}
+
+event @order.placed {
+  order_id: Uuid,
+  note: String @absent(\"\"),
+  channel: String @absent(\"web\") @max(10),
+  discount: Money(2) @absent(0.00),
+  tries: Int @absent(0),
+  gift: Bool @absent(false),
+  meta: Json @absent(Json.empty),
+  detail: Note,
+  placed_at: Timestamp @absent(\"2020-01-01T00:00:00Z\"),
+  batch: Uuid @absent(\"6ba7b810-9dad-11d1-80b4-00c04fd430c8\"),
+}
+";
+    let program = parse(source).expect("every literal shape resolves against its field's type");
+    let event = program
+        .event(&EventPath::new(["order", "placed"]))
+        .expect("declared");
+
+    assert_eq!(
+        event.field("note").and_then(|field| field.absent.clone()),
+        Some(Literal::Str("".into()))
+    );
+    assert_eq!(
+        event
+            .field("discount")
+            .and_then(|field| field.absent.clone()),
+        Some(Literal::Money { units: 0, scale: 2 })
+    );
+    assert_eq!(
+        event
+            .field("placed_at")
+            .and_then(|field| field.absent.clone()),
+        Some(Literal::Timestamp(1_577_836_800_000_000))
+    );
+    assert_eq!(
+        event.field("meta").and_then(|field| field.absent.clone()),
+        Some(Literal::EmptyJson)
+    );
+    // A record carries it too: a record reached from an event is stored inside that
+    // event's payload, so it has the same history one level down.
+    let note = program.record("Note").expect("declared");
+    assert_eq!(
+        note.field("body").and_then(|field| field.absent.clone()),
+        Some(Literal::Str("none given".into()))
+    );
+    assert_eq!(
+        note.field("kind").and_then(|field| field.absent.clone()),
+        None
+    );
+}
+
+/// The question a host asks, answered by the language rather than reimplemented by every
+/// host that asks it.
+#[test]
+fn a_field_answers_absence_by_its_type_or_its_annotation() {
+    let source = "event @order.placed {
+  order_id: Uuid,
+  note: String @absent(\"\"),
+  memo: String?,
+  channel: String,
+}
+";
+    let program = parse(source).expect("parses");
+    let event = program
+        .event(&EventPath::new(["order", "placed"]))
+        .expect("declared");
+    let answers = |name: &str| event.field(name).expect("declared").answers_absence();
+
+    assert!(answers("note"), "`@absent` answers it");
+    assert!(answers("memo"), "an optional type answers it on its own");
+    assert!(!answers("channel"), "a bare required field answers nothing");
+    assert!(!answers("order_id"), "nor does the id");
+}
+
+/// The mirror of an entity column's refusal of `= none`: a payload that predates an
+/// optional field already reads as `none`, so an absence value would be a second
+/// spelling of an answer the type gives for free.
+#[test]
+fn an_optional_field_takes_no_absent_value() {
+    for source in [
+        "event @a.b { id: Int, note: String? @absent(\"\") }",
+        "record R { note: String? @absent(\"\") }",
+    ] {
+        let message = parse(source)
+            .expect_err("an optional field already reads as `none`")
+            .text();
+        assert_eq!(
+            message,
+            "`note` is optional, so a payload that predates it already reads as `none`; \
+             `@absent` is for a field that stays required",
+            "for: {source}"
+        );
+    }
+}
+
+/// Rule 12: a seal holds ciphertext and the language cannot produce any, so there is no
+/// literal that could stand in for one. Order-independent, because the two annotations
+/// are one declaration however they are written.
+#[test]
+fn a_sealed_field_takes_no_absent_value() {
+    for source in [
+        "event @a.b { id: Int, email: String @subject(id) @absent(\"x\") }",
+        "event @a.b { id: Int, email: String @absent(\"x\") @subject(id) }",
+    ] {
+        let message = parse(source)
+            .expect_err("sealed content has no plaintext literal")
+            .text();
+        assert_eq!(
+            message,
+            "`@absent` on `email`, which is sealed under `id`; sealed content has no plaintext \
+             literal: make the field optional instead",
+            "for: {source}"
+        );
+    }
+}
+
+/// `@max` is enforced where a value is written, and a value this annotation produces is
+/// never written: it is read out of a payload that does not hold it. Parse time is the
+/// only place the bound can be applied to it at all.
+#[test]
+fn an_absent_value_is_bounded_by_max() {
+    for source in [
+        "event @a.b { id: Int, note: String @max(3) @absent(\"far too long\") }",
+        "event @a.b { id: Int, note: String @absent(\"far too long\") @max(3) }",
+        "record R { note: String @absent(\"far too long\") @max(3) }",
+    ] {
+        let message = parse(source)
+            .expect_err("an absent value past the field's own bound")
+            .text();
+        assert_eq!(
+            message, "`note` is bounded at 3 and its absent value is 12 long",
+            "for: {source}"
+        );
+    }
+    parse("event @a.b { id: Int, note: String @max(12) @absent(\"just about fits\") }")
+        .expect_err("fifteen characters is still past twelve");
+    parse("event @a.b { id: Int, note: String @max(12) @absent(\"fits\") }")
+        .expect("a value inside the bound is fine");
+}
+
+/// A literal that cannot be the field's type is the same error it is anywhere else, and
+/// it names the annotation so the message is about what was written.
+#[test]
+fn an_absent_value_of_the_wrong_type_is_rejected() {
+    let cases = [
+        (
+            "event @a.b { note: String @absent(none) }",
+            "a String absent value cannot be `none`",
+        ),
+        (
+            "event @a.b { note: String @absent([1]) }",
+            "a String absent value cannot be a list",
+        ),
+        (
+            "event @a.b { note: Json @absent(\"x\") }",
+            "a Json absent value cannot be a String",
+        ),
+    ];
+    for (source, expected) in cases {
+        let message = parse(source)
+            .expect_err("a literal that is not of the field's type")
+            .text();
+        assert_eq!(message, expected, "for: {source}");
+    }
+}
+
+/// Two event types whose field reads back differently from a payload that predates it
+/// are not one field, so an arm listing both cannot bind the name: it would get whichever
+/// event happened to arrive.
+#[test]
+fn an_arm_over_two_events_shares_a_field_only_when_its_absent_value_agrees() {
+    let shared = "event @a.one { id: Int, note: String @absent(\"x\") }
+event @a.two { id: Int, note: String @absent(\"x\") }
+";
+    let split = "event @a.one { id: Int, note: String @absent(\"x\") }
+event @a.two { id: Int, note: String @absent(\"y\") }
+";
+    let arm = "effect E {
+  on @a.one, @a.two as e { @key id } {
+    log(\"{e.note}\")
+  }
+}
+";
+    parse(&format!("{shared}{arm}")).expect("one field, so the bind resolves");
+    let message = parse(&format!("{split}{arm}"))
+        .expect_err("two readings of `note` are not one field")
+        .text();
+    assert_eq!(
+        message,
+        "`note` is not shared by @a.one, @a.two, so an arm listing them cannot name it; \
+         a binding names only what every listed type has, and reads it the same way: the same \
+         type, the same `@subject` and the same `@absent`"
+    );
+}
+
+/// A record field's `@absent` is located in the pass that fills record bodies and read
+/// once they are all in, so a literal here may name a record declared further down. Read
+/// eagerly, a forward reference resolved against a shell with no fields yet: the
+/// every-field check iterated an empty list and passed, and the stored literal would have
+/// built a record value with nothing in it.
+#[test]
+fn a_record_field_absent_value_names_a_record_declared_later() {
+    let ordered = "record Note { kind: String }
+record Wrap { note: Note @absent(Note { kind: \"none\" }) }
+event @a.b { id: Int, wrap: Wrap }
+";
+    let reversed = "record Wrap { note: Note @absent(Note { kind: \"none\" }) }
+record Note { kind: String }
+event @a.b { id: Int, wrap: Wrap }
+";
+    for source in [ordered, reversed] {
+        let program = parse(source).expect("declaration order must not matter");
+        let wrap = program.record("Wrap").expect("declared");
+        assert_eq!(
+            wrap.field("note").and_then(|field| field.absent.clone()),
+            Some(Literal::Record {
+                ty: "Note".into(),
+                fields: vec![("kind".into(), Literal::Str("none".into()))],
+            }),
+            "for: {source}"
+        );
+    }
+
+    // And the every-field check fires whichever way round they are written.
+    for source in [
+        "record Note { kind: String }\nrecord Wrap { note: Note @absent(Note {}) }",
+        "record Wrap { note: Note @absent(Note {}) }\nrecord Note { kind: String }",
+    ] {
+        let message = parse(source)
+            .expect_err("a record literal names every field")
+            .text();
+        assert_eq!(message, "record `Note` needs `kind`", "for: {source}");
+    }
+}
+
+/// The other thing reading it eagerly could not see: a `const`'s shell is collected after
+/// record bodies, so a const in a record field's `@absent` used to be reported as a type
+/// error about a value the parser had not read yet. An event field never had the problem,
+/// and the two must not disagree.
+#[test]
+fn an_absent_value_may_be_a_const_wherever_it_is_written() {
+    let source = "const NONE_GIVEN: String = \"none given\"
+
+record Note { body: String @absent(NONE_GIVEN) }
+
+event @a.b {
+  id: Int,
+  note: String @absent(NONE_GIVEN),
+  detail: Note,
+}
+";
+    let program = parse(source).expect("a const resolves in either position");
+    let expected = Some(Literal::Str("none given".into()));
+    assert_eq!(
+        program
+            .record("Note")
+            .and_then(|def| def.field("body"))
+            .and_then(|field| field.absent.clone()),
+        expected
+    );
+    assert_eq!(
+        program
+            .event(&EventPath::new(["a", "b"]))
+            .and_then(|def| def.field("note"))
+            .and_then(|field| field.absent.clone()),
+        expected
+    );
+}
+
+/// `@max` is declared per field, so a string inside a record is bounded by the record's
+/// own declaration. An absent value is never written, so `interp::bounded` never sees it
+/// and the nested bound would hold nowhere at all.
+#[test]
+fn an_absent_value_is_bounded_through_a_record_and_a_list() {
+    let cases = [
+        (
+            "record N { kind: String @max(3) }\nevent @a.b { id: Int, n: N @absent(N { kind: \"far too long\" }) }",
+            "`n.kind` is bounded at 3 and its absent value is 12 long",
+        ),
+        (
+            "record N { kind: String @max(3) }\nevent @a.b { id: Int, n: List(N) @absent([N { kind: \"ok\" }, N { kind: \"far too long\" }]) }",
+            "`n[1].kind` is bounded at 3 and its absent value is 12 long",
+        ),
+        (
+            "record N { kind: String @max(3) }\nrecord W { n: N @absent(N { kind: \"far too long\" }) }\nevent @a.b { id: Int, w: W }",
+            "`n.kind` is bounded at 3 and its absent value is 12 long",
+        ),
+    ];
+    for (source, expected) in cases {
+        let message = parse(source)
+            .expect_err("a nested absent value past the nested bound")
+            .text();
+        assert_eq!(message, expected, "for: {source}");
+    }
+
+    parse("record N { kind: String @max(3) }\nevent @a.b { id: Int, n: N @absent(N { kind: \"ok\" }) }")
+        .expect("a nested value inside the bound is fine");
 }
