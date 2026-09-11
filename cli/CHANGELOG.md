@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://git.tqwewe.com/tephra/heklang/compare/v0.4.0...v0.4.1) - 2026-09-11
+
+### Other
+
+- updated the following local packages: heklang, tree-sitter-hek
+
 ## [0.4.0](https://git.tqwewe.com/tephra/heklang/compare/v0.3.1...v0.4.0) - 2026-09-08
 
 ### Added

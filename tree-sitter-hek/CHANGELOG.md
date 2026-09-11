@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://git.tqwewe.com/tephra/heklang/compare/tree-sitter-hek-v0.4.0...tree-sitter-hek-v0.5.0) - 2026-09-11
+
+### Added
+
+- [**breaking**] an event field says what it reads as before it existed
+
 ## [0.4.0](https://git.tqwewe.com/tephra/heklang/compare/tree-sitter-hek-v0.3.0...tree-sitter-hek-v0.4.0) - 2026-09-08
 
 ### Added
