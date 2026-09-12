@@ -335,3 +335,44 @@ fn an_optional_method_on_a_narrowed_value_says_why() {
 
 // `a_narrowed_optional_can_be_revealed` lives in `tests/effects.rs`, next to the rest
 // of rule 12, because it needs an effect and a subject-bound event to say anything.
+
+// ---------------------------------------------------------------------------------
+// The receiver
+
+/// A narrowing rewrites the type of a slot, so the receiver has to be a name. A field
+/// access proves the very thing the rule is about and narrows nothing, and a `let` is
+/// the whole of the workaround.
+#[test]
+fn a_field_access_does_not_narrow() {
+    const DECLS: &str = "record Item { plan_id: Uuid? }
+event @item.synced { id: Uuid, plan_id: Uuid }
+";
+
+    let through_the_field = format!(
+        "{DECLS}command Sync(id: Uuid, item: Item) {{
+  if item.plan_id.is_some() {{
+    emit @item.synced {{ id, plan_id: item.plan_id }}
+  }}
+}}
+"
+    );
+    let message = parse(&through_the_field)
+        .expect_err("a field access is not a slot")
+        .text();
+    assert!(
+        message.starts_with("expected Uuid, found Uuid?"),
+        "{message}"
+    );
+
+    let through_a_let = format!(
+        "{DECLS}command Sync(id: Uuid, item: Item) {{
+  let plan_id = item.plan_id
+  if plan_id.is_some() {{
+    emit @item.synced {{ id, plan_id }}
+  }}
+}}
+"
+    );
+    parse(&through_a_let)
+        .unwrap_or_else(|err| panic!("a `let` binds a slot the branch narrows: {err}"));
+}

@@ -119,6 +119,10 @@ other declaration to move the constraint to.
 a container or a record is an error naming the type. That check is new here and applies to event
 fields and entity columns too, where it used to be accepted and silently do nothing.
 
+**The annotation is a boundary and never a transformation.** It says what may enter and reports what
+did not; it does not make a value fit. `String.truncate(n)` is what does, written where the value is
+produced, and `docs/strings.md` is the argument for keeping those two separate.
+
 **Rejected: `@max` on the entity column instead.** It is where the constraint is enforced for a bare
 string, so it looks like the consistent choice. It cannot express this one: the column's type is
 `LineItem`, and there is no syntax for "the `title` inside it", nor should there be, because that is

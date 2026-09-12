@@ -2724,6 +2724,30 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
                 }),
             }
         }
+        // The first `n` characters, counted the way `len` and `@max` count them, and the
+        // string itself when it already fits. A count at or below zero keeps nothing:
+        // the answer is still a string of at most `n` characters, which is the whole
+        // contract.
+        (Value::Str(value), "truncate") => {
+            expect_arity(method, 1, &args)?;
+            match &args[0] {
+                Value::Int(count) => {
+                    // Clamped at both ends, and the two ends are not the same fallback:
+                    // a negative count keeps nothing, and one past `usize` keeps
+                    // everything. `unwrap_or(0)` would read the second as the first and
+                    // empty the string on a 32-bit host.
+                    let count = usize::try_from((*count).max(0)).unwrap_or(usize::MAX);
+                    Ok(match value.char_indices().nth(count) {
+                        Some((end, _)) => Value::str(&value[..end]),
+                        None => Value::Str(value.clone()),
+                    })
+                }
+                other => Err(ErrorKind::TypeMismatch {
+                    expected: Type::Int,
+                    found: other.ty(),
+                }),
+            }
+        }
         (Value::Str(value), "to_int") => {
             expect_arity(method, 0, &args)?;
             Ok(match value.parse::<i64>() {

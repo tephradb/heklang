@@ -15,12 +15,32 @@ it: **a method that is not in these tables does not exist**, and the error names
 | `contains(s)`, `starts_with(s)` | `Bool` | |
 | `strip_prefix(s)` | `String` | the string unchanged when the prefix is absent |
 | `after_last(s)` | `String` | the whole string when the separator is absent or empty |
+| `truncate(n)` | `String` | the first `n` characters, the string itself when it already fits |
 | `to_int()` | `Int?` | |
 | `to_uuid()` | `Uuid?` | |
 
 `strip_prefix` is written after a `starts_with` that already decided, and `after_last` exists so that
 `gid.after_last("/")` is safe on something that is not a global id. The two conversions return
 optionals, because there the failure is the point.
+
+`truncate` counts characters, the unit `len()` reports and `@max(n)` bounds, so `text.truncate(n)`
+satisfies `@max(n)` for every input and a count at or below zero gives `""`. It is how a value from
+outside is made to fit a bounded field: `body_html: html.truncate(500)` at the `emit`. `@max` never
+truncates on its own, because silent truncation at a schema edge is the string version of a silent
+round. A truncated value is computed rather than read, so the `max-tightening` check does not fire on
+it. Four things to get right:
+
+- **Truncate last.** The guarantee covers what `truncate` returns, and `upper()`/`lower()` can grow a
+  count (`ß` uppercases to `SS`), so `body.truncate(3).upper()` may be six characters. Put the bound
+  at the end of the chain.
+- **It is on `String`, not `String?`.** `body.truncate(n)` on an optional is `no method truncate on
+  String?`. Write `body.unwrap_or("").truncate(n)`, or narrow first and truncate the narrowed value.
+- **A sealed destination is fine; a sealed receiver is not.** Writing plaintext into a
+  `@subject(...)` field is the encrypting direction, so `email: email.truncate(200)` from an ordinary
+  `String` checks clean. `e.email.truncate(200)` on content folded out of the log is `seal-boundary`,
+  the same as `e.email.trim()` (rule 7 of this skill, `effects.md` rule 12).
+- **Nothing checks a literal count against a literal bound.** `body.truncate(80)` into `@max(8)`
+  checks clean and then fails at run time, hard in a projector. Match the two by hand.
 
 ### `Json`
 

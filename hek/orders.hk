@@ -58,9 +58,11 @@ projector Orders {
   }
 }
 
-// What the `@max` invariant does not reach, and so the case the runtime backstop is
-// still for: an interpolation has no single declaration to compare a bound against.
-// Writing `notes` straight in would be the static error instead.
+// What the `@max` invariant does not reach: an interpolation has no single declaration
+// to compare a bound against, so nothing static compares these two. Writing `notes`
+// straight in would be the static error instead. A projector has no failure channel, so
+// the author meets the bound rather than leaving it to the runtime backstop, and
+// `truncate` is what meets it.
 projector Notes {
   entity OrderNote {
     order_id: Uuid @key,
@@ -68,7 +70,7 @@ projector Notes {
   }
 
   on @order.placed { order_id, notes } {
-    put OrderNote { order_id, note: "note: {notes}" }
+    put OrderNote { order_id, note: "note: {notes}".truncate(8) }
   }
 }
 

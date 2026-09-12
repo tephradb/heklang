@@ -193,6 +193,9 @@ pub fn method_sig(receiver: &Type, method: &str) -> Option<Sig> {
         (Type::String, "trim" | "lower" | "upper") => sig(Vec::new(), Type::String),
         (Type::String, "strip_prefix" | "after_last") => sig(vec![Type::String], Type::String),
         (Type::String, "len") => sig(Vec::new(), Type::Int),
+        // `len` measures a value against a `@max(n)`; this is what meets one. Both
+        // count characters, which is the unit the annotation bounds in.
+        (Type::String, "truncate") => sig(vec![Type::Int], Type::String),
         (Type::String, "is_empty") => sig(Vec::new(), Type::Bool),
         (Type::String, "contains" | "starts_with") => sig(vec![Type::String], Type::Bool),
         (Type::String, "to_int") => sig(Vec::new(), Type::opt(Type::Int)),

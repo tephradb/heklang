@@ -107,6 +107,65 @@ marked, keeps one syntax at the cost of an author having to remember which mode 
 delimiters that each do one thing are two things to learn once, rather than one thing to check every
 time.
 
+## `truncate` is how a string meets a `@max`
+
+`@max(n)` is a hard boundary on what may enter the log, and `len()` only says where a value sits
+relative to it. `truncate(n)` is the other half of that pair: the first `n` characters, and the
+string itself when it already fits.
+
+```
+emit @product.described { product_id, body_html: html.truncate(500) }
+```
+
+It counts characters, which is the unit `@max(n)` bounds in and the unit `len()` reports in, so the
+value `text.truncate(n)` hands back satisfies `@max(n)` for every input there is. A count at or
+below zero keeps nothing, which is the same sentence read at its edge. `strip_prefix` is the shape
+it copies: total, the string unchanged when there is nothing to do, and no optional for a decision
+the author has already made.
+
+**Truncate last.** The guarantee is about the value `truncate` hands back, so a method after it is
+outside the guarantee, and one of them can undo it: `upper()` and `lower()` may return more
+characters than they took, because `ß` uppercases to `SS` and `İ` lowercases to two. So
+`body.truncate(3).upper()` is six characters on `"ßßßßß"` and `body.upper().truncate(3)` is three.
+Write the bound at the end of the chain.
+
+**It is on `String`, not on `String?`.** An optional has three methods and this is not one of them
+(`docs/optionals.md`), so a `String? @max(n)` field is met by getting to the string first:
+`text.unwrap_or("").truncate(n)` when absent may become empty, and narrowing then truncating when it
+may not.
+
+**Why an author writes it rather than `@max` doing it at the boundary.** Silent truncation at a
+schema edge reads fine and mangles data: a description that arrives forty characters over is stored
+forty characters short, and nothing in the program said so. That is `docs/money.md`'s argument in a
+second place, where an inexact `mul` fails rather than rounds until the author names a rounding. So
+the annotation stays a boundary and the method is what meets it, written at the `emit` where the
+decision is being made and visible to whoever reads it next.
+
+The two runtime channels are unchanged and still carry the values nobody truncated: over-length at an
+`emit` is `Outcome::Invalid`, and in a projector it is a hard error (`docs/projectors.md`). A
+truncated value is computed rather than read, so it is not what the `max-tightening` invariant is
+about either; that check is still two declarations disagreeing.
+
+**Which means the count and the bound are the author's to match.** `body.truncate(80)` into a
+`@max(8)` column checks clean and then fails at run time, hard, because `max-tightening` reads a
+declaration and this is an expression. Comparing the two literals would be decidable, and it is the
+narrow end of a question `docs/projectors.md` declines whole: reasoning about the length of an
+expression is a different check with a different answer, and one that stops at literals would look
+like a guarantee it is not.
+
+**A sealed field is bounded from the plaintext side.** Writing into a `@subject(...)` field is the
+encrypting direction and needs no ceremony (`docs/effects.md` rule 12), so a command holding an
+ordinary `String` meets the bound the ordinary way: `email: email.truncate(200)` checks clean. What
+is refused is a sealed **receiver**. `e.email.truncate(200)` on content folded out of the log is
+`seal-boundary`, for the same reason `e.email.trim()` is, so content that is being *moved* rather
+than freshly written cannot be reshaped to fit and the `max-tightening` check is the whole of what
+can be said about its length.
+
+**Rejected: `truncate` returning `String?`**, absent when it cut something off. The information is
+real, and every call site would spend an `unwrap_or` throwing it away: an author who wrote
+`truncate(500)` against a `@max(500)` has already decided what happens to the tail. `len() > 500`
+asks the question for the one caller who wants to branch on the answer.
+
 ## What is deliberately absent
 
 - **No `+` on strings.** Interpolation covers it, reads better in the cases that matter (a message

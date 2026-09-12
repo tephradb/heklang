@@ -205,7 +205,9 @@ Three lines of rule:
   block**, which is the early-return shape above;
 - a narrowing ends where its block does.
 
-**What deliberately does not narrow**: a compound condition (`if a.is_some() && b.is_some()` narrows
+**What deliberately does not narrow**: a receiver that is not a name (`if item.plan_id.is_some()`
+narrows nothing, because a narrowing rewrites a *slot* and a field access is not one; bind it with a
+`let` first and the `if` narrows that), a compound condition (`if a.is_some() && b.is_some()` narrows
 neither), the value-position `if`, an `else if`, and an equality (`if x == "a"` does prove `x`
 present, and says so nowhere). Where narrowing does not reach, `unwrap_or` does.
 

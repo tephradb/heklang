@@ -227,7 +227,9 @@ Annotations, exhaustively: an **event field** takes `@subject(field)`, `@max(n)`
 and `@no_index`; an **entity field** takes `@key`, `@index` and `@max(n)`, plus `= <literal>` for a
 default and an entity-level `index (a, b)`; a **record field** takes `@max(n)` and
 `@absent(<literal>)`; an **enum variant** takes `@default`; an **effect arm's trigger destructure**
-takes `@key`. `@max` applies to `String` and `String?` and nothing else.
+takes `@key`. `@max` applies to `String` and `String?` and nothing else. **`@max` never truncates on
+its own**: `text.truncate(n)` is how a value from outside is made to satisfy one, written last in its
+chain, and on a `String?` it is `text.unwrap_or("").truncate(n)`.
 
 **Adding a field to an event that already has history.** A log is append-only, so every event already
 in it lacks the new field and a host reading one back has nothing to put in the slot. Either make the
@@ -314,7 +316,8 @@ A comment is `//` to the end of the line. Put one on its own line, leading whate
 6. **`T?` does not fill `T`.** Use `unwrap_or(x)`, or a branch that proves it present (narrowing). A
    bare `T` does fill a `T?` at every declared position, wrapping once at the outside. `==` and `!=`
    are the one exception to needing either: they take a `T?` against a bare `T`, and an absent value
-   is unequal to every present one. Ordering an optional is still an error.
+   is unequal to every present one. Ordering an optional is still an error. Narrowing is about a
+   **name**: `if item.plan_id.is_some()` narrows nothing, so bind it with a `let` first.
 7. **Sealed content may only be moved, asked about, or revealed.** A field with `@subject(...)`
    cannot be interpolated, compared, sent in a body, passed to `invoke`, `unwrap_or`ed or read
    through a method. Move it into a same-subject position, ask `.is_some()`, or `reveal(x)` in an

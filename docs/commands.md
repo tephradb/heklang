@@ -224,7 +224,8 @@ writing every name.
 off another event field: emitting into a field bounded tighter than the one folded into it is
 `max-tightening`, and `docs/projectors.md` has the invariant. An over-length *value* is still
 `Outcome::Invalid` at run time, which is a different thing: one is a bad input and this is two
-declarations disagreeing.
+declarations disagreeing. A value from outside that may be any length is made to fit at the `emit`
+with `truncate(n)` (`docs/strings.md`), which is the author's decision rather than the annotation's.
 
 ## Three outcomes, and the condition comes back with all of them
 

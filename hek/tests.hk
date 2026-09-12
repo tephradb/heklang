@@ -261,3 +261,22 @@ test "an erased customer skips rather than sending plaintext" {
 
   expect skipped
 }
+
+// A note longer than the column is the case the `@max` invariant cannot see, because an
+// interpolation has no declaration to compare against. Without the `truncate` in
+// `Notes` this is a hard error rather than a row.
+test "a note past the column is kept to its first eight characters" {
+  given @order.placed {
+    order_id: ADA,
+    customer_id: 1,
+    email: "ada@example.com",
+    address: "12 Reykjavik St",
+    total: 25.99,
+    tax_rate: 0.2000,
+    notes: "leave at the door",
+  }
+
+  project Notes
+
+  expect OrderNote[ADA] { note: "note: le" }
+}

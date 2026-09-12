@@ -27,13 +27,20 @@ a value becomes text through interpolation and that table is `docs/effects.md` r
 | `contains(s)`, `starts_with(s)` | `Bool` | |
 | `strip_prefix(s)` | `String` | the string unchanged when the prefix is absent |
 | `after_last(s)` | `String` | the whole string when the separator is absent or empty |
+| `truncate(n)` | `String` | the first `n` characters, the string itself when it already fits |
 | `to_int()` | `Int?` | |
 | `to_uuid()` | `Uuid?` | |
 
-`strip_prefix` and `after_last` return a `String` rather than an optional, and both defaults are
-deliberate. `strip_prefix` is written after a `starts_with` that already decided, and `after_last`
-exists so `gid.after_last("/")` is safe on something that is not a gid. The two conversions do return
-optionals, because there the failure is the point.
+`strip_prefix`, `after_last` and `truncate` return a `String` rather than an optional, and all three
+defaults are deliberate. `strip_prefix` is written after a `starts_with` that already decided,
+`after_last` exists so `gid.after_last("/")` is safe on something that is not a gid, and `truncate`
+is written by an author who has already decided what happens to the tail. The two conversions do
+return optionals, because there the failure is the point.
+
+`truncate` counts characters, which is what `len()` reports and what `@max(n)` bounds, so
+`text.truncate(n)` satisfies `@max(n)` and is what meets a bound the annotation will not meet on its
+own. `docs/strings.md` has the argument, and the three things it is easy to get wrong: truncate last,
+`String?` is not a receiver, and a sealed receiver is refused where a sealed destination is free.
 
 ### `Json`
 
@@ -272,7 +279,7 @@ Each of these is a decision with an argument behind it, not a gap waiting to be 
 
 ## Related
 
-- `docs/strings.md`: interpolation, the raw form, and the text table.
+- `docs/strings.md`: interpolation, the raw form, the text table, and meeting a `@max`.
 - `docs/containers.md`: iteration order, where an empty container's type comes from, comprehensions.
 - `docs/optionals.md`: narrowing, and where a bare `T` fills a `T?`.
 - `docs/money.md`: the operator table, and why `Money` is not `Decimal(n)`.

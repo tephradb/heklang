@@ -1,5 +1,5 @@
 //! `docs/strings.md` as executable tests: interpolation, its nesting, the text form
-//! table, and the raw multi-line form.
+//! table, the raw multi-line form, and `truncate`.
 
 use heklang::{Interpreter, Outcome, Value, parse};
 
@@ -295,5 +295,250 @@ projector Notes {
     assert_eq!(
         parse(source).expect_err("expected a rejection").text(),
         "a String default cannot be an interpolated string"
+    );
+}
+
+// ---------------------------------------------------------------------------------
+// `truncate`, which is how a string meets a `@max`.
+
+#[test]
+fn truncate_keeps_the_first_n_characters() {
+    assert_eq!(
+        built(
+            "text: String",
+            "text.truncate(3)",
+            vec![("text", Value::str("abcdef"))]
+        ),
+        "abc"
+    );
+}
+
+#[test]
+fn truncate_returns_the_string_unchanged_when_it_already_fits() {
+    // The `strip_prefix` shape: total, and nothing to do is the string itself. The
+    // boundary case is the one a `@max(n)` sits on.
+    assert_eq!(
+        built(
+            "text: String",
+            "text.truncate(10)",
+            vec![("text", Value::str("abc"))]
+        ),
+        "abc"
+    );
+    assert_eq!(
+        built(
+            "text: String",
+            "text.truncate(3)",
+            vec![("text", Value::str("abc"))]
+        ),
+        "abc"
+    );
+    assert_eq!(
+        built(
+            "text: String",
+            "text.truncate(3)",
+            vec![("text", Value::str(""))]
+        ),
+        ""
+    );
+}
+
+#[test]
+fn truncate_counts_the_characters_len_counts() {
+    // Characters rather than bytes, because that is the unit `@max(n)` bounds in and
+    // the unit `len()` reports in. A byte count would cut inside one of these.
+    assert_eq!(
+        built(
+            "text: String",
+            "text.truncate(3)",
+            vec![("text", Value::str("aé😀bc"))]
+        ),
+        "aé😀"
+    );
+    assert_eq!(
+        built(
+            "text: String",
+            "\"{text.truncate(3).len()}\"",
+            vec![("text", Value::str("aé😀bc"))]
+        ),
+        "3"
+    );
+}
+
+#[test]
+fn truncate_at_or_below_zero_keeps_nothing() {
+    assert_eq!(
+        built(
+            "text: String",
+            "text.truncate(0)",
+            vec![("text", Value::str("abc"))]
+        ),
+        ""
+    );
+    assert_eq!(
+        built(
+            "text: String",
+            "text.truncate(-1)",
+            vec![("text", Value::str("abc"))]
+        ),
+        ""
+    );
+}
+
+#[test]
+fn truncate_takes_an_int() {
+    assert_eq!(
+        err("text: String", "text.truncate(\"3\")"),
+        "expected Int, found String"
+    );
+}
+
+/// The point of the method: `@max(n)` was a constraint a program could test and not
+/// meet, and `truncate(n)` is what meets it.
+#[test]
+fn a_truncated_value_satisfies_the_bound_that_rejected_it() {
+    let source = "event @note.written { note_id: Uuid, body: String @max(8) }
+command Raw(note_id: Uuid, body: String) {
+  emit @note.written { note_id, body }
+}
+command Fitted(note_id: Uuid, body: String) {
+  emit @note.written { note_id, body: body.truncate(8) }
+}
+";
+    let program = parse(source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+    let long = || {
+        vec![
+            (
+                "note_id",
+                Value::uuid("0190d1a1-0000-7000-8000-000000000001"),
+            ),
+            ("body", Value::str("leave at the door")),
+        ]
+    };
+
+    let mut interpreter = Interpreter::new(&program);
+    let raw = interpreter.run("Raw", long()).expect("not an error");
+    assert_eq!(
+        raw.outcome,
+        Outcome::Invalid("body is 17 characters, the most allowed is 8".into())
+    );
+
+    let fitted = interpreter.run("Fitted", long()).expect("not an error");
+    match fitted.outcome {
+        Outcome::Ok(events) => assert_eq!(events[0].field("body"), Some(&Value::str("leave at"))),
+        other => panic!("expected an append, got {other:?}"),
+    }
+}
+
+/// A truncated value is computed, so it is not two declarations disagreeing and the
+/// `max-tightening` invariant has nothing to say about it. That is what lets a
+/// projector write an unbounded event field into a bounded column at all.
+#[test]
+fn truncating_into_a_bounded_column_is_not_max_tightening() {
+    let source = "event @note.written { note_id: Uuid, body: String }
+
+projector Notes {
+  entity Note {
+    note_id: Uuid @key,
+    body: String @max(8),
+  }
+
+  on @note.written as e { note_id, body } {
+    put Note { note_id, body: body.truncate(8) }
+  }
+}
+";
+    parse(source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+
+    let tightening = source.replace("body.truncate(8)", "body");
+    let rejected = parse(&tightening)
+        .expect_err("a plain read is the defect")
+        .text();
+    assert!(
+        rejected.starts_with(
+            "this write narrows `body`: @note.written declares no bound and `Note.body` is `@max(8)`"
+        ),
+        "{rejected}"
+    );
+}
+
+/// The guarantee is about what `truncate` hands back, so a method after it is outside
+/// it, and a case conversion is the one that can undo it: `ß` uppercases to `SS`.
+#[test]
+fn a_case_conversion_after_a_truncate_can_outgrow_the_bound() {
+    assert_eq!(
+        built(
+            "text: String",
+            "\"{text.truncate(3).upper().len()}\"",
+            vec![("text", Value::str("ßßßßß"))]
+        ),
+        "6"
+    );
+    // The same chain with the bound written last, which is where it belongs.
+    assert_eq!(
+        built(
+            "text: String",
+            "\"{text.upper().truncate(3).len()}\"",
+            vec![("text", Value::str("ßßßßß"))]
+        ),
+        "3"
+    );
+}
+
+/// An optional has three methods and this is not one of them, so a `String? @max(n)`
+/// field is met by getting to the string first.
+#[test]
+fn truncate_is_not_a_method_on_an_optional() {
+    assert_eq!(
+        err("text: String?", "text.truncate(3)"),
+        "no method `truncate` on String?; an optional has `is_some()`, `is_none()` and \
+         `unwrap_or(fallback)`, and `truncate` is a question for what it holds"
+    );
+    assert_eq!(
+        built(
+            "text: String?",
+            "text.unwrap_or(\"\").truncate(3)",
+            vec![("text", Value::some(Value::str("abcdef")))]
+        ),
+        "abc"
+    );
+}
+
+/// Writing into a sealed field is the encrypting direction and needs no ceremony, so a
+/// bound on one is met from the plaintext side. Only a sealed **receiver** is refused.
+#[test]
+fn a_sealed_destination_is_bounded_from_the_plaintext_side() {
+    const EVENT: &str = "event @person.registered {
+  person_id: Uuid,
+  email: String @subject(person_id) @max(20),
+}
+";
+    parse(&format!(
+        "{EVENT}command Register(person_id: Uuid, email: String) {{
+  emit @person.registered {{ person_id, email: email.truncate(20) }}
+}}
+"
+    ))
+    .unwrap_or_else(|err| panic!("a plaintext truncate into a seal is free: {err}"));
+
+    let sealed_receiver = format!(
+        "{EVENT}projector People {{
+  entity Person {{
+    person_id: Uuid @key,
+    email: String @max(20),
+  }}
+
+  on @person.registered as e {{ person_id, email }} {{
+    put Person {{ person_id, email: email.truncate(20) }}
+  }}
+}}
+"
+    );
+    let message = parse(&sealed_receiver)
+        .expect_err("a sealed receiver is refused")
+        .text();
+    assert!(
+        message.starts_with("`truncate` reads content sealed under `person_id`"),
+        "{message}"
     );
 }

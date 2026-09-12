@@ -165,9 +165,17 @@ parses either of its blocks, so a single-pass parser needs no backtracking to kn
 
 ## What deliberately does not narrow
 
-Each of these is sound in principle. None of them appeared in the port that motivated narrowing, and
-leaving them out is what keeps the rule three lines instead of a paragraph with exceptions.
+Each of these is sound in principle, and leaving them out is what keeps the rule three lines instead
+of a paragraph with exceptions. The first is the one a later port did reach for, and it is listed
+first for that reason; none of the rest has come up in real code yet.
 
+- **A receiver that is not a name.** `if item.plan_id.is_some()` proves exactly what the rule is
+  about and narrows nothing, because a narrowing rewrites the declared type of a **slot** and a field
+  access is not one. Neither is a method's result, nor anything else an expression builds. The
+  workaround is a line rather than an `unwrap_or` with an invented fallback: `let plan_id =
+  item.plan_id` binds a slot, and the `if` below it narrows that like any other local. Nothing is
+  mutable, so a path would be as fixed as a slot and this would be sound; what it would cost is a
+  second thing a narrowing can be about, because the unwrap a narrowed load lowers to names a slot.
 - **Compound conditions.** `if a.is_some() && b.is_some()` narrows neither, and
   `if a.is_none() || b { return }` narrows nothing after it. A conjunction and a disjunction narrow
   in opposite directions, and getting that wrong is silent.
