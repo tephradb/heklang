@@ -70,7 +70,7 @@ The set is closed: every diagnostic heklang can produce is one of these.
 | `bad-type` | a type spelled wrong | a scale above 18, or a `Map` key that does not order (`Bool`, `Money(n)`, `Decimal(n)`) |
 | `needs-target-type` | a value whose type nothing decides | `[]`, `Map.empty`, `Money.parse` and `Decimal.parse` take their type from the target; a `let` is not one |
 | `not-a-value` | a statement written where a value was wanted | a call to a void effect-local `fn` is a statement, so it cannot be bound with `let` |
-| `arity` | a call with the wrong number of arguments, or braces on a refusal that has no fields | a third positional argument to `http.*` is a timeout, which is configuration; `reject Gone` takes no `{ }` |
+| `arity` | a call with the wrong number of arguments, or a refusal's fields written with the wrong delimiter | a third positional argument to `http.*` is a timeout, which is configuration; `reject Gone` takes no `{ }`, and parens declare while braces use, so a refusal with fields is `reject SkuTaken { sku, item }` and never `reject SkuTaken(sku, item)` |
 | `missing-field` | a field, parameter or argument that has to be given and was not | `emit`, `put`, `given`, `invoke`, a record literal, `reject` with fields and `guard Name { .. }` are all written whole |
 | `duplicate-field` | one given twice | |
 
@@ -96,7 +96,7 @@ The set is closed: every diagnostic heklang can produce is one of these.
 | `impure-fn` | a module `fn` doing something a pure function cannot | move the call to the caller and pass the result in, or make it an effect-local `fn` |
 | `fold-restriction` | a `fold` calling out, invoking, decrypting or reading a clock | a fold has to reproduce without a journal; do it in the body and pass it in |
 | `arm-only` | an effect-local `fn` doing what stays in the arm | `reveal`, `erase`, `now()` and `fold` stay in the arm; pass the revealed value or the moment in as a parameter |
-| `return-shape` | a `return` that does not match the signature it is in, or an answer written with a `return` or with parens | a guard has no `return`: it answers with `reject <Name>` or `invalid "<message>"`, both bare. `return reject X`, `invalid("x")` and `fail("x")` are the removed spellings. A module `fn` must declare a return type and return on every path; `reject`/`invalid` need `-> Outcome` or `-> Outcome?` |
+| `return-shape` | a `return` that does not match the signature it is in, an answer written with a `return` or with parens, or an answer's message written as a value rather than a string | a guard has no `return`: it answers with `reject <Name>` or `invalid "<message>"`, both bare. `return reject X`, `invalid("x")` and `fail("x")` are the removed spellings. `invalid` and `fail` take a written message, so a value reaches one through a hole: `invalid "{err}"`, never `invalid err`. A module `fn` must declare a return type and return on every path; `reject`/`invalid` need `-> Outcome` or `-> Outcome?` |
 | `unreachable` | a statement after the declaration's answer | saying the answer ends the declaration, so nothing below `reject`, `invalid`, `fail` or `return` runs. Delete it, or move it above the answer |
 
 ### Seals

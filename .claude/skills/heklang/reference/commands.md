@@ -292,7 +292,9 @@ a call that did not refuse has no code, and no code is not any name. An `invalid
 
 `reject <Name>` and `invalid "<message>"` are **statements**, not values. Each says what this
 declaration answers, and saying the answer ends the declaration, so neither takes a `return` in front
-of it and neither may be bound to a name. They may be written in a command, in a guard, and in a `fn`
+of it and neither may be bound to a name. `invalid`'s message is written and not computed: a value
+reaches it through a hole, so a `String?` a helper handed back is `invalid "{err}"` and never
+`invalid err`. They may be written in a command, in a guard, and in a `fn`
 declared `-> Outcome` or `-> Outcome?`; a `fn` that declared neither cannot write either.
 
 `return` is left for leaving with nothing more to say (a bare `return`, which is `Ok`), for a `fn`

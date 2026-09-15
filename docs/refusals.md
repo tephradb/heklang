@@ -51,6 +51,15 @@ refusal <Name>[(<field>: <Type>, ...)] "<message>"
 against `invoke Foo { ... }`. A refusal with no fields declares no parens and is written with
 no braces, which is the common case: 19 of the 23 codes in the corpus take nothing.
 
+A use site that reaches for the declaration's parens is told so by name, in both directions:
+`reject SkuTaken(sku, item)` is `` refusal `SkuTaken` takes its fields in braces `` and hints
+with the declaration's own field names, and `reject ShopNotFound(x)` is `` has no fields, so
+it takes no parens ``. Neither used to say that. With fields declared the report was
+`expected `{``, which is true and names no rule; with none it was `unreachable`, because
+`reject ShopNotFound` is already a complete answer and `(x)` parsed as the statement after
+it, so the message described the shape the parser reached rather than the one that was
+written.
+
 **The message may name the refusal's own fields and nothing else.** It is not an expression
 in a scope; it is text and holes, and the holes are filled at the use site. That is what makes
 the message a function of the fields a caller was handed, which is the whole reason to declare
@@ -140,6 +149,23 @@ statement that crosses a call boundary from a helper.
 return to the next statement. The guarantee only runs one way, since `emit` and `put` take no
 parens and are not terminal, so the check that a statement after an answer never runs is a
 diagnostic rather than a shape a reader has to spot (`docs/diagnostics.md`).
+
+**The message is written, and a value reaches it through a hole.** `invalid "{err}"`, never
+`invalid err`: the operand of `invalid` and of `fail` is a string literal and nothing else,
+which is the same sentence "a message and nothing else" says below about not giving `invalid`
+a declaration. A name, a call, a `const` and `"a" + b` are all `return-shape`, and the hint
+names the author's own identifier back in the hole.
+
+This is the one rule the two tools used to disagree about. `tree-sitter-hek/grammar.js` has
+always spelled the message `choice($.string, $.raw_string)`, and it has to: were it an
+expression, the parens of a removed `invalid("x")` would read as a grouping and `hek fmt`
+would rewrite the file to `invalid ("x")`, which is output of its own that `hek check`
+rejects. The parser meanwhile took any expression with a `String` hint, so `invalid err`
+passed `check` and its tests while `hek fmt` declined the whole file, and a migration off
+`invalid(err)` writes exactly that on the first try. `Parser::answer_message` is where the two
+now agree. It checks twice, because a `const` lowers to the literal it was declared with and
+so builds the same node a written message does, while a written message is also how a longer
+expression starts.
 
 **Where it may be written** is unchanged: a command, a guard, and a `fn` that declared
 `Outcome`. An effect's terminal outcome is still `fail`, and a projector still has no failure

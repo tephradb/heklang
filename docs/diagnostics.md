@@ -192,7 +192,7 @@ be the whole of it:
 | `bad-literal` | a literal that cannot be the type its position declares |
 | `needs-target-type` | a value whose type nothing in the program decides |
 | `not-a-value` | a statement written where a value was wanted |
-| `arity` | a call with the wrong number of arguments |
+| `arity` | a call with the wrong number of arguments, or a refusal's fields written with the wrong delimiter |
 | `missing-field` | a field, parameter or argument that has to be given and was not |
 | `duplicate-field` | one given twice |
 | `unknown-annotation` | `@nope` |
@@ -208,7 +208,7 @@ be the whole of it:
 | `impure-fn` | a `fn` doing something a pure function cannot |
 | `fold-restriction` | a `fold` calling out, decrypting, or reading a secret |
 | `arm-only` | an effect-local `fn` doing what stays in the arm |
-| `return-shape` | a `return` that does not match the signature it is in, or an answer written with a `return` or with parens |
+| `return-shape` | a `return` that does not match the signature it is in, an answer written with a `return` or with parens, or an answer's message written as a value rather than a string |
 | `unreachable` | a statement after the declaration's answer |
 | `seal-boundary` | rule 12: sealed content leaving without `reveal` |
 | `secret-boundary` | rule 16: a deployment credential reaching something that observes it |

@@ -4413,8 +4413,7 @@ impl Parser {
             // The same guard the arm's own `fail` uses, so that one mistake in one
             // construct reports one code however it is spelled: an expectation is
             // spelled like the thing it asserts, and that goes for its errors too.
-            self.answer_operand("fail")?;
-            let message = self.expr(lower, Some(Type::String))?;
+            let message = self.answer_message(lower, "fail")?;
             return Ok(Expect::Failed { message, span });
         }
         if self.eat_soft("skipped") {
@@ -6468,8 +6467,7 @@ impl Parser {
                     span,
                 )?;
                 self.bump();
-                self.answer_operand("fail")?;
-                let message = self.expr(lower, Some(Type::String))?;
+                let message = self.answer_message(lower, "fail")?;
                 Ok(Stmt::Fail { message, span })
             }
             "log" => {
@@ -7799,6 +7797,62 @@ impl Parser {
         }))
     }
 
+    /// The message an answer carries: a string literal, and nothing else. Shared by
+    /// `invalid` and `fail`, and by the two expectations that assert them.
+    ///
+    /// This is where `hek check` agrees with `tree-sitter-hek/grammar.js`, which spells
+    /// the message `choice($.string, $.raw_string)`. It did not used to: this took any
+    /// expression with a `String` hint, so `invalid err` passed `check` while `hek fmt`
+    /// declined the whole file, which is the one shape where the two tools disagreed
+    /// about what the language is. A migration off `invalid(err)` writes it on the first
+    /// try, and the only signal was one line from `fmt` that a multi-file run buries.
+    ///
+    /// A value reaches the message through a hole. That is what `docs/refusals.md` means
+    /// by "a message and nothing else": unlike a `refusal`, whose text is rendered at a
+    /// distance from the fields a caller was handed, this message is written where it is
+    /// read.
+    ///
+    /// Two checks, because either one alone lets a shape through. The token decides
+    /// first, since a `const` lowers to the literal it was declared with, so
+    /// `invalid GREETING` builds a `Lit(Str)` that nothing about the node tells apart
+    /// from a written one. The node decides second, since a string is also how a longer
+    /// expression starts: `invalid "a" + b` and `invalid "a".upper()` both open with the
+    /// right token and neither is a message.
+    fn answer_message(&mut self, lower: &mut Lower, named: &str) -> Result<ExprId, Diagnostic> {
+        self.answer_operand(named)?;
+        // Read before the operand is consumed: where the author wrote a name, the fix is
+        // that name in a hole, and after the parse there is no name left to offer.
+        let hole = match self.peek() {
+            Token::Ident(name) => format!("{named} \"{{{name}}}\""),
+            _ => format!("{named} \"<message>\""),
+        };
+        if !matches!(self.peek(), Token::Text(_) | Token::TextOpen(_)) {
+            return Err(self.written_message(named, &hole, self.span_here()));
+        }
+        let message = self.expr(lower, Some(Type::String))?;
+        if !matches!(
+            lower.b.exprs().get(message),
+            Some(Expr::Lit(Literal::Str(_)) | Expr::Interp(_))
+        ) {
+            return Err(self.written_message(named, &hole, lower.b.exprs().span(message)));
+        }
+        Ok(message)
+    }
+
+    /// The one diagnostic both halves of [`Self::answer_message`] report, so that one
+    /// mistake reports one code however it is spelled. `Code::ReturnShape` is what the
+    /// sibling guards in [`Self::answer_operand`] already use for the removed call form.
+    fn written_message(&self, named: &str, hole: &str, span: Span) -> Diagnostic {
+        self.err(
+            Code::ReturnShape,
+            format!("`{named}` takes a written message"),
+            span,
+        )
+        .with_hint(format!(
+            "write `{hole}`: a value reaches an answer's message through a hole, and nothing else does"
+        ))
+    }
+
     /// The message an answer carries, checked before it is read. Shared by `invalid` and
     /// `fail`, which take the same operand in the same shape.
     ///
@@ -7854,8 +7908,7 @@ impl Parser {
     /// The message of `invalid <message>`. `reject` used to share this shape and no longer
     /// does: it names a declaration instead, and `reject_use` reads that.
     fn refusal_args(&mut self, lower: &mut Lower) -> Result<ExprId, Diagnostic> {
-        self.answer_operand("invalid")?;
-        self.expr(lower, Some(Type::String))
+        self.answer_message(lower, "invalid")
     }
 
     /// `reject Name`, or `reject Name { field: value }`, as the code and message pair
@@ -7895,6 +7948,36 @@ impl Parser {
                     "declare it at module scope: `refusal {name} \"<message>\"`"
                 )));
         };
+
+        // Parens declare and braces use, the same split `command Foo(..)` and
+        // `invoke Foo { .. }` have, and the pre-migration spelling of a refusal's fields is
+        // the one that gets this wrong. It is caught here rather than left to fall through,
+        // because what fell through described a consequence instead of the mistake: with no
+        // fields declared, `reject Foo(bar)` is a complete answer followed by `(bar)`, and
+        // the report was `unreachable` under the paren. With fields it was `expected `{``,
+        // which is true and names no rule.
+        if self.at_sym(Sym::LParen) {
+            let at = self.span_here();
+            return Err(if def.params.is_empty() {
+                self.err(
+                    Code::Arity,
+                    format!("refusal `{name}` has no fields, so it takes no parens"),
+                    at,
+                )
+                .with_hint(format!("write `reject {name}`"))
+            } else {
+                let fields: Vec<&str> = def.params.iter().map(|param| &*param.name).collect();
+                self.err(
+                    Code::Arity,
+                    format!("refusal `{name}` takes its fields in braces"),
+                    at,
+                )
+                .with_hint(format!(
+                    "write `reject {name} {{ {} }}`: parens declare a refusal and braces use one",
+                    fields.join(", ")
+                ))
+            });
+        }
 
         let mut args: Vec<Option<ExprId>> = vec![None; def.params.len()];
         if def.params.is_empty() {

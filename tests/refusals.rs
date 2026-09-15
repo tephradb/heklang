@@ -306,6 +306,42 @@ fn a_refusal_with_no_fields_takes_no_braces() {
     ));
 }
 
+/// Parens declare and braces use, so a use site written with the declaration's parens is
+/// told which of the two it wanted, by name.
+///
+/// Both halves used to report a consequence rather than the mistake. With fields declared
+/// it was `expected `{``, which is true and names no rule. With none it was worse:
+/// `reject ShopNotFound` is already a complete answer, so `(x)` parsed as the statement
+/// after it and the report was `unreachable` pointing at the paren, which describes the
+/// shape the parser ended up with and not the one the author wrote.
+#[test]
+fn a_refusal_takes_its_fields_in_braces() {
+    let fields = err(&used("  reject SkuTaken(sku, item_id)"));
+    assert!(
+        fields.contains("refusal `SkuTaken` takes its fields in braces"),
+        "got: {fields}"
+    );
+    // The hint names the declaration's own fields, so it is the line to type.
+    assert!(
+        fields.contains("write `reject SkuTaken { sku, item }`"),
+        "got: {fields}"
+    );
+    assert!(
+        fields.contains("parens declare a refusal and braces use one"),
+        "got: {fields}"
+    );
+
+    let none = err(&used("  reject ShopNotFound(sku)"));
+    assert!(
+        none.contains("refusal `ShopNotFound` has no fields, so it takes no parens"),
+        "got: {none}"
+    );
+    assert!(
+        !none.contains("never runs"),
+        "the paren is the mistake, not the statement it turned into: {none}"
+    );
+}
+
 /// The form this replaces. People will type it, so the message names the declaration to
 /// write, reading the literals it was given to say it concretely.
 #[test]
@@ -379,6 +415,60 @@ fn an_answer_takes_no_parens() {
     // `reject` names a declaration rather than carrying a message, and says so.
     let bare = err(&used("  reject"));
     assert!(bare.contains("`reject` takes a refusal"), "got: {bare}");
+}
+
+/// The message is written where it is read, and a value reaches it through a hole.
+///
+/// This is `hek check` agreeing with `tree-sitter-hek/grammar.js`, which has always
+/// spelled the message `choice($.string, $.raw_string)`. It did not used to: the parser
+/// took any expression with a `String` hint, so a migration off `invalid(err)` wrote
+/// `invalid err`, `check` passed it, the tests passed, and the only signal was `hek fmt`
+/// declining the file on one line of a multi-file run. A formatter and a checker
+/// disagreeing about what the language is is the defect; which of them was right is
+/// settled by `docs/refusals.md`, where the message is "a message and nothing else".
+#[test]
+fn an_answer_takes_a_written_message() {
+    // The shape the migration produced, and the hint names the fix with the author's own
+    // identifier in the hole rather than a placeholder.
+    let named = err(&used("  invalid sku"));
+    assert!(
+        named.contains("`invalid` takes a written message"),
+        "got: {named}"
+    );
+    assert!(named.contains("write `invalid \"{sku}\"`"), "got: {named}");
+
+    // Every other way to write a value where a message goes, reported the same way.
+    for body in ["  invalid sku.trim()", "  invalid \"a\".upper()"] {
+        let message = err(&used(body));
+        assert!(
+            message.contains("`invalid` takes a written message"),
+            "{body} got: {message}"
+        );
+    }
+
+    // A `const` is the case the token has to decide, because by the time there is a node
+    // to look at there is nothing left to tell apart: a const reference lowers to the
+    // literal it was declared with, so this builds the same `Lit(Str)` a written message
+    // does. Without the token check it would pass `check` and `hek fmt` would still
+    // decline the file, which is the whole defect in miniature.
+    let konst = err("const HOUSE: String = \"house\"
+command List(sku: String) {
+  invalid HOUSE
+}
+");
+    assert!(
+        konst.contains("`invalid` takes a written message"),
+        "got: {konst}"
+    );
+    assert!(
+        konst.contains("write `invalid \"{HOUSE}\"`"),
+        "got: {konst}"
+    );
+
+    // The hole is the fix, so it has to work: the same value, said the way the language
+    // spells it.
+    let program = program(&used("  invalid \"{sku}\""));
+    assert_eq!(program.commands.len(), 1);
 }
 
 /// An answer is not a value: there is nothing left for a binding to hold, which is the

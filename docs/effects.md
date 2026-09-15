@@ -154,6 +154,10 @@ to execute, which is the same value reading differently on a retry.
 failure. A runtime error wedges instead, and there is no second author verb, because two would raise
 "which one wedges?" as something to memorise.
 
+The reason is written, the way `invalid`'s message is and for the same reasons
+(`docs/refusals.md`): a value reaches it through a hole, so it is
+`fail "sync rejected with status {response.status}"` and never `fail why`.
+
 Author failures and runtime terminal failures are **counted separately**, and this is what makes
 `fail` safe rather than a way to lose work:
 

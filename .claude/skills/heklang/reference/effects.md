@@ -88,6 +88,9 @@ reproduces it. Three consequences:
 `fail` records the position as failed and advances the cursor. It is the **only** author-invoked
 failure; a runtime error wedges instead.
 
+The reason is a written message, the way `invalid`'s is: a value reaches it through a hole, so it is
+`fail "sync rejected with status {response.status}"` and never `fail why`.
+
 | Outcome | Meaning | Advances |
 | --- | --- | --- |
 | done | the arm ran to the end | yes |

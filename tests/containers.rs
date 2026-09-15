@@ -300,9 +300,10 @@ fn for_binds_an_index_and_an_item_over_a_list() {
 
 #[test]
 fn for_binds_a_key_and_a_value_over_a_map() {
-    let body = "  for key, value in m {\n    if key == 10 {\n      invalid value\n    }\n  }\n"
-        .to_string()
-        + &emitting("[]");
+    let body =
+        "  for key, value in m {\n    if key == 10 {\n      invalid \"{value}\"\n    }\n  }\n"
+            .to_string()
+            + &emitting("[]");
     let program = parse(&source(", m: Map(Int, String)", &body)).expect("parses");
     let mut interpreter = Interpreter::new(&program);
     let execution = interpreter

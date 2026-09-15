@@ -1942,6 +1942,25 @@ fn fail_takes_a_message() {
     assert!(message.contains("`fail` takes a message"), "got: {message}");
 }
 
+/// `fail` carries the same operand as `invalid` through the same function, so the rule
+/// `tests/refusals.rs` states for one holds here: the message is written, and a value
+/// reaches it through a hole. Asserted on this side too because the two words are gated
+/// separately and only a shared call keeps them saying the same thing.
+#[test]
+fn fail_takes_a_written_message() {
+    let message = err("effect E {
+  on @order.placed as e { @key order_id } {
+    let why = e.email
+    fail why
+  }
+}");
+    assert!(
+        message.contains("`fail` takes a written message"),
+        "got: {message}"
+    );
+    assert!(message.contains("write `fail \"{why}\"`"), "got: {message}");
+}
+
 /// `fail` is a soft name (rule 10), so a parameter may be called `fail` and after `return`
 /// that is what it is: a `fail` statement there would be unreachable anyway. Dropping the
 /// parens took away the token that used to tell the two apart, so `ends_return` holds the
@@ -4319,9 +4338,11 @@ fn a_secret_reaches_no_observable_sink() {
 }}"
         ))
     };
+    // `fail` carries a written message, so a hole is the only way a credential could
+    // reach one; that is the sink to close, and it is closed by the same rule.
     for statement in [
         "log(STRIPE_KEY)",
-        "fail STRIPE_KEY",
+        "fail \"{STRIPE_KEY}\"",
         "invoke RecordNotified { order_id: e.order_id, notification_id: STRIPE_KEY }",
     ] {
         assert!(
