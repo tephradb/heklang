@@ -456,14 +456,19 @@ module.exports = grammar({
     // `invalid <message>`, `fail <message>`. No parens, because parens are a call and a
     // call comes back; these are two of the three answers.
     //
-    // The message is a string here where `src/parse.rs` takes any expression, which is
-    // the one place this grammar is narrower rather than wider, and deliberately. A
-    // removed `invalid("x")` then matches no rule at all, so `hek fmt` leaves the file
-    // alone for `hek check` to explain. Were the message `$._expression`, the parens
-    // would read as a grouping, and `hek fmt` would rewrite the file to `invalid ("x")`:
-    // output of its own that `hek check` rejects, which is the one thing a formatter
-    // must never produce. The cost is that `invalid some_call()` is a file `hek fmt`
-    // declines; declining is safe, and nothing in the corpus writes one.
+    // The message is a string, and that is the language rather than a narrowing here:
+    // `docs/refusals.md` has it as "a message and nothing else", and a value reaches one
+    // through a hole. `src/parse.rs` took any expression with a `String` hint until
+    // `Parser::answer_message` was written, which made this the one place the two
+    // disagreed about what the language is, and the disagreement was silent in the
+    // direction that matters: `invalid err` passed `hek check` while `hek fmt` declined
+    // the whole file.
+    //
+    // It has to stay a string for the formatter's sake as well. Were the message
+    // `$._expression`, the parens of a removed `invalid("x")` would read as a grouping
+    // and `hek fmt` would rewrite the file to `invalid ("x")`: output of its own that
+    // `hek check` rejects, which is the one thing a formatter must never produce. As a
+    // string it matches no rule at all, so `fmt` leaves the file for `check` to explain.
     outcome_expression: ($) =>
       prec.right(seq('invalid', field('message', choice($.string, $.raw_string)))),
 
