@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://git.tqwewe.com/tephra/heklang/compare/heklang-v0.7.0...heklang-v0.8.0) - 2026-09-15
+
+### Added
+
+- [**breaking**] an answer's message is written, not computed
+
+### Fixed
+
+- hek fmt counts only the files it could read
+
+### Other
+
+- the grammar's string message is the language, not a narrowing
+
 ## [0.7.0](https://git.tqwewe.com/tephra/heklang/compare/heklang-v0.6.1...heklang-v0.7.0) - 2026-09-15
 
 ### Added

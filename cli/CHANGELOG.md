@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://git.tqwewe.com/tephra/heklang/compare/v0.5.0...v0.5.1) - 2026-09-15
+
+### Fixed
+
+- hek fmt counts only the files it could read
+
 ## [0.5.0](https://git.tqwewe.com/tephra/heklang/compare/v0.4.2...v0.5.0) - 2026-09-15
 
 ### Added

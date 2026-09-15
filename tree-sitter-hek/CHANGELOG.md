@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1](https://git.tqwewe.com/tephra/heklang/compare/tree-sitter-hek-v0.6.0...tree-sitter-hek-v0.6.1) - 2026-09-15
+
+### Other
+
+- the grammar's string message is the language, not a narrowing
+
 ## [0.6.0](https://git.tqwewe.com/tephra/heklang/compare/tree-sitter-hek-v0.5.0...tree-sitter-hek-v0.6.0) - 2026-09-15
 
 ### Added
