@@ -242,7 +242,7 @@ fn refused(body: &str) -> Outcome {
 /// ported so far already had this shape, so nothing a caller switches on moved.
 #[test]
 fn the_code_that_reaches_a_caller_is_the_derived_one() {
-    let outcome = refused("  return reject ShopNotFound");
+    let outcome = refused("  reject ShopNotFound");
     let Outcome::Reject { code, message } = outcome else {
         panic!("expected a refusal, got {outcome:?}");
     };
@@ -254,7 +254,7 @@ fn the_code_that_reaches_a_caller_is_the_derived_one() {
 /// message is built from what the caller passed rather than restated at the site.
 #[test]
 fn the_message_is_built_from_the_fields_the_caller_gave() {
-    let outcome = refused("  return reject SkuTaken { sku, item: item_id }");
+    let outcome = refused("  reject SkuTaken { sku, item: item_id }");
     let Outcome::Reject { code, message } = outcome else {
         panic!("expected a refusal, got {outcome:?}");
     };
@@ -264,7 +264,7 @@ fn the_message_is_built_from_the_fields_the_caller_gave() {
 
 #[test]
 fn a_refusal_must_be_declared() {
-    let message = err(&used("  return reject Nmae"));
+    let message = err(&used("  reject Nmae"));
     assert!(
         message.contains("refusal `Nmae` is not declared"),
         "got: {message}"
@@ -273,37 +273,35 @@ fn a_refusal_must_be_declared() {
 
 #[test]
 fn a_refusal_takes_every_field_and_no_others() {
-    let missing = err(&used("  return reject SkuTaken { sku }"));
+    let missing = err(&used("  reject SkuTaken { sku }"));
     assert!(
         missing.contains("refusal `SkuTaken` needs `item`"),
         "got: {missing}"
     );
 
-    let unknown = err(&used(
-        "  return reject SkuTaken { sku, item: item_id, nope: 1 }",
-    ));
+    let unknown = err(&used("  reject SkuTaken { sku, item: item_id, nope: 1 }"));
     assert!(
         unknown.contains("refusal `SkuTaken` has no field `nope`"),
         "got: {unknown}"
     );
 
     let twice = err(&used(
-        "  return reject SkuTaken { sku, sku: \"b\", item: item_id }",
+        "  reject SkuTaken { sku, sku: \"b\", item: item_id }",
     ));
     assert!(twice.contains("`sku` is given twice"), "got: {twice}");
 }
 
-/// A refusal with no fields takes no braces, which is also what lets `return reject Name`
+/// A refusal with no fields takes no braces, which is also what lets `reject Name`
 /// be the last statement in a block without the closing `}` being read as its fields.
 #[test]
 fn a_refusal_with_no_fields_takes_no_braces() {
-    let message = err(&used("  return reject ShopNotFound { x: 1 }"));
+    let message = err(&used("  reject ShopNotFound { x: 1 }"));
     assert!(
         message.contains("refusal `ShopNotFound` has no fields, so it takes no braces"),
         "got: {message}"
     );
     assert!(matches!(
-        refused("  if true {\n    return reject ShopNotFound\n  }\n  return"),
+        refused("  if true {\n    reject ShopNotFound\n  }\n  return"),
         Outcome::Reject { .. }
     ));
 }
@@ -313,7 +311,7 @@ fn a_refusal_with_no_fields_takes_no_braces() {
 #[test]
 fn the_old_call_form_says_what_to_write_instead() {
     let message = err(&used(
-        "  return reject(\"customer_blocked\", \"this customer cannot place orders\")",
+        "  reject(\"customer_blocked\", \"this customer cannot place orders\")",
     ));
     assert!(
         message.contains("`reject` names a declared refusal, so it takes no code and no message"),
@@ -331,6 +329,73 @@ fn the_old_call_form_says_what_to_write_instead() {
     );
 }
 
+/// Saying the answer ends the declaration, so the `return` that used to precede one says
+/// nothing. People will type it, so it is worth a sentence rather than an error on the name.
+#[test]
+fn an_answer_takes_no_return() {
+    let rejected = err(&used("  return reject ShopNotFound"));
+    assert!(
+        rejected.contains("`reject` takes no `return`"),
+        "got: {rejected}"
+    );
+    assert!(
+        rejected.contains("saying the answer ends the declaration"),
+        "got: {rejected}"
+    );
+
+    let bad = err(&used("  return invalid \"nope\""));
+    assert!(bad.contains("`invalid` takes no `return`"), "got: {bad}");
+}
+
+/// Parens are what a call takes, and a call comes back. An answer does not, so it has none.
+#[test]
+fn an_answer_takes_no_parens() {
+    let message = err(&used("  invalid(\"a sku is required\")"));
+    assert!(
+        message.contains("`invalid` takes no parens"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("parens are a call and a call comes back"),
+        "got: {message}"
+    );
+
+    let missing = err(&used("  invalid"));
+    assert!(
+        missing.contains("`invalid` takes a message"),
+        "got: {missing}"
+    );
+
+    // The message deleted from the middle of a block, which is where one usually is: the
+    // next statement is what gives it away, not the end of the declaration.
+    let swallowed = err(&used(
+        "  invalid\n  emit @item.listed { item_id, seller_id, sku }",
+    ));
+    assert!(
+        swallowed.contains("`invalid` takes a message"),
+        "got: {swallowed}"
+    );
+
+    // `reject` names a declaration rather than carrying a message, and says so.
+    let bare = err(&used("  reject"));
+    assert!(bare.contains("`reject` takes a refusal"), "got: {bare}");
+}
+
+/// An answer is not a value: there is nothing left for a binding to hold, which is the
+/// same sentence `log` and `fail` have always said in a value position.
+#[test]
+fn an_answer_is_not_a_value() {
+    let message = err(&used("  let x = reject ShopNotFound\n  return"));
+    assert!(
+        message.contains("`reject` is a statement rather than a value"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("there is nothing to bind"),
+        "got: {message}"
+    );
+}
+
 /// The reason a refusal is worth declaring on the consuming side too: a bare name in a
 /// `String` position is the code, so a comparison against one is checked where the string
 /// it replaces was checked by nobody.
@@ -339,7 +404,7 @@ fn a_name_in_a_string_position_is_the_code() {
     let source = "refusal ShopNotFound \"shop does not exist\"
 event @order.placed { order_id: Uuid, customer_id: Int }
 command Inner(order_id: Uuid, customer_id: Int) {
-  return reject ShopNotFound
+  reject ShopNotFound
 }
 effect E {
   on @order.placed as e { @key order_id, customer_id } {
@@ -368,7 +433,7 @@ fn a_code_compares_against_a_name_without_unwrapping_it() {
     let source = "refusal ShopNotFound \"shop does not exist\"
 event @order.placed { order_id: Uuid, customer_id: Int }
 command Inner(order_id: Uuid, customer_id: Int) {
-  return reject ShopNotFound
+  reject ShopNotFound
 }
 effect E {
   on @order.placed as e { @key order_id, customer_id } {
@@ -400,13 +465,13 @@ fn refused_answers_which_refusal_came_back() {
 refusal Unset \"no capacity set\"
 event @plan.created { plan_id: Uuid, months: Int }
 fn ladder(months: Int) -> Outcome {
-  if months > 60 { return reject TooLong }
-  return reject Unset
+  if months > 60 { reject TooLong }
+  reject Unset
 }
 command Create(plan_id: Uuid, months: Int) {
   let decision = ladder(months)
   if decision.refused(TooLong) {
-    return reject TooLong
+    reject TooLong
   }
   emit @plan.created { plan_id, months }
 }
@@ -444,12 +509,12 @@ fn an_invalid_outcome_is_refused_by_nothing() {
         "refusal TooLong \"sixty months is the limit\"
 event @plan.created { plan_id: Uuid, months: Int }
 fn ladder(months: Int) -> Outcome {
-  return invalid(\"months must be positive\")
+  invalid \"months must be positive\"
 }
 command Create(plan_id: Uuid, months: Int) {
   let decision = ladder(months)
   if decision.refused(TooLong) {
-    return reject TooLong
+    reject TooLong
   }
   emit @plan.created { plan_id, months }
 }
@@ -474,12 +539,12 @@ fn a_misspelled_refusal_does_not_reach_refused() {
     let asking = "refusal ShopNotFound \"shop does not exist\"
 event @a.b { id: Uuid }
 fn ladder() -> Outcome {
-  return reject ShopNotFound
+  reject ShopNotFound
 }
 command C(id: Uuid) {
   let decision = ladder()
   if decision.refused(ShopNotFound) {
-    return reject ShopNotFound
+    reject ShopNotFound
   }
   emit @a.b { id }
 }

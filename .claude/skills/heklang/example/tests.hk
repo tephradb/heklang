@@ -58,7 +58,7 @@ test "a blank email is the caller's mistake, whatever the log says" {
     paid: 40.00,
   }
 
-  expect invalid("an attendee needs an email")
+  expect invalid "an attendee needs an email"
 }
 
 test "the last seat is the last seat" {
@@ -184,7 +184,7 @@ test "a 4xx is a decision the arm makes, and it fails terminally" {
   deliver ConfirmBooking
 
   expect http.post(CONFIRM_URL)
-  expect fail("confirmation rejected with status 422")
+  expect fail "confirmation rejected with status 422"
 }
 
 test "an erased attendee skips rather than sending plaintext" {

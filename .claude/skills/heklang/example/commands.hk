@@ -12,7 +12,7 @@ command BookSeat(
   // above the first guard. A caller who sends a blank email gets `invalid` whatever
   // the log says, and learns nothing about which workshops exist.
   if email.trim() == "" {
-    return invalid("an attendee needs an email")
+    invalid "an attendee needs an email"
   }
 
   // The order on the page is the precedence of the refusals.
@@ -46,7 +46,7 @@ command RecordConfirmed(booking_id: Uuid, notification_id: Uuid) {
     on @booking.confirmed(booking_id) => true
 
   if confirmed {
-    return reject AlreadyConfirmed
+    reject AlreadyConfirmed
   }
 
   // Every field, `channel` included: an `@absent` value is what a *reader* gets for an

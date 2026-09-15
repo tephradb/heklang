@@ -96,7 +96,8 @@ The set is closed: every diagnostic heklang can produce is one of these.
 | `impure-fn` | a module `fn` doing something a pure function cannot | move the call to the caller and pass the result in, or make it an effect-local `fn` |
 | `fold-restriction` | a `fold` calling out, invoking, decrypting or reading a clock | a fold has to reproduce without a journal; do it in the body and pass it in |
 | `arm-only` | an effect-local `fn` doing what stays in the arm | `reveal`, `erase`, `now()` and `fold` stay in the arm; pass the revealed value or the moment in as a parameter |
-| `return-shape` | a `return` that does not match the signature it is in | a guard returns only `reject <Name>` or `invalid(...)`; a module `fn` must declare a return type and return on every path; `reject`/`invalid` need `-> Outcome` or `-> Outcome?` |
+| `return-shape` | a `return` that does not match the signature it is in, or an answer written with a `return` or with parens | a guard has no `return`: it answers with `reject <Name>` or `invalid "<message>"`, both bare. `return reject X`, `invalid("x")` and `fail("x")` are the removed spellings. A module `fn` must declare a return type and return on every path; `reject`/`invalid` need `-> Outcome` or `-> Outcome?` |
+| `unreachable` | a statement after the declaration's answer | saying the answer ends the declaration, so nothing below `reject`, `invalid`, `fail` or `return` runs. Delete it, or move it above the answer |
 
 ### Seals
 

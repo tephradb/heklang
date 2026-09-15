@@ -52,7 +52,7 @@ command RecordNotified(order_id: Uuid, notification_id: Uuid) {
     on @order.notified(order_id) => true
 
   if notified {
-    return reject AlreadyNotified
+    reject AlreadyNotified
   }
 
   emit @order.notified { order_id, notification_id }
@@ -296,7 +296,7 @@ const FAILING: &str = "effect E {
   on @order.placed as e { @key order_id } {
     let response = http.post(\"https://mail.example/confirm\", { \"to\": \"x\" })
     if response.status >= 400 {
-      fail(\"confirmation rejected\")
+      fail \"confirmation rejected\"
     }
     log(\"sent\")
   }
@@ -707,7 +707,7 @@ fn an_erase_on_a_path_that_fails_does_not_poison_the_join() {
   on @order.placed as e { @key order_id } {
     if e.total > 100.00 {
       erase(e.customer_id)
-      fail(\"gone\")
+      fail \"gone\"
     }
     log(reveal(e.email))
   }
@@ -990,7 +990,7 @@ fn every_http_verb_is_writable() {
   on @order.placed as e {{ @key order_id }} {{
     let response = http.{verb}({args})
     if response.status >= 400 {{
-      fail(\"rejected\")
+      fail \"rejected\"
     }}
   }}
 }}"
@@ -1169,7 +1169,7 @@ fn a_command_that_appends_nothing_still_reads_a_clock() {
 refusal No \"not today\"
 command Give() {
   let at = now()
-  return reject No
+  reject No
 }
 ",
     )
@@ -1538,7 +1538,7 @@ fn the_fold_rules_hold_in_a_command_too() {
     on @order.placed(customer_id) { email } => email
 
   if secret.is_none() {
-    return reject Unknown
+    reject Unknown
   }
   return
 }",
@@ -1911,8 +1911,107 @@ fn invoke_outside_an_effect_is_rejected() {
 #[test]
 fn fail_outside_an_effect_points_at_the_right_outcome() {
     assert_eq!(
-        command_err("  fail(\"no\")\n  return"),
-        "`fail` is an effect's terminal outcome; a command returns `invalid(...)` or `reject(...)`"
+        command_err("  fail \"no\"\n  return"),
+        "`fail` is an effect's terminal outcome; a command answers with `invalid` or `reject`"
+    );
+}
+
+/// `fail` is one of the three answers, so it takes no parens: parens are a call, and a
+/// call comes back. It is also the one that is not a keyword, recognised by the shape of
+/// what follows it, so the old spelling has to be caught rather than fall through as a name.
+#[test]
+fn fail_takes_no_parens() {
+    let message = err("effect E {
+  on @order.placed as e { @key order_id } { fail(\"no\") }
+}");
+    assert!(message.contains("`fail` takes no parens"), "got: {message}");
+    assert!(
+        message.contains("parens are a call and a call comes back"),
+        "got: {message}"
+    );
+}
+
+/// The word alone used to fall through to "expected a statement", which names no rule. It
+/// is the likeliest slip while a codebase is being migrated off the call form, so the
+/// statement dispatch claims a bare `fail` in order to be able to explain it.
+#[test]
+fn fail_takes_a_message() {
+    let message = err("effect E {
+  on @order.placed as e { @key order_id } { fail }
+}");
+    assert!(message.contains("`fail` takes a message"), "got: {message}");
+}
+
+/// `fail` is a soft name (rule 10), so a parameter may be called `fail` and after `return`
+/// that is what it is: a `fail` statement there would be unreachable anyway. Dropping the
+/// parens took away the token that used to tell the two apart, so `ends_return` holds the
+/// distinction the way it already held it for `http`.
+#[test]
+fn fail_is_still_an_ordinary_name() {
+    program(
+        "effect E {
+  fn shout(fail: String) -> String { return fail }
+  on @order.placed as e { @key order_id } { log(shout(\"x\")) }
+}",
+    );
+}
+
+/// `return` above a real `fail` is two statements with the second one dead, and it says so
+/// rather than accusing the `return` of carrying a value. Told apart by the string literal:
+/// only the builtin takes one, so `return fail`, `return fail.trim()` and `return fail + x`
+/// are all still a local of that name being returned.
+#[test]
+fn a_return_above_a_fail_reports_the_dead_statement() {
+    let message = err("effect E {
+  fn note(msg: String) {
+    log(msg)
+    return
+    fail \"no\"
+  }
+  on @order.placed as e { @key order_id } { note(\"x\") }
+}");
+    assert!(
+        message.contains("this statement is after the answer, so it never runs"),
+        "got: {message}"
+    );
+}
+
+/// A `guard` below the answer is unreachable, and an effect says the other thing instead:
+/// it has no `guard` at all, which is the more useful of the two and the one rule 2 wrote.
+#[test]
+fn an_effect_guard_below_the_answer_still_says_an_effect_has_no_guard() {
+    let message = err("effect E {
+  on @order.placed as e { @key order_id } {
+    fail \"no\"
+    guard G { order_id }
+  }
+}");
+    assert!(
+        message.contains("an effect has no `guard`"),
+        "got: {message}"
+    );
+}
+
+/// Rule 4 keeps `fail` as an effect's terminal outcome, and declaring `-> Outcome?` on an
+/// effect-local `fn` must not buy a way past that: the kind decides before the signature is
+/// consulted. `docs/functions.md` says an effect is unaffected, and this is that.
+#[test]
+fn an_effect_local_fn_cannot_answer_with_a_refusal() {
+    let message = err("refusal Nope \"no\"
+effect E {
+  fn decide(status: Int) -> Outcome? {
+    if status >= 400 { reject Nope }
+    return none
+  }
+  on @order.placed as e { @key order_id } { log(\"x\") }
+}");
+    assert!(
+        message.contains("`reject` is a command's outcome"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("an effect's terminal outcome is `fail`"),
+        "got: {message}"
     );
 }
 
@@ -1950,12 +2049,12 @@ fn an_effect_has_no_guard() {
 fn a_command_outcome_is_not_an_effect_outcome() {
     let message = err("effect E {
   on @order.placed as e { @key order_id } {
-    return reject No
+    reject No
   }
 }");
     assert_eq!(
         message,
-        "`reject` is a command's outcome; an effect's terminal outcome is `fail(...)`"
+        "`reject` is a command's outcome; an effect's terminal outcome is `fail`"
     );
 }
 
@@ -2432,7 +2531,7 @@ effect E {{
 fn a_trailing_comma_closes_an_effect_builtin() {
     for body in [
         "log(\"x\",)",
-        "fail(\"x\",)",
+        "fail \"x\"",
         "erase(e.customer_id,)",
         "let r = http.get(\"https://mail.example/confirm\",)",
         "let r = http.post(\"https://mail.example/confirm\", { \"to\": \"x\" },)",
@@ -2523,7 +2622,7 @@ fn a_fail_inside_an_effect_local_fn_ends_the_invocation() {
   fn confirm(to: String) -> Int {
     let response = http.post(\"https://mail.example/confirm\", { \"to\": to })
     if response.status >= 400 {
-      fail(\"mail rejected {response.status}\")
+      fail \"mail rejected {response.status}\"
     }
     return response.status
   }
@@ -2825,7 +2924,7 @@ fn an_effect_local_fn_may_return_nothing() {
   fn confirm(order_id: Uuid, to: String) {
     let response = http.post(\"https://mail.example/confirm\", { \"to\": to })
     if response.status >= 400 {
-      fail(\"mail rejected {response.status}\")
+      fail \"mail rejected {response.status}\"
     }
     invoke RecordNotified { order_id, notification_id: order_id }
     log(\"confirmed\")
@@ -4222,7 +4321,7 @@ fn a_secret_reaches_no_observable_sink() {
     };
     for statement in [
         "log(STRIPE_KEY)",
-        "fail(STRIPE_KEY)",
+        "fail STRIPE_KEY",
         "invoke RecordNotified { order_id: e.order_id, notification_id: STRIPE_KEY }",
     ] {
         assert!(

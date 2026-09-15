@@ -51,7 +51,7 @@ exists for nothing else.
 
 ### An expectation is spelled like the thing it asserts
 
-`expect reject SkuTaken` beside the `return reject SkuTaken` it is about;
+`expect reject SkuTaken` beside the `reject SkuTaken` it is about;
 `expect invoke RecordSync { shop_id: 1 }` beside the `invoke RecordSync { shop_id: shop_id }`;
 `expect log("...")` beside the `log("...")`. Nothing here is a second dialect for describing a call,
 so the vocabulary is one line long: write the call.
@@ -187,7 +187,7 @@ between `given`s, splitting the log into history and live.
 | --- | --- |
 | `expect @path { field: value, ... }` | one appended event, in order |
 | `expect nothing` | the command appended no events |
-| `expect invalid("<message>")` | `Outcome::Invalid` |
+| `expect invalid "<message>"` | `Outcome::Invalid` |
 | `expect reject <Name>`, `expect reject <Name> { field: value }` | `Outcome::Reject` |
 
 The appended events must match the `expect @path` lines **one for one and in order**. An event the
@@ -252,7 +252,7 @@ An effect's output is a **trace**: the ordered list of things it did to the worl
 | `expect invoke Command { name: value, ... }` | an `invoke` of that command with exactly those arguments |
 | `expect erase(<subject>, "<id>")` | rule 9's erase, naming the subject field and the id |
 | `expect log("<message>")` | one `log` line |
-| `expect fail("<message>")` | an arm returned `fail` |
+| `expect fail "<message>"` | an arm returned `fail` |
 | `expect skipped` | an arm hit a shredded key, rule 12's terminal skip |
 | `expect nothing` | the effect did nothing observable |
 

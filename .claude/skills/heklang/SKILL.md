@@ -166,7 +166,7 @@ guard UnderOpenOrderLimit(customer_id: Int) {
     on @order.cancelled(customer_id) => open - 1
 
   if open >= LIMIT {
-    return reject TooManyOpen
+    reject TooManyOpen
   }
 }
 
@@ -196,7 +196,7 @@ effect NotifyCustomer {
   fn send(url: String, to: String) {
     let response = http.post(url, { "to": to })
     if response.status >= 400 {
-      fail("rejected with status {response.status}")
+      fail "rejected with status {response.status}"
     }
   }
 
@@ -262,10 +262,10 @@ guard @order.placed(id), @order.cancelled(id)   // raw slices, binds nothing
 if c { .. } else if d { .. } else { .. }
 for item in list { .. }
 for key, value in map { .. }            // or index, item over a list
-return / return <expr> / return reject Name / return reject Name { field } / return invalid("msg")
+return / return <expr> / reject Name / reject Name { field } / invalid "msg"
 emit @path { field, other: value }
 put Entity { .. } / patch Entity[key] { .. } / update Entity[key] { .. } / delete Entity[key]
-log("...") / fail("...") / erase(value) / erase(subject, value)
+log("...") / fail "..." / erase(value) / erase(subject, value)
 invoke Command { field: value }
 helper(args)                            // a call to a void effect-local fn is a statement
 ```
@@ -284,7 +284,7 @@ x.method(arg)  record.field  response.status  response.body  .stored_column
 Uuid.derive(seed, name)  Json.empty  Json.encode(v)  Map.empty
 Timestamp.parse(t)  Timestamp.from_parts(y, mo, d, h, mi, s)  Money.parse(t)  Decimal.parse(t)
 http.get(url)  http.post(url, body, headers = { "K": "v" })  now()  reveal(x)
-invoke C { .. }  reject Name  invalid("msg")
+invoke C { .. }                         // reject / invalid / fail are statements, not values
 ```
 
 **Statements are separated by newlines. There are no semicolons anywhere in the language.**
@@ -338,7 +338,7 @@ A comment is `//` to the end of the line. Put one on its own line, leading whate
 13. **`reject` is about the world and carries a code; `invalid` is about the request and does not.**
     A blank address is `invalid` whoever sends it; a blocked customer is `reject`.
 14. **A guard names a proposition, not an entity**: `CourseIsDefined`, not `Course`. It may only
-    `return reject <Name>` or `return invalid(...)`, folds at least one slice, reads the log once,
+    `reject <Name>` or `invalid "<message>"`, folds at least one slice, reads the log once,
     and hands nothing back to its caller.
 15. **An idempotent no-op is not a guard.** If a replay must answer `ok`, the check stays inline as a
     `fold` and an `if`, and so does every refusal below it.

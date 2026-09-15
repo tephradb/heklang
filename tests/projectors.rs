@@ -1337,7 +1337,7 @@ command Copy(order_id: Uuid, customer_id: Int) {{
     on @order.placed(customer_id) {{ note }} => note
 
   if note.is_none() {{
-    return reject Nothing
+    reject Nothing
   }}
   emit @order.copied {{ order_id, customer_id, note }}
 }}
@@ -1413,7 +1413,7 @@ command Copy(order_id: Uuid, customer_id: Int) {
     on @order.trimmed(customer_id) { note } => note.trim()
 
   if note.is_none() {
-    return reject Nothing
+    reject Nothing
   }
   emit @order.copied { order_id, customer_id, note }
 }

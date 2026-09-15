@@ -109,8 +109,9 @@ impl<'a> Printer<'a> {
             "for_statement" => self.keyed("for", node),
             "iter_bindings" => self.iter_bindings(node),
             "return_statement" => self.returned(node),
-            "outcome_expression" => self.prefixed(node),
+            "outcome_expression" => self.keyed_value("invalid", node),
             "refusal_expression" => self.keyed_value("reject", node),
+            "fail_statement" => self.keyed_value("fail", node),
             "emit_statement" => self.keyed("emit", node),
             "put_statement" => self.keyed("put", node),
             "patch_statement" => self.keyed_row(node, true),
@@ -731,9 +732,9 @@ impl<'a> Printer<'a> {
 
     // --------------------------------------------------------------- expressions
 
-    /// A prefix operator or keyword that the grammar leaves anonymous: `!x`, `-x`,
-    /// `invalid(..)`. `reject` is no longer one of them: it names a declaration, so it
-    /// prints through `keyed` beside `emit` and `put`.
+    /// A prefix operator that the grammar leaves anonymous: `!x`, `-x`. The three
+    /// outcome verbs are no longer among them: each takes an operand a space away rather
+    /// than an argument list, so they print through `keyed_value` beside `invoke`.
     fn prefixed(&self, node: Node<'a>) -> Doc<'a> {
         Doc::concat([Doc::text(self.leading_token(node)), self.spaced(node)])
     }
@@ -995,8 +996,9 @@ impl<'a> Printer<'a> {
         )
     }
 
-    /// The same where the construct is a **value** and sits mid-line: `return reject X`,
-    /// `let outcome = invoke C { .. }`. Leading there puts a hardline after the `=`.
+    /// The same for a construct that may sit **mid-line**: `let outcome = invoke C { .. }`,
+    /// `expect reject X`. Leading there puts a hardline after the `=`. The outcome verbs
+    /// take this too, because `expect` puts each of them mid-line as well.
     fn keyed_value(&self, keyword: &'a str, node: Node<'a>) -> Doc<'a> {
         let (trailing, kids) = self.split(node);
         self.trailed(

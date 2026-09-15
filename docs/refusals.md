@@ -15,7 +15,7 @@ command ListItem(item_id: Uuid, seller_id: Int, sku: String) {
 
   for other_id, other in items {
     if other.sku == sku {
-      return reject SkuTaken { sku, item: other_id }
+      reject SkuTaken { sku, item: other_id }
     }
   }
 
@@ -61,7 +61,7 @@ A const in a message goes through a field:
 ```
 refusal FreeLimit(limit: Int) "the free tier lists {limit} items"
 
-return reject FreeLimit { limit: FREE_LIMIT }
+reject FreeLimit { limit: FREE_LIMIT }
 ```
 
 One clause at one site, and it says where the number came from. The alternative, allowing a
@@ -113,18 +113,43 @@ A refusal with no fields takes no braces:
 
 > refusal `ShopNotFound` has no fields, so it takes no braces
 
-That is not only tidiness. It is what lets `return reject ShopNotFound` be the last statement
+That is not only tidiness. It is what lets `reject ShopNotFound` be the last statement
 in a block without the closing `}` being read as its field list.
 
-**`return` stays.** `fail` is written bare in an effect because an effect arm has no result
-channel and there is nothing to return; a command has one, and `return` is it. `reject` also
-has to remain a value, because a `fn` declared `-> Outcome?` decides a refusal and hands it
-back (`docs/functions.md`), so a bare statement form would be a second spelling rather than a
-replacement: the same word meaning "exit here" in a command and "this is my result" in a `fn`.
+**There is no `return` in front of it**, and there are no parens after it. Those are the same
+rule twice:
+
+> `reject X`, `invalid "..."` and `fail "..."` each say what this declaration answers, and
+> saying the answer ends the declaration.
+
+One meaning in all three places a `reject` may be written. What `return` used to add was
+nothing: in statement position `reject` can only be the answer, so the word carried no
+information at the site heklang writes most often.
+
+The argument this replaces said a bare form would be "a second spelling ... the same word
+meaning 'exit here' in a command and 'this is my result' in a `fn`". That mis-attributed the
+overload. In `return reject X` the operand `reject X` means the same thing in every
+declaration; the token whose meaning changes with the enclosing declaration is `return`, which
+already means "the command's outcome" in a command and "leave this helper" in an effect-local
+`fn` (`docs/functions.md`). Two constructs had shipped the disputed shape years apart:
+`invoke` is both a statement and an `Outcome` expression, and `fail` is a bare terminal
+statement that crosses a call boundary from a helper.
+
+**Parens are what a call takes, and a call comes back.** That is the second half, and it is why
+`invalid` and `fail` lost theirs while `log`, `erase` and `reveal` keep them: those three
+return to the next statement. The guarantee only runs one way, since `emit` and `put` take no
+parens and are not terminal, so the check that a statement after an answer never runs is a
+diagnostic rather than a shape a reader has to spot (`docs/diagnostics.md`).
 
 **Where it may be written** is unchanged: a command, a guard, and a `fn` that declared
 `Outcome`. An effect's terminal outcome is still `fail`, and a projector still has no failure
 channel at all.
+
+**`reject` is not a value.** `let objection = reject SkuTaken { sku }` is refused, the way
+`log` and `fail` are refused in a value position, because saying the answer ends the
+declaration and there is nothing left for a binding to hold. A `fn` that declared `Outcome`
+still decides a refusal and still hands it back; it writes the same bare statement, and the
+answer travels the result channel every other `fn` result travels.
 
 ## Reading one back
 
@@ -173,9 +198,18 @@ resolves to its code in both and a typo is `` `ShopNotFund` is not in scope `` i
 - **It does not put the fields on the wire.** `Outcome::Reject` still carries a code and a
   rendered message, which is what kept every host unchanged. Sending the fields as data is a
   real option and a separate one; it changes an API that reaches outside this repository.
-- **It does not touch `invalid`.** `docs/commands.md` argues that it carries no code because
-  there is nothing to branch on when the answer is "you sent nonsense", and the asymmetry
-  stays: `invalid(message)` is still a message and nothing else.
+- **It does not give `invalid` a declaration.** `docs/commands.md` argues that it carries no
+  code because there is nothing to branch on when the answer is "you sent nonsense", and the
+  asymmetry stays: `invalid "<message>"` is a message and nothing else.
+
+  The symmetry is tempting, because a `refusal` exists to stop one message being written twice
+  and an `invalid` message is still the unchecked string that argument is about. What says no
+  is that the two are different kinds of thing, and the corpus shows it: an `invalid` message
+  interpolates a const where it stands, and a refusal's may not, because a refusal's message is
+  text and holes rendered at a distance from fields a caller was handed. A declared name and a
+  literal string is the right pair of spellings for that difference. Revisit it if a port ever
+  writes the same `invalid` message twice; that is the bar `refusal` cleared with 75 sites over
+  23 codes, and this has not.
 
 ## Related
 

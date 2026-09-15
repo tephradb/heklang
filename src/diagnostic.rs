@@ -74,6 +74,7 @@ pub enum Code {
     FoldRestriction,
     ArmOnly,
     ReturnShape,
+    Unreachable,
 
     // The decrypt boundary.
     SealBoundary,
@@ -132,6 +133,7 @@ impl Code {
         Code::FoldRestriction,
         Code::ArmOnly,
         Code::ReturnShape,
+        Code::Unreachable,
         Code::SealBoundary,
         Code::EraseSubject,
         Code::EraseOrder,
@@ -180,6 +182,7 @@ impl Code {
             Code::FoldRestriction => "fold-restriction",
             Code::ArmOnly => "arm-only",
             Code::ReturnShape => "return-shape",
+            Code::Unreachable => "unreachable",
             Code::SealBoundary => "seal-boundary",
             Code::SecretBoundary => "secret-boundary",
             Code::EraseSubject => "erase-subject",

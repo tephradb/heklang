@@ -63,7 +63,7 @@ test "a blank address is the caller's mistake" {
     tax_rate: 0.2000,
   }
 
-  expect invalid("address must not be blank")
+  expect invalid "address must not be blank"
 }
 
 test "an email that already placed an order is refused" {
@@ -241,7 +241,7 @@ test "a 4xx is a decision the arm makes, and it fails terminally" {
   deliver NotifyCustomer
 
   expect http.post("secret:CONFIRM_URL")
-  expect fail("confirmation rejected")
+  expect fail "confirmation rejected"
 }
 
 test "an erased customer skips rather than sending plaintext" {

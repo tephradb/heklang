@@ -56,7 +56,7 @@ fn effective_sku(sku: String?, item_id: Uuid) -> String {
 // its first fold.
 fn sku_error(sku: String?) -> Outcome? {
   if sku.unwrap_or("").trim().starts_with(RESERVED) {
-    return invalid("a sku may not start with {RESERVED}")
+    invalid "a sku may not start with {RESERVED}"
   }
   return none
 }
@@ -131,12 +131,12 @@ command ListItem(
 
   for other_id, other in items {
     if other_id != item_id && other.sku == wanted {
-      return reject SkuTaken { sku: wanted, item: other_id }
+      reject SkuTaken { sku: wanted, item: other_id }
     }
   }
 
   if tier == Free && items.len() >= FREE_LIMIT {
-    return reject FreeLimit { limit: FREE_LIMIT }
+    reject FreeLimit { limit: FREE_LIMIT }
   }
 
   emit @item.listed { item_id, seller_id, item: Item { sku: wanted, price, tags }, tier }
@@ -206,7 +206,7 @@ effect AuditCatalog {
     // A string literal inside the braces of another string literal. Before the lexer
     // nested, this needed a helper whose only job was to move the `""` out.
     if response.status >= 400 {
-      fail("audit rejected: {response.body.string("error").unwrap_or("no reason")}")
+      fail "audit rejected: {response.body.string("error").unwrap_or("no reason")}"
     }
 
     log("seller {seller_id} now lists {listed}, house: {tagged(house, HOUSE_TAG)}")
@@ -241,5 +241,5 @@ test "a reserved-prefix sku is the caller's mistake, not an answer from the log"
     tier: Free,
   }
 
-  expect invalid("a sku may not start with CATALOG:")
+  expect invalid "a sku may not start with CATALOG:"
 }

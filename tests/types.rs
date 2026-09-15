@@ -195,7 +195,7 @@ fn the_optional_message_names_the_way_out() {
 fn a_narrowed_optional_fills_a_required_position() {
     let body = "command C(id: Int, text: String?) {
   if text.is_none() {
-    return invalid(\"no text\")
+    invalid \"no text\"
   }
   emit @thing.happened {
     id, name: text, maybe: none, at: \"2026-01-01T00:00:00Z\", total: 0, rate: 0,
@@ -607,7 +607,7 @@ fn the_bare_name_shorthand_is_the_same_position() {
   fold seen: Bool = false
     on @thing.touched(id: 1) => true
   if !seen {
-    return invalid(\"no\")
+    invalid \"no\"
   }
 }
 command C(id: Int) {
@@ -621,7 +621,7 @@ command C(id: Int) {
             "refusal Taken(note: String) \"note {note} is taken\"
 command C(id: Int, note: Int) {
   if id > 0 {
-    return reject Taken { note }
+    reject Taken { note }
   }
   emit @thing.touched { id }
 }",
@@ -694,7 +694,7 @@ fn the_shorthand_still_wraps_and_still_propagates() {
         // a branch that proved it present makes it its inner type
         "command C(id: Int, held: String?) {
   if held.is_none() {
-    return invalid(\"none\")
+    invalid \"none\"
   }
   let f = Facts { note: held, count: 0 }
   emit @thing.touched { id }

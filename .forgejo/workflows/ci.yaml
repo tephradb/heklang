@@ -50,6 +50,33 @@ jobs:
       - run: cargo run -p hek -- .claude/skills/heklang/example
       - run: cargo run -p hek -- fmt --check .claude/skills/heklang/example
 
+      # `tree-sitter-hek/src/` is generated and committed, because nix's `buildGrammar`
+      # compiles `parser.c` and never runs `generate`. Nothing else notices when it falls
+      # behind `grammar.js`: `build.rs` watches `parser.c` rather than the grammar, so a
+      # grammar edit alone rebuilds nothing and `hek fmt` goes on parsing the old language
+      # while `hek check` parses the new one. The `--abi 14` is the one Helix loads, and a
+      # bare `generate` picks a newer default the editor then declines.
+      #
+      # Needs `tree-sitter` and `nodejs` on the runner (they are in `devenv.nix` for the
+      # dev shell; `hostPackages` in desktop/forgejo-runner.nix is the CI half).
+      #
+      # `--abi 14` pins the output ABI but not the generator, and `src/` carries
+      # generator-version artefacts, so this gate also pins the tool: a runner on a
+      # different tree-sitter fails the diff on a grammar that is perfectly in sync. The
+      # version is printed first so that failure names itself rather than reading as a
+      # stale commit. Committed with 0.26.9.
+      - run: |
+          cd tree-sitter-hek
+          tree-sitter --version
+          tree-sitter generate --abi 14
+          # `git diff` alone would not see a file the generator *added*, which is the
+          # half of "out of sync" that leaves the committed tree missing something
+          # `buildGrammar` needs. Staging first makes an untracked file a staged add.
+          git add -A src/
+          git diff --cached --exit-code src/
+          tree-sitter test
+          tree-sitter parse ../hek/*.hk ../.claude/skills/heklang/example/*.hk --quiet --stat
+
       # Rustdoc with warnings denied, catching broken intra-doc links and other doc warnings.
       - run: cargo doc --workspace --all-features --no-deps
         env:

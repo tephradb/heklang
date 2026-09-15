@@ -17,7 +17,7 @@ effect AuditCatalog {
     )
 
     if response.status >= 400 {
-      fail("audit rejected")
+      fail "audit rejected"
     }
 
     log("seller {seller_id} now lists {listed}")
@@ -98,12 +98,9 @@ effect AuditCatalog {
               (identifier))
             (integer_literal))
           (block
-            (expression_statement
-              (call_expression
-                (identifier)
-                (arguments
-                  (string
-                    (string_content)))))))
+            (fail_statement
+              (string
+                (string_content)))))
         (expression_statement
           (call_expression
             (identifier)
@@ -292,7 +289,7 @@ effect SyncShop {
   fn sync(shop_id: Int, domain: String) {
     let response = http.post("https://{domain}/sync", { "shop": shop_id })
     if response.status >= 400 {
-      fail("sync failed")
+      fail "sync failed"
     }
   }
 
@@ -341,12 +338,9 @@ effect SyncShop {
               (identifier))
             (integer_literal))
           (block
-            (expression_statement
-              (call_expression
-                (identifier)
-                (arguments
-                  (string
-                    (string_content)))))))))
+            (fail_statement
+              (string
+                (string_content)))))))
     (event_handler
       (event_path)
       (identifier)

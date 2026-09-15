@@ -53,7 +53,7 @@ interpolation, including a string inside a hole
 effect Audit {
   on @a.b {
     log("seller {seller_id} now lists {listed}, house: {tagged(house, HOUSE_TAG)}")
-    fail("audit rejected: {response.body.string("error").unwrap_or("no reason")}")
+    fail "audit rejected: {response.body.string("error").unwrap_or("no reason")}"
     log("{duration_months / 12}-Year Warranty")
   }
 }
@@ -84,26 +84,23 @@ effect Audit {
                     (arguments
                       (identifier)
                       (identifier))))))))
-        (expression_statement
-          (call_expression
-            (identifier)
-            (arguments
-              (string
-                (string_content)
-                (interpolation
-                  (method_call
-                    (method_call
-                      (field_expression
-                        (identifier)
-                        (identifier))
-                      (identifier)
-                      (arguments
-                        (string
-                          (string_content))))
+        (fail_statement
+          (string
+            (string_content)
+            (interpolation
+              (method_call
+                (method_call
+                  (field_expression
                     (identifier)
-                    (arguments
-                      (string
-                        (string_content)))))))))
+                    (identifier))
+                  (identifier)
+                  (arguments
+                    (string
+                      (string_content))))
+                (identifier)
+                (arguments
+                  (string
+                    (string_content)))))))
         (expression_statement
           (call_expression
             (identifier)

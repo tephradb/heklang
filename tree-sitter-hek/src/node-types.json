@@ -95,10 +95,6 @@
           "named": true
         },
         {
-          "type": "refusal_expression",
-          "named": true
-        },
-        {
           "type": "stored_field",
           "named": true
         },
@@ -194,10 +190,6 @@
           "named": true
         },
         {
-          "type": "refusal_expression",
-          "named": true
-        },
-        {
           "type": "stored_field",
           "named": true
         },
@@ -286,10 +278,6 @@
           },
           {
             "type": "record_literal",
-            "named": true
-          },
-          {
-            "type": "refusal_expression",
             "named": true
           },
           {
@@ -437,10 +425,6 @@
             "named": true
           },
           {
-            "type": "refusal_expression",
-            "named": true
-          },
-          {
             "type": "stored_field",
             "named": true
           },
@@ -477,6 +461,10 @@
           "named": true
         },
         {
+          "type": "fail_statement",
+          "named": true
+        },
+        {
           "type": "fold_declaration",
           "named": true
         },
@@ -501,11 +489,19 @@
           "named": true
         },
         {
+          "type": "outcome_expression",
+          "named": true
+        },
+        {
           "type": "patch_statement",
           "named": true
         },
         {
           "type": "put_statement",
+          "named": true
+        },
+        {
+          "type": "refusal_expression",
           "named": true
         },
         {
@@ -659,10 +655,6 @@
             "named": true
           },
           {
-            "type": "refusal_expression",
-            "named": true
-          },
-          {
             "type": "stored_field",
             "named": true
           },
@@ -746,10 +738,6 @@
           },
           {
             "type": "record_literal",
-            "named": true
-          },
-          {
-            "type": "refusal_expression",
             "named": true
           },
           {
@@ -875,10 +863,6 @@
             "named": true
           },
           {
-            "type": "refusal_expression",
-            "named": true
-          },
-          {
             "type": "stored_field",
             "named": true
           },
@@ -978,10 +962,6 @@
           },
           {
             "type": "record_literal",
-            "named": true
-          },
-          {
-            "type": "refusal_expression",
             "named": true
           },
           {
@@ -1203,10 +1183,6 @@
             "named": true
           },
           {
-            "type": "refusal_expression",
-            "named": true
-          },
-          {
             "type": "stored_field",
             "named": true
           },
@@ -1378,10 +1354,6 @@
           },
           {
             "type": "record_literal",
-            "named": true
-          },
-          {
-            "type": "refusal_expression",
             "named": true
           },
           {
@@ -1576,6 +1548,10 @@
           "named": true
         },
         {
+          "type": "fail_statement",
+          "named": true
+        },
+        {
           "type": "invoke_expression",
           "named": true
         },
@@ -1615,6 +1591,26 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "fail_statement",
+    "named": true,
+    "fields": {
+      "message": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "raw_string",
+            "named": true
+          },
+          {
+            "type": "string",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -1701,10 +1697,6 @@
           },
           {
             "type": "record_literal",
-            "named": true
-          },
-          {
-            "type": "refusal_expression",
             "named": true
           },
           {
@@ -1807,10 +1799,6 @@
           },
           {
             "type": "record_literal",
-            "named": true
-          },
-          {
-            "type": "refusal_expression",
             "named": true
           },
           {
@@ -1931,10 +1919,6 @@
             "named": true
           },
           {
-            "type": "refusal_expression",
-            "named": true
-          },
-          {
             "type": "stored_field",
             "named": true
           },
@@ -2034,10 +2018,6 @@
           },
           {
             "type": "record_literal",
-            "named": true
-          },
-          {
-            "type": "refusal_expression",
             "named": true
           },
           {
@@ -2150,10 +2130,6 @@
           },
           {
             "type": "record_literal",
-            "named": true
-          },
-          {
-            "type": "refusal_expression",
             "named": true
           },
           {
@@ -2433,10 +2409,6 @@
             "named": true
           },
           {
-            "type": "refusal_expression",
-            "named": true
-          },
-          {
             "type": "stored_field",
             "named": true
           },
@@ -2523,10 +2495,6 @@
             "named": true
           },
           {
-            "type": "refusal_expression",
-            "named": true
-          },
-          {
             "type": "stored_field",
             "named": true
           },
@@ -2610,10 +2578,6 @@
           },
           {
             "type": "record_literal",
-            "named": true
-          },
-          {
-            "type": "refusal_expression",
             "named": true
           },
           {
@@ -2720,10 +2684,6 @@
           },
           {
             "type": "record_literal",
-            "named": true
-          },
-          {
-            "type": "refusal_expression",
             "named": true
           },
           {
@@ -2848,10 +2808,6 @@
           "named": true
         },
         {
-          "type": "refusal_expression",
-          "named": true
-        },
-        {
           "type": "stored_field",
           "named": true
         },
@@ -2966,10 +2922,6 @@
           },
           {
             "type": "record_literal",
-            "named": true
-          },
-          {
-            "type": "refusal_expression",
             "named": true
           },
           {
@@ -3121,10 +3073,6 @@
             "named": true
           },
           {
-            "type": "refusal_expression",
-            "named": true
-          },
-          {
             "type": "stored_field",
             "named": true
           },
@@ -3214,10 +3162,6 @@
         },
         {
           "type": "record_literal",
-          "named": true
-        },
-        {
-          "type": "refusal_expression",
           "named": true
         },
         {
@@ -3373,10 +3317,6 @@
             "named": true
           },
           {
-            "type": "refusal_expression",
-            "named": true
-          },
-          {
             "type": "stored_field",
             "named": true
           },
@@ -3476,10 +3416,6 @@
           },
           {
             "type": "record_literal",
-            "named": true
-          },
-          {
-            "type": "refusal_expression",
             "named": true
           },
           {
@@ -3589,10 +3525,6 @@
             "named": true
           },
           {
-            "type": "refusal_expression",
-            "named": true
-          },
-          {
             "type": "stored_field",
             "named": true
           },
@@ -3627,12 +3559,16 @@
     "type": "outcome_expression",
     "named": true,
     "fields": {
-      "arguments": {
+      "message": {
         "multiple": false,
         "required": true,
         "types": [
           {
-            "type": "arguments",
+            "type": "raw_string",
+            "named": true
+          },
+          {
+            "type": "string",
             "named": true
           }
         ]
@@ -3757,10 +3693,6 @@
           "named": true
         },
         {
-          "type": "refusal_expression",
-          "named": true
-        },
-        {
           "type": "stored_field",
           "named": true
         },
@@ -3859,10 +3791,6 @@
           },
           {
             "type": "record_literal",
-            "named": true
-          },
-          {
-            "type": "refusal_expression",
             "named": true
           },
           {
@@ -4213,10 +4141,6 @@
             "named": true
           },
           {
-            "type": "refusal_expression",
-            "named": true
-          },
-          {
             "type": "stored_field",
             "named": true
           },
@@ -4428,10 +4352,6 @@
             "named": true
           },
           {
-            "type": "refusal_expression",
-            "named": true
-          },
-          {
             "type": "stored_field",
             "named": true
           },
@@ -4582,10 +4502,6 @@
           },
           {
             "type": "record_literal",
-            "named": true
-          },
-          {
-            "type": "refusal_expression",
             "named": true
           },
           {
@@ -4922,10 +4838,6 @@
           "named": true
         },
         {
-          "type": "refusal_expression",
-          "named": true
-        },
-        {
           "type": "stored_field",
           "named": true
         },
@@ -5151,6 +5063,10 @@
   },
   {
     "type": "expect",
+    "named": false
+  },
+  {
+    "type": "fail",
     "named": false
   },
   {

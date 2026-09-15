@@ -41,10 +41,10 @@ reject names a refusal, with fields only when it has them
 
 command ListItem(item_id: Uuid, sku: String) {
   if taken {
-    return reject ShopNotFound
+    reject ShopNotFound
   }
 
-  return reject SkuTaken { sku, item: item_id }
+  reject SkuTaken { sku, item: item_id }
 }
 
 --------------------------------------------------------------------------------
@@ -65,18 +65,16 @@ command ListItem(item_id: Uuid, sku: String) {
       (if_statement
         (identifier)
         (block
-          (return_statement
-            (refusal_expression
-              (type_identifier)))))
-      (return_statement
-        (refusal_expression
-          (type_identifier)
-          (field_initializer_list
-            (field_initializer
-              (identifier))
-            (field_initializer
-              (identifier)
-              (identifier))))))))
+          (refusal_expression
+            (type_identifier))))
+      (refusal_expression
+        (type_identifier)
+        (field_initializer_list
+          (field_initializer
+            (identifier))
+          (field_initializer
+            (identifier)
+            (identifier)))))))
 
 ================================================================================
 a test expects a refusal by name

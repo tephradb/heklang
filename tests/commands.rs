@@ -172,10 +172,10 @@ fn the_condition_comes_back_for_every_outcome() {
     on @order.placed(customer_id) => open + 1
 
   if total <= 0.00 {
-    return invalid(\"a total must be positive\")
+    invalid \"a total must be positive\"
   }
   if blocked {
-    return reject Blocked
+    reject Blocked
   }
 
   emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
@@ -318,7 +318,7 @@ fn a_let_reading_a_fold_runs_after_it() {
 
   let live = open - shut
   if live <= 0 {
-    return reject NoneLive
+    reject NoneLive
   }
   emit @order.cancelled { order_id, customer_id }
 }",
@@ -349,7 +349,7 @@ fn a_let_reading_a_folded_let_stays_with_it() {
   let live = open
   let doubled = live * 2
   if doubled != 2 {
-    return reject Unexpected { saw: \"{doubled}\" }
+    reject Unexpected { saw: \"{doubled}\" }
   }
   emit @order.cancelled { order_id, customer_id }
 }",
@@ -406,7 +406,7 @@ fn a_seed_may_read_a_parameter_or_a_let_above_it() {
     on @order.placed(customer_id) => open + 1
 
   if open != 14 {
-    return reject Unexpected { saw: \"{open}\" }
+    reject Unexpected { saw: \"{open}\" }
   }
   emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
 }",
@@ -442,7 +442,7 @@ fn a_filter_may_name_a_let_that_reads_an_earlier_stage() {
     on @customer.blocked(customer_id: who) => true
 
   if blocked {
-    return reject Blocked
+    reject Blocked
   }
 
   emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
@@ -514,7 +514,7 @@ fn a_destructure_reads_the_event_where_a_filter_reads_the_command() {
     on @order.placed(customer_id) { total } => spend + total
 
   if spend != 8.00 {
-    return reject Unexpected { saw: \"{spend}\" }
+    reject Unexpected { saw: \"{spend}\" }
   }
   emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
 }",
@@ -626,10 +626,76 @@ fn a_command_cannot_write_a_read_model() {
 
 #[test]
 fn a_command_cannot_fail() {
-    let message = body_is_rejected("fail(\"nope\")");
+    let message = body_is_rejected("fail \"nope\"");
     assert!(
-        message.contains("a command returns `invalid(...)` or `reject(...)`"),
+        message.contains("a command answers with `invalid` or `reject`"),
         "got: {message}"
+    );
+}
+
+/// Saying the answer ends the declaration, so anything written below one never runs. This
+/// is what stands in for the `return` that used to prefix every answer and mark its line.
+#[test]
+fn a_statement_after_the_answer_is_refused() {
+    for body in [
+        "  reject Blocked\n  emit @order.cancelled { order_id, customer_id }",
+        "  invalid \"no\"\n  return",
+        "  reject Blocked\n  let x = customer_id + 1\n  return",
+        "  if true {\n    reject Blocked\n    return\n  }\n  return",
+    ] {
+        let message = err(&format!(
+            "command C(order_id: Uuid, customer_id: Int) {{\n{body}\n}}"
+        ));
+        assert!(
+            message.contains("this statement is after the answer, so it never runs"),
+            "for {body}: {message}"
+        );
+    }
+}
+
+/// A `fold` or a `guard` below an answer is unreachable too, and this deliberately does
+/// not say so: they are declarations, and the rules about where a declaration may sit are
+/// the more specific thing to say. Reporting "this statement" with the caret under a
+/// `fold` would also contradict the message the next line over calls it a declaration.
+#[test]
+fn a_declaration_after_the_answer_keeps_its_own_message() {
+    let message = err("command C(order_id: Uuid, customer_id: Int) {
+  reject Blocked
+  fold seen: Bool = false
+    on @order.placed(customer_id) => true
+  return
+}");
+    assert!(
+        message.contains("this declaration is after the answer, so it never runs"),
+        "got: {message}"
+    );
+}
+
+/// A bare `return` above an answer is dead code too, but it is not what this reports: a
+/// newline is not a statement separator here, so the parser cannot tell it from the
+/// `return reject X` someone typed out of habit. The migration message is the useful one
+/// of the two, and it is the one that wins.
+#[test]
+fn a_return_above_an_answer_reads_as_the_old_spelling() {
+    let message =
+        err("command C(order_id: Uuid, customer_id: Int) {\n  return\n  reject Blocked\n}");
+    assert!(
+        message.contains("`reject` takes no `return`"),
+        "got: {message}"
+    );
+}
+
+/// The answer still reaches the end of a block as the last statement, which is the shape
+/// every guard and most commands are written in.
+#[test]
+fn an_answer_may_end_a_block() {
+    program(
+        "command C(order_id: Uuid, customer_id: Int) {
+  if customer_id < 0 {
+    reject Blocked
+  }
+  emit @order.placed { order_id, customer_id, email: \"a@b.c\", total: 0.00 }
+}",
     );
 }
 

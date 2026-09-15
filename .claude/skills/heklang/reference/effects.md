@@ -18,7 +18,7 @@ effect NotifyCustomer {
     })
 
     if response.status >= 400 {
-      fail("confirmation rejected")
+      fail "confirmation rejected"
     }
 
     invoke RecordNotified {
@@ -83,7 +83,7 @@ reproduces it. Three consequences:
 - **it counts the trigger**, so an effect folding its own trigger type sees itself, and a customer's
   first order leaves a count of one, not zero.
 
-## 4. `fail("reason")` is the author's terminal outcome
+## 4. `fail "<reason>"` is the author's terminal outcome
 
 `fail` records the position as failed and advances the cursor. It is the **only** author-invoked
 failure; a runtime error wedges instead.
@@ -223,7 +223,7 @@ It is a reachability analysis over the arm's control flow, not a lexical check:
 ```hek
 if x {
   erase(e.customer_id)
-  fail("gone")
+  fail "gone"
 }
 reveal(e.email)                   // legal: the erase path never reaches here
 
@@ -293,7 +293,7 @@ effect SyncShop {
       return                          // leaves the helper, not the arm
     }
     if response.status >= 400 {
-      fail("sync rejected with status {response.status}")
+      fail "sync rejected with status {response.status}"
     }
   }
 

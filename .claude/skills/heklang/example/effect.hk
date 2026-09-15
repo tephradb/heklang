@@ -15,7 +15,7 @@ effect ConfirmBooking {
     // Retryable statuses never arrive: the runtime absorbed them with backoff, so a
     // 4xx here is a real decision rather than something every effect re-implements.
     if response.status >= 400 {
-      fail("confirmation rejected with status {response.status}")
+      fail "confirmation rejected with status {response.status}"
     }
   }
 

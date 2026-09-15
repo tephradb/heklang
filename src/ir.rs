@@ -1024,9 +1024,13 @@ pub enum Expr {
         /// host answering `None` is an answer rather than a failure.
         optional: bool,
     },
-    /// `reject(code, message)` or, with no code, `invalid(message)`. An `Outcome` as a
-    /// value, so a `fn` can decide a refusal and a command can return what it decided.
-    /// See `docs/functions.md`.
+    /// A refusal with its code, or with no code an `invalid`, as an `Outcome` value.
+    ///
+    /// It has no spelling: `reject` and `invalid` are statements, so nothing in a source
+    /// file builds one directly. What builds it is a `fn` that declared `Outcome`, whose
+    /// answer travels the result channel and so has to be a value on the way out. That
+    /// is also why the node stayed when the syntax went: the IR a command produces is
+    /// the IR it always produced, and no digest moved. See `docs/functions.md`.
     Refusal {
         code: Option<ExprId>,
         message: ExprId,

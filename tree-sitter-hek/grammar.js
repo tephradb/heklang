@@ -172,7 +172,7 @@ module.exports = grammar({
 
     // A named refusal and the one message it carries. Parens declare and braces use,
     // the same split `guard` has; a refusal with no fields declares no parens and is
-    // named with no braces, which is what lets `return reject Name` end a block.
+    // named with no braces, which is what lets `reject Name` end a block.
     refusal_declaration: ($) =>
       seq(
         'refusal',
@@ -316,6 +316,7 @@ module.exports = grammar({
         $.row_expectation,
         $.outcome_expression,
         $.refusal_expression,
+        $.fail_statement,
         $.invoke_expression,
         $.call_expression,
         $.method_call,
@@ -346,6 +347,9 @@ module.exports = grammar({
         $.if_statement,
         $.for_statement,
         $.return_statement,
+        $.outcome_expression,
+        $.refusal_expression,
+        $.fail_statement,
         $.emit_statement,
         $.put_statement,
         $.patch_statement,
@@ -421,17 +425,52 @@ module.exports = grammar({
         field('container', $._expression),
       ),
 
-    // Bare, an outcome, or a value inside a `fn`.
+    // Bare, or a value inside a `fn`. An outcome is no longer one of them: saying the
+    // answer ends the declaration, so `reject` and `invalid` are statements of their own.
+    //
+    // `fail` is named here because it is a soft name (rule 10) that this grammar also
+    // spells as a keyword. After `return` it can only be a value: a `fail` *statement*
+    // there would be unreachable. That is the same call `Parser::ends_return` makes, and
+    // without it a local named `fail` is a file `hek fmt` cannot read.
+    //
+    // The two answers are named here for the opposite reason: `return reject X` is the
+    // removed spelling, and this grammar is a superset on purpose. Without them the words
+    // still parse, as a bare `return` followed by a statement, and `hek fmt` relays the
+    // one line out into two before `hek check` ever gets to explain it. Keeping the old
+    // shape whole is what lets the formatter hand a pre-migration file back unchanged.
     return_statement: ($) =>
       prec.right(
-        seq('return', optional(choice($.outcome_expression, $._expression))),
+        seq(
+          'return',
+          optional(
+            choice(
+              $._expression,
+              $.outcome_expression,
+              $.refusal_expression,
+              alias('fail', $.identifier),
+            ),
+          ),
+        ),
       ),
 
-    outcome_expression: ($) => seq('invalid', field('arguments', $.arguments)),
+    // `invalid <message>`, `fail <message>`. No parens, because parens are a call and a
+    // call comes back; these are two of the three answers.
+    //
+    // The message is a string here where `src/parse.rs` takes any expression, which is
+    // the one place this grammar is narrower rather than wider, and deliberately. A
+    // removed `invalid("x")` then matches no rule at all, so `hek fmt` leaves the file
+    // alone for `hek check` to explain. Were the message `$._expression`, the parens
+    // would read as a grouping, and `hek fmt` would rewrite the file to `invalid ("x")`:
+    // output of its own that `hek check` rejects, which is the one thing a formatter
+    // must never produce. The cost is that `invalid some_call()` is a file `hek fmt`
+    // declines; declining is safe, and nothing in the corpus writes one.
+    outcome_expression: ($) =>
+      prec.right(seq('invalid', field('message', choice($.string, $.raw_string)))),
 
-    // `reject Name`, or `reject Name { field: value }`. The token after `reject` is
-    // what tells this from `outcome_expression`: a `(` opens arguments and a name
-    // opens this, the same one-token lookahead `guard` uses for a path against a name.
+    fail_statement: ($) =>
+      prec.right(seq('fail', field('message', choice($.string, $.raw_string)))),
+
+    // `reject Name`, or `reject Name { field: value }`.
     // `prec.right` because a `{` after the name is always the fields: unlike a record
     // literal, which loses to a block in a header (`no_record_literal` in parse.rs),
     // a refusal is never a header's condition, so there is no block for it to lose to.
@@ -471,7 +510,8 @@ module.exports = grammar({
         ']',
       ),
 
-    // `fail(...)`, `log(...)`, `erase(...)` and a discarded `http.*` call.
+    // `log(...)`, `erase(...)` and a discarded `http.*` call. `fail` is no longer one of
+    // them: it takes no parens, so it is not a call.
     expression_statement: ($) => choice($.call_expression, $.method_call),
 
     // ----------------------------------------------------------------------- types
@@ -526,7 +566,6 @@ module.exports = grammar({
         $.list,
         $.comprehension,
         $.invoke_expression,
-        $.refusal_expression,
         $.if_expression,
         $.parenthesized_expression,
       ),

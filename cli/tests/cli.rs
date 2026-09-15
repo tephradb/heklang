@@ -14,7 +14,7 @@ command Place(order_id: Int, total: Money(2)) {
   fold placed: Bool = false
     on @order.placed(order_id) => true
   if placed {
-    return reject Duplicate
+    reject Duplicate
   }
   emit @order.placed { order_id, total }
 }
@@ -513,7 +513,7 @@ guard ShopIsConnected(shop_id: Int) {
   fold connected: Bool = false
     on @shop.connected(shop_id) => true
   if !connected {
-    return reject ShopNotFound
+    reject ShopNotFound
   }
 }
 
@@ -522,7 +522,7 @@ guard PlanExists(plan_id: Int, shop_id: Int) {
   fold exists: Bool = false
     on @plan.created(plan_id, shop_id) => true
   if !exists {
-    return reject PlanNotFound
+    reject PlanNotFound
   }
 }
 
@@ -558,7 +558,7 @@ guard ShopIsConnected(shop_id: Int) {
   fold connected: Bool = false
     on @shop.connected(shop_id) => true
   if !connected {
-    return reject ShopNotFound
+    reject ShopNotFound
   }
 }
 

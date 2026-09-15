@@ -51,7 +51,9 @@ Three more exist and **cannot be written in a type position**:
   `fn` signature and nowhere else. A module `fn` is callable from a command and a projector, so one
   taking a credential would have a parameter nothing could ever fill. Like the two below it, it is
   kept out of `List` and `Map` by living above the ordinary type parser rather than in it.
-- `Outcome`, the result of an `invoke`. It has no spelling outside a `fn` signature; it is
+- `Outcome`, the result of an `invoke`. It has no spelling outside a `fn` signature, and no
+  literal at all: `reject` and `invalid` are statements rather than constructors
+  (`docs/refusals.md`), so the only way to hold one is to have been handed it. It is
   otherwise only consumed by `.ok()`, `.code()` and `.message()` on the expression that produced
   it. `.code()` is a `String?`, and a declared refusal name is that code, so
   `r.refused(ShopNotFound)` and `r.code() == ShopNotFound` are both checked (`docs/refusals.md`).

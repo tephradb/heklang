@@ -24,7 +24,7 @@ effect NotifyCustomer {
     })
 
     if response.status >= 400 {
-      fail("confirmation rejected")
+      fail "confirmation rejected"
     }
 
     invoke RecordNotified {
@@ -148,7 +148,7 @@ projector:
 Folding to head instead would make state depend on how far the log had run when the handler happened
 to execute, which is the same value reading differently on a retry.
 
-## 4. `fail("reason")` is the author's terminal outcome
+## 4. `fail "<reason>"` is the author's terminal outcome
 
 `fail` records the position as failed and advances the cursor. It is the **only** author-invoked
 failure. A runtime error wedges instead, and there is no second author verb, because two would raise
@@ -418,7 +418,7 @@ This is a **reachability analysis over the arm's control flow**, not a lexical o
 difference is visible in one line:
 
 ```
-if x { erase(e.customer_id); fail("gone") }
+if x { erase(e.customer_id); fail "gone" }
 reveal(e.email)                              // legal: the erase path never reaches here
 ```
 
@@ -594,7 +594,7 @@ effect SyncShop {
     let response = http.post("https://{domain}/admin/api/sync", { "shop": shop_id },
       headers = { "X-Access-Token": secret })
     if response.status >= 400 {
-      fail("sync rejected with status {response.status}")
+      fail "sync rejected with status {response.status}"
     }
     log("synced shop {shop_id} at {domain}")
   }
@@ -1169,7 +1169,7 @@ rule is about sinks rather than about operations, and it is met wherever a type 
 | an *un-narrowed* `secret NAME?`, anywhere but those two | no |
 | a boolean operand, a comprehension's yielded element | no |
 | a `List`, a `Map`, a record field, an array inside a body | no |
-| `log(..)`, `fail(..)` | no |
+| `log(..)`, `fail ..` | no |
 | `emit`, `put` / `patch` / `update`, `invoke` | no |
 | a `fold` seed, arm or filter | **no**, and this one is correctness |
 | `==`, `!=`, ordering, arithmetic | no |

@@ -17,9 +17,9 @@ command PlaceOrder(order_id: Uuid, customer_id: Int, notes: String?) {
     on @customer.blocked(customer_id: customer) => true
 
   if blocked {
-    return reject CustomerBlocked
+    reject CustomerBlocked
   } else if email_taken {
-    return invalid("that email has already placed an order")
+    invalid "that email has already placed an order"
   } else {
     return
   }
@@ -108,17 +108,14 @@ command PlaceOrder(order_id: Uuid, customer_id: Int, notes: String?) {
       (if_statement
         (identifier)
         (block
-          (return_statement
-            (refusal_expression
-              (type_identifier))))
+          (refusal_expression
+            (type_identifier)))
         (if_statement
           (identifier)
           (block
-            (return_statement
-              (outcome_expression
-                (arguments
-                  (string
-                    (string_content))))))
+            (outcome_expression
+              (string
+                (string_content))))
           (block
             (return_statement)))))))
 
@@ -129,7 +126,7 @@ for over a map, emit with shorthand fields
 command ListItem(item_id: Uuid, tier: Tier) {
   for other_id, other in items {
     if other_id != item_id && other.sku == wanted {
-      return reject SkuTaken { sku }
+      reject SkuTaken { sku }
     }
   }
 
@@ -172,12 +169,11 @@ command ListItem(item_id: Uuid, tier: Tier) {
                   (identifier))
                 (identifier)))
             (block
-              (return_statement
-                (refusal_expression
-                  (type_identifier)
-                  (field_initializer_list
-                    (field_initializer
-                      (identifier)))))))))
+              (refusal_expression
+                (type_identifier)
+                (field_initializer_list
+                  (field_initializer
+                    (identifier))))))))
       (emit_statement
         (event_path)
         (field_initializer_list
@@ -205,7 +201,7 @@ declarations interleave with statements, and each run is one read
 command ListItem(item_id: Uuid, sku: String) {
   let trimmed = sku.trim()
   if trimmed.is_empty() {
-    return invalid("a sku is required")
+    invalid "a sku is required"
   }
 
   guard SkuIsFree { sku: trimmed }
@@ -243,11 +239,9 @@ command ListItem(item_id: Uuid, sku: String) {
           method: (identifier)
           arguments: (arguments))
         consequence: (block
-          (return_statement
-            (outcome_expression
-              arguments: (arguments
-                (string
-                  (string_content)))))))
+          (outcome_expression
+            message: (string
+              (string_content)))))
       (guard_declaration
         guard: (type_identifier)
         (field_initializer_list

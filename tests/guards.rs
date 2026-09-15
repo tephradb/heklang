@@ -48,7 +48,7 @@ guard CourseIsDefined(course: String) {
     on @course.defined(course) => true
 
   if !defined {
-    return reject UndefinedCourse
+    reject UndefinedCourse
   }
 }
 
@@ -57,7 +57,7 @@ guard StudentIsRegistered(student: String) {
     on @student.registered(student) => true
 
   if !registered {
-    return reject UnregisteredStudent
+    reject UnregisteredStudent
   }
 }
 
@@ -69,7 +69,7 @@ guard CourseHasSeats(course: String) {
     on @student.subscribed(course) => enrolled + 1
 
   if enrolled >= seats {
-    return reject CourseFull
+    reject CourseFull
   }
 }
 
@@ -268,7 +268,7 @@ guard ShopIsConnected(shop_id: Int) {
     on @shop.connected(shop_id) => true
 
   if !connected {
-    return reject ShopNotFound
+    reject ShopNotFound
   }
 }
 
@@ -279,7 +279,7 @@ guard PlanExists(plan_id: Int, shop_id: Int) {
     on @plan.created(plan_id, shop_id) => true
 
   if !exists {
-    return reject PlanNotFound
+    reject PlanNotFound
   }
 }
 
@@ -383,7 +383,7 @@ fn a_guard_returns_only_a_refusal() {
 fn a_guard_that_folds_nothing_is_a_fn() {
     let message = error(&format!(
         "{EVENTS}guard G(course: String) {{
-  if course == \"\" {{ return reject No }}
+  if course == \"\" {{ reject No }}
 }}
 "
     ));
@@ -401,7 +401,7 @@ fn an_arm_less_fold_in_a_guard_is_not_told_to_write_a_let() {
         "{EVENTS}guard G(course: String) {{
   fold seen: Bool = false
 
-  if !seen {{ return reject No }}
+  if !seen {{ reject No }}
 }}
 "
     ))
@@ -422,7 +422,7 @@ fn a_guard_has_no_clock() {
   fold d: Bool = false
     on @course.defined(course) => true
   let at = now()
-  if !d {{ return reject No }}
+  if !d {{ reject No }}
 }}
 "
     ));
@@ -500,7 +500,7 @@ fn a_guard_cannot_name_itself() {
   guard G {{ course }}
   fold d: Bool = false
     on @course.defined(course) => true
-  if !d {{ return reject No }}
+  if !d {{ reject No }}
 }}
 "
     ));
@@ -517,13 +517,13 @@ fn a_cycle_through_another_guard_is_refused() {
   guard B {{ course }}
   fold d: Bool = false
     on @course.defined(course) => true
-  if !d {{ return reject No }}
+  if !d {{ reject No }}
 }}
 guard B(course: String) {{
   guard A {{ course }}
   fold e: Bool = false
     on @course.defined(course) => true
-  if !e {{ return reject No }}
+  if !e {{ reject No }}
 }}
 "
     ));
@@ -565,7 +565,7 @@ fn a_command_and_a_guard_may_share_a_name() {
 guard Same(course: String) {{
   fold d: Bool = false
     on @course.defined(course) => true
-  if !d {{ return reject UndefinedCourse }}
+  if !d {{ reject UndefinedCourse }}
 }}
 "
     );
@@ -585,7 +585,7 @@ fn a_const_above_a_guard_does_not_swallow_it() {
 guard CourseIsDefined(course: String) {{
   fold defined: Bool = false
     on @course.defined(course) => true
-  if !defined {{ return reject UndefinedCourse }}
+  if !defined {{ reject UndefinedCourse }}
 }}
 "
     );
@@ -600,7 +600,7 @@ guard CourseIsDefined(course: String) {{
 const STAGED: &str = "\
 fn blank(course: String) -> Outcome? {
   if course.trim().is_empty() {
-    return invalid(\"a course is required\")
+    invalid \"a course is required\"
   }
   return none
 }
@@ -654,7 +654,7 @@ fn a_guard_is_one_read_of_the_log() {
   fold defined: Bool = false
     on @course.defined(course) => true
   if !defined {{
-    return reject UndefinedCourse
+    reject UndefinedCourse
   }}
   fold registered: Bool = false
     on @student.registered(student) => true

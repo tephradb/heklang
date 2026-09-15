@@ -439,6 +439,10 @@ fn cases() -> Vec<(Code, String)> {
             "fn f(a: Int) -> Int { log(\"x\") return a }\n",
         ),
         (Code::ReturnShape, "fn f(a: Int) -> Int { return }\n"),
+        (
+            Code::Unreachable,
+            "fn f(a: Int) -> Int { return a\n  return a }\n",
+        ),
         (Code::TestShape, "test \"x\" { }\n"),
         (Code::RecursiveFn, "fn f(a: Int) -> Int { return f(a) }\n"),
         (
@@ -450,7 +454,7 @@ fn cases() -> Vec<(Code, String)> {
                 "  guard G { x }\n",
                 "  fold s: Bool = false\n",
                 "    on @a.b(x) => true\n",
-                "  if !s { return reject No }\n",
+                "  if !s { reject No }\n",
                 "}\n",
             ),
         ),
@@ -725,7 +729,7 @@ fn two_mistakes_in_one_body_are_both_reported() {
         "event @shop.connected { shop_id: Int, name: String }
 command C(shop_id: Int, owner_email: String) {
   if owner_email.trm().is_empty() {
-    return invalid(\"no email\")
+    invalid \"no email\"
   }
   emit @shop.reconneced { shop_id, name: owner_email }
 }
@@ -736,6 +740,57 @@ command C(shop_id: Int, owner_email: String) {
     assert_eq!(lines, vec![3, 6], "one per mistake, in source order");
     assert_eq!(found[0].code, Code::UnknownMember);
     assert_eq!(found[1].code, Code::NotDeclared);
+}
+
+/// A declaration that is given up on takes its state with it. Every declaration parser
+/// restores what it set on the way out, and none of them can on the way out through `?`,
+/// so a `fn` whose body failed used to leave `kind` at `Kind::Function` and the next
+/// command's `emit` was reported as ``a `fn` is pure, so it cannot append events``: a
+/// second diagnostic about a declaration with nothing wrong with it.
+#[test]
+fn an_abandoned_declaration_does_not_poison_the_next_one() {
+    let found = errors(
+        "event @shop.opened { shop_id: Int }
+fn broken(a: Int) -> Int {
+  return
+}
+command OpenShop(shop_id: Int) {
+  emit @shop.opened { shop_id }
+}
+",
+    );
+
+    assert_eq!(found.len(), 1, "got: {found:#?}");
+    assert_eq!(found[0].code, Code::ReturnShape);
+}
+
+/// The same for the kinds that carry more than `kind`: a projector holds its own enums
+/// and entities, and an effect holds its local `fn`s and the name of the effect itself.
+#[test]
+fn an_abandoned_projector_or_effect_leaves_nothing_behind() {
+    let found = errors(
+        "event @shop.opened { shop_id: Int }
+projector P {
+  entity Shop { shop_id: Int @key, tier: Int }
+  on @shop.opened as e { shop_id } {
+    put Shop { shop_id, tier: nosuchname }
+  }
+}
+effect E {
+  fn helper(a: Int) -> Int { return a }
+  on @shop.opened as e { @key shop_id } { nosuchcall(\"x\") }
+}
+command OpenShop(shop_id: Int) {
+  emit @shop.opened { shop_id }
+}
+",
+    );
+
+    // One per real mistake, and nothing said about the command underneath them. An
+    // `entity`, an enum or a local `fn` surviving into the command would be reported
+    // there instead, which is the shape this is guarding against.
+    let lines: Vec<u32> = found.iter().map(|err| err.span.start.line).collect();
+    assert_eq!(lines, vec![5, 10], "got: {found:#?}");
 }
 
 /// The poison is what keeps that from becoming a flood. A rejected value has no type,

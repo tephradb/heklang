@@ -153,8 +153,10 @@ declared refusal and answers whether this is it (`docs/refusals.md`); an `invali
 so it is refused by nothing.
 
 `Outcome` is spellable in a `fn` parameter and return type and nowhere else, the same allowance
-`Response` has: a refusal is a decision, not data. `reject <Name>` and `invalid(message)` construct
-one wherever an `Outcome` is expected. `docs/functions.md` has the rule, and `docs/refusals.md`
+`Response` has: a refusal is a decision, not data. It is the type of an `invoke`'s result and of a
+`fn` that decides a refusal on a command's behalf. `reject <Name>` and `invalid "<message>"` do not
+construct one: they are statements rather than values, and a `fn` that declared `Outcome` answers
+with them directly (`docs/refusals.md`). `docs/functions.md` has the rule, and `docs/refusals.md`
 has the declaration the name resolves to.
 
 ### `Response`
@@ -171,8 +173,6 @@ hiding in it; anything that makes a value out of nothing is qualified by the typ
 | Call | Returns | |
 | --- | --- | --- |
 | `Uuid.derive(seed, name)` | `Uuid` | a v5 UUID, a pure function of both arguments |
-| `reject <Name>` | `Outcome` | a declared refusal (`docs/refusals.md`), as a value |
-| `invalid(message)` | `Outcome` | the same, for a malformed request |
 | `Json.empty` | `Json` | |
 | `Json.encode(value)` | `String` | rule 8's table pointed at a string instead of a socket |
 | `Map.empty` | `Map(K, V)` | the type comes from the target |
@@ -209,7 +209,7 @@ These are not functions in the sense above. They reach the world, and the right-
 | `now()` | `Timestamp` | yes, pinned once per invocation |
 | `erase(value)` / `erase(subject, value)` | nothing | yes |
 | `log(message)` | nothing | **no** |
-| `fail(message)` | nothing, terminal | n/a |
+| `fail "<message>"` | nothing, terminal | n/a |
 | `reveal(value)` | `String` | **no**, re-decrypts every attempt |
 
 Every verb takes an optional named `headers = { ... }` after its other arguments. A timeout does not
@@ -222,7 +222,14 @@ shredding exists to prevent, so it is re-done on every attempt instead.
 
 `fail` is the author's terminal outcome and the only author-invoked way to stop an arm. `erase` is a
 statement rather than an expression because there is nothing an author could do differently on either
-answer, and `log` and `fail` are statements for the same reason.
+answer, and `log` is a statement for the same reason.
+
+**`fail` takes no parens and the other two do**, and the line between them is not statement against
+expression: it is terminal against not. `fail` is one of the three answers, beside `reject` and
+`invalid`, and saying an answer ends the declaration (`docs/refusals.md`). `log` and `erase` come
+back to the next statement, so they stay calls, and parens are what a call takes. The guarantee runs
+one way only, since `emit` and `put` take no parens and are not terminal; what catches a statement
+written after an answer is a diagnostic rather than its shape.
 
 ## 4. Where each one is allowed
 

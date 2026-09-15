@@ -46,7 +46,7 @@ command PlaceOrder(order_id: Uuid, customer_id: Int, email: String, total: Money
     on @order.cancelled(customer_id) => open_orders - 1
 
   if open_orders >= 10 {
-    return reject TooManyOpen
+    reject TooManyOpen
   }
 
   emit @order.placed { order_id, customer_id, email, total }

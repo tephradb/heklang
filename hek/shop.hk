@@ -41,7 +41,7 @@ effect SyncShop {
       return
     }
     if response.status >= 400 {
-      fail("sync rejected with status {response.status}")
+      fail "sync rejected with status {response.status}"
     }
     log("synced shop {shop_id} at {domain}")
   }

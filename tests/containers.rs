@@ -274,7 +274,7 @@ fn an_empty_map_in_a_body_still_needs_a_target_type() {
 #[test]
 fn for_binds_one_name_over_a_list() {
     let body = format!(
-        "  let xs = [1, 2, 3]\n  for x in xs {{\n    if x == 2 {{\n      return invalid(\"found two\")\n    }}\n  }}\n{}",
+        "  let xs = [1, 2, 3]\n  for x in xs {{\n    if x == 2 {{\n      invalid \"found two\"\n    }}\n  }}\n{}",
         emitting("[]")
     );
     let program = parse(&source("", &body)).expect("parses");
@@ -287,9 +287,9 @@ fn for_binds_one_name_over_a_list() {
 
 #[test]
 fn for_binds_an_index_and_an_item_over_a_list() {
-    let body =
-        "  for i, x in [10, 20] {\n    if i == 1 {\n      return invalid(\"{i}:{x}\")\n    }\n  }\n"
-            .to_string() + &emitting("[]");
+    let body = "  for i, x in [10, 20] {\n    if i == 1 {\n      invalid \"{i}:{x}\"\n    }\n  }\n"
+        .to_string()
+        + &emitting("[]");
     let program = parse(&source("", &body)).expect("parses");
     let mut interpreter = Interpreter::new(&program);
     let execution = interpreter
@@ -300,10 +300,9 @@ fn for_binds_an_index_and_an_item_over_a_list() {
 
 #[test]
 fn for_binds_a_key_and_a_value_over_a_map() {
-    let body =
-        "  for key, value in m {\n    if key == 10 {\n      return invalid(value)\n    }\n  }\n"
-            .to_string()
-            + &emitting("[]");
+    let body = "  for key, value in m {\n    if key == 10 {\n      invalid value\n    }\n  }\n"
+        .to_string()
+        + &emitting("[]");
     let program = parse(&source(", m: Map(Int, String)", &body)).expect("parses");
     let mut interpreter = Interpreter::new(&program);
     let execution = interpreter

@@ -25,7 +25,8 @@ Two more are spellable **only** in a `fn` parameter or return type, and nowhere 
 
 - `Response`, what `http.*` returns. A response is transport, not data, so no event field, entity
   column, record field, `fold` or command parameter may name one, and neither may `List(Response)`.
-- `Outcome`, what an `invoke` answers with and what `reject`/`invalid` construct. A refusal is a
+- `Outcome`, what an `invoke` answers with, and what a `fn` declaring one answers with. `reject` and
+  `invalid` are statements rather than constructors, so there is no literal for one. A refusal is a
   decision, not data, so the same restriction applies.
 
 A third, `Rounding`, is spellable **nowhere**: `Rounding` as a type name is `unknown type`, and its
@@ -312,9 +313,9 @@ are both rejected as unknown types. A
 
 ```hek
 fn ladder(subscribed: Bool, taken: Int, cap: Int) -> Outcome? {
-  if subscribed { return reject AlreadySubscribed }
-  if cap == 0 { return invalid("this course has no capacity set") }
-  if taken >= cap { return reject CourseFull }
+  if subscribed { reject AlreadySubscribed }
+  if cap == 0 { invalid "this course has no capacity set" }
+  if taken >= cap { reject CourseFull }
   return none
 }
 

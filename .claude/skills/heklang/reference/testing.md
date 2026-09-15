@@ -111,7 +111,7 @@ starts running.
 | --- | --- |
 | `expect @path { field: value, ... }` | one appended event, in order |
 | `expect nothing` | the command appended no events |
-| `expect invalid("<message>")` | `Outcome::Invalid` |
+| `expect invalid "<message>"` | `Outcome::Invalid` |
 | `expect reject <Name>` / `expect reject <Name> { field: value }` | `Outcome::Reject` |
 
 The appended events must match the `expect @path` lines **one for one and in order**, and an event
@@ -155,7 +155,7 @@ An effect's output is a **trace**: the ordered list of things it did to the worl
 | `expect invoke Command { name: value, ... }` | an `invoke` with exactly those arguments |
 | `expect erase(<subject>, "<id>")` | an erase, naming the subject field and the id |
 | `expect log("<message>")` | one `log` line |
-| `expect fail("<message>")` | an arm returned `fail` |
+| `expect fail "<message>"` | an arm returned `fail` |
 | `expect skipped` | an arm hit a shredded key |
 | `expect nothing` | the effect did nothing observable |
 
@@ -207,4 +207,4 @@ Write a case for each of these, because each is a rule the checker cannot see:
 - each projector handler, including the absent-row case that distinguishes `patch` from `update`
   (`expect no Entity[key]`);
 - each effect arm: the success trace, an absorbed retry (`respond url 503` then `200`), a terminal
-  4xx (`expect fail(...)`), and a shredded subject (`erased ... ` then `expect skipped`).
+  4xx (`expect fail "<message>"`), and a shredded subject (`erased ... ` then `expect skipped`).

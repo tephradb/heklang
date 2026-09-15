@@ -45,7 +45,7 @@ guard CustomerIsNotBlocked(customer_id: Int) {
     on @customer.blocked(customer_id: customer) => true
 
   if blocked {
-    return reject CustomerBlocked
+    reject CustomerBlocked
   }
 }
 
@@ -54,7 +54,7 @@ guard EmailIsUnused(email: String) {
     on @order.placed(email) => true
 
   if taken {
-    return reject EmailTaken
+    reject EmailTaken
   }
 }
 
@@ -64,7 +64,7 @@ guard UnderOpenOrderLimit(customer_id: Int) {
     on @order.cancelled(customer_id) => open_orders - 1
 
   if open_orders >= 10 {
-    return reject TooManyOpen
+    reject TooManyOpen
   }
 }
 
@@ -92,7 +92,7 @@ command PlaceOrder(
 
   // Not a guard either: it is about the input rather than the log, so it folds nothing.
   if address.trim() == "" {
-    return invalid("address must not be blank")
+    invalid "address must not be blank"
   }
 
   let discounted = if lifetime_spend > 1000.00 { total.mul(0.9, HalfUp) } else { total }

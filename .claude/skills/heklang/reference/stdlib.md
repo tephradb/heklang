@@ -144,8 +144,6 @@ The global namespace is closed: anything built from nothing is named by its type
 | `Timestamp.from_parts(y, mo, d, h, mi, s)` | `Timestamp?` | optional, because Feb 30 is not a date |
 | `Money.parse(text)` | `Money(n)?` | the scale comes from where the result lands |
 | `Decimal.parse(text)` | `Decimal(n)?` | the same, for a rate rather than an amount |
-| `reject <Name>` | `Outcome` | a declared refusal, as a value |
-| `invalid(message)` | `Outcome` | the same, for a malformed request |
 
 `Money.parse`, `Decimal.parse`, `Map.empty` and `[]` all take their type from the target, and a call
 with no target is a compile error naming the places one comes from. There is no `List.empty`, because
@@ -165,7 +163,7 @@ with no target is a compile error naming the places one comes from. There is no 
 | `now()` | `Timestamp` | yes, pinned once per invocation |
 | `erase(value)` / `erase(subject, value)` | nothing | yes |
 | `log(message)` | nothing | **no** |
-| `fail(message)` | nothing, terminal | n/a |
+| `fail "<message>"` | nothing, terminal | n/a |
 | `reveal(value)` | the sealed type, unsealed | **no**, re-decrypts every attempt |
 
 Every `http` verb takes an optional `headers = { ... }` named argument after its other arguments. A

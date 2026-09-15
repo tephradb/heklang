@@ -834,10 +834,84 @@ impl Parser {
             Err(err) => {
                 self.errors.borrow_mut().push(err);
                 self.pos = at;
+                self.abandon();
                 self.skip_item()?;
                 Ok(None)
             }
         }
+    }
+
+    /// Drops the state the abandoned declaration had set, so the next one is parsed as
+    /// itself rather than as the tail of a broken neighbour.
+    ///
+    /// Every declaration parser restores what it set on the way out, and none of them can
+    /// on the way out through `?`. The result was a second, invented diagnostic: a `fn`
+    /// whose body failed left `kind` at `Kind::Function`, and the next command's `emit`
+    /// was then reported as ``a `fn` is pure, so it cannot append events``. Restoring in
+    /// each parser would need every one of them to be careful forever; doing it here needs
+    /// only this, because this is the one place a declaration is given up on.
+    ///
+    /// Destructured rather than assigned field by field so that a field added to `Parser`
+    /// does not compile until someone has said which half it belongs to.
+    fn abandon(&mut self) {
+        let Parser {
+            // Built up across declarations, and the reason a later pass can read what an
+            // earlier one collected. Untouched.
+            tokens: _,
+            modules: _,
+            pos: _,
+            errors: _,
+            commands: _,
+            guards: _,
+            refusals: _,
+            functions: _,
+            module_enums: _,
+            records: _,
+            consts: _,
+            shells: _,
+            pending_absent: _,
+            secrets: _,
+            declared: _,
+            // The declaration now being given up on. All of it goes.
+            prologue,
+            folding,
+            command_end,
+            kind,
+            local_fns,
+            in_effect,
+            returns,
+            in_body,
+            propagating,
+            enums,
+            entities,
+            in_request,
+            resolving,
+            no_record_literal,
+            narrowings,
+            event,
+            triggers,
+            envelope,
+            stored,
+        } = self;
+        *prologue = false;
+        *folding = false;
+        *command_end = 0;
+        *kind = Kind::Command;
+        *in_effect = None;
+        *returns = None;
+        *in_body = false;
+        *propagating = false;
+        *in_request = false;
+        *no_record_literal = false;
+        *event = None;
+        *envelope = None;
+        *stored = None;
+        local_fns.clear();
+        enums.clear();
+        entities.clear();
+        resolving.clear();
+        narrowings.clear();
+        triggers.clear();
     }
 
     /// The first error a pass recorded, which ends the run. A later pass reads what an
@@ -3172,7 +3246,28 @@ impl Parser {
         one_stage: bool,
     ) -> Result<(), Diagnostic> {
         let mut named: Vec<(Ident, Vec<Token>)> = Vec::new();
+        // Saying the answer ends the declaration, so nothing written below one runs. A
+        // declaration body cannot check this the way a block does, by looking at what it
+        // has collected: it hands each statement to the builder, which has already split
+        // them into stages. So the fact is carried instead.
+        let mut answered = false;
         loop {
+            // A `fold` or a `guard` below the answer is unreachable too, and says so as a
+            // declaration rather than as a statement: a command may open a second stage,
+            // so there is no other rule that would catch it. The exception is a `guard` in
+            // an effect, which has a rule of its own and a better thing to say.
+            let spoken_for = self.kind == Kind::Effect && self.at_word(Keyword::Guard);
+            if answered
+                && !spoken_for
+                && !matches!(self.peek(), Token::Sym(Sym::RBrace) | Token::End)
+            {
+                let what = if self.at_word(Keyword::Fold) || self.at_word(Keyword::Guard) {
+                    "declaration"
+                } else {
+                    "statement"
+                };
+                return self.unreachable(what);
+            }
             match self.peek() {
                 Token::Word(Keyword::Guard) if self.kind == Kind::Effect => {
                     return self.fail_hint(
@@ -3218,6 +3313,7 @@ impl Parser {
                 Token::Sym(Sym::RBrace) | Token::End => break,
                 _ => {
                     let stmt = self.statement(lower, events)?;
+                    answered = terminates(&stmt);
                     lower.b.stmt(stmt);
                 }
             }
@@ -3626,6 +3722,13 @@ impl Parser {
         let depth = self.narrowings.len();
         let mut stmts = Vec::new();
         while !self.at_sym(Sym::RBrace) && !matches!(self.peek(), Token::End) {
+            // Saying the answer ends the declaration, so a statement after one could
+            // never run. This is what stands in for the `return` that used to prefix
+            // every answer: there are four terminal statements now and no shared shape
+            // marks them, so the check does what reading the line used to do.
+            if stmts.last().is_some_and(terminates) {
+                return self.unreachable("statement");
+            }
             stmts.push(self.statement(lower, events)?);
         }
         self.unnarrow(lower, depth);
@@ -4307,9 +4410,11 @@ impl Parser {
             return Ok(Expect::Log { message, span });
         }
         if self.eat_soft("fail") {
-            self.expect_sym(Sym::LParen)?;
+            // The same guard the arm's own `fail` uses, so that one mistake in one
+            // construct reports one code however it is spelled: an expectation is
+            // spelled like the thing it asserts, and that goes for its errors too.
+            self.answer_operand("fail")?;
             let message = self.expr(lower, Some(Type::String))?;
-            self.end_args()?;
             return Ok(Expect::Failed { message, span });
         }
         if self.eat_soft("skipped") {
@@ -4463,39 +4568,44 @@ impl Parser {
             }
             Token::Word(Keyword::Return) => {
                 self.bump();
-                // A `fn` that declares an `Outcome` is deciding a refusal on the
-                // command's behalf, so it may write one. Everything else that is not a
-                // command still cannot, and the reason differs per kind.
-                let decides = matches!(
-                    self.returns.as_ref().map(|ty| match ty {
-                        Type::Opt(inner) => inner.as_ref(),
-                        other => other,
-                    }),
-                    Some(Type::Outcome)
-                );
-                if !matches!(self.kind, Kind::Command | Kind::Guard)
-                    && !decides
-                    && (self.at_word(Keyword::Invalid) || self.at_word(Keyword::Reject))
-                {
+                // The `return` that used to precede these said nothing: `reject` in
+                // statement position can only be the answer. People will still type it,
+                // so it is worth a sentence rather than a parse error on the name.
+                if self.at_word(Keyword::Invalid) || self.at_word(Keyword::Reject) {
                     let outcome = if self.at_word(Keyword::Invalid) {
-                        "invalid"
+                        Keyword::Invalid
                     } else {
-                        "reject"
+                        Keyword::Reject
+                    }
+                    .text();
+                    return match self.outcome_place() {
+                        Some(why) => self.fail_hint(
+                            Code::ReturnShape,
+                            format!("`{outcome}` is a command's outcome"),
+                            why,
+                        ),
+                        None => self.fail_hint(
+                            Code::ReturnShape,
+                            format!("`{outcome}` takes no `return`"),
+                            format!(
+                                "write `{outcome}` on its own: saying the answer ends the declaration"
+                            ),
+                        ),
                     };
-                    let why = match self.kind {
-                        Kind::Effect | Kind::EffectFn => {
-                            "an effect's terminal outcome is `fail(...)`"
-                        }
-                        Kind::Function => {
-                            "declare it `-> Outcome` or `-> Outcome?` to decide a refusal the caller returns, or return a value the caller branches on"
-                        }
-                        _ => "a projector write cannot fail in a way the program observes",
-                    };
-                    return self.fail_hint(
-                        Code::ReturnShape,
-                        format!("`{outcome}` is a command's outcome"),
-                        why,
-                    );
+                }
+                // `ends_return` calls a `fail` after `return` a value, because for a local
+                // of that name that is the only thing it could be. A string literal after
+                // it says otherwise: that is the builtin taking its message, so what the
+                // author wrote is two statements and the second one never runs. Keyed on
+                // the literal rather than on anything looser so that `return fail`,
+                // `return fail.trim()` and `return fail + x` all stay values.
+                if matches!(self.peek(), Token::Ident(name) if name == "fail")
+                    && matches!(
+                        self.tokens.get(self.pos + 1).map(|spanned| &spanned.token),
+                        Some(Token::Text(_) | Token::TextOpen(_))
+                    )
+                {
+                    return self.unreachable("statement");
                 }
                 if let Some(want) = self.returns.clone() {
                     let at = self.span_here();
@@ -4523,14 +4633,7 @@ impl Parser {
                     }
                     return Ok(Stmt::Return(Return::Ok));
                 }
-                let ret = if self.eat_word(Keyword::Invalid) {
-                    Return::Invalid(self.refusal_args(lower)?)
-                } else if self.at_word(Keyword::Reject) {
-                    let at = self.span_here();
-                    self.bump();
-                    let (code, message) = self.reject_use(lower, at)?;
-                    Return::Reject { code, message }
-                } else if self.kind == Kind::Command && !self.ends_return() {
+                let ret = if self.kind == Kind::Command && !self.ends_return() {
                     // The decision came from somewhere else, which is the whole point:
                     // a `fn` can hold the ladder two commands share. The target type is
                     // the whole check, and it is the one that reports the mismatch:
@@ -4544,12 +4647,18 @@ impl Parser {
                         Code::ReturnShape,
                         "a guard holds by reaching its end, so this `return` says nothing"
                             .to_string(),
-                        "write `return reject(...)` or `return invalid(...)`, or delete it",
+                        "write `reject <Name>` or `invalid \"<message>\"`, or delete it",
                     );
                 } else {
                     Return::Ok
                 };
                 Ok(Stmt::Return(ret))
+            }
+            Token::Word(word @ (Keyword::Reject | Keyword::Invalid)) => {
+                let word = *word;
+                let at = self.span_here();
+                self.bump();
+                self.outcome_statement(lower, word, at)
             }
             Token::Word(Keyword::Emit) => {
                 match self.kind {
@@ -5366,8 +5475,19 @@ impl Parser {
                 )),
             },
             Token::Word(Keyword::Invoke) => self.invoke_expr(lower, span),
+            // An answer is not a value. `log` and `fail` say the same thing the same way,
+            // for the same reason: there is nothing for a binding to hold.
             Token::Word(word @ (Keyword::Reject | Keyword::Invalid)) => {
-                self.refusal_expr(lower, word, span)
+                let named = word.text();
+                Err(self
+                    .err(
+                        Code::NotAValue,
+                        format!("`{named}` is a statement rather than a value"),
+                        span,
+                    )
+                    .with_hint(
+                        "saying the answer ends the declaration, so there is nothing to bind",
+                    ))
             }
             Token::Sym(Sym::LBrace) => self.object_literal(lower, expect.as_ref(), span),
             Token::Sym(Sym::LBracket) => self.bracketed(lower, expect, span),
@@ -6211,8 +6331,13 @@ impl Parser {
     /// Whether a `return` in a `fn` ends without a value. `http.*` is deliberately not
     /// counted even though it can begin a statement: its statement form is a value
     /// being discarded, so after `return` it is the value being returned.
+    ///
+    /// `fail` is excluded for the same reason and one more. It is a soft name (rule 10),
+    /// so a parameter or a local may be called `fail`, and after `return` that is what it
+    /// is: a `fail` *statement* there would be unreachable anyway, so the only reading
+    /// that can be right is the value.
     fn ends_return(&self) -> bool {
-        if matches!(self.peek(), Token::Ident(name) if name == "http") {
+        if matches!(self.peek(), Token::Ident(name) if name == "http" || name == "fail") {
             return false;
         }
         self.at_sym(Sym::RBrace) || self.starts_statement()
@@ -6234,7 +6359,9 @@ impl Parser {
                 | Keyword::Invoke
                 | Keyword::For
                 | Keyword::Fold
-                | Keyword::Guard,
+                | Keyword::Guard
+                | Keyword::Reject
+                | Keyword::Invalid,
             ) => true,
             Token::Ident(name) => self.starts_effect_statement(name),
             _ => false,
@@ -6297,10 +6424,20 @@ impl Parser {
 
     /// Whether a statement begins with one of the soft-named effect builtins. They are
     /// not keywords (rule 10), so this is recognised by shape rather than by token.
+    ///
+    /// `fail` is the one that cannot look for a `(`, because it no longer takes any: it
+    /// is an answer rather than a call. What stands in for the paren is that heklang has
+    /// no bare expression statements, so an identifier followed by the start of an
+    /// expression is this builtin and could not have been anything else.
     fn starts_effect_statement(&self, name: &str) -> bool {
         let next = self.tokens.get(self.pos + 1).map(|next| &next.token);
         match name {
-            "fail" | "log" | "erase" => matches!(next, Some(Token::Sym(Sym::LParen))),
+            // Unconditional: no statement other than this one can begin with the word, so
+            // claiming it here is what lets `effect_statement` explain a `fail` with no
+            // message rather than leaving it to "expected a statement". `ends_return`
+            // holds the one position where a `fail` is a value instead.
+            "fail" => true,
+            "log" | "erase" => matches!(next, Some(Token::Sym(Sym::LParen))),
             "http" => matches!(next, Some(Token::Sym(Sym::Dot))),
             _ => false,
         }
@@ -6321,7 +6458,7 @@ impl Parser {
                 self.gate(
                     (
                         "`fail` is an effect's terminal outcome",
-                        Some("a command returns `invalid(...)` or `reject(...)`"),
+                        Some("a command answers with `invalid` or `reject`"),
                     ),
                     (
                         "`fail` is an effect's terminal outcome",
@@ -6331,9 +6468,8 @@ impl Parser {
                     span,
                 )?;
                 self.bump();
-                self.expect_sym(Sym::LParen)?;
+                self.answer_operand("fail")?;
                 let message = self.expr(lower, Some(Type::String))?;
-                self.end_args()?;
                 Ok(Stmt::Fail { message, span })
             }
             "log" => {
@@ -7582,30 +7718,60 @@ impl Parser {
         Ok(lower.b.expr(Expr::Object(fields)))
     }
 
-    /// `reject(code, message)` and `invalid(message)` as values, which is what lets a
-    /// `fn` decide a refusal and hand it back. The written statement forms in a command
-    /// are parsed before this is reached, so nothing about them changes.
+    /// Why this declaration may not answer with `reject` or `invalid`, or `None` when it
+    /// may. A command and a guard answer with the command's outcome; a `fn` that declared
+    /// `Outcome` is deciding a refusal on the command's behalf, so it answers with its
+    /// result. Nothing else has an answer to give.
+    fn outcome_place(&self) -> Option<&'static str> {
+        // The kinds that may never answer with a refusal are decided by the kind alone,
+        // before the signature is consulted. An effect-local `fn` is the one this order
+        // matters for: it *can* declare `-> Outcome?`, and rule 4 still says an effect's
+        // terminal outcome is `fail`, so declaring one must not buy its way past that.
+        match self.kind {
+            Kind::Command | Kind::Guard => return None,
+            Kind::Effect | Kind::EffectFn => {
+                return Some("an effect's terminal outcome is `fail`");
+            }
+            Kind::Projector => {
+                return Some("a projector write cannot fail in a way the program observes");
+            }
+            Kind::Test => {
+                return Some("a test states inputs and expectations rather than deciding");
+            }
+            Kind::Function => {}
+        }
+        // A module `fn` that declares an `Outcome` is deciding a refusal on the command's
+        // behalf, so it may answer with one.
+        let decides = matches!(
+            self.returns.as_ref().map(|ty| match ty {
+                Type::Opt(inner) => inner.as_ref(),
+                other => other,
+            }),
+            Some(Type::Outcome)
+        );
+        if decides {
+            return None;
+        }
+        Some(
+            "declare it `-> Outcome` or `-> Outcome?` to decide a refusal the caller returns, or return a value the caller branches on",
+        )
+    }
+
+    /// `reject <Name>`, `reject <Name> { .. }` and `invalid <message>`: the answer this
+    /// declaration gives. Saying the answer ends the declaration, which is why neither
+    /// takes a `return` in front of it and why both are statements rather than values.
     ///
-    /// There is no check here that the position wants an `Outcome`: the type is
-    /// `Outcome`, so a `fn` returning a `String` reports the mismatch it always would.
-    fn refusal_expr(
+    /// A command and a guard answer with the command's outcome. A `fn` that declared
+    /// `Outcome` answers with its result, so the same two words lower to a `Return::Value`
+    /// there and the IR below the parser is the one it always was.
+    fn outcome_statement(
         &mut self,
         lower: &mut Lower,
         word: Keyword,
         span: Span,
-    ) -> Result<ExprId, Diagnostic> {
-        let named = if word == Keyword::Reject {
-            "reject"
-        } else {
-            "invalid"
-        };
-        let why = match self.kind {
-            Kind::Command | Kind::Function | Kind::Guard => None,
-            Kind::Effect | Kind::EffectFn => Some("an effect's terminal outcome is `fail(...)`"),
-            Kind::Projector => Some("a projector write cannot fail in a way the program observes"),
-            Kind::Test => Some("a test states inputs and expectations rather than deciding"),
-        };
-        if let Some(why) = why {
+    ) -> Result<Stmt, Diagnostic> {
+        let named = word.text();
+        if let Some(why) = self.outcome_place() {
             return Err(self
                 .err(
                     Code::ReturnShape,
@@ -7620,17 +7786,76 @@ impl Parser {
         } else {
             (None, self.refusal_args(lower)?)
         };
-        lower.b.at(span);
-        Ok(lower.b.expr(Expr::Refusal { code, message }))
+        // A command and a guard carry the parts; a `fn` carries a value, because its
+        // answer travels the result channel every other `fn` result travels.
+        if !matches!(self.kind, Kind::Command | Kind::Guard) {
+            lower.b.at(span);
+            let value = lower.b.expr(Expr::Refusal { code, message });
+            return Ok(Stmt::Return(Return::Value(value)));
+        }
+        Ok(Stmt::Return(match code {
+            Some(code) => Return::Reject { code, message },
+            None => Return::Invalid(message),
+        }))
     }
 
-    /// The argument of `invalid(message)`. `reject` used to share this shape and no
-    /// longer does: it names a declaration instead, and `reject_use` reads that.
+    /// The message an answer carries, checked before it is read. Shared by `invalid` and
+    /// `fail`, which take the same operand in the same shape.
+    ///
+    /// No parens, because parens are a call and a call comes back, and an answer does not.
+    /// A paren here is nearly always the removed call form, and when it is not it is a
+    /// group around the only operand there is, which says nothing either way; the hint
+    /// covers both so that it is right whichever the author meant.
+    ///
+    /// A missing message is the other half. The word alone used to fall through to
+    /// "expected a statement", which names no rule, and it is the likeliest slip while a
+    /// codebase is being migrated off the call form.
+    fn answer_operand(&mut self, named: &str) -> Result<(), Diagnostic> {
+        if self.at_sym(Sym::LParen) {
+            return Err(self
+                .err(
+                    Code::ReturnShape,
+                    format!("`{named}` takes no parens"),
+                    self.span_here(),
+                )
+                .with_hint(format!(
+                    "write `{named} \"<message>\"`: parens are a call and a call comes back, and around the whole message they say nothing"
+                )));
+        }
+        if self.missing_operand() {
+            return Err(self
+                .err(
+                    Code::ReturnShape,
+                    format!("`{named}` takes a message"),
+                    self.span_here(),
+                )
+                .with_hint(format!("write `{named} \"<message>\"`")));
+        }
+        Ok(())
+    }
+
+    /// Whether an answer's operand was left out: the declaration ends here, or the next
+    /// thing is another statement rather than a value. The second half is what catches
+    /// the message deleted from the middle of a block, which is where one usually is.
+    fn missing_operand(&self) -> bool {
+        self.at_sym(Sym::RBrace) || matches!(self.peek(), Token::End) || self.starts_statement()
+    }
+
+    /// Saying the answer ends the declaration, so what follows one never runs. Both places
+    /// that can see it say it the same way: a block, which has the statements in hand, and
+    /// a declaration body, which hands each one to the builder as it goes.
+    fn unreachable<T>(&self, what: &str) -> Result<T, Diagnostic> {
+        self.fail(
+            Code::Unreachable,
+            format!("this {what} is after the answer, so it never runs"),
+        )
+    }
+
+    /// The message of `invalid <message>`. `reject` used to share this shape and no longer
+    /// does: it names a declaration instead, and `reject_use` reads that.
     fn refusal_args(&mut self, lower: &mut Lower) -> Result<ExprId, Diagnostic> {
-        self.expect_sym(Sym::LParen)?;
-        let message = self.expr(lower, Some(Type::String))?;
-        self.end_args()?;
-        Ok(message)
+        self.answer_operand("invalid")?;
+        self.expr(lower, Some(Type::String))
     }
 
     /// `reject Name`, or `reject Name { field: value }`, as the code and message pair
@@ -7647,6 +7872,15 @@ impl Parser {
     ) -> Result<(ExprId, ExprId), Diagnostic> {
         if self.at_sym(Sym::LParen) {
             return Err(self.rejected_call(span));
+        }
+        // The same courtesy `answer_operand` does for the other two answers. `reject`
+        // names a declaration rather than carrying a message, so it says so.
+        if self.missing_operand() {
+            return self.fail_hint(
+                Code::ReturnShape,
+                "`reject` takes a refusal".to_string(),
+                "write `reject <Name>`, naming a `refusal` declared at module scope",
+            );
         }
         let at = self.span_here();
         let name = self.expect_ident()?;
@@ -8639,9 +8873,15 @@ fn starts_item(word: Keyword) -> bool {
     )
 }
 
+/// Whether a statement is the declaration's answer, after which nothing runs. The four
+/// of them: a `return`, and the three outcome verbs, which lower to one.
+fn terminates(stmt: &Stmt) -> bool {
+    matches!(stmt, Stmt::Return(_) | Stmt::Fail { .. })
+}
+
 fn always_returns(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|stmt| match stmt {
-        Stmt::Return(_) | Stmt::Fail { .. } => true,
+        _ if terminates(stmt) => true,
         Stmt::If {
             then, otherwise, ..
         } => !otherwise.is_empty() && always_returns(then) && always_returns(otherwise),

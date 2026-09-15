@@ -67,7 +67,7 @@ effect CreateMasterProduct {
       return
     }
     if graphql_error(response, "productCreate").is_some() {
-      fail("productCreate failed")
+      fail "productCreate failed"
     }
     invoke RecordMasterProductCreated { shop_id, product_id, default_variant_id }
   }
@@ -144,9 +144,14 @@ if response.status == 401 {
 }
 ```
 
-`fail(...)` is the one that ends the invocation, wherever it is written. A helper's `fail` produces
+`fail` is the one that ends the invocation, wherever it is written. A helper's `fail` produces
 the same outcome and the same trace entry as an arm's; only the channel it travels on differs,
 because a call is an expression and cannot carry a control-flow result out.
+
+Note what this has always meant, because it is the precedent the other two answers now follow: a
+bare, terminal statement that ends the invocation from inside a call. `fail` takes no parens for
+the same reason `reject` and `invalid` do not (`docs/refusals.md`): parens are a call, and a call
+comes back.
 
 ### What else it may not do
 
@@ -270,9 +275,9 @@ refusal AlreadySubscribed "already on the course"
 refusal CourseFull "the course is full"
 
 fn ladder(subscribed: Bool, taken: Int, cap: Int) -> Outcome? {
-  if subscribed { return reject AlreadySubscribed }
-  if cap == 0   { return invalid("this course has no capacity set") }
-  if taken >= cap { return reject CourseFull }
+  if subscribed { reject AlreadySubscribed }
+  if cap == 0   { invalid "this course has no capacity set" }
+  if taken >= cap { reject CourseFull }
   return none
 }
 
@@ -296,10 +301,15 @@ way to share it was a `String` whose emptiness meant "allowed", plus a second `f
 into a message. That is a sentinel, in a language whose optional story exists to remove sentinels,
 and the caller had to evaluate the ladder twice because there was nothing to bind before the `if`.
 
-**`reject` and `invalid` are expressions now, not only statements.** The written forms in a command
-are unchanged and are still parsed as statements, so nothing about `return reject <Name>`
-moved. What is new is that the same two words produce a value where an `Outcome` is expected, which
-is what a `fn` returns and what a command's `return` accepts.
+**`reject` and `invalid` are statements here too, and that is the whole of it.** A `fn` writes the
+same bare `reject <Name>` a command writes, and it means the same thing in both: this declaration's
+answer. What differs is only where the answer goes, and that is the declaration's business rather
+than the author's: a command's travels the outcome channel, a `fn`'s travels the result channel
+every other `fn` result travels. Neither takes a `return` in front of it (`docs/refusals.md`).
+
+`return` is still how a command hands back an `Outcome` it did **not** spell, which is the other half
+of sharing a ladder: `return decision` takes anything of type `Outcome`, and that is what the caller
+below writes.
 
 **A `fn` that did not declare one still cannot write one**, and the error says how to:
 

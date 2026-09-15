@@ -10,7 +10,7 @@ guard CourseIsDefined(course: String) {
     on @course.defined(course) => true
 
   if !defined {
-    return reject UndefinedCourse
+    reject UndefinedCourse
   }
 }
 
@@ -119,7 +119,7 @@ command ListItem(item_id: Uuid, seller_id: Int, sku: String?) {
 
 It closed a defect rather than adding a convenience. A guard sees the arguments exactly as the
 caller passed them, because nothing has run that could have looked at them; that is what a parameter
-is. What was wrong is that guards owned the whole body, so a `return invalid(...)` was unreachable
+is. What was wrong is that guards owned the whole body, so an `invalid` was unreachable
 until after the fold, and a command that both validated its request and guarded the log answered the
 world's question first. A port of a real application took that inversion in all three commands that
 validate, and 125 tests caught none of it, because a test that expects `invalid` sets up an
@@ -166,7 +166,7 @@ guard PlanExists(plan_id: Uuid, shop_id: Int) {
     on @plan.created(plan_id, shop_id) => true
 
   if !exists {
-    return reject PlanNotFound
+    reject PlanNotFound
   }
 }
 ```
@@ -221,15 +221,16 @@ caller's stage in half and turn `guard A; guard B; fold s` into three reads wher
 already says a guard names one proposition; this is what that costs and what it buys.
 
 
-**A guard returns only a refusal.** `return reject <Name>` and `return invalid(...)`, and nothing
-else. A guard is spliced into the command that names it, where a bare `return` would read as *the
+**A guard has no `return`.** It answers with `reject <Name>` or `invalid "<message>"`, and those
+carry no `return` in front of them (`docs/refusals.md`), so the word does not appear in a guard body
+at all. A guard is spliced into the command that names it, where a bare `return` would read as *the
 command succeeded and appended nothing*, which is the opposite of what the author wrote:
 
-> a guard holds by reaching its end, so this `return` says nothing; write `return reject <Name>` or
-> `return invalid(...)`, or delete it
+> a guard holds by reaching its end, so this `return` says nothing; write `reject <Name>` or
+> `invalid "<message>"`, or delete it
 
-So an early exit meaning "this holds" is spelled by not writing one: `if !defined { return reject
-(...) }` rather than `if defined { return }`.
+So an early exit meaning "this holds" is spelled by not writing one: `if !defined { reject Undefined
+}` rather than `if defined { return }`.
 
 **A guard refuses; an idempotent no-op is not a guard.** That is the line between what belongs in
 one and what stays inline. `CancelWarranty` guards the shop and the sale, and keeps its own fold
@@ -267,7 +268,7 @@ command RecordWarrantySale(warranty_id: Uuid, shop_id: Int, premium: Bool) {
   fold sold: Int = 0
     on @warranty.sold(shop_id) => sold + 1
   if !premium && sold >= FREE_TIER_LIMIT {
-    return reject FreeTierExhausted
+    reject FreeTierExhausted
   }
 
   emit @warranty.sold { warranty_id, shop_id }

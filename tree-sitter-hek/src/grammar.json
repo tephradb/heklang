@@ -1528,6 +1528,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "fail_statement"
+        },
+        {
+          "type": "SYMBOL",
           "name": "invoke_expression"
         },
         {
@@ -1656,6 +1660,18 @@
         {
           "type": "SYMBOL",
           "name": "return_statement"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "outcome_expression"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "refusal_expression"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "fail_statement"
         },
         {
           "type": "SYMBOL",
@@ -2125,11 +2141,24 @@
                 "members": [
                   {
                     "type": "SYMBOL",
+                    "name": "_expression"
+                  },
+                  {
+                    "type": "SYMBOL",
                     "name": "outcome_expression"
                   },
                   {
                     "type": "SYMBOL",
-                    "name": "_expression"
+                    "name": "refusal_expression"
+                  },
+                  {
+                    "type": "ALIAS",
+                    "content": {
+                      "type": "STRING",
+                      "value": "fail"
+                    },
+                    "named": true,
+                    "value": "identifier"
                   }
                 ]
               },
@@ -2142,21 +2171,64 @@
       }
     },
     "outcome_expression": {
-      "type": "SEQ",
-      "members": [
-        {
-          "type": "STRING",
-          "value": "invalid"
-        },
-        {
-          "type": "FIELD",
-          "name": "arguments",
-          "content": {
-            "type": "SYMBOL",
-            "name": "arguments"
+      "type": "PREC_RIGHT",
+      "value": 0,
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "invalid"
+          },
+          {
+            "type": "FIELD",
+            "name": "message",
+            "content": {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "string"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "raw_string"
+                }
+              ]
+            }
           }
-        }
-      ]
+        ]
+      }
+    },
+    "fail_statement": {
+      "type": "PREC_RIGHT",
+      "value": 0,
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "fail"
+          },
+          {
+            "type": "FIELD",
+            "name": "message",
+            "content": {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "string"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "raw_string"
+                }
+              ]
+            }
+          }
+        ]
+      }
     },
     "refusal_expression": {
       "type": "PREC_RIGHT",
@@ -2584,10 +2656,6 @@
         {
           "type": "SYMBOL",
           "name": "invoke_expression"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "refusal_expression"
         },
         {
           "type": "SYMBOL",

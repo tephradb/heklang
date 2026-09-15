@@ -22,10 +22,10 @@ command RecordSync(plan_id: Int) {
   fold synced: Bool = false
     on @plan.synced(plan_id) => true
   if synced {
-    return reject Already
+    reject Already
   }
   if plan_id < 0 {
-    return invalid(\"a plan id is not negative\")
+    invalid \"a plan id is not negative\"
   }
   emit @plan.synced { plan_id }
 }
@@ -324,7 +324,7 @@ fn run_matches_invalid_and_reject() {
     let results = verdicts(
         "test \"a negative id is invalid\" {
   run RecordSync { plan_id: -1 }
-  expect invalid(\"a plan id is not negative\")
+  expect invalid \"a plan id is not negative\"
 }",
     );
     assert!(only(&results).passed(), "{}", only(&results));

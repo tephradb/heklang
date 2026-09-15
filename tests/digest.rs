@@ -70,7 +70,7 @@ fn a_lifted_comparison_is_in_the_form() {
     const LIFTED: &str =
         "command Place(order_id: Uuid, customer_id: Int, total: Money(2), note: String?) {
            if note == \"gift\" {
-             return invalid(\"no gifts\")
+             invalid \"no gifts\"
            }
            emit @order.placed { order_id, customer_id, total }
          }";
@@ -153,7 +153,7 @@ fn an_unwritten_headers_argument_and_an_empty_one_are_one() {
            on @order.placed as e { @key order_id } {
              let response = http.get(\"https://ping.example/\")
              if response.status >= 400 {
-               fail(\"no\")
+               fail \"no\"
              }
            }
          }",
@@ -161,7 +161,7 @@ fn an_unwritten_headers_argument_and_an_empty_one_are_one() {
            on @order.placed as e { @key order_id } {
              let response = http.get(\"https://ping.example/\", headers = {})
              if response.status >= 400 {
-               fail(\"no\")
+               fail \"no\"
              }
            }
          }",
@@ -222,7 +222,7 @@ fn slots_are_numbered_from_zero_with_no_gaps() {
              on @order.cancelled(customer_id) => open - 1
 
            if open >= 10 {
-             return reject TooMany
+             reject TooMany
            }
          }
 
@@ -382,7 +382,7 @@ fn a_body_holding_a_call_keeps_the_order_it_was_written_in() {
           \"a\": ping(\"https://a.example/\"),
         })
         if sent.status >= 400 {
-          fail(\"no\")
+          fail \"no\"
         }
       }
     }
@@ -399,7 +399,7 @@ fn a_body_holding_a_call_keeps_the_order_it_was_written_in() {
           \"b\": ping(\"https://b.example/\"),
         })
         if sent.status >= 400 {
-          fail(\"no\")
+          fail \"no\"
         }
       }
     }
@@ -424,7 +424,7 @@ fn a_json_key_is_quoted_because_it_is_not_an_identifier() {
            on @order.placed as e { @key order_id } {
              let sent = http.post(\"https://ship.example/\", { \"a-b\": 1 })
              if sent.status >= 400 {
-               fail(\"no\")
+               fail \"no\"
              }
            }
          }",
@@ -473,13 +473,13 @@ fn a_const_is_its_value_and_not_its_name() {
 fn a_refusal_message_reaches_every_reject() {
     let before = with_events(
         "refusal Nope \"not this time\"
-         command A(order_id: Uuid, customer_id: Int) { return reject Nope }
-         command B(order_id: Uuid, customer_id: Int) { return reject Nope }",
+         command A(order_id: Uuid, customer_id: Int) { reject Nope }
+         command B(order_id: Uuid, customer_id: Int) { reject Nope }",
     );
     let after = with_events(
         "refusal Nope \"not today\"
-         command A(order_id: Uuid, customer_id: Int) { return reject Nope }
-         command B(order_id: Uuid, customer_id: Int) { return reject Nope }",
+         command A(order_id: Uuid, customer_id: Int) { reject Nope }
+         command B(order_id: Uuid, customer_id: Int) { reject Nope }",
     );
 
     assert_ne!(
@@ -521,7 +521,7 @@ fn a_guard_is_printed_where_it_runs() {
              on @order.cancelled(customer_id) => open + 1
 
            if open >= 10 {
-             return reject TooMany
+             reject TooMany
            }
          }
 
@@ -958,7 +958,7 @@ fn a_command_signature_names_the_codes_it_can_answer_with() {
            fold open: Int = 0
              on @order.placed(customer_id) => open + 1
            if open >= 10 {
-             return reject TooMany
+             reject TooMany
            }
            emit @order.placed { order_id, customer_id, total }
          }",
@@ -981,7 +981,7 @@ fn a_refusal_decided_in_a_fn_still_reaches_the_signature() {
 
          fn objection(open: Int) -> Outcome? {
            if open >= 10 {
-             return reject TooMany
+             reject TooMany
            }
            return none
          }

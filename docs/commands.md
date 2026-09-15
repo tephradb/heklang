@@ -11,7 +11,7 @@ command PlaceOrder(order_id: Uuid, customer_id: Int, email: String, total: Money
     on @order.cancelled(customer_id) => open_orders - 1
 
   if open_orders >= 10 {
-    return reject TooManyOpen
+    reject TooManyOpen
   }
 
   emit @order.placed { order_id, customer_id, email, total }
@@ -267,9 +267,11 @@ yesterday. The distinction matters to a caller deciding whether to fix the input
 is why `reject` carries a code and `invalid` does not: there is nothing to branch on when the answer
 is "you sent nonsense".
 
-**A command may return an outcome it did not spell.** `return reject <Name>` is unchanged,
-and beside it `return <expression>` takes anything of type `Outcome`, which is what a `fn` declared
-`-> Outcome?` produces. That is how two commands share one ladder without sharing a body:
+**A command may return an outcome it did not spell.** `reject <Name>` and `invalid "<message>"` say
+the answer and end the command, with no `return` in front of either (`docs/refusals.md`). Beside
+them `return <expression>` takes anything of type `Outcome`, which is what a `fn` declared
+`-> Outcome?` produces. That is the one place `return` still carries an outcome, and it is the
+shape that lets two commands share one ladder without sharing a body:
 
 ```
 let decision = ladder(subscribed, taken, limit)
@@ -313,7 +315,7 @@ command's own, and write raw slices when you can say which slice they add that n
   command may still *fold* sealed content and emit it into a field sealed under the same subject:
   moving it is not reading it (`docs/effects.md` rule 12).
 - **No `put` / `patch` / `update` / `delete`.** A read model is a projector's output.
-- **No `fail`.** That is an effect's terminal outcome; a command returns `invalid` or `reject`.
+- **No `fail`.** That is an effect's terminal outcome; a command answers with `invalid` or `reject`.
 
 Each of those has a message naming the rule at the point of violation rather than naming a category.
 

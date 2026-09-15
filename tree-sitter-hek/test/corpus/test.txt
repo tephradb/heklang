@@ -59,7 +59,7 @@ outcomes and nothing
 test "a blank address is the caller's mistake" {
   run PlaceOrder { address: "   " }
 
-  expect invalid("address must not be blank")
+  expect invalid "address must not be blank"
   expect reject EmailTaken
   expect nothing
 }
@@ -80,9 +80,8 @@ test "a blank address is the caller's mistake" {
               (string_content)))))
       (expect_clause
         (outcome_expression
-          (arguments
-            (string
-              (string_content)))))
+          (string
+            (string_content))))
       (expect_clause
         (refusal_expression
           (type_identifier)))
@@ -157,7 +156,7 @@ test "confirming an order records the notification" {
   expect http.post("https://mail.example/confirm", { "to": "ada@example.com" })
   expect http.get("https://mail.example/confirm")
   expect log("confirmed an order")
-  expect fail("confirmation rejected")
+  expect fail "confirmation rejected"
   expect erase(customer_id, "1")
   expect invoke RecordNotified { order_id: ADA }
   expect skipped
@@ -225,11 +224,9 @@ test "confirming an order records the notification" {
             (string
               (string_content)))))
       (expect_clause
-        (call_expression
-          (identifier)
-          (arguments
-            (string
-              (string_content)))))
+        (fail_statement
+          (string
+            (string_content))))
       (expect_clause
         (call_expression
           (identifier)

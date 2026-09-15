@@ -135,8 +135,11 @@ after a `let x =` puts the comment mid-line, and a re-parse then finds it somewh
 the tree and moves it again.
 
 The split is by construct and not by node kind, and two of them are worth naming because
-they are the ones that got it wrong first. A `reject` and an `invoke` are **values**, so they
-trail even though nine of their siblings under the same printer are statements that lead.
+they are the ones that got it wrong first. An `invoke` and the three answers (`reject`,
+`invalid`, `fail`) may each sit **mid-line** -- under a `let`, or after an `expect` -- so they
+trail even though nine of their siblings under the same printer are statements that lead. An
+answer starts its own line everywhere except an `expect`, and that one position is enough to
+decide it: a construct that can be mid-line has to place its comment as if it always is.
 And a construct whose head is read by position but whose tail is a sequence or a list -- a
 `fold`'s arms, a `slice`'s filters, a declaration's body -- lifts only the comments before
 its head: the tail already places its own, and taking those out would move a comment written

@@ -213,17 +213,21 @@
 (invoke_expression command: (identifier) @function)
 (run_clause command: (identifier) @function)
 
-(outcome_expression "invalid" @function.builtin)
+; The three answers. None of them is a call, because saying the answer ends the
+; declaration, so all three take a keyword's colour rather than a function's.
+(outcome_expression "invalid" @keyword)
+(fail_statement "fail" @keyword)
 
-; `reject <Name>` is a keyword and a declared name, not a call: the name resolves to a
-; `refusal` declaration, so it takes the colour a type takes rather than an argument.
+; `reject <Name>` also carries a declared name: it resolves to a `refusal` declaration,
+; so it takes the colour a type takes rather than an argument.
 (refusal_expression "reject" @keyword)
 (refusal_expression name: (type_identifier) @type)
 
 ; The closed global namespace: actions with no natural receiver. After the generic call
-; rules above, so these override them.
+; rules above, so these override them. `fail` is not among them any more: it takes no
+; parens, so it is not a `call_expression` and is matched above.
 ((call_expression function: (identifier) @function.builtin)
- (#any-of? @function.builtin "now" "reveal" "log" "fail" "erase"))
+ (#any-of? @function.builtin "now" "reveal" "log" "erase"))
 
 ; `Uuid.derive(..)`, `Json.encode(..)`, `Money.parse(..)`, `http.post(..)`.
 ((method_call

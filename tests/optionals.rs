@@ -53,7 +53,7 @@ fn err(body: &str) -> String {
 fn an_absent_value_equals_nothing_present() {
     const MAKE: &str = "command Make(id: Uuid, text: String?) {
   if text == \"hello\" {
-    return invalid(\"equal\")
+    invalid \"equal\"
   }
   emit @note.made { id, text: \"not equal\" }
 }";
@@ -69,7 +69,7 @@ fn an_absent_value_equals_nothing_present() {
 fn an_absent_value_is_unequal_under_ne() {
     const MAKE: &str = "command Make(id: Uuid, text: String?) {
   if text != \"hello\" {
-    return invalid(\"different\")
+    invalid \"different\"
   }
   emit @note.made { id, text: \"same\" }
 }";
@@ -84,7 +84,7 @@ fn an_absent_value_is_unequal_under_ne() {
 fn either_operand_may_be_the_bare_one() {
     const MAKE: &str = "command Make(id: Uuid, text: String?) {
   if \"hello\" == text {
-    return invalid(\"equal\")
+    invalid \"equal\"
   }
   emit @note.made { id, text: \"not equal\" }
 }";
@@ -99,7 +99,7 @@ fn either_operand_may_be_the_bare_one() {
 fn an_optional_still_compares_against_none() {
     const MAKE: &str = "command Make(id: Uuid, text: String?) {
   if text == none {
-    return invalid(\"absent\")
+    invalid \"absent\"
   }
   emit @note.made { id, text: \"present\" }
 }";
@@ -126,7 +126,7 @@ fn the_lift_takes_its_type_from_the_comparison() {
 
 command Make(id: Uuid, text: String?) {
   if listed(text) == [] {
-    return invalid(\"empty\")
+    invalid \"empty\"
   }
   emit @note.made { id, text: \"absent\" }
 }";
@@ -142,7 +142,7 @@ fn an_optional_of_an_optional_compares_the_same_way() {
     const MAKE: &str = "command Make(id: Uuid, text: String?) {
   let xs = [text]
   if xs.first() == text {
-    return invalid(\"head is text\")
+    invalid \"head is text\"
   }
   emit @note.made { id, text: \"head is not text\" }
 }";
@@ -181,7 +181,7 @@ fn an_equality_does_not_narrow() {
 fn an_early_return_narrows_the_remainder() {
     const MAKE: &str = "command Make(id: Uuid, text: String?) {
   if text.is_none() {
-    return invalid(\"no text\")
+    invalid \"no text\"
   }
   emit @note.made { id, text }
 }";
@@ -196,7 +196,7 @@ fn an_is_some_branch_narrows_its_body() {
     emit @note.made { id, text }
     return
   }
-  return invalid(\"no text\")
+  invalid \"no text\"
 }";
     assert_eq!(made(MAKE, "hello"), Value::str("hello"));
     assert!(matches!(run(MAKE, None), Outcome::Invalid(_)));
@@ -207,7 +207,7 @@ fn an_is_some_branch_narrows_its_body() {
 fn a_negated_test_narrows_the_other_way() {
     const EARLY: &str = "command Make(id: Uuid, text: String?) {
   if !text.is_some() {
-    return invalid(\"no text\")
+    invalid \"no text\"
   }
   emit @note.made { id, text }
 }";
@@ -218,7 +218,7 @@ fn a_negated_test_narrows_the_other_way() {
     emit @note.made { id, text }
     return
   }
-  return invalid(\"no text\")
+  invalid \"no text\"
 }";
     assert_eq!(made(BRANCH, "hello"), Value::str("hello"));
 }
@@ -230,7 +230,7 @@ fn the_other_branch_is_not_narrowed() {
     let program = source(
         "command Make(id: Uuid, text: String?) {
   if text.is_some() {
-    return invalid(\"has text\")
+    invalid \"has text\"
   } else {
     emit @note.made { id, text: text.unwrap_or(\"\") }
   }
@@ -250,7 +250,7 @@ fn the_other_branch_is_not_narrowed() {
 fn a_narrowing_ends_with_its_block() {
     let message = err("command Make(id: Uuid, text: String?) {
   if text.is_none() {
-    return invalid(\"no text\")
+    invalid \"no text\"
   }
   emit @note.made { id, text: text.unwrap_or(\"\") }
 }");
@@ -263,7 +263,7 @@ fn a_narrowing_ends_with_its_block() {
         "command Make(id: Uuid, text: String?) {
   if id == id {
     if text.is_none() {
-      return invalid(\"no text\")
+      invalid \"no text\"
     }
   }
   emit @note.made { id, text: text.unwrap_or(\"\") }
@@ -279,9 +279,9 @@ fn an_else_if_does_not_leak_its_narrowing() {
     let program = source(
         "command Make(id: Uuid, text: String?) {
   if id != id {
-    return invalid(\"never\")
+    invalid \"never\"
   } else if text.is_none() {
-    return invalid(\"no text\")
+    invalid \"no text\"
   }
   emit @note.made { id, text: text.unwrap_or(\"\") }
 }",
@@ -297,7 +297,7 @@ fn a_compound_condition_narrows_nothing() {
         let program = source(&format!(
             "command Make(id: Uuid, text: String?) {{
   if {cond} {{
-    return invalid(\"no text\")
+    invalid \"no text\"
   }}
   emit @note.made {{ id, text: text.unwrap_or(\"\") }}
 }}"
@@ -317,9 +317,9 @@ fn an_optional_method_on_a_narrowed_value_says_why() {
         let message = err(&format!(
             "command Make(id: Uuid, text: String?) {{
   if text.is_none() {{
-    return invalid(\"no text\")
+    invalid \"no text\"
   }}
-  return invalid(\"{{text.{method}}}\")
+  invalid \"{{text.{method}}}\"
 }}"
         ));
         assert!(

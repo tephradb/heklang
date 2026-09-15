@@ -7,7 +7,7 @@ guard WorkshopIsOpen(workshop_id: Uuid) {
     on @workshop.opened(workshop_id) => true
 
   if !opened {
-    return reject WorkshopIsClosed
+    reject WorkshopIsClosed
   }
 }
 
@@ -20,7 +20,7 @@ guard SeatIsAvailable(workshop_id: Uuid) {
     on @seat.released(workshop_id) => taken - 1
 
   if taken >= capacity {
-    return reject WorkshopIsFull { seats: capacity }
+    reject WorkshopIsFull { seats: capacity }
   }
 }
 
@@ -30,6 +30,6 @@ guard AttendeeHasNoSeat(workshop_id: Uuid, attendee_id: Int) {
     on @seat.released(workshop_id, attendee_id) => false
 
   if booked {
-    return reject AlreadyBooked
+    reject AlreadyBooked
   }
 }

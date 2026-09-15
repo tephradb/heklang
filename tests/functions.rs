@@ -172,7 +172,7 @@ fn a_fn_is_pure() {
         ),
         ("erase(p)", "erase a subject key"),
         ("log(\"x\")", "log"),
-        ("fail(\"x\")", "fail"),
+        ("fail \"x\"", "fail"),
     ] {
         let decls = format!("\nfn helper(p: Uuid) -> String {{\n  {stmt}\n  return \"\"\n}}\n");
         assert!(
@@ -196,7 +196,7 @@ fn a_fn_has_no_fold() {
 /// the way to: declaring `Outcome` is what makes the refusal the `fn`'s to decide.
 #[test]
 fn a_fn_returns_a_value_not_an_outcome() {
-    let decls = "\nfn helper(p: Uuid) -> String {\n  return invalid(\"no\")\n}\n";
+    let decls = "\nfn helper(p: Uuid) -> String {\n  invalid \"no\"\n}\n";
     assert_eq!(
         err(decls, EMIT),
         "`invalid` is a command's outcome; declare it `-> Outcome` or `-> Outcome?` to decide a refusal the caller returns, or return a value the caller branches on"
@@ -214,8 +214,8 @@ fn a_fn_may_decide_a_refusal_and_a_command_may_return_it() {
     let decls = "
 refusal TooLong \"sixty months is the limit\"
 fn ladder(months: Int) -> Outcome? {
-  if months <= 0 { return invalid(\"months must be positive\") }
-  if months > 60 { return reject TooLong }
+  if months <= 0 { invalid \"months must be positive\" }
+  if months > 60 { reject TooLong }
   return none
 }
 ";
@@ -422,10 +422,13 @@ fn a_fn_is_declared_once() {
 /// Every comma-separated list took a trailing comma except a fixed-arity builtin's
 /// argument list, whose parser read `arg`, `,`, `arg`, `)` literally. A port found it
 /// by writing a long `reject` across three lines.
+///
+/// `invalid` and `fail` are no longer in the set, because they no longer have an
+/// argument list: each takes one operand a space away, so there is no closing delimiter
+/// for a comma to sit before.
 #[test]
 fn a_trailing_comma_closes_an_argument_list() {
     let cases = [
-        ("invalid", "  return invalid(\n    \"a long message\",\n  )"),
         (
             "fn call",
             "  emit @plan.created { plan_id, sku: effective_sku(sku, plan_id,), months }",

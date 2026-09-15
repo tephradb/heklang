@@ -55,7 +55,7 @@ An `else` may be followed by another `if` rather than a block, so a multi-way di
 if kind == 1 {
   return
 } else if kind == 2 {
-  return invalid("two")
+  invalid "two"
 } else {
   emit @order.routed { order_id, kind }
 }

@@ -261,7 +261,7 @@ command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
   fold open: Int = 0
     on @order.placed(customer_id) => open + 1
 
-  if open >= 2 { return reject AtCapacity }
+  if open >= 2 { reject AtCapacity }
   emit @order.placed { order_id, customer_id, total }
 }";
 
@@ -345,7 +345,7 @@ command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
   fold open: Int = 0
     on @order.placed(customer_id) => open + 1
 
-  if open > 0 { return reject OnePerCustomer }
+  if open > 0 { reject OnePerCustomer }
   emit @order.placed { order_id, customer_id, total }
 }",
     );
@@ -511,7 +511,7 @@ impl Calls for Ledger {
 const NOTIFY: &str = "effect Notify {
   on @order.placed as e { @key order_id } {
     let response = http.post(\"https://mail.example/confirm\", { \"order\": e.order_id })
-    if response.status >= 400 { fail(\"rejected\") }
+    if response.status >= 400 { fail \"rejected\" }
   }
 }";
 

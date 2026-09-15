@@ -208,7 +208,8 @@ be the whole of it:
 | `impure-fn` | a `fn` doing something a pure function cannot |
 | `fold-restriction` | a `fold` calling out, decrypting, or reading a secret |
 | `arm-only` | an effect-local `fn` doing what stays in the arm |
-| `return-shape` | a `return` that does not match the signature it is in |
+| `return-shape` | a `return` that does not match the signature it is in, or an answer written with a `return` or with parens |
+| `unreachable` | a statement after the declaration's answer |
 | `seal-boundary` | rule 12: sealed content leaving without `reveal` |
 | `secret-boundary` | rule 16: a deployment credential reaching something that observes it |
 | `erase-subject` | an `erase` whose subject or id is not one |
@@ -340,6 +341,17 @@ rustc does with `DiagCtxt` and for the same reason.
 coherent to check the body against, so those keep returning. So does a syntax error, which
 is what every compiler does: recovering from one is a parser question rather than a
 diagnostic one.
+
+**An abandoned declaration takes its state with it**, and that is `Parser::abandon` rather
+than each declaration parser being careful. Every one of them restores what it set on the
+way out, and none of them can on the way out through `?`: a `fn` whose body failed left the
+parser believing it was still inside a `fn`, and the next command's `emit` was reported as
+``a `fn` is pure, so it cannot append events``. A second diagnostic, about a declaration with
+nothing wrong with it, is worse than no second diagnostic at all, which is the whole reason
+this rule exists. `abandon` runs where the giving-up happens, which is the one place that
+knows it happened, and it destructures `Parser` rather than assigning field by field so that
+a field added later does not compile until someone has said whether it belongs to the program
+or to the declaration.
 
 ## 11. A boundary gets its own code
 

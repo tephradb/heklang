@@ -9,7 +9,7 @@ guard UnderOpenOrderLimit(customer_id: Int) {
     on @order.cancelled(customer_id) => open - 1
 
   if open >= 10 {
-    return reject TooManyOpen
+    reject TooManyOpen
   }
 }
 
@@ -204,14 +204,14 @@ journal or a trace.
 | `put`, `patch`, `update`, `delete` | a guard reads |
 | `invoke`, `http.*`, `reveal`, `erase`, `fail`, `log` | an effect's, and a guard runs inside a command |
 | `now()` | a guard decides from the log; take the moment as a parameter |
-| a bare `return`, or `return <value>` | only `return reject <Name>` and `return invalid(...)` |
+| a bare `return`, or `return <value>` | only `reject <Name>` and `invalid "<message>"` |
 | fold nothing | a decision made from arguments alone is a `fn` |
 | read the log twice | a guard is one read: its declarations come before its first statement |
 | bind a value back to its caller | its states are its own |
 | name itself, directly or through another | a guard is copied, so a cycle has no end |
 | be named twice on the same arguments in one body | the second decides what the first already did |
 
-An early exit meaning "this holds" is spelled by not writing one: `if !defined { return reject ... }`
+An early exit meaning "this holds" is spelled by not writing one: `if !defined { reject ... }`
 rather than `if defined { return }`.
 
 ### When a check is not a guard
@@ -234,7 +234,7 @@ command RecordWarrantySale(warranty_id: Uuid, shop_id: Int, premium: Bool) {
   fold sold: Int = 0
     on @warranty.sold(shop_id) => sold + 1
   if !premium && sold >= FREE_TIER_LIMIT {
-    return reject FreeTierExhausted
+    reject FreeTierExhausted
   }
 
   emit @warranty.sold { warranty_id, shop_id }
@@ -255,13 +255,13 @@ discount computed from `lifetime_spend` is a fold, not a guard.
 refusal ShopNotFound "shop does not exist"
 refusal SkuTaken(sku: String, item: Uuid) "sku {sku} already belongs to item {item}"
 
-return reject ShopNotFound
-return reject SkuTaken { sku: wanted, item: other_id }
+reject ShopNotFound
+reject SkuTaken { sku: wanted, item: other_id }
 ```
 
 `refusal <Name>[(<field>: <Type>, ...)] "<message>"`. Parens declare, braces use, with the same
 bare-name shorthand. A refusal with no fields takes **no braces** at the use site, which is what lets
-`return reject ShopNotFound` be the last statement in a block.
+`reject ShopNotFound` be the last statement in a block.
 
 **The code is derived from the name**: `ShopNotFound` becomes `"shop_not_found"`. Insert `_` before
 each capital after the first and lowercase the rest. This is the one name whose spelling leaves the
@@ -274,7 +274,7 @@ const in a message goes through a field:
 
 ```hek
 refusal FreeLimit(limit: Int) "the free tier lists {limit} items"
-return reject FreeLimit { limit: FREE_LIMIT }
+reject FreeLimit { limit: FREE_LIMIT }
 ```
 
 **Reading one back.** A bare refusal name in a `String` position is its code, so the consuming side
@@ -290,6 +290,10 @@ if r.code() == ShopNotFound { log("the same question, spelled out") }
 a call that did not refuse has no code, and no code is not any name. An `invalid` carries no code, so
 `refused` answers `false` for it whichever refusal is named.
 
-`reject <Name>` and `invalid(msg)` may be written wherever an `Outcome` is expected: as a `return` in
-a command or a guard, and as the value of a `fn` declared `-> Outcome` or `-> Outcome?`. A `fn` that
-declared neither cannot write either.
+`reject <Name>` and `invalid "<message>"` are **statements**, not values. Each says what this
+declaration answers, and saying the answer ends the declaration, so neither takes a `return` in front
+of it and neither may be bound to a name. They may be written in a command, in a guard, and in a `fn`
+declared `-> Outcome` or `-> Outcome?`; a `fn` that declared neither cannot write either.
+
+`return` is left for leaving with nothing more to say (a bare `return`, which is `Ok`), for a `fn`
+handing back a value, and for `return <expr>` where a command passes on an `Outcome` a `fn` decided.

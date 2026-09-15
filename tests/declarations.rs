@@ -227,9 +227,9 @@ command Route(order_id: Uuid, kind: Int) {
   if kind == 1 {
     return
   } else if kind == 2 {
-    return invalid(\"two\")
+    invalid \"two\"
   } else if kind == 3 {
-    return reject Three
+    reject Three
   } else {
     emit @order.placed { order_id, kind }
   }
