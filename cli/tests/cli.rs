@@ -658,6 +658,34 @@ fn fmt_leaves_a_file_it_cannot_parse_alone() {
     );
 }
 
+/// The total counts the files that were read, not the files that were named. A run over
+/// two files where one did not parse used to print "does not parse, so it was left alone"
+/// and "2 files already formatted" together, and the second line is the one an eye
+/// skimming a multi-file run believes: it claims a check that never happened on the very
+/// file the line above it gave up on.
+#[test]
+fn fmt_does_not_count_a_file_it_could_not_read() {
+    let root = project(
+        "fmt-skipped-total",
+        &[
+            ("broken.hk", "record Item {\n"),
+            ("tidy.hk", "record Other {\n  a: Int,\n}\n"),
+        ],
+    );
+    let output = run(&root, &["fmt", "--check"]);
+    let text = stdout(&output);
+    assert!(text.contains("broken.hk: does not parse"), "{text}");
+    assert!(text.contains("1 file already formatted"), "{text}");
+    assert!(!text.contains("2 files already formatted"), "{text}");
+
+    // Nothing was read at all, so there is no total to report and the per-file lines are
+    // the whole answer. "0 files already formatted" under them reads as a result.
+    let none = project("fmt-all-skipped", &[("broken.hk", "record Item {\n")]);
+    let text = stdout(&run(&none, &["fmt", "--check"]));
+    assert!(text.contains("broken.hk: does not parse"), "{text}");
+    assert!(!text.contains("already formatted"), "{text}");
+}
+
 /// `fmt` formats what `check` would reject: the grammar is a superset of the language, and
 /// judging a program is a different command's job.
 #[test]

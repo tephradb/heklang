@@ -274,12 +274,19 @@ fn format(root: &Path, paths: &[PathBuf], checking: bool) -> Result<bool, String
     for name in &changed {
         println!("{name} {verb} reformatted");
     }
+    // Only the files this run could read. A file it declined was left alone, so counting
+    // it among the formatted ones claims a check that never happened: two files where one
+    // did not parse printed "does not parse, so it was left alone" and "2 files already
+    // formatted" together, and the second line is what an eye skimming a run believes.
+    let formatted = paths.len() - unparsed.len();
     let s = if changed.len() == 1 { "" } else { "s" };
     match (checking, changed.is_empty()) {
+        // Nothing read, so there is nothing to report: the lines above already said so
+        // once per file, and a "0 files already formatted" under them reads as a result.
+        (_, true) if formatted == 0 => {}
         (_, true) => println!(
-            "{} file{} already formatted",
-            paths.len(),
-            if paths.len() == 1 { "" } else { "s" }
+            "{formatted} file{} already formatted",
+            if formatted == 1 { "" } else { "s" }
         ),
         (true, false) => println!("\n{} file{s} would change", changed.len()),
         (false, false) => println!("\n{} file{s} reformatted", changed.len()),
