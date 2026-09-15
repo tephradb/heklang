@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://git.tqwewe.com/tephra/heklang/compare/v0.4.2...v0.5.0) - 2026-09-15
+
+### Added
+
+- [**breaking**] an answer ends the declaration, so it takes no return and no parens
+
 ## [0.4.2](https://git.tqwewe.com/tephra/heklang/compare/v0.4.1...v0.4.2) - 2026-09-12
 
 ### Other
