@@ -6,8 +6,11 @@
 const ADA: Uuid = "0190d1a1-0000-7000-8000-000000000001"
 const GRACE: Uuid = "0190d1a1-0000-7000-8000-000000000002"
 
-fn address(n: Int) -> String {
-  return "{n} Reykjavik St"
+// One address, written once. A `fn` is callable from a `given` and an `expect` as well
+// as from a `run`, so the record does not have to be spelled out at each of the twenty
+// positions a test names one.
+fn address(n: Int) -> Address {
+  return Address { line1: "{n} Reykjavik St", city: "Reykjavík", postcode: "101" }
 }
 
 test "a first order for a fresh customer is appended as written" {
@@ -25,7 +28,7 @@ test "a first order for a fresh customer is appended as written" {
     order_id: ADA,
     customer_id: 1,
     email: "ada@example.com",
-    address: "12 Reykjavik St",
+    address: address(12),
     total: 25.99,
     tax_rate: 0.2000,
     notes: "leave at the door",
@@ -46,7 +49,7 @@ test "an absent note becomes the empty string rather than staying absent" {
     order_id: ADA,
     customer_id: 1,
     email: "ada@example.com",
-    address: "12 Reykjavik St",
+    address: address(12),
     total: 25.99,
     tax_rate: 0.2000,
     notes: "",
@@ -58,7 +61,7 @@ test "a blank address is the caller's mistake" {
     order_id: ADA,
     customer_id: 1,
     email: "ada@example.com",
-    address: "   ",
+    address: Address { line1: "   ", city: "Reykjavík", postcode: "101" },
     total: 25.99,
     tax_rate: 0.2000,
   }
@@ -71,7 +74,7 @@ test "an email that already placed an order is refused" {
     order_id: ADA,
     customer_id: 1,
     email: "ada@example.com",
-    address: "12 Reykjavik St",
+    address: address(12),
     total: 25.99,
     tax_rate: 0.2000,
     notes: "",
@@ -109,7 +112,7 @@ test "a customer past a thousand gets a tenth off" {
     order_id: GRACE,
     customer_id: 1,
     email: "first@example.com",
-    address: "12 Reykjavik St",
+    address: address(12),
     total: 1500.00,
     tax_rate: 0.2000,
     notes: "",
@@ -128,7 +131,7 @@ test "a customer past a thousand gets a tenth off" {
     order_id: ADA,
     customer_id: 1,
     email: "ada@example.com",
-    address: "12 Reykjavik St",
+    address: address(12),
     total: 90.00,
     tax_rate: 0.2000,
     notes: "",
@@ -140,7 +143,7 @@ test "a placed order writes the row and counts the customer" {
     order_id: ADA,
     customer_id: 1,
     email: "ada@example.com",
-    address: "12 Reykjavik St",
+    address: address(12),
     total: 25.99,
     tax_rate: 0.2000,
     notes: "",
@@ -157,7 +160,7 @@ test "a purged order does not come back on a late shipment" {
     order_id: ADA,
     customer_id: 1,
     email: "ada@example.com",
-    address: "12 Reykjavik St",
+    address: address(12),
     total: 25.99,
     tax_rate: 0.2000,
     notes: "",
@@ -170,12 +173,12 @@ test "a purged order does not come back on a late shipment" {
   expect Order[ADA] { total: 0.00, status: Shipped, tracking: "TRK-1" }
 }
 
-test "confirming an order reveals the address and records the notification" {
+test "confirming an order reveals the email and records the notification" {
   given @order.placed {
     order_id: ADA,
     customer_id: 1,
     email: "ada@example.com",
-    address: "12 Reykjavik St",
+    address: address(12),
     total: 25.99,
     tax_rate: 0.2000,
     notes: "",
@@ -204,7 +207,7 @@ test "an absorbed retry never reaches the arm" {
     order_id: ADA,
     customer_id: 1,
     email: "ada@example.com",
-    address: "12 Reykjavik St",
+    address: address(12),
     total: 25.99,
     tax_rate: 0.2000,
     notes: "",
@@ -230,7 +233,7 @@ test "a 4xx is a decision the arm makes, and it fails terminally" {
     order_id: ADA,
     customer_id: 1,
     email: "ada@example.com",
-    address: "12 Reykjavik St",
+    address: address(12),
     total: 25.99,
     tax_rate: 0.2000,
     notes: "",
@@ -249,7 +252,7 @@ test "an erased customer skips rather than sending plaintext" {
     order_id: ADA,
     customer_id: 1,
     email: "ada@example.com",
-    address: "12 Reykjavik St",
+    address: address(12),
     total: 25.99,
     tax_rate: 0.2000,
     notes: "",
@@ -270,7 +273,7 @@ test "a note past the column is kept to its first eight characters" {
     order_id: ADA,
     customer_id: 1,
     email: "ada@example.com",
-    address: "12 Reykjavik St",
+    address: address(12),
     total: 25.99,
     tax_rate: 0.2000,
     notes: "leave at the door",

@@ -1,10 +1,28 @@
+// records/address.hk
+//
+// An address is one thing, so it is one field. The alternative is a sealed `String` per
+// part, and a part added later is then its own schema-evolution event on every event
+// that carries one; a `@subject` field takes `?` and never `@absent`, so evolution is
+// tighter there than anywhere else.
+//
+// `@max` goes on the parts rather than on the whole, because the field's type is
+// `Address` and there is no syntax for "the `line1` inside it". An over-length value
+// reports the path, so `address.line1` is what a caller is told.
+record Address {
+  line1: String @max(200),
+  city: String @max(100),
+  postcode: String @max(10),
+}
+
 // events/order.hk
 
 event @order.placed {
   order_id: Uuid,
   customer_id: Int,
   email: String @subject(customer_id) @max(200),
-  address: String @subject(customer_id) @max(200),
+  // Sealed whole. The seal is a property of the type, so the annotation applies at
+  // record granularity and `reveal` hands an `Address` back rather than its text.
+  address: Address @subject(customer_id),
   total: Money(2),
   tax_rate: Decimal(4),
   notes: String @no_index,
@@ -74,7 +92,7 @@ command PlaceOrder(
   order_id: Uuid,
   customer_id: Int,
   email: String,
-  address: String,
+  address: Address,
   total: Money(2),
   tax_rate: Decimal(4),
   notes: String?,
@@ -91,7 +109,7 @@ command PlaceOrder(
     on @order.placed(customer_id) { total } => lifetime_spend + total
 
   // Not a guard either: it is about the input rather than the log, so it folds nothing.
-  if address.trim() == "" {
+  if address.line1.trim() == "" {
     invalid "address must not be blank"
   }
 

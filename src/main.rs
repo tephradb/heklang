@@ -38,6 +38,20 @@ fn uuid(seq: u32) -> String {
     format!("0190d1a1-0000-7000-8000-{seq:012}")
 }
 
+/// The demo's `Address`, which is what `@subject(customer_id)` seals whole. Only the
+/// street varies across the scenarios, so the other two are the same everywhere and the
+/// call sites stay one argument wide.
+fn address(line1: &str) -> Value {
+    Value::record(
+        "Address",
+        [
+            ("line1", Value::str(line1)),
+            ("city", Value::str("Reykjavík")),
+            ("postcode", Value::str("101")),
+        ],
+    )
+}
+
 fn placed(seq: u32, customer_id: i64, email: &str, total: i64) -> Event {
     Event::new(
         order_placed(),
@@ -45,7 +59,7 @@ fn placed(seq: u32, customer_id: i64, email: &str, total: i64) -> Event {
             ("order_id", Value::uuid(uuid(seq))),
             ("customer_id", Value::Int(customer_id)),
             ("email", Value::str(email)),
-            ("address", Value::str("1 Seed St")),
+            ("address", address("1 Seed St")),
             ("total", Value::money(total, SCALE)),
             ("tax_rate", Value::decimal(825, 4)),
             ("notes", Value::str("")),
@@ -92,14 +106,14 @@ fn place(
     seq: u32,
     customer_id: i64,
     email: &str,
-    address: &str,
+    line1: &str,
     notes: Option<&str>,
 ) {
     let mut args = vec![
         ("order_id", Value::uuid(uuid(seq))),
         ("customer_id", Value::Int(customer_id)),
         ("email", Value::str(email)),
-        ("address", Value::str(address)),
+        ("address", address(line1)),
         ("total", Value::money(2_599, SCALE)),
         ("tax_rate", Value::decimal(825, 4)),
     ];
