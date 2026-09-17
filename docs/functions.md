@@ -371,6 +371,25 @@ That helper belongs in a shipped `lib/` where an application can read it,
 disagree with it and replace it. That is the general shape of the rule: **a `fn` is where an opinion
 goes, and the language is for what has no defensible alternative.**
 
+### The line is the unit, not arithmetic
+
+The rule above says where an opinion goes. It does not say a `Timestamp` cannot be moved, and reading
+it that way cost real applications a hand-written `add_minutes`.
+
+`add_seconds`, `add_minutes`, `add_hours` and `add_days` are in the language (`docs/stdlib.md`),
+because a fixed-length unit has no opinion in it: a minute is sixty seconds and a UTC day is
+twenty-four hours, so there is nothing to clamp and no rule to disagree with. A window cap and an
+overdue clock are the two things every application needs, and both want exactly these.
+
+**The `fn` written over the calendar fields could not have been right.** `from_parts` range-checks
+each argument, so adding five minutes across an hour boundary forces a carry through hour, day, month
+and year with leap years, and it is on the second, so the result silently drops any sub-second
+fraction the original carried. That is a correctness bug the author cannot see, in arithmetic nobody
+should be rewriting, in a program that handles money.
+
+So the deferral stands exactly where the argument does. `add_months` is one opinion among several;
+`add_minutes` is not an opinion at all.
+
 ## Calls, order, and what is absent
 
 A call is `name(args)`, resolved after a local binding and after the builtin names, so a local still

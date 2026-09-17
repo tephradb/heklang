@@ -5930,12 +5930,37 @@ fn no_method(receiver: &Type, name: &str) -> (String, Option<String>) {
         )),
         // Named because its absence is a decision rather than an oversight, and the
         // author who reached for it is the one the decision is addressed to.
-        (Type::Timestamp, _) => Some(
-            "calendar arithmetic is not in the language, because month-end clamping is one opinion among several and a language that picks one cannot be argued with. Write it as a `fn`".to_string(),
+        //
+        // **These two only**, because these two are what month-end clamping is an
+        // argument about. A week is seven fixed-length days and has no clamping question
+        // in it, so telling someone who wrote `add_weeks` about month ends would argue
+        // something false about the method being refused; it falls to the list below and
+        // is pointed at `add_days` like anything else.
+        (Type::Timestamp, "add_months" | "add_years") => Some(
+            "the calendar units are not in the language, because month-end clamping is one opinion among several and a language that picks one cannot be argued with. `add_days`, `add_hours`, `add_minutes` and `add_seconds` are fixed-length and are here; write the rest as a `fn`".to_string(),
         ),
+        (Type::Timestamp, "format" | "to_string" | "rfc3339") => Some(
+            "a Timestamp becomes text through interpolation, and there are no format specifiers. `year()` through `second()` are the parts, and `Int.pad(width)` is what makes one two digits wide".to_string(),
+        ),
+        // The three general answers, above the per-type catch-alls below them. Each is
+        // about what the *call* was asking rather than about what the receiver has, so a
+        // list of the type's real methods would answer a different question than the one
+        // that was put. `String` gets its own wording for the first two, above.
         (_, "unwrap_or") => Some(format!(
             "a {receiver} is already there, so there is nothing to fall back to"
         )),
+        (_, "is_none" | "is_some") => Some(format!(
+            "{} is always there, so there is no presence to ask about. Absence is what a {receiver}? is for",
+            a(receiver)
+        )),
+        (Type::Timestamp, _) => Some(
+            "a Timestamp has `year()`, `month()`, `day()`, `hour()`, `minute()`, `second()` and the fixed-length `add_seconds`, `add_minutes`, `add_hours` and `add_days`".to_string(),
+        ),
+        // The one `Int` method, so an author who reached for a second is told there is
+        // no arithmetic hiding behind a name: the operators are the arithmetic.
+        (Type::Int, _) => Some(
+            "an Int has `pad(width)` and nothing else. The arithmetic is the operators, and text is interpolation".to_string(),
+        ),
         _ => None,
     };
     (format!("no method `{name}` on {receiver}"), instead)

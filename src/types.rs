@@ -257,6 +257,17 @@ pub fn method_sig(receiver: &Type, method: &str) -> Option<Sig> {
         (Type::Timestamp, "year" | "month" | "day" | "hour" | "minute" | "second") => {
             sig(Vec::new(), Type::Int)
         }
+        // The fixed-length units, which have no clamping question to defer: a minute is
+        // sixty seconds wherever it lands. `add_months` and `add_years` stay absent,
+        // because those are the ones the opinion is about. See `docs/stdlib.md`.
+        (Type::Timestamp, "add_seconds" | "add_minutes" | "add_hours" | "add_days") => {
+            sig(vec![Type::Int], Type::Timestamp)
+        }
+
+        // The one `Int` method, and it is about text rather than arithmetic: a width is
+        // what interpolation cannot say, and `"{y}-{mo}"` silently writing `2026-9` is
+        // a wrong key rather than a wrong-looking one. See `docs/strings.md`.
+        (Type::Int, "pad") => sig(vec![Type::Int], Type::String),
 
         (Type::Outcome, "ok") => sig(Vec::new(), Type::Bool),
         (Type::Outcome, "code" | "message") => sig(Vec::new(), Type::opt(Type::String)),

@@ -153,6 +153,13 @@ pub enum ErrorKind {
     DivisionByZero,
     Overflow,
     Inexact,
+    /// `Int.pad(width)` asked for a rendering wider than [`MAX_PAD`].
+    ///
+    /// Its own variant rather than `Overflow`, because nothing overflowed: the width is
+    /// representable and the string it asks for is the problem. A handler must not be
+    /// able to take the process down with an allocation, and a width that reaches a
+    /// program from an event field or a request parameter otherwise could.
+    PadWidth(i64),
 }
 
 impl fmt::Display for ErrorKind {
@@ -257,6 +264,12 @@ impl fmt::Display for ErrorKind {
             ErrorKind::DivisionByZero => f.write_str("division by zero"),
             ErrorKind::Overflow => f.write_str("arithmetic overflow"),
             ErrorKind::Inexact => f.write_str("result is not exact"),
+            ErrorKind::PadWidth(width) => write!(
+                f,
+                "`pad` was asked for a width of {width}, and {MAX_PAD} is the widest it \
+                 will build. A width is a field's shape and is written as a small number; \
+                 one this large has come from data"
+            ),
         }
     }
 }
@@ -2993,6 +3006,66 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
                 _ => second,
             }))
         }
+        // A `Timestamp` is epoch microseconds, so a fixed-length unit is a multiply and
+        // an add and nothing is rounded or clamped on the way. Sub-second precision
+        // survives, which is the thing a `fn` written over `parts` and `from_parts`
+        // cannot do: `from_parts` is on the second.
+        //
+        // `Overflow` rather than an optional, which is the answer `Int` and `Money`
+        // arithmetic already give: `from_parts` is optional because Feb 30 is not a
+        // date, and five minutes after a real moment always is one.
+        (Value::Timestamp(micros), "add_seconds" | "add_minutes" | "add_hours" | "add_days") => {
+            expect_arity(method, 1, &args)?;
+            let Value::Int(count) = &args[0] else {
+                return Err(ErrorKind::TypeMismatch {
+                    expected: Type::Int,
+                    found: args[0].ty(),
+                });
+            };
+            let unit: i64 = match method {
+                "add_seconds" => 1_000_000,
+                "add_minutes" => 60_000_000,
+                "add_hours" => 3_600_000_000,
+                _ => 86_400_000_000,
+            };
+            count
+                .checked_mul(unit)
+                .and_then(|delta| micros.checked_add(delta))
+                .map(Value::Timestamp)
+                .ok_or(ErrorKind::Overflow)
+        }
+        // Zero-padded on the left to `width` characters, and the number's own text when
+        // it already meets it: `truncate` pointed the other way, and both count the
+        // characters `len` counts.
+        //
+        // The sign comes first and the zeros after it, because `-05` is the padding of
+        // `-5` and `0-5` is not a number. A width at or below zero pads nothing, the
+        // same way a `truncate` at or below zero keeps nothing.
+        //
+        // **The bound is not decoration.** This is the only method in the language that
+        // makes a string longer, `width` is an ordinary expression, and a total language
+        // whose handlers cannot crash the runtime cannot also let `id.pad(w)` allocate
+        // whatever `w` says. `truncate` needs no such rule because it can only shrink.
+        (Value::Int(value), "pad") => {
+            expect_arity(method, 1, &args)?;
+            let Value::Int(width) = &args[0] else {
+                return Err(ErrorKind::TypeMismatch {
+                    expected: Type::Int,
+                    found: args[0].ty(),
+                });
+            };
+            if *width > MAX_PAD {
+                return Err(ErrorKind::PadWidth(*width));
+            }
+            let digits = value.unsigned_abs().to_string();
+            let sign = if *value < 0 { "-" } else { "" };
+            // Counted over the whole rendering, sign included, so `pad(3)` answers a
+            // three-character string whatever the sign. The cast cannot truncate, since
+            // the bound above is far inside `usize` on every host.
+            let width = usize::try_from((*width).max(0)).unwrap_or(0);
+            let zeros = width.saturating_sub(digits.len() + sign.len());
+            Ok(Value::str(format!("{sign}{}{digits}", "0".repeat(zeros))))
+        }
         (Value::Invoked(outcome), "ok") => {
             expect_arity(method, 0, &args)?;
             Ok(Value::Bool(outcome.ok()))
@@ -3121,6 +3194,17 @@ fn uuid_derive(args: &[Value]) -> Result<Value, ErrorKind> {
 /// forever, each a step further out than the last. The first is a busy log and the second
 /// is the bug, and depth is what tells them apart. Volume never could.
 const CASCADE: u32 = 32;
+
+/// The widest rendering `Int.pad(width)` will build.
+///
+/// `pad` is the one method that makes a string longer, and its width is an ordinary
+/// expression, so it is the one place a handler could ask for an allocation the size of
+/// whatever a request parameter said. A total language cannot have that.
+///
+/// The number is the widest `@max` any real declaration carries: a 4096-character API
+/// key. A width past the longest string a field is declared to hold is not a field's
+/// shape any more, and a `pad` is always written for one.
+const MAX_PAD: i64 = 4096;
 
 /// How many attempts the runtime makes before a call wedges. Retryable statuses and
 /// transport errors are absorbed here, so the handler never sees one (rule 5). The

@@ -252,7 +252,8 @@ story.
   literal is parsed, which covers the same ground by a different route.
 - **A moment built from parts is on the second.** `Timestamp.from_parts` takes no sub-second
   argument, so calendar arithmetic through it drops any fraction the original carried. The written
-  form and `Timestamp.parse` both keep microseconds.
+  form and `Timestamp.parse` both keep microseconds, and so do the `add_` methods, which is most of
+  why they are in the language rather than written as a `fn` over these two.
 
 ## Methods
 
@@ -265,14 +266,22 @@ The message names the way out for the confusion this sees most, which is one con
 sides: `is_empty()` asked of a `String?` and `is_none()` asked of a `String`. A real port made that
 edit by hand in eight files, having found each one by running it.
 
-### A `Timestamp` can be taken apart
+### A `Timestamp` can be taken apart, and moved by a fixed amount
 
 ```
 at.year()  at.month()  at.day()  at.hour()  at.minute()  at.second()   -> Int
 Timestamp.from_parts(year, month, day, hour, minute, second)           -> Timestamp?
+
+at.add_seconds(n)  at.add_minutes(n)  at.add_hours(n)  at.add_days(n)  -> Timestamp
 ```
 
-UTC, and the constructor is fallible because six numbers do not always name a date. These exist so
-that calendar arithmetic can be written as a `fn`, which is where `docs/functions.md` argues it
-belongs: month-end clamping is one opinion among several, so the language supplies the calendar and
-the author supplies the rule. Before them that argument had nowhere to send anyone.
+UTC, and the constructor is fallible because six numbers do not always name a date. The fields and the
+constructor exist so that *calendar* arithmetic can be written as a `fn`, which is where
+`docs/functions.md` argues it belongs: month-end clamping is one opinion among several, so the
+language supplies the calendar and the author supplies the rule. Before them that argument had nowhere
+to send anyone.
+
+The `add_` family is the other half of the same line. A minute is sixty seconds wherever it lands, so
+these have no opinion to defer and are total: an out-of-range result is `ErrorKind::Overflow`, the
+answer `Int` and `Money` arithmetic already give, rather than an optional with nothing on the other
+side of it. `add_months` and `add_years` stay absent, and the refusal names the ones that are here.

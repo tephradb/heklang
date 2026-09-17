@@ -74,6 +74,30 @@ wrong:
 `Money(3)` giving `10.500` rather than `10.5` is the point of the shared table: the scale is part of
 the value, and a message that drops it is a message that lies about precision.
 
+### A width is the one thing the table cannot say, and `Int.pad` says it
+
+There are no format specifiers, and that stays: a hole holds an expression, and a second little
+language inside the braces is a second thing to learn and a second thing to get wrong. What the
+decision cost was narrower than it looked, and it was one shape:
+
+```
+"{y}-{mo}"          // 2026-9, and a billing-period key that is silently wrong
+"{y}-{mo.pad(2)}"   // 2026-09
+```
+
+`Int` renders as its digits and nothing pads them, so a key built out of calendar fields comes out a
+character short for nine months of the year and matches nothing. That is a wrong value rather than a
+wrong-looking one, which is the kind of thing worth a method.
+
+`Int.pad(width)` is a total method (`docs/stdlib.md`) and it is deliberately not a specifier: it is
+written in the expression where the number is, so nothing about the string syntax changes and there is
+no second place where a value's text form is decided. It is on the number rather than on the string
+because the receiver always is one: a `String.pad_start(2, "0")` would make `"{y}-{"{mo}".pad_start(2,
+"0")}"` the way to write a two-digit month, which is a nested interpolation to pad a number.
+
+It is `truncate`'s pair. One bounds a string above and one bounds it below, both count the characters
+`len` counts, and both hand back the receiver unchanged rather than reporting that it already fitted.
+
 ## Raw multi-line strings
 
 ```

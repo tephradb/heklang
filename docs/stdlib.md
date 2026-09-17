@@ -133,11 +133,60 @@ than rounders where the result is not exact. Money never rounds silently.
 
 ### `Timestamp`
 
-`year()`, `month()`, `day()`, `hour()`, `minute()`, `second()`, each `Int`, each in UTC.
+| Method | Returns | |
+| --- | --- | --- |
+| `year()`, `month()`, `day()`, `hour()`, `minute()`, `second()` | `Int` | in UTC |
+| `add_seconds(n)`, `add_minutes(n)`, `add_hours(n)`, `add_days(n)` | `Timestamp` | `n` may be negative |
 
-These exist so calendar arithmetic is writable as a `fn`, which is where the opinion about month-end
-clamping belongs: the language gives the calendar and the author gives the rule. There is no `add`,
-no duration type and no `format`.
+The calendar fields exist so calendar arithmetic is writable as a `fn`, which is where the opinion
+about month-end clamping belongs: the language gives the calendar and the author gives the rule.
+
+**The fixed-length units are here, because they have no opinion to defer.** A minute is sixty seconds
+wherever it lands and a day is twenty-four hours in UTC, so `add_minutes` has nothing to clamp and no
+rule for an author to disagree with. `add_months` and `add_years` are exactly the ones the argument is
+about, and they stay absent; the refusal now names the line rather than denying arithmetic outright.
+
+Three things follow from a `Timestamp` being epoch microseconds:
+
+- **A count, not a magnitude.** `add_minutes(0 - 30)` goes backwards, so there is no second `sub_`
+  family to remember.
+- **Sub-second precision survives**, which is the thing the `fn` could not do. `Timestamp.from_parts`
+  is on the second and says so, so every hand-written `add_minutes` that went out through the calendar
+  fields and back through `from_parts` silently truncated microseconds.
+- **Overflow is an error rather than an optional**, the same answer `Int` and `Money` arithmetic give.
+  `from_parts` is optional because Feb 30 is not a date; five minutes after a real moment always is
+  one, so an optional there would be a branch with nothing on the other side of it.
+
+There is still no duration type and no `format`. A moment becomes text through interpolation, and
+rule 8's table renders one as epoch microseconds.
+
+### `Int`
+
+| Method | Returns | |
+| --- | --- | --- |
+| `pad(width)` | `String` | zero-filled on the left; the number's own text when it already fits |
+
+The only `Int` method, and it is about text rather than arithmetic: the arithmetic is the operators.
+It exists because interpolation has no format specifiers, so `"{y}-{mo}"` writes `2026-9`, and a
+billing-period key or a bucket match that is silently wrong is worse than one that is visibly wrong.
+
+`"{y}-{mo.pad(2)}"` is the shape it is for, which is why the receiver is the number rather than the
+string: `"{mo}".pad_start(2, "0")` would make the common case a nested interpolation.
+
+The sign comes first and the zeros after it, because `0-5` is not a number, and `width` counts the
+whole rendering, so `pad(3)` answers three characters on either side of zero. A width at or below zero
+pads nothing, the same way `String.truncate` at or below zero keeps nothing. It is the pair of
+`truncate`: one bounds a string above and one bounds it below, and both count the characters `len`
+counts.
+
+**A width past 4096 is a runtime error**, and it is the one place in the language where a bound had to
+be picked rather than derived. `pad` is the only method that makes a string longer and its width is an
+ordinary expression, so without the bound `id.pad(w)` allocates whatever `w` says and a width that
+reached a program from a request parameter could take the process down. A total language whose
+handlers cannot crash the runtime cannot also have that. The number is the widest `@max` any real
+declaration carries, and a width past the longest string a field could hold is not a field's shape any
+more. The error says so, rather than blaming arithmetic. `truncate` needs no such rule, because it can
+only shrink.
 
 ### `Outcome`
 
@@ -270,6 +319,8 @@ Each of these is a decision with an argument behind it, not a gap waiting to be 
 
 - **No `+` on strings, no `str()`, no `.to_string()`, no format specifiers.** Interpolation is the
   whole mechanism and rule 8's table is the whole text form. A second spelling could drift from it.
+  `Int.pad(width)` is the one thing a specifier would have been reached for that the table cannot
+  say, and it is a method rather than a syntax for exactly that reason.
 - **No `sort`, `map`, `filter` or `fold` methods.** A comprehension covers map and filter, iteration
   order is already defined, and a fold over a container is a `for` inside a pure `fn`.
 - **No set type and no tuple type.** `Map(K, Bool)` covers membership and a record covers two values
@@ -277,8 +328,10 @@ Each of these is a decision with an argument behind it, not a gap waiting to be 
 - **No `x.expect("reason")`.** `unwrap_or` and narrowing cover it without a panic.
 - **No random, no `uuid4`, no minted identity.** `Uuid.derive` is a pure function of its arguments,
   and that is a language guarantee rather than a convention.
-- **No duration type and no timestamp arithmetic.** The calendar fields plus `from_parts` make it
-  writable as a `fn`, which is where the clamping rule belongs.
+- **No duration type, and no *calendar* timestamp arithmetic.** `add_months` and `add_years` are the
+  ones month-end clamping is an argument about, and the calendar fields plus `from_parts` make them
+  writable as a `fn`. The fixed-length units are in the language, because they have no clamping
+  question: see the `Timestamp` table above.
 - **No regular expressions.** Nothing in a real port wanted one that `contains`, `starts_with` and
   `after_last` did not cover.
 - **No `Money` conversion and no rate type.** All of it needs currency back in the type, and

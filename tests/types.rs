@@ -790,11 +790,25 @@ fn the_emptiness_and_presence_questions_name_each_other() {
         message.contains("is already there, so there is nothing to fall back to"),
         "got: {message}"
     );
+    // The same answer for a receiver that has a hint of its own, because "there is
+    // nothing to fall back to" is what `unwrap_or` was asking and a list of the type's
+    // real methods would answer a different question.
+    for receiver in [", n: Int", ", at_in: Timestamp"] {
+        let name = receiver.trim_start_matches(", ").split(':').next().unwrap();
+        let message = err(&emitting(receiver, "name", &format!("{name}.unwrap_or(1)")));
+        assert!(
+            message.contains("is already there, so there is nothing to fall back to"),
+            "for `{receiver}`, got: {message}"
+        );
+    }
 }
 
 /// `docs/functions.md` argues that calendar arithmetic is one opinion among several and
 /// belongs in a `fn`. That decision is only visible if reaching for it says so, and a
 /// real port reached for it.
+///
+/// It is now the *calendar* units the decision is about, so the hint has to draw that
+/// line rather than deny arithmetic outright: the test below this one is the other half.
 #[test]
 fn calendar_arithmetic_says_why_it_is_absent() {
     let message = err(&emitting(
@@ -810,6 +824,197 @@ fn calendar_arithmetic_says_why_it_is_absent() {
         message.contains("month-end clamping is one opinion among several"),
         "got: {message}"
     );
+    assert!(
+        message.contains("`add_days`, `add_hours`, `add_minutes` and `add_seconds`"),
+        "the refusal has to say what is here, got: {message}"
+    );
+}
+
+/// The fixed-length units have no clamping question to defer, so they are in the
+/// language: a minute is sixty seconds wherever it lands.
+///
+/// The evidence is a window cap and an overdue clock, which every application needs and
+/// which `from_parts` cannot express: it range-checks each field, so adding five minutes
+/// across an hour boundary forces a hand-rolled carry through hour, day, month and year.
+#[test]
+fn the_fixed_length_units_are_arithmetic_and_carry() {
+    // 2026-03-15T09:30:45Z, the same moment the calendar-fields test uses.
+    let at = 1_773_567_045_000_000;
+    for (call, expected) in [
+        ("at_in.add_seconds(15)", at + 15_000_000),
+        ("at_in.add_minutes(30)", at + 1_800_000_000),
+        ("at_in.add_hours(24)", at + 86_400_000_000),
+        ("at_in.add_days(1)", at + 86_400_000_000),
+        // Negative counts subtract, because the parameter is a count and not a
+        // magnitude. One verb rather than a second `sub_` family.
+        ("at_in.add_minutes(0 - 30)", at - 1_800_000_000),
+        // Chained, which is what a cap expressed in mixed units reads as.
+        ("at_in.add_hours(2).add_minutes(5)", at + 7_500_000_000),
+    ] {
+        assert_eq!(
+            fired(
+                ", at_in: Timestamp",
+                "at",
+                call,
+                vec![("at_in", Value::Timestamp(at))],
+            ),
+            Value::Timestamp(expected),
+            "for `{call}`"
+        );
+    }
+}
+
+/// The thing a `fn` written over `parts` and `from_parts` cannot do, and the reason this
+/// is a language feature rather than a convenience: `from_parts` is on the second and
+/// documents that it does not preserve sub-second precision, so every hand-rolled
+/// `add_minutes` silently truncates microseconds.
+#[test]
+fn an_add_keeps_sub_second_precision() {
+    let at = 1_773_567_045_123_456;
+    assert_eq!(
+        fired(
+            ", at_in: Timestamp",
+            "at",
+            "at_in.add_minutes(1)",
+            vec![("at_in", Value::Timestamp(at))],
+        ),
+        Value::Timestamp(at + 60_000_000),
+        "the microseconds are still there"
+    );
+}
+
+/// Interpolation has no format specifiers, which is a decision (`docs/strings.md`), and
+/// the consequence is that `"{y}-{mo}"` writes `2026-9`: a billing-period key that is
+/// silently wrong rather than visibly wrong.
+///
+/// One total method closes it without reopening format strings. It is on `Int` rather
+/// than on `String` because the receiver is always a number: `"{mo}".pad_start(2, "0")`
+/// would make the common case a nested interpolation.
+#[test]
+fn an_int_pads_to_a_width() {
+    for (value, call, expected) in [
+        (9, "n.pad(2)", "09"),
+        // Past the width already: the receiver's own text, the way `truncate` hands
+        // back a string that already fits rather than reporting that it did not.
+        (2026, "n.pad(2)", "2026"),
+        (7, "n.pad(0)", "7"),
+        (7, "n.pad(0 - 1)", "7"),
+        (0, "n.pad(3)", "000"),
+        // The sign is part of the rendering and comes first, because `0-5` is not a
+        // number. The width counts the whole thing, so `pad(3)` answers three
+        // characters whichever side of zero the value is.
+        (-5, "n.pad(3)", "-05"),
+        (-5, "n.pad(2)", "-5"),
+    ] {
+        assert_eq!(
+            fired(", n: Int", "name", call, vec![("n", Value::Int(value))]),
+            Value::str(expected),
+            "for `{call}` on {value}"
+        );
+    }
+}
+
+/// `pad` is the only `Int` method, so reaching for a second one is told that rather than
+/// left to guess which arithmetic hides behind a name.
+#[test]
+fn an_int_has_one_method_and_says_so() {
+    let message = err(&emitting(", n: Int", "name", "n.abs()"));
+    assert!(message.contains("no method `abs` on Int"), "got: {message}");
+    assert!(
+        message.contains("The arithmetic is the operators"),
+        "got: {message}"
+    );
+}
+
+/// `pad` is the one method that makes a string longer and its width is an ordinary
+/// expression, so a width that reaches a program from a request parameter or an event
+/// field would otherwise be an allocation the size of whatever the data said.
+///
+/// A total language cannot have a handler take the process down, so the bound is part of
+/// the method rather than a hardening pass: before it, `id.pad(w)` with `w` at `i64::MAX`
+/// aborted the process with `memory allocation of 9223372036854775806 bytes failed`.
+#[test]
+fn a_pad_width_is_bounded_and_says_the_width_came_from_data() {
+    assert_eq!(
+        fired(
+            ", n: Int",
+            "name",
+            "n.pad(4096)",
+            vec![("n", Value::Int(7))],
+        ),
+        Value::str(format!("{}7", "0".repeat(4095))),
+        "the bound itself still builds"
+    );
+    for width in [4097, 2_000_000_000, i64::MAX] {
+        let program = program(&emitting(", n: Int, w: Int", "name", "n.pad(w)"));
+        let mut interpreter = Interpreter::new(&program);
+        let message = interpreter
+            .run(
+                "C",
+                vec![
+                    ("id", Value::Int(1)),
+                    ("n", Value::Int(7)),
+                    ("w", Value::Int(width)),
+                ],
+            )
+            .expect_err("a width past the bound is refused")
+            .to_string();
+        assert!(
+            message.contains("is the widest it will build") && message.contains("come from data"),
+            "for {width}, got: {message}"
+        );
+    }
+}
+
+/// The only branch of the `add_` family that is not a multiply and an add, and the one
+/// both `docs/stdlib.md` and `docs/types.md` state as a contract: an out-of-range result
+/// is an error rather than a wrap or a saturation.
+#[test]
+fn an_add_past_the_representable_range_is_an_error() {
+    for call in [
+        "at_in.add_days(9223372036854775807)",
+        "at_in.add_seconds(1)",
+    ] {
+        let program = program(&emitting(", at_in: Timestamp", "at", call));
+        let mut interpreter = Interpreter::new(&program);
+        let message = interpreter
+            .run(
+                "C",
+                vec![("id", Value::Int(1)), ("at_in", Value::Timestamp(i64::MAX))],
+            )
+            .expect_err("an out-of-range moment is refused")
+            .to_string();
+        assert!(
+            message.contains("arithmetic overflow"),
+            "for `{call}`: {message}"
+        );
+    }
+}
+
+/// A week is seven fixed-length days, so it has no clamping question in it. Telling an
+/// author who reached for `add_weeks` about month ends would argue something false about
+/// the method being refused, so it falls to the list instead.
+#[test]
+fn the_clamping_argument_is_made_only_about_the_units_it_is_about() {
+    let message = err(&emitting(", at_in: Timestamp", "at", "at_in.add_weeks(2)"));
+    assert!(
+        !message.contains("month-end clamping"),
+        "a week has no month end in it, got: {message}"
+    );
+    assert!(message.contains("add_days"), "got: {message}");
+}
+
+/// The presence confusion is about the call rather than about the receiver, so a type
+/// with a hint of its own must not swallow it. `Int` and `Timestamp` both grew one.
+#[test]
+fn asking_a_bare_value_about_presence_answers_the_question_that_was_put() {
+    for (receiver, name) in [(", n: Int", "n"), (", at_in: Timestamp", "at_in")] {
+        let message = err(&emitting(receiver, "name", &format!("{name}.is_none()")));
+        assert!(
+            message.contains("is always there, so there is no presence to ask about"),
+            "for `{receiver}`, got: {message}"
+        );
+    }
 }
 
 /// And the decision has somewhere to send an author, which is what makes it a decision
