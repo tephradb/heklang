@@ -32,6 +32,29 @@ event @order.audited {
   tool: String,
 }
 
+// Personal data that is one thing rather than nine parallel fields, which is what a
+// record-typed `@subject` field is for. An address is the shape every application that
+// handles PII reaches for first.
+record Address {
+  line1: String @max(200),
+  city: String @max(100),
+  country: String @max(2) @absent(\"IS\"),
+}
+event @order.addressed {
+  order_id: Uuid,
+  customer_id: Int,
+  ship_to: Address @subject(customer_id),
+  tags: List(String) @subject(customer_id),
+  extra: Json @subject(customer_id),
+}
+// The optional form, which is what both `docs/declarations.md` and rule 12 advertise:
+// one address rather than nine parallel optional sealed fields.
+event @order.shipped {
+  order_id: Uuid,
+  customer_id: Int,
+  ship_to: Address? @subject(customer_id),
+}
+
 // A tenant grouping many subjects, which is the shape a bulk erase needs: the ids come
 // from a fold rather than from the event being handled.
 event @tenant.redacted { tenant_id: Int }
@@ -117,6 +140,62 @@ fn reviewed(seq: u32, customer_id: i64, comment: Option<&str>) -> Event {
                 match comment {
                     Some(text) => Value::some(Value::str(text)),
                     None => Value::none(Type::String),
+                },
+            ),
+        ],
+    )
+}
+
+/// An event whose subject-bound fields are composite: a record, a list and a `Json`.
+/// A seal holds text, so these are the three whose text is a whole JSON document rather
+/// than a scalar's bare rendering.
+fn addressed(seq: u32, customer_id: i64, city: &str, extra: Json) -> Event {
+    Event::new(
+        EventPath::new(["order", "addressed"]),
+        [
+            (
+                "order_id",
+                Value::uuid(format!("0190d1a1-0000-7000-8000-{seq:012}")),
+            ),
+            ("customer_id", Value::Int(customer_id)),
+            ("ship_to", an_address(city)),
+            (
+                "tags",
+                Value::list(Type::String, [Value::str("vip"), Value::str("eu")]),
+            ),
+            ("extra", Value::Json(extra)),
+        ],
+    )
+}
+
+fn an_address(city: &str) -> Value {
+    Value::record(
+        "Address",
+        [
+            ("line1", Value::str("1 Main")),
+            ("city", Value::str(city)),
+            ("country", Value::str("IS")),
+        ],
+    )
+}
+
+/// The same record behind an optional, which is the shape the docs advertise. `Opt` is
+/// outermost around a seal, so this is the path where `reveal` peels before the content
+/// type is read.
+fn shipped(seq: u32, customer_id: i64, city: Option<&str>) -> Event {
+    Event::new(
+        EventPath::new(["order", "shipped"]),
+        [
+            (
+                "order_id",
+                Value::uuid(format!("0190d1a1-0000-7000-8000-{seq:012}")),
+            ),
+            ("customer_id", Value::Int(customer_id)),
+            (
+                "ship_to",
+                match city {
+                    Some(city) => Value::some(an_address(city)),
+                    None => Value::none(Type::Record("Address".to_owned())),
                 },
             ),
         ],
@@ -1259,6 +1338,200 @@ fn the_skip_message_says_the_erase_may_be_non_local() {
         "{message}"
     );
     assert!(message.contains("concurrent invocation"), "{message}");
+}
+
+// Rule 12: a seal holds text, and for a composite that text is a whole JSON document.
+// `@subject` on a record, a list or a map has always type-checked and `reveal` has
+// always been typed to hand the record back; what was missing was the reading half, so
+// every one of these wedged with "expected Address, stored a string".
+
+const REVEALING_A_RECORD: &str = "effect E {
+  on @order.addressed as e { @key order_id, ship_to } {
+    http.post(\"https://mail.example/confirm\", { \"city\": reveal(ship_to).city })
+  }
+}";
+
+#[test]
+fn a_sealed_record_reveals_as_a_record() {
+    let program = program(REVEALING_A_RECORD);
+    let mut journal = Journal::default();
+    let (_, outcome) = deliver(
+        &program,
+        vec![addressed(1, 7, "Reykjavik", Json::Obj(Default::default()))],
+        vec![Reply::Status(200)],
+        &mut journal,
+    );
+    outcome.expect("a sealed record is revealable");
+    assert!(
+        posted(&journal).contains("\"city\":\"Reykjavik\""),
+        "{}",
+        posted(&journal)
+    );
+}
+
+#[test]
+fn a_sealed_list_reveals_as_a_list() {
+    let program = program(
+        "effect E {
+  on @order.addressed as e { @key order_id, tags } {
+    http.post(\"https://mail.example/confirm\", { \"n\": reveal(tags).len() })
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let (_, outcome) = deliver(
+        &program,
+        vec![addressed(1, 7, "Reykjavik", Json::Obj(Default::default()))],
+        vec![Reply::Status(200)],
+        &mut journal,
+    );
+    outcome.expect("a sealed list is revealable");
+    assert!(posted(&journal).contains("\"n\":2"), "{}", posted(&journal));
+}
+
+/// The trap the writing half has to avoid, and the one hekla's own seal text calls out:
+/// a `Json` is the one type whose value can itself be a string that looks like another,
+/// so it is sealed whole, quotes and all. Flattening `"42"` to `42` would read back as a
+/// number and `.string("sku")` would answer `none` for a key that is there.
+#[test]
+fn a_sealed_json_string_does_not_come_back_as_a_number() {
+    let program = program(
+        "effect E {
+  on @order.addressed as e { @key order_id, extra } {
+    http.post(\"https://mail.example/confirm\", {
+      \"sku\": reveal(extra).string(\"sku\").unwrap_or(\"-\"),
+      \"as_int\": reveal(extra).int(\"sku\").is_some(),
+    })
+  }
+}",
+    );
+    let mut journal = Journal::default();
+    let extra = Json::Obj([("sku".to_string(), Json::str("42"))].into_iter().collect());
+    let (_, outcome) = deliver(
+        &program,
+        vec![addressed(1, 7, "Reykjavik", extra)],
+        vec![Reply::Status(200)],
+        &mut journal,
+    );
+    outcome.expect("a sealed Json is revealable");
+    let body = posted(&journal);
+    assert!(body.contains("\"sku\":\"42\""), "{body}");
+    assert!(body.contains("\"as_int\":false"), "{body}");
+}
+
+/// The shape both `docs/declarations.md` and rule 12 advertise, and the reason the whole
+/// composite path exists: `Address? @subject(customer_ref)` in place of nine parallel
+/// optional sealed fields.
+///
+/// It is its own test because it is its own path: `Opt` is outermost around a seal, so
+/// `reveal` peels it before the content type is read, and the property over generated
+/// values filters `Opt` out for exactly that reason. A regression in the peel would
+/// otherwise pass the whole suite.
+const REVEALING_AN_OPTIONAL_RECORD: &str = "effect E {
+  on @order.shipped as e { @key order_id, ship_to } {
+    let plain = reveal(ship_to)
+    if plain.is_none() {
+      log(\"no address\")
+      return
+    }
+    http.post(\"https://mail.example/confirm\", { \"city\": plain.city })
+  }
+}";
+
+#[test]
+fn an_optional_sealed_record_reveals_as_an_optional_record() {
+    let program = program(REVEALING_AN_OPTIONAL_RECORD);
+    let mut journal = Journal::default();
+    let (_, outcome) = deliver(
+        &program,
+        vec![shipped(1, 7, Some("Reykjavik"))],
+        vec![Reply::Status(200)],
+        &mut journal,
+    );
+    outcome.expect("an optional sealed record is revealable");
+    assert!(
+        posted(&journal).contains("\"city\":\"Reykjavik\""),
+        "{}",
+        posted(&journal)
+    );
+}
+
+/// The first row of rule 12's table at record granularity: absent is `none` and **does
+/// not consult the key store**, because a value that was never there was never encrypted.
+#[test]
+fn an_absent_sealed_record_answers_none_without_a_key() {
+    let program = program(REVEALING_AN_OPTIONAL_RECORD);
+    let mut interpreter = Interpreter::with_log(&program, vec![shipped(1, 7, None)]);
+    // The key is gone, and it must not matter: nothing was sealed, so nothing is asked.
+    interpreter.erase_subject("customer_id", "7");
+    let outcome = interpreter
+        .deliver("E", 0, &mut Journal::default())
+        .expect("absent is an ordinary condition, not a terminal one");
+    assert!(
+        matches!(outcome, Invocation::Done),
+        "got {outcome:?}, which means an absent record reached the key store"
+    );
+}
+
+/// A record inside a seal is stored history like any other payload, so a field added to
+/// one today reads as its `@absent` literal on every seal already written.
+///
+/// It read as a body before, which made `@absent` inert exactly here: adding `country` to
+/// `Address` would have wedged every `reveal` of every seal written without it, forever,
+/// with the plaintext behind a key and no way to migrate it.
+#[test]
+fn a_field_younger_than_a_seal_reads_as_its_absent_literal() {
+    let program = program(REVEALING_A_RECORD);
+    assert_eq!(
+        Value::from_sealed(
+            "{\"line1\":\"1 Main\",\"city\":\"Reykjavik\"}",
+            &Type::Record("Address".into()),
+            Defs::of(&program),
+        ),
+        Ok(an_address("Reykjavik")),
+        "a seal written before `country` existed still reads"
+    );
+}
+
+/// The rows rule 12 says must not collapse, at record granularity: absent never consults
+/// the key store, and a shredded key is terminal rather than a quiet `none`.
+#[test]
+fn a_sealed_record_keeps_absent_and_erased_apart() {
+    let program = program(REVEALING_A_RECORD);
+    let mut interpreter = Interpreter::with_log(
+        &program,
+        vec![addressed(1, 7, "Reykjavik", Json::Obj(Default::default()))],
+    );
+    interpreter.script(URL, [Reply::Status(200)]);
+    interpreter.erase_subject("customer_id", "7");
+    let outcome = interpreter
+        .deliver("E", 0, &mut Journal::default())
+        .expect("terminal, not a wedge");
+    let Invocation::Skipped(message) = outcome else {
+        panic!("expected a terminal skip, got {outcome:?}");
+    };
+    assert!(
+        message.starts_with("reveal cannot decrypt `ship_to`"),
+        "{message}"
+    );
+}
+
+/// A store that hands back something that is not the document it was given is a
+/// mismatch, which is data rather than a broken host: the message names the type the
+/// declaration promised rather than blaming the store.
+#[test]
+fn a_composite_seal_holding_something_else_is_a_mismatch() {
+    let program = program(REVEALING_A_RECORD);
+    assert!(
+        Value::from_sealed(
+            "not json",
+            &Type::Record("Address".into()),
+            Defs::of(&program),
+        )
+        .expect_err("a record cannot be read out of that")
+        .to_string()
+        .contains("a seal that is not the JSON it was stored as")
+    );
 }
 
 // Rule 12: what `reveal` takes. The credential is folded off an event that happened

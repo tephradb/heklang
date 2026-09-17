@@ -262,20 +262,144 @@ proptest! {
 
     /// The seal path reads the same table from text rather than from JSON, because a key
     /// store hands back a string and only the declaration says what that string was.
-    /// Scalars are the whole of what a seal can hold.
+    ///
+    /// **Every type a field can be declared as**, not only the scalars: a record, a list
+    /// and a map seal as the JSON rule 8 already writes them, and reading one back is
+    /// parsing. `Opt` is the one exclusion, and it is not a gap: an `Opt` is outermost
+    /// around a seal, so `reveal` peels it before it gets here and an absent value never
+    /// consults the key store at all.
     #[test]
-    fn a_sealed_scalar_reads_back_from_its_text(
-        (ty, value) in typed_value().prop_filter("a seal holds a scalar", |(ty, _)| {
-            matches!(
-                ty,
-                Type::Bool | Type::Int | Type::String | Type::Uuid | Type::Timestamp
-            )
+    fn a_seal_reads_back_from_its_text(
+        (ty, value) in typed_value().prop_filter("a seal is inside the optional", |(ty, _)| {
+            !matches!(ty, Type::Opt(_))
         })
     ) {
         let defs = Defs::of(shapes());
-        let text = heklang::value::text(&value);
+        let text = heklang::value::sealed_text(&value);
         prop_assert_eq!(Value::from_sealed(&text, &ty, defs), Ok(value));
     }
+
+    /// The parser behind the composite half, stated on its own: JSON text written by the
+    /// `Display` impl reads back as the document that wrote it.
+    ///
+    /// Separate from the property above because it is the stronger claim. That one is
+    /// keyed on a declaration and so only ever meets documents a type describes; this
+    /// one meets every document rule 8 can write, including the `Json` values a response
+    /// body hands back with no declaration behind them at all.
+    #[test]
+    fn json_text_reads_back_as_the_document_that_wrote_it((_, value) in typed_value()) {
+        let written = Json::from_value(&value);
+        prop_assert_eq!(Json::parse(&written.to_string()), Some(written));
+    }
+}
+
+/// What the reader refuses, and each one is a thing a store could hand back rather than
+/// a syntax nobody writes: trailing content is two documents where one was promised, and
+/// the rest are truncations.
+#[test]
+fn the_json_reader_takes_one_whole_document_and_nothing_else() {
+    for text in [
+        "",
+        "  ",
+        "{",
+        "[",
+        "\"",
+        "{\"a\"}",
+        "{\"a\":}",
+        "[1,]",
+        "{,}",
+        "tru",
+        "nul",
+        "-",
+        "1.",
+        "1e",
+        "01x",
+        "{} {}",
+        "[1] 2",
+        "\"a\" \"b\"",
+        "{\"a\":1} trailing",
+        // A leading zero is not a JSON number and no conforming writer emits one. The
+        // leniency the escapes get is a service to another writer; this would only widen
+        // what a corrupt store can smuggle past the mismatch this reader exists to
+        // report, since `{"qty":007}` would otherwise read back as the `Int` 7.
+        "01",
+        "-0012",
+        "00",
+        "[01]",
+        "{\"a\":01}",
+    ] {
+        assert_eq!(Json::parse(text), None, "for {text:?}");
+    }
+    // A bare zero and a zero before a fraction or an exponent are numbers, and the rule
+    // above must not take them with it.
+    for text in ["0", "-0", "0.5", "-0.25", "0e3"] {
+        assert_eq!(Json::parse(text), Some(Json::num(text)), "for {text:?}");
+    }
+}
+
+/// The escapes, from both ends. `write_json_str` writes five and `\uXXXX` for a control
+/// character; the reader takes those plus the three JSON allows that heklang never
+/// writes, because text another producer wrote still has to read back.
+#[test]
+fn the_json_reader_takes_every_escape_the_writer_can_produce() {
+    let awkward = "a\"b\\c\nd\re\tf\u{1}g/h";
+    let written = Json::str(awkward).to_string();
+    assert_eq!(Json::parse(&written), Some(Json::str(awkward)));
+
+    // The three the writer never needs, and a surrogate pair, which it never writes
+    // either: a character outside the basic plane goes out as itself.
+    assert_eq!(Json::parse(r#""\b\f\/""#), Some(Json::str("\u{8}\u{c}/")));
+    assert_eq!(Json::parse(r#""😀""#), Some(Json::str("😀")));
+    // Half a pair is not a character. `char::from_u32` would refuse the lone surrogate
+    // anyway; this says the reader does not quietly substitute one.
+    assert_eq!(Json::parse(r#""\ud83d""#), None);
+    assert_eq!(Json::parse(r#""\ud83dx""#), None);
+}
+
+/// A number keeps its exact text, which is what `Json::Num` is for: a `Money(2)` and a
+/// `Money(3)` read different values out of the same digits, and a reader that went
+/// through an `f64` would have decided for them.
+#[test]
+fn the_json_reader_keeps_a_number_as_written() {
+    for text in [
+        "0",
+        "-0",
+        "3",
+        "10.50",
+        "0.30000000000000004",
+        "1e10",
+        "-2.5E-3",
+    ] {
+        assert_eq!(Json::parse(text), Some(Json::num(text)), "for {text:?}");
+    }
+}
+
+/// A seal's content is whatever a host handed back, so a corrupt one must not take the
+/// stack with it.
+///
+/// **The boundary is pinned rather than bracketed, because the exact value is
+/// load-bearing in both directions.** Lowering it starts refusing documents that already
+/// seal and reveal, and a `Json` seal the reader will not walk is plaintext behind a key
+/// with no way back; raising it walks further down an untrusted document. Either is a
+/// decision, so either should fail here rather than pass quietly.
+///
+/// The literals track `value::MAX_DEPTH`, which is not public. It sits above the 128 that
+/// serde's recursion limit stops a host at, so the writer/reader pair is reachable only
+/// by a host that went out of its way.
+#[test]
+fn the_json_reader_refuses_a_document_deeper_than_it_will_walk() {
+    let nested = |depth: usize| format!("{}1{}", "[".repeat(depth), "]".repeat(depth));
+    assert!(
+        Json::parse(&nested(256)).is_some(),
+        "the bound itself has to parse"
+    );
+    assert_eq!(
+        Json::parse(&nested(257)),
+        None,
+        "one past it has to be refused"
+    );
+    // Well past any host's own limit, and the case the bound is actually for.
+    assert_eq!(Json::parse(&nested(5_000)), None);
 }
 
 /// A scale is the declaration's, not the text's. Widening is exact and silent; more
@@ -334,6 +458,32 @@ fn a_seal_does_not_round_trip_through_json_alone() {
         Ok(Value::str("Y2lwaGVy")),
         "a seal reads back as its content, not as a seal"
     );
+}
+
+proptest! {
+    /// The seal text has three consumers, not two, and the third is the one that drifts
+    /// silently: `Value::same` compares a stored seal against the plain value a test
+    /// named.
+    ///
+    /// It read `value::text` while the seal was written with `value::sealed_text`, which
+    /// disagree about exactly one value: a `Json` holding a string, which seals quoted. A
+    /// test naming what it put in then answered false. Stated over generated values, so
+    /// it covers the pair rather than the one case that exposed it.
+    #[test]
+    fn a_stored_seal_compares_equal_to_the_value_it_was_made_from(
+        (_, value) in typed_value().prop_filter("a seal is inside the optional", |(ty, _)| {
+            !matches!(ty, Type::Opt(_))
+        })
+    ) {
+        let sealed = Value::Sealed {
+            field: "field".to_owned(),
+            subject: "subject".to_owned(),
+            id: "7".to_owned(),
+            content: heklang::value::sealed_text(&value).into(),
+        };
+        prop_assert!(sealed.same(&value), "for {:?}", value);
+        prop_assert!(value.same(&sealed), "and the other way, for {:?}", value);
+    }
 }
 
 /// The one value an optional cannot be told from absence: both write `null`, and the

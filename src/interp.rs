@@ -2407,13 +2407,13 @@ fn seal(program: &Program, event: &Event, name: &Ident, value: Value) -> Result<
 /// The text form of what a host stored, which for a real one is its ciphertext and for
 /// the harness is the content as it was given (`docs/host.md`).
 ///
-/// Text is already the shape a stored seal has, so the common case is a refcount bump
-/// rather than a copy. This runs once per record a fold binds, which is the reason it
-/// is worth the arm.
+/// [`value::sealed_text`] is the rendering and this is the allocation: text is already
+/// the shape a stored seal has, so the common case is a refcount bump rather than a
+/// copy. This runs once per record a fold binds, which is the reason it is worth the arm.
 fn stored_text(stored: &Value) -> Arc<str> {
     match stored {
         Value::Str(text) => text.clone(),
-        other => value::text(other).into(),
+        other => value::sealed_text(other).into(),
     }
 }
 

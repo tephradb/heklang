@@ -56,6 +56,19 @@ survives because an absent optional never reaches here at all.
 its whole boundary without asking for a key: only the content a handler actually reveals costs one.
 A host that decrypts on the way in instead pays per record for content nothing reads.
 
+**The plaintext is text, and for a composite that text is JSON.** `@subject(...)` takes any declared
+type, so a field declared a record, a list, a map or a `Json` seals as the document rule 8 writes and
+`Value::from_sealed` parses it back against the declaration. A host neither builds that text nor reads
+it; what this asks of one is only that `decrypt` return the same bytes that were sealed. The pair is
+`value::sealed_text` and `Value::from_sealed`, and a `Json` is the one type sealed whole, quotes and
+all, because it is the only one whose value can itself be a string that looks like another.
+
+Two things follow that a host implementor should know. **A composite seal is read as stored history**,
+so `@absent` answers inside one and a host need do nothing to make an older seal readable. And **the
+reader has a depth limit**, above what a host's own parser will hand over but not unbounded: a `Json`
+value nested past it would seal and never come back, so a host that builds a `Json` some other way
+than by parsing a body should keep its own limit below this one.
+
 **`Secrets` answers with a value and never with a source.** Where a credential comes from is a
 host's business the way a key store is: `docs/effects.md` rule 16 says which declarations may read
 one and says nothing about environments, files or vaults. It is asked lazily rather than resolved

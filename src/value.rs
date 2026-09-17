@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
+use std::iter::Peekable;
+use std::str::Chars;
 use std::sync::Arc;
 
 use crate::ir::{
@@ -171,17 +173,45 @@ impl Value {
     /// decimal at a scale. This is the reading half of what a host does storing one,
     /// and it lives here so the two halves cannot drift apart.
     ///
-    /// `ty` is the seal's content type, which `Value::Sealed` carries for this.
+    /// `ty` is the seal's content type, which the `reveal` node carries for this.
+    /// [`sealed_text`] is the writing half, and the two are stated as one property over
+    /// generated values in `tests/roundtrip.rs`.
+    ///
+    /// **It reads as stored history rather than as a body**, which is the same reading
+    /// [`stored_field`] performs one level up: a seal was written when the declaration
+    /// was whatever it was that day, so a field younger than it reads as its `@absent`
+    /// literal. Reading it as a body instead would make `@absent` inert inside a
+    /// subject-bound record, and adding a field to one would wedge every `reveal` of
+    /// every seal already written, permanently.
     pub fn from_sealed(text: &str, ty: &Type, defs: Defs<'_>) -> Result<Value, Mismatch> {
         let json = match ty {
             Type::Bool if text == "true" => Json::Bool(true),
             Type::Bool if text == "false" => Json::Bool(false),
             Type::Int | Type::Timestamp => Json::num(text),
-            // A `String`, a `Uuid`, an enum variant and a scaled decimal are all text
-            // already, so the seal held exactly what goes back.
-            _ => Json::str(text),
+            // The text-shaped types, listed rather than inverted: a `String`, a `Uuid`,
+            // an enum variant and a scaled decimal are all text already, so the seal
+            // held exactly what goes back.
+            //
+            // **Everything else parses**, and that direction is deliberate. A type added
+            // later is a composite far more often than it is another spelling of text, so
+            // the fallback that costs nothing to get wrong is the one that tries to read
+            // a document: a new composite left to `Json::str` would silently reveal
+            // `{"city":"Reykjavik"}` as one string, which is the bug this arm was added
+            // to fix, reintroduced quietly. Parsing fails loudly instead.
+            Type::String | Type::Uuid | Type::Enum(_) | Type::Money(_) | Type::Decimal(_) => {
+                Json::str(text)
+            }
+            // An `Opt` never arrives: `reveal` peels it, and an absent one does not reach
+            // a key store at all. Listed anyway, because this is `pub` and a host calling
+            // it with one should get its content read rather than a parse of it.
+            Type::Opt(_) => Json::str(text),
+            _ => Json::parse(text).ok_or_else(|| Mismatch {
+                path: Vec::new(),
+                expected: ty.clone(),
+                found: "a seal that is not the JSON it was stored as".into(),
+            })?,
         };
-        Value::from_json(&json, ty, defs)
+        read_json(&json, ty, defs, Origin::Stored, &mut Vec::new())
     }
 
     pub fn ty(&self) -> Type {
@@ -252,11 +282,12 @@ impl Value {
     /// and nothing about the key lifecycle is in the question. `has_type` already answers
     /// the type half of it the same way.
     ///
-    /// **A seal compares by its stored text.** heklang cannot read one without a key, so
-    /// this is the only comparison available to it, and it is the right one: the harness
-    /// stores content as it was given (`docs/host.md`), so a test still names what it put
-    /// in. Against a real host's ciphertext it would answer false, which is what a test
-    /// running there should get rather than a decrypt nothing asked for.
+    /// **A seal compares by its stored text**, which is [`sealed_text`] and the third
+    /// consumer of it. heklang cannot read one without a key, so this is the only
+    /// comparison available to it, and it is the right one: the harness stores content as
+    /// it was given (`docs/host.md`), so a test still names what it put in. Against a real
+    /// host's ciphertext it would answer false, which is what a test running there should
+    /// get rather than a decrypt nothing asked for.
     ///
     /// The absent optional is why this is not only about content. An `Opt` carries its
     /// element type, and sealing one seals that type while leaving the value `None`
@@ -267,8 +298,11 @@ impl Value {
             (Value::Sealed { content: left, .. }, Value::Sealed { content: right, .. }) => {
                 left == right
             }
+            // `sealed_text` and not `text`, because the content was written by the
+            // first and comparing it against the second answers false for the one value
+            // they disagree about: a `Json` holding a string, which seals quoted.
             (Value::Sealed { content, .. }, plain) | (plain, Value::Sealed { content, .. }) => {
-                content.as_ref() == text(plain)
+                content.as_ref() == sealed_text(plain)
             }
             // Both absent, so only the element types could differ, and one of them may
             // carry a seal nobody wrote.
@@ -938,6 +972,30 @@ impl Json {
         Json::Num(text.into())
     }
 
+    /// JSON text read back into a document: the inverse of the `Display` impl below.
+    ///
+    /// `None` when the text is not exactly one complete document, trailing content
+    /// included. Hand-rolled for the reason [`timestamp`] is: the grammar is small and
+    /// fixed, and building the language must not need a parser dependency.
+    ///
+    /// **A number keeps its exact text**, so a value that went into a seal comes back
+    /// spelled as it went in and a `Money(2)` still reads its own scale out of it.
+    ///
+    /// It never produces a [`Json::Secret`], which is right: that variant exists only
+    /// between an object literal and the request built from it, and nothing outside the
+    /// process has ever seen one.
+    pub fn parse(text: &str) -> Option<Json> {
+        let mut reader = Reader {
+            chars: text.chars().peekable(),
+        };
+        let json = reader.value(0)?;
+        reader.space();
+        match reader.chars.next() {
+            Some(_) => None,
+            None => Some(json),
+        }
+    }
+
     pub fn obj(fields: impl IntoIterator<Item = (impl Into<String>, Json)>) -> Self {
         Json::Obj(
             fields
@@ -1068,6 +1126,27 @@ pub fn text(value: &Value) -> String {
     }
 }
 
+/// The text a seal holds: what a host encrypts, and what [`Value::from_sealed`] reads
+/// back. The writing half, here rather than beside the `reveal` that consumes it, so
+/// the two cannot drift apart.
+///
+/// It is [`text`] with one exception, and the exception is the whole reason this is a
+/// function. **A `Json` is written whole, quotes and all**, because it is the one type
+/// whose value can itself be a string that looks like another: `text` flattens
+/// `Json::Str("42")` to `42`, and reading that back would hand an author a number for a
+/// key that holds a string. A record, a list and a map have no such ambiguity, because
+/// each is already a bracketed document that quotes its own leaves.
+///
+/// A `Value::Secret` cannot reach here: rule 16 keeps one out of an `emit`, and
+/// `interp::seal` refuses it rather than letting this file a credential in the log under
+/// a subject key.
+pub fn sealed_text(value: &Value) -> String {
+    match value {
+        Value::Json(json) => json.to_string(),
+        other => text(other),
+    }
+}
+
 /// The same text with every credential named rather than spelled: what a journal key,
 /// a trace and an error message get. The pair with [`text`], and the reason a
 /// `Value::Secret` carries two renderings instead of each printing surface carrying a
@@ -1132,6 +1211,212 @@ fn write_json_str(f: &mut fmt::Formatter<'_>, value: &str) -> fmt::Result {
         }
     }
     f.write_str("\"")
+}
+
+/// How deep a document may nest before [`Json::parse`] refuses it.
+///
+/// A seal's content is whatever a host handed back, so this is the backstop that keeps a
+/// corrupt one from taking the stack down with it rather than a bound a real value comes
+/// near.
+///
+/// **It has to clear what the writer can produce, and a `Json` is the reason the number
+/// is not small.** A record, a list and a map are as deep as a declaration says, which is
+/// three or four; a `Json` is unstructured and carries whatever a response body held, and
+/// `Display` will happily write a document this refuses to read. That asymmetry is not
+/// harmless: a `blob: Json @subject(customer_id)` deeper than this would seal and then
+/// never reveal, with the plaintext gone. So the bound sits above the 128 that serde's
+/// recursion limit stops a host at, which makes the pair reachable only by a host that
+/// went out of its way.
+const MAX_DEPTH: usize = 256;
+
+/// The reader behind [`Json::parse`]. Character-wise rather than byte-wise, so a
+/// multi-byte character inside a string costs no index arithmetic.
+struct Reader<'a> {
+    chars: Peekable<Chars<'a>>,
+}
+
+impl Reader<'_> {
+    fn space(&mut self) {
+        while matches!(self.chars.peek(), Some(' ' | '\t' | '\n' | '\r')) {
+            self.chars.next();
+        }
+    }
+
+    fn eat(&mut self, want: char) -> Option<()> {
+        match self.chars.peek() {
+            Some(&found) if found == want => {
+                self.chars.next();
+                Some(())
+            }
+            _ => None,
+        }
+    }
+
+    fn word(&mut self, whole: &str) -> Option<()> {
+        for want in whole.chars() {
+            self.eat(want)?;
+        }
+        Some(())
+    }
+
+    fn value(&mut self, depth: usize) -> Option<Json> {
+        if depth > MAX_DEPTH {
+            return None;
+        }
+        self.space();
+        match *self.chars.peek()? {
+            'n' => self.word("null").map(|()| Json::Null),
+            't' => self.word("true").map(|()| Json::Bool(true)),
+            'f' => self.word("false").map(|()| Json::Bool(false)),
+            '"' => self.string().map(Json::Str),
+            '[' => self.array(depth),
+            '{' => self.object(depth),
+            '-' | '0'..='9' => self.number(),
+            _ => None,
+        }
+    }
+
+    /// A number as the exact text it was written as, which is what [`Json::Num`] holds:
+    /// the digits are never read into an `f64` and back, because the scale belongs to
+    /// the target rather than to what is on the wire.
+    ///
+    /// **A leading zero is refused**, unlike the escapes, and the two are not the same
+    /// judgement. Leniency about an escape lets text another writer produced read back,
+    /// which is a service to a host; leniency here would let `007` through as `7`, and
+    /// since no conforming writer emits one, all that buys is a wider door for a corrupt
+    /// store to get past the mismatch this reader exists to report.
+    fn number(&mut self) -> Option<Json> {
+        let mut text = String::new();
+        if self.eat('-').is_some() {
+            text.push('-');
+        }
+        let leading_zero = self.chars.peek() == Some(&'0');
+        self.digits(&mut text)?;
+        if leading_zero && text.trim_start_matches('-').len() > 1 {
+            return None;
+        }
+        if self.eat('.').is_some() {
+            text.push('.');
+            self.digits(&mut text)?;
+        }
+        if matches!(self.chars.peek(), Some('e' | 'E')) {
+            text.push(self.chars.next()?);
+            if matches!(self.chars.peek(), Some('+' | '-')) {
+                text.push(self.chars.next()?);
+            }
+            self.digits(&mut text)?;
+        }
+        Some(Json::Num(text))
+    }
+
+    fn digits(&mut self, out: &mut String) -> Option<()> {
+        let mut any = false;
+        while let Some(&found) = self.chars.peek() {
+            if !found.is_ascii_digit() {
+                break;
+            }
+            out.push(found);
+            self.chars.next();
+            any = true;
+        }
+        any.then_some(())
+    }
+
+    fn string(&mut self) -> Option<String> {
+        self.eat('"')?;
+        let mut out = String::new();
+        loop {
+            match self.chars.next()? {
+                '"' => return Some(out),
+                '\\' => out.push(self.escape()?),
+                found if (found as u32) < 0x20 => return None,
+                found => out.push(found),
+            }
+        }
+    }
+
+    /// The escapes [`write_json_str`] writes, plus the three it never needs to. A
+    /// reader is the lenient half of the pair: text another writer produced still has
+    /// to read back, and `\/`, `\b` and `\f` cost one arm each.
+    fn escape(&mut self) -> Option<char> {
+        Some(match self.chars.next()? {
+            '"' => '"',
+            '\\' => '\\',
+            '/' => '/',
+            'b' => '\u{8}',
+            'f' => '\u{c}',
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            'u' => return self.unicode(),
+            _ => return None,
+        })
+    }
+
+    /// A `\uXXXX` escape, and the surrogate pair a character outside the basic plane is
+    /// written as. [`write_json_str`] only ever writes one of these for a control
+    /// character, so the pair is here for text another writer produced.
+    fn unicode(&mut self) -> Option<char> {
+        let first = self.hex4()?;
+        if !(0xD800..0xDC00).contains(&first) {
+            return char::from_u32(first);
+        }
+        self.eat('\\')?;
+        self.eat('u')?;
+        let second = self.hex4()?;
+        if !(0xDC00..0xE000).contains(&second) {
+            return None;
+        }
+        char::from_u32(0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00))
+    }
+
+    fn hex4(&mut self) -> Option<u32> {
+        let mut value = 0;
+        for _ in 0..4 {
+            value = value * 16 + self.chars.next()?.to_digit(16)?;
+        }
+        Some(value)
+    }
+
+    fn array(&mut self, depth: usize) -> Option<Json> {
+        self.eat('[')?;
+        let mut items = Vec::new();
+        self.space();
+        if self.eat(']').is_some() {
+            return Some(Json::Arr(items));
+        }
+        loop {
+            items.push(self.value(depth + 1)?);
+            self.space();
+            if self.eat(',').is_some() {
+                continue;
+            }
+            self.eat(']')?;
+            return Some(Json::Arr(items));
+        }
+    }
+
+    fn object(&mut self, depth: usize) -> Option<Json> {
+        self.eat('{')?;
+        let mut fields = BTreeMap::new();
+        self.space();
+        if self.eat('}').is_some() {
+            return Some(Json::Obj(fields));
+        }
+        loop {
+            self.space();
+            let name = self.string()?;
+            self.space();
+            self.eat(':')?;
+            fields.insert(name, self.value(depth + 1)?);
+            self.space();
+            if self.eat(',').is_some() {
+                continue;
+            }
+            self.eat('}')?;
+            return Some(Json::Obj(fields));
+        }
+    }
 }
 
 /// What an `invoke` returns (rule 6): hekla's six-variant `CommandOutcome` cut to the

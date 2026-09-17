@@ -715,6 +715,46 @@ size for something identical at every run.
 so content moved into another position still decrypts under the name it was sealed with. Moving it
 is the one thing rule 12 allows without a key, and this is what makes that safe rather than lucky.
 
+### A composite seals as the JSON rule 8 already writes
+
+`@subject(...)` takes any declared type, and a record, a list and a map are not scalars: the text a
+seal holds for one is a whole JSON document rather than a bare rendering. `Value::from_sealed` parses
+it back against the declared type, which is the reading half of the same table rule 8 writes, and
+`value::sealed_text` is the writing half. The two are stated as one property over generated values in
+`tests/roundtrip.rs` so they cannot drift.
+
+This is what makes `ship_to: Address? @subject(customer_ref)` work, which is the shape any application
+handling personal data reaches for first: one address rather than nine parallel optional sealed
+fields, where adding a tenth is a schema-evolution event on every event that carries it.
+
+**A `Json` is written whole, quotes and all**, and it is the one type that needs saying. It is the
+only one whose value can itself be a string that looks like another: flattening `Json::Str("42")` to
+`42` would read back as a number, and `.string("sku")` would answer `none` for a key that is there. A
+record, a list and a map have no such ambiguity, because each is already a bracketed document that
+quotes its own leaves.
+
+**A store handing back something that is not that document is a `Mismatch`**, which is data rather
+than a broken host: the message names the type the declaration promised and does not blame the store,
+the same answer a record written before a field changed type already gets.
+
+**A seal is read as stored history, not as a request body**, which is what makes `@absent` work inside
+one. A seal was written when the declaration was whatever it was that day, so a field added to a
+subject-bound record today reads as its `@absent` literal on every seal already written, exactly as
+`docs/declarations.md` promises for a record one level down. Reading a seal as a body instead would
+make that annotation inert precisely where it is least recoverable: adding a field would wedge every
+`reveal` of every seal written without it, forever, with the plaintext behind a key and no migration
+available.
+
+**A `Json` seal has a depth the reader will walk and the writer does not check.** A record, a list and
+a map are only as deep as a declaration says; a `Json` carries whatever a response body held. The
+bound sits above the recursion limit a host's own parser stops at, so the two meet only for a host
+that went out of its way, but the asymmetry is real and is stated rather than left to be found: a
+document deeper than the bound would seal and never reveal.
+
+None of the rules above move. A composite seal is moved, asked about and revealed exactly as a scalar
+one is; `reveal` of an absent optional still does not consult the key store, and `reveal` of a
+shredded one is still terminal and still names the field.
+
 **This replaced a companion fold.** Each subject-bound variable used to get a second, hidden state
 variable that folded the subject id alongside the value, because the id could not come from the
 slice's filter: a fold of `customer_name @subject(customer_id)` filtered on `warranty_id` is an

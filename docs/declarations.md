@@ -128,11 +128,27 @@ string, so it looks like the consistent choice. It cannot express this one: the 
 `LineItem`, and there is no syntax for "the `title` inside it", nor should there be, because that is
 the record's business rather than the column's.
 
-**`@subject` is deliberately not here yet.** A record field cannot be subject-bound, so a record
-cannot carry personal data through the crypto-shredding path. That is a real restriction rather than
-an oversight of the same shape as `@max`: `docs/effects.md` rule 12 recovers subject-ness from the
-schema path, and a record reached through a container has no path the parser can name. Nothing needs
-it yet, so it stays recorded rather than designed.
+**`@subject` is deliberately not here, and the restriction is narrower than it sounds.** A field
+*inside* a record cannot be subject-bound: `@subject(x)` names a sibling field holding the id a key is
+filed under, and a record reached through a container has no sibling the parser can name. So the
+annotation stays out of this declaration.
+
+**What that does not mean is that a record cannot carry personal data.** `@subject` on an event field
+whose *type* is a record seals the whole record, which is the shape an author wants anyway:
+
+```
+event @order.placed {
+  order_id: Uuid,
+  customer_ref: String,
+  ship_to: Address @subject(customer_ref),
+}
+```
+
+The id is a sibling of `ship_to`, so nothing has to be recovered from inside the record; `reveal`
+hands back an `Address` and `.city` reads it. The alternative is nine parallel optional sealed fields
+for one address, where adding a tenth is a schema-evolution event and `@subject` fields take `?` and
+never `@absent`. `docs/effects.md` rule 12 has the rules, and the seal's text for a composite is the
+JSON rule 8 already writes.
 
 ### `@absent` on a field younger than the log
 
@@ -162,7 +178,10 @@ writing the wrong shape and stays the mismatch it is; a payload with no `reason`
 A reader that flattened the two could not tell an absent optional from a field younger than the log.
 
 A record field takes it for the same reason and with the same meaning, because a record reached from an
-event is stored inside that event's payload and has the same history one level down.
+event is stored inside that event's payload and has the same history one level down. **That holds
+through a seal too**: a subject-bound record is read as stored history rather than as a body, so a
+field added to one today reads as its `@absent` literal on every seal already written
+(`docs/effects.md` rule 12).
 
 **It applies to a stored payload and never to a request body.** A body arriving over a wire is read
 against the declaration as it stands, so a caller that omits a field is told so rather than handed a
