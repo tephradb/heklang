@@ -7,27 +7,31 @@ use heklang::{
 
 const URL: &str = "https://mail.example/confirm";
 
-const PRELUDE: &str = "event @order.placed {
+const PRELUDE: &str = "subject Customer(Int)
+subject Auditor(Int)
+subject Tenant(Int)
+subject Member(Int) under Tenant
+event @order.placed {
   order_id: Uuid,
-  customer_id: Int,
+  customer_id: Customer,
   email: String @subject(customer_id),
   total: Money(2),
 }
-event @order.cancelled { order_id: Uuid, customer_id: Int }
+event @order.cancelled { order_id: Uuid, customer_id: Customer }
 event @order.reviewed {
   order_id: Uuid,
-  customer_id: Int,
+  customer_id: Customer,
   comment: String? @subject(customer_id),
 }
 event @order.notified { order_id: Uuid, notification_id: Uuid }
 event @order.reconfirmed {
   order_id: Uuid,
-  customer_id: Int,
+  customer_id: Customer,
   email: String @subject(customer_id),
 }
 event @order.audited {
   order_id: Uuid,
-  auditor_id: Int,
+  auditor_id: Auditor,
   note: String @subject(auditor_id),
   tool: String,
 }
@@ -42,7 +46,7 @@ record Address {
 }
 event @order.addressed {
   order_id: Uuid,
-  customer_id: Int,
+  customer_id: Customer,
   ship_to: Address @subject(customer_id),
   tags: List(String) @subject(customer_id),
   extra: Json @subject(customer_id),
@@ -51,16 +55,16 @@ event @order.addressed {
 // one address rather than nine parallel optional sealed fields.
 event @order.shipped {
   order_id: Uuid,
-  customer_id: Int,
+  customer_id: Customer,
   ship_to: Address? @subject(customer_id),
 }
 
 // A tenant grouping many subjects, which is the shape a bulk erase needs: the ids come
 // from a fold rather than from the event being handled.
-event @tenant.redacted { tenant_id: Int }
+event @tenant.redacted { tenant_id: Tenant }
 event @tenant.member.joined {
-  tenant_id: Int,
-  member_id: Int,
+  tenant_id: Tenant,
+  member_id: Member,
   secret: String @subject(member_id),
 }
 
@@ -814,7 +818,7 @@ fn an_erase_on_a_path_that_fails_does_not_poison_the_join() {
 fn an_erase_in_a_loop_reaches_a_reveal_above_it() {
     let message = err("effect E {
   on @order.placed as e { @key order_id } {
-    fold ids: List(Int) = []
+    fold ids: List(Customer) = []
       on @order.placed(customer_id: e.customer_id) { customer_id } => ids.push(customer_id)
 
     for id in ids {
@@ -901,17 +905,21 @@ fn joined(tenant_id: i64, member_id: i64) -> Event {
 
 const REDACT: &str = "effect E {
   on @tenant.redacted as e { @key tenant_id } {
-    fold members: List(Int) = []
+    fold members: List(Member) = []
       on @tenant.member.joined(tenant_id) { member_id } => members.push(member_id)
 
     for id in members {
-      erase(member_id, id)
+      erase(id)
     }
   }
 }";
 
+/// The case the two-argument form existed for, and the one `docs/effects.md` used to
+/// reject under "inferring the name through the fold": proving every element of a
+/// `List(Int)` is a member id needed element-level provenance through `List.push`. With
+/// the namespace in the element type there is nothing to prove.
 #[test]
-fn erase_may_name_its_subject() {
+fn erase_reads_its_subject_from_a_folded_element_type() {
     let program = program(REDACT);
     let log = vec![
         joined(1, 7),
@@ -939,11 +947,11 @@ fn erase_may_name_its_subject() {
         erased,
         [
             &Effectful::Erase {
-                subject: "member_id".to_string(),
+                subject: "Member".to_string(),
                 id: "7".to_string()
             },
             &Effectful::Erase {
-                subject: "member_id".to_string(),
+                subject: "Member".to_string(),
                 id: "8".to_string()
             },
         ],
@@ -951,29 +959,96 @@ fn erase_may_name_its_subject() {
     );
 }
 
+/// The wrong-namespace hole, closed. `erase` used to take an untyped value beside a name
+/// the author asserted, so erasing a customer with a shop's id compiled and destroyed the
+/// wrong subject's key. The value's type is the namespace now, so it cannot.
 #[test]
-fn a_named_subject_must_be_declared() {
+fn erase_refuses_a_value_that_is_not_a_subject_id() {
     let message = err("effect E {
-  on @tenant.redacted as e { @key tenant_id } {
-    for id in [1, 2] {
-      erase(nobody, id)
-    }
+  on @order.placed as e { @key customer_id } {
+    erase(e.order_id)
   }
 }");
     assert!(
-        message.contains("nothing is scoped to `nobody`"),
+        message.contains("`erase` takes a subject id, and this is a Uuid"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("subject Customer(Int)"),
+        "expected the fix, got: {message}"
+    );
+}
+
+/// Two declared subjects are two types, so an id of the wrong one cannot reach a
+/// position expecting the other. Both are `Int` underneath and were spelled the same way
+/// before, which is exactly how the wrong namespace used to be destroyed.
+#[test]
+fn one_subjects_id_cannot_stand_in_for_another() {
+    let message = err("effect E {
+  on @tenant.member.joined as e { @key tenant_id } {
+    fold seen: List(Member) = []
+      on @tenant.member.joined(tenant_id) { tenant_id } => seen.push(tenant_id)
+
+    erase(e.member_id)
+  }
+}");
+    assert!(
+        message.contains("expected Member, found Tenant"),
         "got: {message}"
     );
 }
 
-/// Rule 9's second rule, which only this form can reach: the inferring form takes a
-/// trigger field, and a `reveal` is not one.
+/// The namespace comes from the type and from nowhere else, so one arm erasing two
+/// subjects files two different key rows without naming either.
 #[test]
-fn a_named_subject_rejects_a_revealed_id() {
-    let message = err("effect E {
-  on @order.placed as e { @key customer_id } {
-    erase(customer_id, reveal(e.email).len())
+fn erase_reads_a_different_subject_from_a_different_field() {
+    let program = program(
+        "effect E {
+  on @tenant.member.joined as e { @key tenant_id } {
+    erase(e.member_id)
+    erase(e.tenant_id)
   }
+}",
+    );
+    let mut interpreter = Interpreter::with_log(&program, vec![joined(1, 7)]);
+    interpreter
+        .deliver("E", 0, &mut Journal::default())
+        .expect("delivered");
+
+    let erased: Vec<&Effectful> = interpreter
+        .trace()
+        .iter()
+        .filter(|entry| matches!(entry, Effectful::Erase { .. }))
+        .collect();
+    assert_eq!(
+        erased,
+        [
+            &Effectful::Erase {
+                subject: "Member".to_string(),
+                id: "7".to_string()
+            },
+            &Effectful::Erase {
+                subject: "Tenant".to_string(),
+                id: "1".to_string()
+            },
+        ]
+    );
+}
+
+/// Rule 9's second rule. It used to be reachable only from the two-argument form,
+/// because the other one recovered its subject from a trigger field and a `reveal` is
+/// not one. It stays reachable: a sealed field may itself hold a subject id, so a
+/// revealed one is well-typed and still has to be refused.
+#[test]
+fn erase_rejects_a_revealed_id() {
+    let message = err("effect E {
+  on @revealed.id as e { @key tenant_id, former } {
+    erase(reveal(former))
+  }
+}
+event @revealed.id {
+  tenant_id: Tenant,
+  former: Member @subject(tenant_id),
 }");
     assert!(
         message.contains("was learned by revealing"),
@@ -982,35 +1057,6 @@ fn a_named_subject_rejects_a_revealed_id() {
     assert!(
         message.contains("take a subject id from a plaintext field"),
         "expected the fix, got: {message}"
-    );
-}
-
-#[test]
-fn a_named_subject_checks_the_value_type() {
-    let message = err("effect E {
-  on @order.placed as e { @key customer_id } {
-    erase(customer_id, e.order_id)
-  }
-}");
-    // "an Int" and "a Uuid" in one sentence, which is the pair a plain vowel rule gets
-    // half right: `Uuid` is read "you-eye-dee".
-    assert!(
-        message.contains("files its keys under an Int"),
-        "got: {message}"
-    );
-    assert!(message.contains("cannot take a Uuid"), "got: {message}");
-}
-
-/// The lookahead is three tokens, not two. `erase(customer_id,)` is a bare trigger
-/// field plus the trailing comma every argument list takes, so it stays one argument.
-#[test]
-fn a_trailing_comma_does_not_make_a_named_subject() {
-    program(
-        "effect E {
-  on @order.placed as e { @key customer_id } {
-    erase(customer_id,)
-  }
-}",
     );
 }
 
@@ -1301,7 +1347,7 @@ fn reveal_of_an_erased_subject_skips_terminally() {
     let program = program(REVEALING);
     let mut interpreter = Interpreter::with_log(&program, vec![placed(1, 7, 100)]);
     interpreter.script(URL, [Reply::Status(200)]);
-    interpreter.erase_subject("customer_id", "7");
+    interpreter.erase_subject("Customer", "7");
 
     let outcome = interpreter
         .deliver("E", 0, &mut Journal::default())
@@ -1315,7 +1361,7 @@ fn reveal_of_an_erased_subject_skips_terminally() {
     );
     // Terminal means the cursor advances, and it is counted apart from a wedge.
     let mut interpreter = Interpreter::with_log(&program, vec![placed(1, 7, 100)]);
-    interpreter.erase_subject("customer_id", "7");
+    interpreter.erase_subject("Customer", "7");
     let counts = interpreter.drive("E").expect("advanced");
     assert_eq!(counts.skipped(), 1);
     assert_eq!(counts.failed(), 0);
@@ -1326,7 +1372,7 @@ fn reveal_of_an_erased_subject_skips_terminally() {
 fn the_skip_message_says_the_erase_may_be_non_local() {
     let program = program(REVEALING);
     let mut interpreter = Interpreter::with_log(&program, vec![placed(1, 7, 100)]);
-    interpreter.erase_subject("customer_id", "7");
+    interpreter.erase_subject("Customer", "7");
     let Ok(Invocation::Skipped(message)) = interpreter.deliver("E", 0, &mut Journal::default())
     else {
         panic!("expected a terminal skip");
@@ -1463,7 +1509,7 @@ fn an_absent_sealed_record_answers_none_without_a_key() {
     let program = program(REVEALING_AN_OPTIONAL_RECORD);
     let mut interpreter = Interpreter::with_log(&program, vec![shipped(1, 7, None)]);
     // The key is gone, and it must not matter: nothing was sealed, so nothing is asked.
-    interpreter.erase_subject("customer_id", "7");
+    interpreter.erase_subject("Customer", "7");
     let outcome = interpreter
         .deliver("E", 0, &mut Journal::default())
         .expect("absent is an ordinary condition, not a terminal one");
@@ -1503,7 +1549,7 @@ fn a_sealed_record_keeps_absent_and_erased_apart() {
         vec![addressed(1, 7, "Reykjavik", Json::Obj(Default::default()))],
     );
     interpreter.script(URL, [Reply::Status(200)]);
-    interpreter.erase_subject("customer_id", "7");
+    interpreter.erase_subject("Customer", "7");
     let outcome = interpreter
         .deliver("E", 0, &mut Journal::default())
         .expect("terminal, not a wedge");
@@ -1579,7 +1625,7 @@ fn a_fold_from_two_events_with_the_same_subject_reveals() {
     // customer changes nothing.
     let mut interpreter = Interpreter::with_log(&program, log.clone());
     interpreter.script(URL, [Reply::Status(200)]);
-    interpreter.erase_subject("customer_id", "3");
+    interpreter.erase_subject("Customer", "3");
     assert!(matches!(
         interpreter.deliver("E", 2, &mut Journal::default()),
         Ok(Invocation::Done)
@@ -1591,7 +1637,7 @@ fn a_fold_from_two_events_with_the_same_subject_reveals() {
     // what `docs/effects.md` always documented.
     let mut interpreter = Interpreter::with_log(&program, log);
     interpreter.script(URL, [Reply::Status(200)]);
-    interpreter.erase_subject("customer_id", "7");
+    interpreter.erase_subject("Customer", "7");
     let Ok(Invocation::Skipped(message)) = interpreter.deliver("E", 2, &mut Journal::default())
     else {
         panic!("expected a terminal skip");
@@ -1637,7 +1683,7 @@ fn a_narrowed_optional_can_be_revealed() {
     let mut interpreter =
         Interpreter::with_log(&program, vec![placed(1, 7, 100), reviewed(2, 7, None)]);
     interpreter.script(URL, [Reply::Status(200)]);
-    interpreter.erase_subject("customer_id", "7");
+    interpreter.erase_subject("Customer", "7");
     assert!(matches!(
         interpreter.deliver("E", 1, &mut Journal::default()),
         Ok(Invocation::Skipped(_))
@@ -1668,7 +1714,7 @@ fn a_non_subject_seed_is_accepted() {
     );
 
     let mut interpreter = Interpreter::with_log(&program, vec![reviewed(1, 7, None)]);
-    interpreter.erase_subject("customer_id", "7");
+    interpreter.erase_subject("Customer", "7");
     interpreter
         .deliver("E", 0, &mut Journal::default())
         .expect("the seed was never sealed");
@@ -1691,8 +1737,8 @@ fn two_arms_with_different_subjects_are_a_conflict() {
         message.contains("folds under two subjects"),
         "got: {message}"
     );
-    assert!(message.contains("`customer_id`"), "got: {message}");
-    assert!(message.contains("`auditor_id`"), "got: {message}");
+    assert!(message.contains("`Customer`"), "got: {message}");
+    assert!(message.contains("`Auditor`"), "got: {message}");
 }
 
 /// A seed may be plain, an arm may not, and the order the two are written in does not
@@ -1744,7 +1790,7 @@ fn a_transform_of_sealed_content_is_rejected_where_it_is_written() {
   }
 }");
     assert!(
-        message.contains("`trim` reads content sealed under `customer_id`"),
+        message.contains("`trim` reads content sealed under `Customer`"),
         "got: {message}"
     );
     assert!(message.contains("`reveal` it first"), "got: {message}");
@@ -1760,7 +1806,7 @@ fn unwrap_or_on_sealed_content_names_the_mixture() {
   }
 }");
     assert!(
-        message.contains("plaintext default and content sealed under `customer_id` in one slot"),
+        message.contains("plaintext default and content sealed under `Customer` in one slot"),
         "got: {message}"
     );
 }
@@ -1806,7 +1852,7 @@ fn a_let_keeps_the_seal() {
 #[test]
 fn the_fold_rules_hold_in_a_command_too() {
     let good = source(
-        "command Check(customer_id: Int) {
+        "command Check(customer_id: Customer) {
   fold secret: String? = none
     on @order.placed(customer_id) { email } => email
 
@@ -1819,7 +1865,7 @@ fn the_fold_rules_hold_in_a_command_too() {
     parse(&good).expect("a command may fold a subject-bound value");
 
     let message = parse(&source(
-        "command Check(customer_id: Int, order_id: Uuid) {
+        "command Check(customer_id: Customer, order_id: Uuid) {
   fold secret: String? = none
     on @order.placed(customer_id) { email } => email
     on @order.audited(order_id) { tool } => tool
@@ -1835,26 +1881,62 @@ fn the_fold_rules_hold_in_a_command_too() {
     );
 }
 
-/// The **inferring** form stays trigger-only. Rule 12's fold path tracks the subject of
-/// a value, and this is the id itself, so there is no field name to recover from a
-/// folded one. The error offers the other form rather than just refusing.
+/// An **optional** id is not an id. The rule `@subject(...)` already makes about a
+/// field holds here too: a missing id is not "no key", it is no question at all, so
+/// there is nothing for `erase` to remove and narrowing is what the position asks for.
+///
+/// This used to be reported as "`erase` takes a field of the triggering event", because
+/// the subject was recovered from the slot a value loaded from and a folded one has no
+/// field to recover. The fold is fine now; only the optional is not.
 #[test]
-fn the_inferring_erase_stays_on_the_trigger() {
+fn erase_refuses_an_optional_id() {
     let message = err("effect E {
   on @order.reviewed as e { @key customer_id } {
-    fold who: Int? = none
+    fold who: Customer? = none
       on @order.placed(customer_id) { customer_id } => customer_id
 
     erase(who)
   }
 }");
     assert!(
-        message.contains("`erase` takes a field of the triggering event"),
+        message.contains("`erase` takes a subject id, and this is a Customer?"),
         "got: {message}"
     );
-    assert!(
-        message.contains("erase(customer_id, id)"),
-        "expected the named form to be offered, got: {message}"
+}
+
+/// And the same fold, narrowed, is an ordinary erase. The subject rides on the element
+/// type, so nothing has to be recovered and nothing has to be named.
+#[test]
+fn erase_takes_a_narrowed_folded_id() {
+    let program = program(
+        "effect E {
+  on @order.reviewed as e { @key customer_id } {
+    fold who: Customer? = none
+      on @order.placed(customer_id) { customer_id } => customer_id
+
+    if who.is_some() {
+      erase(who)
+    }
+  }
+}",
+    );
+    let mut interpreter = Interpreter::with_log(
+        &program,
+        vec![placed(1, 7, 100), reviewed(1, 7, Some("ok"))],
+    );
+    interpreter
+        .deliver("E", 1, &mut Journal::default())
+        .expect("delivered");
+    assert_eq!(
+        interpreter
+            .trace()
+            .iter()
+            .filter(|entry| matches!(entry, Effectful::Erase { .. }))
+            .collect::<Vec<_>>(),
+        [&Effectful::Erase {
+            subject: "Customer".to_string(),
+            id: "7".to_string()
+        }]
     );
 }
 
@@ -1879,7 +1961,7 @@ fn reveal_on_an_optional_is_none_when_the_field_was_never_set() {
     let mut interpreter = Interpreter::with_log(&program, vec![reviewed(1, 7, None)]);
     // The key store is never consulted, so an erased subject changes nothing here: an
     // absent value was never encrypted.
-    interpreter.erase_subject("customer_id", "7");
+    interpreter.erase_subject("Customer", "7");
 
     let outcome = interpreter
         .deliver("E", 0, &mut Journal::default())
@@ -1893,7 +1975,7 @@ fn reveal_on_an_optional_still_skips_terminally_on_a_shredded_key() {
     let program = program(REVIEWING);
     let mut interpreter = Interpreter::with_log(&program, vec![reviewed(1, 7, Some("rude"))]);
     interpreter.script(URL, [Reply::Status(200)]);
-    interpreter.erase_subject("customer_id", "7");
+    interpreter.erase_subject("Customer", "7");
 
     let outcome = interpreter
         .deliver("E", 0, &mut Journal::default())
@@ -1926,12 +2008,126 @@ fn reveal_on_a_present_optional_hands_back_the_plaintext() {
     assert_eq!(interpreter.lines(), ["moderated"]);
 }
 
+/// The check that could not exist before a subject was a type: `@subject(x)` used to
+/// accept any sibling field and quietly conjure a namespace spelled `x`.
+#[test]
+fn a_subject_annotation_must_name_a_declared_subject() {
+    let message = parse(
+        "subject Customer(Int)
+event @e.happened { buyer: Customer, who: Int, note: String @subject(who) }
+",
+    )
+    .expect_err("`who` declares no namespace")
+    .text();
+    assert!(
+        message.contains("names `who`, which is an Int rather than a subject id"),
+        "got: {message}"
+    );
+    assert!(message.contains("subject Customer(Int)"), "got: {message}");
+}
+
+/// Rule 12's hierarchy rule. Minting a child's key wraps it inside its parent's at that
+/// moment, and the only place the runtime can learn the parent's id is the event in
+/// front of it, so an event that seals under a child carries the parent in plaintext.
+#[test]
+fn an_event_sealing_under_a_child_carries_its_parent() {
+    let message = parse(
+        "subject Shop(Int)
+subject Customer(Int) under Shop
+event @customer.contacted { buyer: Customer, note: String @subject(buyer) }
+",
+    )
+    .expect_err("nothing to file the key under")
+    .text();
+    assert!(
+        message.contains("sits under `Shop`, but carries no `Shop` field"),
+        "got: {message}"
+    );
+
+    parse(
+        "subject Shop(Int)
+subject Customer(Int) under Shop
+event @customer.contacted { buyer: Customer, shop: Shop, note: String @subject(buyer) }
+",
+    )
+    .expect("the parent is on the event");
+}
+
+/// **Transitive, not the immediate parent.** Minting the customer's key needs the shop's
+/// secret, which lives in the shop's key row; if that row is not there yet the runtime
+/// has to mint it too, and minting it needs the marketplace id. At depth one the two
+/// rules coincide, which is why the shorter one reads correct.
+#[test]
+fn the_ancestor_rule_reaches_past_the_immediate_parent() {
+    let message = parse(
+        "subject Market(Int)
+subject Shop(Int) under Market
+subject Customer(Int) under Shop
+event @e.happened { buyer: Customer, shop: Shop, note: String @subject(buyer) }
+",
+    )
+    .expect_err("the immediate parent is not the whole chain")
+    .text();
+    assert!(
+        message.contains("which sits under `Shop` under `Market`"),
+        "the diagnostic names the whole chain: {message}"
+    );
+    assert!(
+        message.contains("carries no `Market` field"),
+        "got: {message}"
+    );
+
+    parse(
+        "subject Market(Int)
+subject Shop(Int) under Market
+subject Customer(Int) under Shop
+event @e.happened { buyer: Customer, shop: Shop, market: Market, note: String @subject(buyer) }
+",
+    )
+    .expect("every ancestor is on the event");
+}
+
+/// The trigger is a **sealed field**, never a subject-typed one: an event that carries a
+/// `Customer` and seals nothing mints no key and needs no parent. That is what keeps the
+/// rule from spreading to every event that merely mentions one.
+#[test]
+fn an_event_that_seals_nothing_needs_no_parent() {
+    parse(
+        "subject Shop(Int)
+subject Customer(Int) under Shop
+event @customer.seen { buyer: Customer, at: Timestamp }
+",
+    )
+    .expect("no seal, no key, no parent");
+}
+
+/// And the ancestor has to be usable as one: an optional id is no question at all, and a
+/// sealed one needs a key of its own before it could name where a key goes.
+#[test]
+fn an_ancestor_field_may_be_neither_optional_nor_sealed() {
+    for shop in ["shop: Shop?", "shop: Shop @subject(buyer)"] {
+        let message = parse(&format!(
+            "subject Shop(Int)
+subject Customer(Int) under Shop
+event @e.happened {{ buyer: Customer, {shop}, note: String @subject(buyer) }}
+"
+        ))
+        .expect_err("an unusable parent id")
+        .text();
+        assert!(
+            message.contains("carries no `Shop` field") || message.contains("`@subject(buyer)`"),
+            "`{shop}`: {message}"
+        );
+    }
+}
+
 /// A subject id is the name a key is filed under, so it has to be a value that is
 /// always there and that does not itself need a key.
 #[test]
 fn a_subject_id_is_a_plain_field_that_always_has_a_value() {
     let message = parse(
-        "event @e.happened { id: Int?, text: String @subject(id) }
+        "subject Thing(Int)
+event @e.happened { id: Thing?, text: String @subject(id) }
 effect E { on @e.happened as e { @key id } { log(\"x\") } }
 ",
     )
@@ -1943,7 +2139,9 @@ effect E { on @e.happened as e { @key id } { log(\"x\") } }
     );
 
     let message = parse(
-        "event @e.happened { owner: Int, id: Int @subject(owner), text: String @subject(id) }
+        "subject Owner(Int)
+subject Thing(Int)
+event @e.happened { owner: Owner, id: Thing @subject(owner), text: String @subject(id) }
 effect E { on @e.happened as e { @key id } { log(\"x\") } }
 ",
     )
@@ -1974,7 +2172,7 @@ fn a_fold_into_an_optional_holds_an_optional() {
     let program = program(
         "effect E {
   on @order.reviewed as e { @key order_id } {
-    fold customer: Int? = none
+    fold customer: Customer? = none
       on @order.placed(order_id) { customer_id } => customer_id
 
     if customer.is_none() {
@@ -2992,7 +3190,7 @@ fn an_effect_local_fn_may_be_declared_after_its_use() {
         "effect E {
   on @order.placed as e { @key order_id } { log(greeting(e.customer_id)) }
 
-  fn greeting(customer_id: Int) -> String {
+  fn greeting(customer_id: Customer) -> String {
     return \"hello {customer_id}\"
   }
 }",
@@ -3007,8 +3205,8 @@ fn an_effect_local_fn_may_be_declared_after_its_use() {
 fn an_effect_local_fn_may_call_another() {
     let program = program(
         "effect E {
-  fn outer(customer_id: Int) -> String { return \"[{inner(customer_id)}]\" }
-  fn inner(customer_id: Int) -> String { return \"c{customer_id}\" }
+  fn outer(customer_id: Customer) -> String { return \"[{inner(customer_id)}]\" }
+  fn inner(customer_id: Customer) -> String { return \"c{customer_id}\" }
 
   on @order.placed as e { @key order_id } { log(outer(e.customer_id)) }
 }",
@@ -3063,7 +3261,7 @@ fn an_effect_local_fn_may_not_reveal() {
 #[test]
 fn an_effect_local_fn_may_not_erase() {
     let message = err("effect E {
-  fn forget(customer_id: Int) -> Bool {
+  fn forget(customer_id: Customer) -> Bool {
     erase(customer_id)
     return true
   }
@@ -3096,11 +3294,11 @@ effect F {
 fn two_effects_may_each_declare_the_same_helper() {
     let program = program(
         "effect E {
-  fn label(n: Int) -> String { return \"E{n}\" }
+  fn label(n: Customer) -> String { return \"E{n}\" }
   on @order.placed as e { @key order_id } { log(label(e.customer_id)) }
 }
 effect F {
-  fn label(n: Int) -> String { return \"F{n}\" }
+  fn label(n: Customer) -> String { return \"F{n}\" }
   on @order.cancelled as e { @key order_id } { log(label(e.customer_id)) }
 }",
     );
@@ -3157,7 +3355,7 @@ fn a_fold_arm_may_not_call_an_effect_local_fn() {
 #[test]
 fn an_effect_local_fn_has_no_fold() {
     let message = err("effect E {
-  fn count(customer_id: Int) -> Int {
+  fn count(customer_id: Customer) -> Int {
     fold seen: Int = 0
       on @order.placed(customer_id) => seen + 1
     return seen
@@ -3322,7 +3520,7 @@ fn a_cycle_between_void_helpers_is_rejected() {
 fn reveal_reads_a_seal_back_at_its_declared_type() {
     let program = program(
         "event @vault.filled {
-  owner: Int,
+  owner: Customer,
   count: Int @subject(owner),
   owed: Money(2) @subject(owner),
   ok: Bool @subject(owner),
@@ -3389,13 +3587,13 @@ fn a_subject_bound_field_has_a_sealed_type() {
         .expect("the prelude declares it");
 
     let email = &def.field("email").expect("declared").ty;
-    assert_eq!(email, &Type::sealed(Type::String, "customer_id"));
-    assert_eq!(email.subject().map(String::as_str), Some("customer_id"));
+    assert_eq!(email, &Type::sealed(Type::String, "Customer"));
+    assert_eq!(email.subject().map(String::as_str), Some("Customer"));
     assert_eq!(email.unsealed(), Type::String);
 
     // A plain field carries no seal, and asking is not an error.
     let plain = &def.field("customer_id").expect("declared").ty;
-    assert_eq!(plain, &Type::Int);
+    assert_eq!(plain, &Type::subject_ty("Customer", Type::Int));
     assert_eq!(plain.subject(), None);
 }
 
@@ -3410,11 +3608,8 @@ fn an_optional_subject_bound_field_seals_inside_the_optional() {
         .expect("the prelude declares it");
 
     let comment = &def.field("comment").expect("declared").ty;
-    assert_eq!(
-        comment,
-        &Type::opt(Type::sealed(Type::String, "customer_id"))
-    );
-    assert_eq!(comment.subject().map(String::as_str), Some("customer_id"));
+    assert_eq!(comment, &Type::opt(Type::sealed(Type::String, "Customer")));
+    assert_eq!(comment.subject().map(String::as_str), Some("Customer"));
     assert_eq!(comment.unsealed(), Type::opt(Type::String));
 }
 
@@ -3437,7 +3632,7 @@ fn sealed_content_cannot_be_sent_in_a_body() {
         "got: {message}"
     );
     assert!(
-        message.contains("sealed under `customer_id`"),
+        message.contains("sealed under `Customer`"),
         "got: {message}"
     );
 }
@@ -3481,7 +3676,7 @@ fn sealed_content_cannot_be_compared() {
 #[test]
 fn sealed_content_may_be_written_into_the_same_seal() {
     program(
-        "command Reconfirm(order_id: Uuid, customer_id: Int) {
+        "command Reconfirm(order_id: Uuid, customer_id: Customer) {
   guard @order.reconfirmed(order_id)
 
   fold held: String = \"\"

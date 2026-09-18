@@ -4616,6 +4616,10 @@
           "named": true
         },
         {
+          "type": "subject_declaration",
+          "named": true
+        },
+        {
           "type": "test_declaration",
           "named": true
         }
@@ -4659,6 +4663,42 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "subject_declaration",
+    "named": true,
+    "fields": {
+      "id": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "type",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "type_identifier",
+            "named": true
+          }
+        ]
+      },
+      "parent": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "type_identifier",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -5206,6 +5246,10 @@
     "named": true
   },
   {
+    "type": "subject",
+    "named": false
+  },
+  {
     "type": "test",
     "named": false
   },
@@ -5220,6 +5264,10 @@
   {
     "type": "type_identifier",
     "named": true
+  },
+  {
+    "type": "under",
+    "named": false
   },
   {
     "type": "update",

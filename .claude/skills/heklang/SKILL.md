@@ -111,14 +111,25 @@ call one. An effect-local `fn` may call out, which is why a fold arm may not cal
 ### Types
 
 `Bool`, `Int`, `Decimal(n)`, `Money(n)`, `String`, `Uuid`, `Timestamp`, `Json`, an `enum` name, a
-`record` name, `List(T)`, `Map(K, V)`, and `T?` for the only absence there is.
+`record` name, a `subject` name, `List(T)`, `Map(K, V)`, and `T?` for the only absence there is.
 
 `Response` and `Outcome` exist and are spellable **only** in a `fn` parameter or return type.
 `Rounding` is spellable nowhere: it reaches `.mul` and `.div` as the bare words `HalfUp`, `HalfEven`
-and `Down`. `Sealed(T, subject)` is derived from `@subject(...)` and is never written. A `Map` key
-must be `Int`, `String`, `Uuid`, `Timestamp` or an enum. `Money(n)` and `Decimal(n)` cap at scale 18.
+and `Down`. `Sealed(T, Subject)` is derived from `@subject(...)` and is never written. A `Map` key
+must be `Int`, `String`, `Uuid`, `Timestamp`, an enum or a subject. `Money(n)` and `Decimal(n)` cap
+at scale 18.
 
-Type equality is exact and structural: `Money(2)` is not `Decimal(2)` is not `Money(3)`.
+Type equality is exact and structural: `Money(2)` is not `Decimal(2)` is not `Money(3)`, and a
+`Customer` is not a `Shop` however alike their ids look.
+
+**A `subject` declares a key namespace, and its values are that namespace's ids.**
+`subject Customer(Int)` makes `Customer` a type; `subject Customer(Int) under Shop` also says a
+customer's key is wrapped under its shop's, so deleting the shop takes every customer beneath it, and
+every event sealing something under a `Customer` must then carry a `Shop` field (and every further
+ancestor). An id may be `Int`, `String` or `Uuid`. A subject id is an id and nothing else: equality
+(including against a literal), and use as an entity key, an index column, a map key or a partition
+key, reading through to its scalar. No arithmetic, no methods, no mixing two subjects. A **literal**
+fills a subject position (`buyer: 7`); a *name* of the underlying scalar does not.
 
 ### Declarations
 
@@ -141,9 +152,13 @@ const NO_SKU: String? = none
 secret DISCORD_WEBHOOK
 secret SENTRY_DSN?
 
+// A key namespace. The field's *type* is what says which keys `@subject(...)` files under, so
+// the field could be called `buyer` and still be the same customer.
+subject Customer(Int)
+
 event @order.placed {
   order_id: Uuid,
-  customer_id: Int,
+  customer_id: Customer,
   email: String @subject(customer_id) @max(200),
   total: Money(2),
   notes: String @no_index,
@@ -223,8 +238,8 @@ test "a first order is appended as written" {
 }
 ```
 
-Annotations, exhaustively: an **event field** takes `@subject(field)`, `@max(n)`, `@absent(<literal>)`
-and `@no_index`; an **entity field** takes `@key`, `@index` and `@max(n)`, plus `= <literal>` for a
+Annotations, exhaustively: an **event field** takes `@subject(field)` (naming a sibling field whose
+type is a declared subject), `@max(n)`, `@absent(<literal>)` and `@no_index`; an **entity field** takes `@key`, `@index` and `@max(n)`, plus `= <literal>` for a
 default and an entity-level `index (a, b)`; a **record field** takes `@max(n)` and
 `@absent(<literal>)`; an **enum variant** takes `@default`; an **effect arm's trigger destructure**
 takes `@key`. `@max` applies to `String` and `String?` and nothing else. **`@max` never truncates on
@@ -265,7 +280,7 @@ for key, value in map { .. }            // or index, item over a list
 return / return <expr> / reject Name / reject Name { field } / invalid "msg"
 emit @path { field, other: value }
 put Entity { .. } / patch Entity[key] { .. } / update Entity[key] { .. } / delete Entity[key]
-log("...") / fail "..." / erase(value) / erase(subject, value)
+log("...") / fail "..." / erase(value)          // the value's type names the subject
 invoke Command { field: value }
 helper(args)                            // a call to a void effect-local fn is a statement
 ```

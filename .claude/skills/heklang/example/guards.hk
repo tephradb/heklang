@@ -24,7 +24,7 @@ guard SeatIsAvailable(workshop_id: Uuid) {
   }
 }
 
-guard AttendeeHasNoSeat(workshop_id: Uuid, attendee_id: Int) {
+guard AttendeeHasNoSeat(workshop_id: Uuid, attendee_id: Attendee) {
   fold booked: Bool = false
     on @seat.booked(workshop_id, attendee_id) => true
     on @seat.released(workshop_id, attendee_id) => false

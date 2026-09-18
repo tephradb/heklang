@@ -5,12 +5,13 @@ rows. A read model is a rebuildable cache, never a source of truth, so everythin
 replaying the log from position 0 reproduces the same rows.
 
 ```hek
+// `Customer` is a declared subject: `subject Customer(Int)`.
 projector Orders {
   enum Status { @default Placed, Shipped, Cancelled }
 
   entity Order {
     order_id: Uuid @key,
-    customer_id: Int @index,
+    customer_id: Customer @index,
     email: String @max(200),
     total: Money(2),
     status: Status,
@@ -21,7 +22,7 @@ projector Orders {
   }
 
   entity Customer {
-    customer_id: Int @key,
+    customer_id: Customer @key,
     order_count: Int,
     lifetime_spend: Money(2),
   }

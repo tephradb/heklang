@@ -4,22 +4,26 @@
 // event being handled. It was appended when the shop connected, long before, so the
 // arm folds it back out of the log and reveals it there.
 
+// subjects/shop.hk
+
+subject Shop(Int)
+
 // events/shop.hk
 
 event @shop.connected {
-  shop_id: Int,
+  shop_id: Shop,
   shop_domain: String @max(255),
   access_token: String @subject(shop_id) @no_index @max(4096),
 }
 
 event @shop.reconnected {
-  shop_id: Int,
+  shop_id: Shop,
   shop_domain: String @max(255),
   access_token: String @subject(shop_id) @no_index @max(4096),
 }
 
 event @shop.sync.requested {
-  shop_id: Int,
+  shop_id: Shop,
 }
 
 // effects/sync_shop.hk
@@ -29,7 +33,7 @@ effect SyncShop {
   // handle, which is what keeps every decrypt at the arm's own level and leaves rule
   // 9's erase-last check over one arm's statement tree. It declares no result, because
   // there is nothing for a caller to decide from: `fail` is the only other way out.
-  fn sync(shop_id: Int, domain: String, secret: String) {
+  fn sync(shop_id: Shop, domain: String, secret: String) {
     let response = http.post(
       "https://{domain}/admin/api/sync",
       { "shop": shop_id },

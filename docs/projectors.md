@@ -430,8 +430,8 @@ statically, where the write was written.
   holding two would have nothing static to say which it needs. This is the same sentence
   `docs/effects.md` rule 12 says about a `fold`, one level out.
 
-  > `Row.text` already holds content sealed under `customer_id`, so it cannot also hold content
-  > sealed under `shop_id`; one column holds one subject, because `erase` files a key under exactly
+  > `Row.text` already holds content sealed under `Customer`, so it cannot also hold content
+  > sealed under `Shop`; one column holds one subject, because `erase` files a key under exactly
   > one
 
 - **Sealed content cannot be written where the seal is discarded.** That is rule 12's boundary rule
@@ -584,10 +584,15 @@ Synthesis (`docs/types.md`) still answers "unknown" in places, and enum literals
 variant in a position whose type comes back as `None` falls to the unique-across-enums rule rather
 than being resolved from context.
 
-Key types are restricted to those that can order and hash: `Int`, `String`, `Uuid`, `Timestamp` and
-enums. `Bool`, `Money(n)` and `Decimal(n)` are rejected as keys, matching the runtime's requirement that
-a key be an orderable scalar, since it doubles as the read API's pagination cursor.
+Key types are restricted to those that can order and hash: `Int`, `String`, `Uuid`, `Timestamp`,
+enums, and a subject whose ids are one of those, reading through to the scalar. `Bool`, `Money(n)`
+and `Decimal(n)` are rejected as keys, matching the runtime's requirement that a key be an orderable
+scalar, since it doubles as the read API's pagination cursor.
 
-Compound indexes are recorded in full, but the runtime can only filter on an index's leftmost column
-today. Nothing here depends on that, since indexes are not used at runtime, but a compound index
-declared now is more than the runtime can currently exploit.
+A subject-typed column that is **not** the key needs a default if any `patch` materialises its
+entity, because a subject id has no zero: customer 0 is a customer rather than an absence, which is
+the argument `Uuid` and `Timestamp` already make about nil and epoch-zero.
+
+Compound indexes are recorded in full, and the runtime filters on any prefix of one plus a range on
+the column after it. Nothing here depends on that, since indexes are not used by the interpreter,
+but the column order a compound index declares is what decides which questions it can answer.

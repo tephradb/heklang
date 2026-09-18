@@ -153,7 +153,13 @@ pub enum ErrorKind {
     DivisionByZero,
     Overflow,
     Inexact,
-    /// `Int.pad(width)` asked for a rendering wider than [`MAX_PAD`].
+    /// `Int.pad(width)` asked for a rendering wider than 4096 characters, which is the
+    /// bound `docs/stdlib.md` sets on it.
+    ///
+    /// The number rather than a link to `MAX_PAD`: the constant is private, and this
+    /// variant is not, so a link from here is one rustdoc refuses to resolve. The bound
+    /// is a language contract rather than an implementation detail, so it is written
+    /// where a reader of this variant is.
     ///
     /// Its own variant rather than `Overflow`, because nothing overflowed: the width is
     /// representable and the string it asks for is the problem. A handler must not be
@@ -2374,14 +2380,25 @@ fn call_void(
 /// is, and `Keys::decrypt` at a `reveal` is the only thing that opens one. See
 /// `docs/effects.md` rule 12.
 fn seal(program: &Program, event: &Event, name: &Ident, value: Value) -> Result<Value, Error> {
-    let Some(declared) = program.event(&event.path).and_then(|def| def.field(name)) else {
+    let Some(def) = program.event(&event.path) else {
         return Ok(value);
     };
-    let Some(subject) = declared.subject.clone() else {
+    let Some(declared) = def.field(name) else {
+        return Ok(value);
+    };
+    // The **field** the annotation named, which is where the id is read from, and then
+    // the **subject** that field's type names, which is what the key is filed under.
+    // Two facts, kept apart: `@subject(buyer)` is local to one declaration and the
+    // `Customer` it resolves to is what crosses the host seam.
+    let Some(id_field) = declared.subject.clone() else {
         return Ok(value);
     };
     let span = Span::default();
-    let Some(id) = subject_id(field(event, &subject)?, span)? else {
+    let Some(Type::Subject(sub)) = def.field(&id_field).map(|def| &def.ty) else {
+        return Err(Error::at(ErrorKind::MalformedIr, span));
+    };
+    let subject = sub.name.clone();
+    let Some(id) = subject_id(field(event, &id_field)?, span)? else {
         return Err(Error::at(ErrorKind::MalformedIr, span));
     };
     // Rule 12: an absent optional was never encrypted, so there is no key behind it

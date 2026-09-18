@@ -129,7 +129,7 @@ string, so it looks like the consistent choice. It cannot express this one: the 
 the record's business rather than the column's.
 
 **`@subject` is deliberately not here, and the restriction is narrower than it sounds.** A field
-*inside* a record cannot be subject-bound: `@subject(x)` names a sibling field holding the id a key is
+*inside* a record cannot be subject-bound: `@subject(buyer)` names a sibling field holding the id a key is
 filed under, and a record reached through a container has no sibling the parser can name. So the
 annotation stays out of this declaration.
 
@@ -298,6 +298,41 @@ A `const` is still right for a value that is **part of the program**: a free-tie
 uuid, a launch date. The test is whether changing it should count as changing what the program does.
 For a limit it should. For a credential it must not.
 
+## `subject`
+
+```
+subject Shop(Int)
+subject Customer(Int) under Shop
+```
+
+A subject is a **key namespace with a name**, and the type it declares has that namespace's ids as
+its values. A field of it is a customer id in the way a `Money(2)` field is an amount:
+
+```
+event @order.placed {
+  order_id: Uuid,
+  buyer: Customer,
+  shop: Shop,
+  email: String? @subject(buyer) @max(200),
+}
+```
+
+The id type may be `Int`, `String` or `Uuid`, and the parens hold it the way `List(String)` and
+`Money(2)` hold theirs. It appears at the declaration only: `Customer` is the whole spelling at
+every use site.
+
+`under Parent` says this subject's keys are wrapped under that one's, so deleting a tenant's key
+takes every key beneath it in one delete. One parent each, and the graph is checked acyclic.
+`docs/effects.md` rule 12 is the contract: what an id may be, what may be done with one, what
+`under` obliges every event to carry, and what nothing can check.
+
+`subject` and `under` are **soft** words, claimed only where a top-level declaration begins, so a
+field, a parameter or a local called `subject` stays writable; `@subject(...)` is an annotation and
+lexes apart from either. Subjects are global rather than module-scoped, which is the point of
+declaring them: a module-local one would put back the two-spellings-one-person defect the
+declaration exists to remove. Order and file are irrelevant, because the declaration is collected in
+the first pass.
+
 ## `secret`
 
 ```
@@ -408,12 +443,17 @@ than two. Each does only what the pass before it made possible:
 
 | Pass | Reads | Because |
 | --- | --- | --- |
-| A | `enum` bodies, `record` names | a record field may name an enum, and a record may name a record |
+| A | `enum` bodies, `subject` declarations, `record` names | a record field may name an enum or a subject, and a record may name a record |
 | B | `record` fields | every type they might name now has a name |
 | C0 | `const` names and types, and where each value starts | a const value may name a const declared later |
 | C | `event`, `refusal`, `projector` shells, `command` and `guard` signatures | these name enums, records and consts |
 | D | `command`, `guard` and `projector` bodies, `effect` helpers and arms | these name everything |
 | E | `test` bodies | a test names commands, projectors and effects rather than declaring any |
+
+**A `subject` resolves its `under` between A and B**, which is the first point where every subject
+name exists: a parent may be declared below its child or in another file, so the name is collected
+in A and the link is closed after it. That is the same shape a `record` field's `@absent` has, which
+is read between C0 and C for the same reason one level down.
 
 Two boundaries are about something other than types. **C0** is about a declaration whose value can
 name a sibling, so every name has to exist before any value is read, and the values are then

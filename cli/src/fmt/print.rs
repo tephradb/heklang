@@ -67,6 +67,7 @@ impl<'a> Printer<'a> {
             "index_clause" => self.index_clause(node),
             "const_declaration" => self.const_decl(node),
             "secret_declaration" => self.secret_decl(node),
+            "subject_declaration" => self.subject_decl(node),
             "secret_clause" => self.secret_clause(node),
             "refusal_declaration" => self.refusal(node),
             "function_declaration" => self.function(node),
@@ -335,6 +336,24 @@ impl<'a> Printer<'a> {
                 Doc::text(if optional { "?" } else { "" }),
             ]),
         )
+    }
+
+    /// `subject Name(Id)` and `subject Name(Id) under Parent`. A one-line declaration
+    /// like `const` and `secret`, so it never wraps: the parent is one word.
+    fn subject_decl(&self, node: Node<'a>) -> Doc<'a> {
+        let (leading, kids) = self.parted(node);
+        let mut parts = vec![
+            Doc::text("subject "),
+            self.node(kids[0]),
+            Doc::text("("),
+            self.node(kids[1]),
+            Doc::text(")"),
+        ];
+        if let Some(parent) = kids.get(2) {
+            parts.push(Doc::text(" under "));
+            parts.push(self.node(*parent));
+        }
+        Self::led(leading, Doc::concat(parts))
     }
 
     /// `secret NAME = <value>` in a test's setup section: the same word, and the same

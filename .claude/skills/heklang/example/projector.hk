@@ -17,7 +17,7 @@ projector Workshops {
   entity Booking {
     booking_id: Uuid @key,
     workshop_id: Uuid @index,
-    attendee_id: Int @index,
+    attendee_id: Attendee @index,
     // Sealed on the event, so writing it here seals the column. A projector stores
     // personal data it can never read, which is what makes crypto-shredding cheap.
     email: String @max(200),

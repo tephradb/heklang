@@ -8,7 +8,8 @@ fn slice_count(command: &Command) -> usize {
 
 #[test]
 fn a_command_may_precede_the_events_it_uses() {
-    let source = "command PlaceOrder(order_id: Uuid, customer_id: Int) {
+    let source = "subject Customer(Int)
+command PlaceOrder(order_id: Uuid, customer_id: Customer) {
   guard @order.placed(order_id)
 
   fold open: Int = 0
@@ -19,7 +20,7 @@ fn a_command_may_precede_the_events_it_uses() {
 
 event @order.placed {
   order_id: Uuid,
-  customer_id: Int,
+  customer_id: Customer,
 }
 ";
     let program = parse(source).expect("events are collected before command bodies are parsed");
@@ -29,16 +30,18 @@ event @order.placed {
 
 #[test]
 fn events_from_two_files_are_order_independent() {
-    let customer_first = "event @customer.blocked { customer_id: Int }
-event @order.placed { order_id: Uuid, customer_id: Int }
-command C(order_id: Uuid, customer_id: Int) {
+    let customer_first = "subject Customer(Int)
+event @customer.blocked { customer_id: Customer }
+event @order.placed { order_id: Uuid, customer_id: Customer }
+command C(order_id: Uuid, customer_id: Customer) {
   guard @customer.blocked(customer_id), @order.placed(order_id)
   return
 }
 ";
-    let order_first = "event @order.placed { order_id: Uuid, customer_id: Int }
-event @customer.blocked { customer_id: Int }
-command C(order_id: Uuid, customer_id: Int) {
+    let order_first = "subject Customer(Int)
+event @order.placed { order_id: Uuid, customer_id: Customer }
+event @customer.blocked { customer_id: Customer }
+command C(order_id: Uuid, customer_id: Customer) {
   guard @customer.blocked(customer_id), @order.placed(order_id)
   return
 }
@@ -604,4 +607,141 @@ fn an_absent_value_is_bounded_through_a_record_and_a_list() {
 
     parse("record N { kind: String @max(3) }\nevent @a.b { id: Int, n: N @absent(N { kind: \"ok\" }) }")
         .expect("a nested value inside the bound is fine");
+}
+
+// ---------------------------------------------------------------------------------
+// `subject`: a key namespace with a name, an id type, and at most one parent.
+// `docs/declarations.md` and `docs/effects.md` rule 12 are the contract.
+
+/// The error one source raises, as text.
+fn refused(source: &str) -> String {
+    parse(source)
+        .expect_err("this source is meant to be rejected")
+        .text()
+}
+
+#[test]
+fn a_subject_declares_a_type_whose_values_are_its_ids() {
+    let program = parse(
+        "subject Shop(Int)
+subject Customer(Int) under Shop
+event @order.placed {
+  order_id: Uuid,
+  buyer: Customer,
+  shop: Shop,
+  email: String? @subject(buyer) @max(200),
+}
+",
+    )
+    .expect("a subject is an ordinary declaration");
+
+    let customer = program.subject("Customer").expect("declared");
+    assert_eq!(customer.id, heklang::Type::Int);
+    assert_eq!(customer.parent.as_deref(), Some("Shop"));
+    assert_eq!(
+        program.subject("Shop").expect("declared").parent,
+        None,
+        "a root has no parent"
+    );
+
+    // The seal names the **subject**, not the field the annotation pointed at. That is
+    // what a host files a key under.
+    let email = &program
+        .event(&EventPath::new(["order", "placed"]))
+        .expect("declared")
+        .field("email")
+        .expect("declared")
+        .ty;
+    assert_eq!(email.subject().map(String::as_str), Some("Customer"));
+}
+
+/// Order and file are irrelevant here as everywhere else: a parent may be declared below
+/// the child that names it.
+#[test]
+fn a_parent_may_be_declared_after_its_child() {
+    parse("subject Customer(Int) under Shop\nsubject Shop(Int)\nevent @e { n: Int }\n")
+        .expect("pass A collects every name before any `under` is resolved");
+}
+
+#[test]
+fn a_subjects_ids_are_an_int_a_string_or_a_uuid() {
+    for id in ["Int", "String", "Uuid"] {
+        parse(&format!("subject S({id})\nevent @e {{ n: Int }}\n"))
+            .unwrap_or_else(|err| panic!("`{id}` is a key a store can file under: {err}"));
+    }
+    for id in ["Money(2)", "Bool", "Timestamp", "Json", "List(Int)"] {
+        let message = refused(&format!("subject S({id})\nevent @e {{ n: Int }}\n"));
+        assert!(
+            message.contains("a subject's ids cannot be"),
+            "`{id}`: {message}"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_parent_is_refused() {
+    let message = refused("subject Customer(Int) under Shop\nevent @e { n: Int }\n");
+    assert!(
+        message.contains("`Customer` sits under `Shop`, which is not a declared subject"),
+        "got: {message}"
+    );
+}
+
+/// One parent each makes the graph a forest, so a cycle is the only failure a walk can
+/// find. The message names the route rather than only the subject it started from.
+#[test]
+fn the_under_graph_must_be_acyclic() {
+    let message = refused("subject A(Int) under B\nsubject B(Int) under A\nevent @e { n: Int }\n");
+    assert!(message.contains("sits under itself"), "got: {message}");
+    assert!(message.contains("A under B under A"), "got: {message}");
+
+    let message = refused("subject A(Int) under A\nevent @e { n: Int }\n");
+    assert!(message.contains("sits under itself"), "got: {message}");
+}
+
+#[test]
+fn a_subject_is_declared_once_and_shares_its_name_with_no_other_type() {
+    let message = refused("subject S(Int)\nsubject S(Uuid)\nevent @e { n: Int }\n");
+    assert!(
+        message.contains("subject `S` is declared twice"),
+        "got: {message}"
+    );
+
+    // `type_ref` resolves enum, then record, then subject, so a name taken by either of
+    // the first two would leave the subject unreachable and its erase-safety silently off.
+    let message = refused("record S { n: Int }\nsubject S(Int)\nevent @e { n: Int }\n");
+    assert!(
+        message.contains("`S` is already the name of a record"),
+        "got: {message}"
+    );
+    let message = refused("enum S { A, B }\nsubject S(Int)\nevent @e { n: Int }\n");
+    assert!(
+        message.contains("`S` is already the name of an enum"),
+        "got: {message}"
+    );
+}
+
+/// A declaration that fails must not take the next one with it. `subject S` with the id
+/// type left off is claimed on purpose so the parser can say what is missing, and the
+/// recovery that follows used to scan forward for a closing delimiter it never saw.
+#[test]
+fn a_malformed_subject_does_not_swallow_what_follows() {
+    // `check_files` rather than `parse`, because the whole point is that a *second*
+    // mistake is still found: `parse` answers with the first diagnostic only.
+    let errors = heklang::check_files([(
+        "a.hk",
+        "subject S\nsubject Bad(Money(2))\nevent @e { n: Int }\n",
+    )])
+    .expect_err("two malformed subjects");
+    let text: Vec<String> = errors.iter().map(|err| err.text()).collect();
+    assert_eq!(
+        errors.len(),
+        2,
+        "the declaration after a malformed one is still read: {text:?}"
+    );
+    assert!(text[0].contains("expected `(`"), "got: {text:?}");
+    assert!(
+        text[1].contains("a subject's ids cannot be"),
+        "got: {text:?}"
+    );
 }

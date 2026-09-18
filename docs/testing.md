@@ -110,7 +110,7 @@ produces.
 | `respond "<url>" <status>` | queue one HTTP reply for that URL |
 | `respond "<url>" <status> { <json> }` | the same, with a body |
 | `respond "<url>" timeout` | a transport failure, which rule 5 of `docs/effects.md` absorbs and retries |
-| `erased <subject> "<id>"` | that subject's key is already destroyed |
+| `erased <Subject> "<id>"` | that subject's key is already destroyed |
 | `secret <NAME> = "<value>"` | this deployment holds that credential |
 | `secret <NAME> = none` | this deployment does not set it |
 
@@ -250,7 +250,7 @@ An effect's output is a **trace**: the ordered list of things it did to the worl
 | `expect http.<verb>("<url>")` | a call to that URL, body not checked |
 | `expect http.<verb>("<url>", { <json> })` | the same, and the body matches the listed keys |
 | `expect invoke Command { name: value, ... }` | an `invoke` of that command with exactly those arguments |
-| `expect erase(<subject>, "<id>")` | rule 9's erase, naming the subject field and the id |
+| `expect erase(<Subject>, "<id>")` | rule 9's erase, naming the key row: the subject and the id |
 | `expect log("<message>")` | one `log` line |
 | `expect fail "<message>"` | an arm returned `fail` |
 | `expect skipped` | an arm hit a shredded key, rule 12's terminal skip |
@@ -278,9 +278,12 @@ That is the same rule section 6 already states for sealed content one boundary o
 stores content as it was given, and the test meets it there. Someone will read `Effectful::Http`
 holding a plaintext url and file it as a leak, so it is written down here.
 
-**`erase` reads the same here as in an arm.** The expectation names the subject and the id, and so
-does the statement's named form (`erase(customer_id, id)` in `docs/effects.md` rule 9), so the two
-are one spelling met twice rather than two spellings met once.
+**`erase` names a key row here, and a value in an arm.** The expectation is
+`expect erase(Customer, "7")` and the statement is `erase(id)`, and that is deliberate rather than
+left over. A test states what the key store was asked to do, which is a namespace and the id as a
+host files it, and it is the same pair `hekla erase Customer 7` takes on a command line. A statement
+names a value, and the value's type is the namespace (`docs/effects.md` rule 9). The two read
+differently because they are about different things.
 
 **`log` is in the trace.** It is not journaled (rule 10 of `docs/effects.md`), so it runs again on a
 replay, and being able to assert on the line is how a test pins the branch an arm took when the arm's

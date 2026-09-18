@@ -149,8 +149,13 @@ pub fn comparable(op: BinOp, lhs: &Type, rhs: &Type) -> bool {
         // `Timestamp` orders because a moment does, and because an application that
         // works with them asks "before" and "after" constantly. It is the same order
         // that makes one an entity key.
+        //
+        // A subject orders exactly when the scalar its ids are does, which is the same
+        // read-through that lets one be an entity key and an index column. The equality
+        // above already refuses a `Customer` against a `Shop`, and against a bare `Int`:
+        // `lhs != rhs` is one line and it is the whole of "and nothing else".
         _ => matches!(
-            lhs,
+            lhs.as_scalar(),
             Type::Int | Type::Decimal(_) | Type::Money(_) | Type::String | Type::Timestamp
         ),
     }

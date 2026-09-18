@@ -239,21 +239,23 @@ for id in ids {
 A `for` body iterates to a fixed point, so an `erase` anywhere in one is reachable from every
 `reveal` in it, including one lexically above.
 
-### The two forms of `erase`
+### `erase` takes a value whose type is a subject
 
 ```hek
-erase(e.shop_id)          // inferring: the value must be a field of the triggering event
-erase(customer_id, id)    // named: the subject name, then the value
+erase(e.shop)             // a Shop id, so a shop's key
+erase(id)                 // `id` is a Customer, wherever it came from
 ```
 
-`erase(value)` recovers the subject from the value, which must be a trigger field whose
-`@subject(...)` declaration says which key namespace it names. When the id comes from a fold there is
-no name to recover, so the second form supplies it. That is the shape a mandatory shop-wide or
-tenant-wide redaction has.
+There is one form, because the value's **type** is the namespace. It used to be two: `erase(value)`
+recovered the subject by looking at the field the value was loaded from, so it reached trigger fields
+and nothing else, and a folded id needed `erase(customer_id, id)` to assert a namespace heklang could
+not check. `erase(customer_id, some_other_int)` compiled and destroyed the wrong subject's key. A
+subject is a declared type now, so a fold is written `fold ids: List(Customer) = []` and `erase(id)`
+says what it destroys.
 
-The named form gives up the check that the value really is a `customer_id`, so **the inferring form
-stays the default**. Three things are still checked: the name is a declared subject, the value's type
-matches the field the keys are filed under, and the value contains no `reveal`.
+Two things are checked: the value is a subject id (`erase(e.order_id)` is refused, and so is
+`erase(7)`), and it contains no `reveal`, because a repeat request for a subject whose id you learned
+by revealing then cannot be read at all.
 
 `erase` is a statement and returns nothing, because there is nothing an author could do differently
 on either answer.
@@ -266,7 +268,7 @@ on either answer.
 | `http.post(url, body)`, `.put`, `.patch`, `.delete` | `Response` | yes |
 | `invoke Name { ... }` | `Outcome` | yes |
 | `now()` | `Timestamp` | yes, pinned once per invocation |
-| `erase(value)` / `erase(subject, value)` | nothing | yes |
+| `erase(value)` | nothing | yes |
 | `Uuid.derive(seed, name)` | `Uuid` | pure |
 | `log(message)` | nothing | **no**, so it may appear twice across a crash |
 | `reveal(value)` | the sealed type, unsealed | **no**, re-decrypts every attempt |
@@ -288,7 +290,7 @@ value.
 
 ```hek
 effect SyncShop {
-  fn sync(shop_id: Int, domain: String, secret: String) {
+  fn sync(shop_id: Shop, domain: String, secret: String) {          // Shop is a subject
     let response = http.post("https://{domain}/admin/api/sync", { "shop": shop_id },
       headers = { "X-Access-Token": secret })
     if response.status == 401 {
@@ -355,24 +357,29 @@ In a test, a declared secret answers `secret:NAME` with no setup, and
 
 ## 12. `reveal` and the seal
 
-`@subject(customer_id)` on an event field is the authored form; `Sealed(String, customer_id)` is what
+`@subject(buyer)` on an event field is the authored form; `Sealed(String, Customer)` is what
 propagates from it, and `Sealed` is not spellable. `Opt` stays outermost, so
-`String? @subject(x)` is `Opt(Sealed(String, x))`.
+`String? @subject(buyer)` is `Opt(Sealed(String, Customer))`.
+
+The annotation names a **sibling field**, and the type carries the **subject** that field's type
+names. Two facts, kept apart: `@subject(buyer)` is local to one declaration, which is what lets
+`from: Customer, to: Customer` be sealed under separately, and `Customer` is what a key store files
+under. `@subject(x)` is refused unless `x` is a declared subject.
 
 **A seal survives a `let`, a fold, a parameter and a column**, because it lives in the type rather
 than in how an expression was spelled. A sealed value carries the field it was sealed under, the
 subject, the id its key is filed under, and the content as a host stored it. heklang never reads the
 content.
 
-**`@subject(x)` must name a field of the same event, `x` may not itself be subject-bound, and `x` may
-not be optional.** A subject id is the name a key is filed under, so a missing id is not "no key", it
-is no question at all.
+**`@subject(x)` must name a field of the same event whose type is a declared subject, `x` may not
+itself be subject-bound, and `x` may not be optional.** A subject id is the name a key is filed
+under, so a missing id is not "no key", it is no question at all.
 
 ### What may be done to sealed content
 
 | | |
 | --- | --- |
-| **Move it** into a position sealed under the same subject: a `let`, a `fold`, an entity column, another event field declared `@subject(<same name>)` | the content is never read |
+| **Move it** into a position sealed under the same subject: a `let`, a `fold`, an entity column, another event field declared `@subject(<a field of the same subject>)` | the content is never read |
 | **Ask if it is there**: `.is_some()` / `.is_none()` | presence is not content |
 | **`reveal` it**, in an effect arm | the boundary itself |
 
@@ -390,7 +397,7 @@ keep(e.email)                            // a `fn` parameter is a plain type, so
 ```
 
 A destination is sealed only when it is declared under the **same subject name**: moving content
-sealed under `customer_id` into a field declared `@subject(shop_id)` is rejected, because a key is
+sealed under `Customer` into a field declared `@subject(shop)` is rejected, because a key is
 filed under exactly one subject. There is no way to declare a sealed `fn` parameter, a sealed record
 field or a sealed container element, so `reveal` at the point of use and pass plaintext onward.
 

@@ -48,7 +48,7 @@ they read better without moving a stored hash, and it is the difference between 
 and hashing a punctuation choice.
 
 The first version of this got it backwards and hashed the readable text, so every improvement to
-the layout would have invalidated every stored hash. That is the whole reason `VERSION` is `2`.
+the layout would have invalidated every stored hash. That is the whole reason `VERSION` reached `2`.
 
 ## 3. Declared names stay, and are repeated rather than indexed
 
@@ -56,6 +56,12 @@ A name that leaves the program is kept verbatim and written out at every use: ev
 record and entity field names, command and `fn` names, command parameter names, refusal codes,
 entity and enum names, subject names, method names and JSON object keys. Renaming one of those *is*
 a change, because something outside the program is holding the old spelling.
+
+A **subject** name is the clearest case of that, and it is literal rather than illustrative: the
+runtime files every key row under it, so renaming one re-partitions everybody's keys. That is why a
+subject carries an entry of its own rather than being inlined at each use the way a `const` is: its
+`under` appears nowhere else in the program, so declaring or removing a parent would otherwise
+change how every key beneath it is wrapped and move no hash at all.
 
 A name that does not leave is a slot number: a `let`, a `fold`'s state, a `for`'s bindings, a
 `fn`'s parameters. A `fn`'s arguments are positional, so its parameter names are as local as a
@@ -191,6 +197,7 @@ body never has to be decoded to run a compatibility check.
 
 | Kind | Signature |
 | --- | --- |
+| `subject` | the declaration: name, id type, parent |
 | `event` | the declaration: path, fields, types, `@subject`, `@max`, `@absent`, `@no_index` |
 | `enum` | the declaration: variants and the default, by name |
 | `record` | the declaration: fields, types, `@max`, `@absent` |
@@ -237,7 +244,7 @@ carries, and a reader never has to go looking for what one covered.
 
 ## 11. The version line is part of the hash
 
-The first line is `hek-digest 2`, and it is hashed with the rest. The digest is the meaning of a
+The first line is `hek-digest 3`, and it is hashed with the rest. The digest is the meaning of a
 program *as this version of heklang reads it*, so a change to how the parser desugars, or to the
 packed form's own spelling, is a change to what a hash means. Bumping the version moves every hash
 at once, which is the point: a global change then has one legible cause instead of looking like
@@ -270,10 +277,10 @@ capitalised, which keeps them apart from the lowercase heads a value uses: `(Mon
 
 | | Heads |
 | --- | --- |
-| declaration | `event` `enum` `record` `function` `command` `projector` `effect` `test` |
-| structure | `params` `p` `f` `col` `key` `index` `entity` `on` `events` `delivery` `bind` `env` `now` `stage` `pre` `post` `fold` `slice` `filter` `acc` `variants` `default` `absent` `max` `no_index` `returns` `body` `sig` `rejects` |
+| declaration | `subject` `event` `enum` `record` `function` `command` `projector` `effect` `test` |
+| structure | `params` `p` `f` `col` `key` `index` `entity` `on` `events` `delivery` `bind` `env` `now` `stage` `pre` `post` `fold` `slice` `filter` `acc` `variants` `default` `absent` `max` `no_index` `returns` `body` `sig` `rejects` `id` `under` |
 | statement | `set` `if` `then` `else` `emit` `put` `patch` `update` `delete` `fail` `log` `erase` `for` `in` `index` `item` `do` `discard` `call` `return` `value` `outcome` |
-| type | `Bool` `Int` `String` `Uuid` `Timestamp` `Rounding` `Json` `Response` `Outcome` `Secret` `(Decimal n)` `(Money n)` `(Enum N)` `(Record N)` `(List t)` `(Map k v)` `(Opt t)` `(Sealed t subject)` |
+| type | `Bool` `Int` `String` `Uuid` `Timestamp` `Rounding` `Json` `Response` `Outcome` `Secret` `(Decimal n)` `(Money n)` `(Enum N)` `(Record N)` `(List t)` `(Map k v)` `(Opt t)` `(Subject N)` `(Sealed t Subject)` |
 | value | `$n` `bool` `int` `dec` `money` `str` `uuid` `ts` `none` `some` `variant` `rounding` `array` `of` `map-empty` `obj` `json-num` `new` |
 | expression | `neg` `not` `+ - * / % == != < <= > >= && \|\|` `.method` `field` `choose` `interp` `fn` `builtin` `invoke` `unwrap` `wrap` `reveal` `secret` `reject` `invalid` `comp` `when` `yield` `bad` |
 | test | `given` `respond` `status` `timeout` `erased` `run` `project` `deliver` `expect` `event` `nothing` `row` `norow` `http` `failed` `skipped` |
@@ -287,7 +294,7 @@ That is one small set to keep rather than a field table per head.
 Packed, which is what is hashed:
 
 ```
-hek-digest 2
+hek-digest 3
 (event @order.placed (f customer_id Int) (f order_id Uuid) (f total (Money 2)))
 (command Place (params (p order_id Uuid) (p customer_id Int) (p total (Money 2))) (stage (fold $3 Int (int 0)) (slice @order.placed (filter customer_id $1) (acc $3 Int (+ $3 (int 1)))) (post (if (>= $3 (int 10)) (then (return (reject (str "too_many_open") (str "too many open orders"))))) (emit @order.placed (f customer_id $1) (f order_id $0) (f total $2)))))
 ```

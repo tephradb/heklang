@@ -267,6 +267,12 @@ impl Value {
             }
             (Value::Enum { ty: name, .. }, Type::Enum(want)) => name == want,
             (Value::Record { ty: name, .. }, Type::Record(want)) => name == want,
+            // A subject id is nominal to the checker and an ordinary scalar to the
+            // runtime, so the only question left here is the scalar's. Which `Customer`
+            // an `Int` is was settled where the write was written, and there is no tag
+            // on the value for this to read: that is rule 12's "positional at the edge"
+            // being structural rather than promised.
+            (value, Type::Subject(sub)) => value.has_type(&sub.id),
             // Everything left is a scalar, whose `ty()` is a variant with nothing in it.
             _ => self.ty().same_unsealed(ty),
         }
@@ -489,7 +495,10 @@ pub fn zero(ty: &Type, defs: Defs<'_>) -> Option<Value> {
         Type::Opt(inner) => Value::none(inner.as_ref().clone()),
         Type::List(inner) => Value::list(inner.as_ref().clone(), []),
         Type::Map(key, value) => Value::map(key.as_ref().clone(), value.as_ref().clone(), []),
-        Type::Uuid | Type::Timestamp | Type::Rounding => return None,
+        // An id's zero is a real id for the same reason nil and epoch-zero are real
+        // data: customer 0 is a customer, not an absence. So a subject-typed column
+        // that is not the key needs a default written, and `check_zeros` says so.
+        Type::Uuid | Type::Timestamp | Type::Rounding | Type::Subject(_) => return None,
         // Never reachable from a declaration: there is no syntax that writes one of
         // these as an entity field type.
         Type::Json | Type::Response | Type::Outcome | Type::Secret => return None,
@@ -600,9 +609,13 @@ fn key_text(key: &Key) -> String {
 
 /// Whether a type may be an entity key. Matches the runtime's requirement that a
 /// key be an orderable scalar, since it doubles as the read API's pagination cursor.
+///
+/// A subject reads through to the scalar its ids are, which is what makes `Customer` an
+/// entity key, an index column and a map key without any of those learning about
+/// subjects.
 pub fn can_key(ty: &Type) -> bool {
     matches!(
-        ty,
+        ty.as_scalar(),
         Type::Int | Type::String | Type::Uuid | Type::Timestamp | Type::Enum(_)
     )
 }
@@ -695,7 +708,7 @@ fn shape(json: &Json) -> &'static str {
 }
 
 fn key_from_text(text: &str, ty: &Type, defs: Defs<'_>) -> Option<Key> {
-    Some(match ty {
+    Some(match ty.as_scalar() {
         Type::Int => Key::Int(text.parse().ok()?),
         Type::String => Key::Str(text.into()),
         Type::Uuid => {
@@ -811,6 +824,25 @@ fn read_json(
         (Type::Sealed(_, _), _) => {
             return Err(wrong("a seal that is not text".into(), path));
         }
+
+        // Rule 12's "positional at the edge", and the one place it is visible. JSON
+        // carries no type tag, so `{"buyer": 7}` reads as a `Customer` because the
+        // declaration says that position is one, and a caller that swapped two ids is
+        // not caught and cannot be. Every mix-up *past* this line is.
+        //
+        // The mismatch is re-labelled with the subject, because the scalar is an
+        // implementation detail of it: a host told `expected Int` about a `Customer`
+        // column has to go and read the declaration to find out what heklang meant.
+        // Every other nominal type in this table keeps its name in the message.
+        (Type::Subject(sub), _) => match read_json(json, &sub.id, defs, origin, path) {
+            Ok(value) => value,
+            Err(inner) => {
+                return Err(Mismatch {
+                    expected: ty.clone(),
+                    ..inner
+                });
+            }
+        },
 
         // The one place `null` means something rather than being the wrong shape.
         (Type::Opt(inner), Json::Null) => Value::none(inner.as_ref().clone()),

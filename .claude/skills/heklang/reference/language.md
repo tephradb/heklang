@@ -33,8 +33,16 @@ A third, `Rounding`, is spellable **nowhere**: `Rounding` as a type name is `unk
 values reach `.mul` and `.div` as the bare words `HalfUp`, `HalfEven` and `Down`. So a rounding mode
 cannot be passed through a `fn` parameter.
 
-One more is **derived rather than written**: `Sealed(T, subject)`, which an event field gets from
-`@subject(...)`. `Opt` stays outermost, so `String? @subject(x)` is `Opt(Sealed(String, x))`.
+One more is **derived rather than written**: `Sealed(T, Subject)`, which an event field gets from
+`@subject(...)`. `Opt` stays outermost, so `String? @subject(buyer)` is
+`Opt(Sealed(String, Customer))`.
+
+And one is **declared**: `subject Customer(Int)` makes `Customer` a type whose values are customer
+ids, and `subject Customer(Int) under Shop` wraps a customer's key under its shop's, so deleting the
+shop takes every customer beneath it. An id may be `Int`, `String` or `Uuid`. A subject id is an id
+and nothing else: equality (including against a literal), and use as an entity key, an index column,
+a map key or a partition key, reading through to its scalar. No arithmetic, no methods, and no
+mixing two subjects.
 
 **Type equality is exact and structural.** `Decimal(2)` is not `Decimal(3)`, `Money(2)` is not
 `Decimal(2)`, and content sealed under one subject is not content sealed under another. Nothing

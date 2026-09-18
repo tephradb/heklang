@@ -11,9 +11,10 @@ use heklang::{
     Record, Recorded, Reply, Request, Row, Rows, Secrets, Span, Type, Value, parse,
 };
 
-const PRELUDE: &str = "event @order.placed {
+const PRELUDE: &str = "subject Customer(Int)
+event @order.placed {
   order_id: Uuid,
-  customer_id: Int,
+  customer_id: Customer,
   total: Money(2),
 }
 ";
@@ -155,7 +156,7 @@ impl Secrets for Elsewhere {
     }
 }
 
-const COUNTING: &str = "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+const COUNTING: &str = "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
   fold open: Int = 0
     on @order.placed(customer_id) => open + 1
 
@@ -257,7 +258,7 @@ fn the_condition_comes_back_resolved() {
 }
 
 const CAPPED: &str = "refusal AtCapacity \"two is the limit\"
-command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
   fold open: Int = 0
     on @order.placed(customer_id) => open + 1
 
@@ -341,7 +342,7 @@ fn run_raises_a_conflict_rather_than_retrying_it() {
 fn a_second_run_folds_what_the_first_appended() {
     let program = program(
         "refusal OnePerCustomer \"already ordered\"
-command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
   fold open: Int = 0
     on @order.placed(customer_id) => open + 1
 
@@ -362,14 +363,20 @@ command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
 // ---------------------------------------------------------------------------------
 // `Keys`, and the one thing a seal is for.
 
-const SEALED: &str = "event @shop.connected {
-  shop_id: Int,
+// A shop's credential, filed under the shop. It briefly read `shop_id: Customer`, which
+// checked and ran and said the wrong thing: a shop's key is not a customer's, and the
+// assertions below name the subject a key is filed under.
+const SEALED: &str = "subject Shop(Int)
+event @shop.connected {
+  shop_id: Shop,
   token: String @subject(shop_id),
 }
 effect Use {
   on @order.placed as e { @key order_id } {
     fold token: String? = none
-      on @shop.connected(shop_id: e.customer_id) { token } => token
+      // A literal, because this arm triggers on an order and an order carries no shop.
+      // Every record below is shop 7.
+      on @shop.connected(shop_id: 7) { token } => token
 
     log(reveal(token).unwrap_or(\"nothing\"))
   }
@@ -421,7 +428,7 @@ fn a_fold_opens_only_the_seal_it_reveals() {
         1,
         "twenty records folded, one `reveal`, one key used: {opened:?}"
     );
-    assert_eq!(opened[0], ("shop_id".to_string(), "7".to_string()));
+    assert_eq!(opened[0], ("Shop".to_string(), "7".to_string()));
 }
 
 /// An absent optional does not consult the key store at all (`docs/effects.md` rule
@@ -453,7 +460,7 @@ fn a_destroyed_key_is_terminal_rather_than_absent() {
     let program = program(SEALED);
     let host = Elsewhere {
         records: vec![connected(0, 7, "s3cret"), order(1, 7)],
-        shredded: vec![("shop_id".to_string(), "7".to_string())],
+        shredded: vec![("Shop".to_string(), "7".to_string())],
         ..Elsewhere::default()
     };
     let mut interpreter = Interpreter::with_host(&program, host);
@@ -658,7 +665,7 @@ fn a_stale_condition_is_refused() {
 
 const TALLY: &str = "projector Orders {
   entity Tally {
-    customer_id: Int @key,
+    customer_id: Customer @key,
     orders: Int,
     last: Money(2),
   }
@@ -673,7 +680,7 @@ const TALLY: &str = "projector Orders {
 
 projector Strict {
   entity Running {
-    customer_id: Int @key,
+    customer_id: Customer @key,
     orders: Int,
   }
 
@@ -684,7 +691,7 @@ projector Strict {
 
 const TWICE: &str = "projector Twice {
   entity Count {
-    customer_id: Int @key,
+    customer_id: Customer @key,
     hits: Int,
   }
 
@@ -862,7 +869,7 @@ fn a_read_model_failure_arrives_as_a_host_error_at_the_statement() {
 #[test]
 fn a_command_that_folds_nothing_asks_the_host_for_no_position() {
     let program = program(
-        "command Note(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Note(order_id: Uuid, customer_id: Customer, total: Money(2)) {
   emit @order.placed { order_id, customer_id, total }
 }",
     );
@@ -893,11 +900,16 @@ fn a_command_that_folds_nothing_asks_the_host_for_no_position() {
 #[test]
 fn two_stages_read_twice_against_one_pinned_head() {
     let program = program(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-  fold open: Int = 0
-    on @order.placed(customer_id) => open + 1
+        // The first stage folds a `Customer` out of the log by `order_id`, and the second
+        // filters on it, so the second stage's filter is resolved from what the first one
+        // read rather than from the command's own argument. It used to fold a count and
+        // filter `customer_id` on that, which a count is not; folding the id keeps the
+        // shape the test is about.
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
+  fold owner: Customer = customer_id
+    on @order.placed(order_id) { customer_id } => customer_id
 
-  let seen = open
+  let seen = owner
 
   fold again: Int = 0
     on @order.placed(customer_id: seen) => again + 1
@@ -929,11 +941,12 @@ fn two_stages_read_twice_against_one_pinned_head() {
         2,
         "the condition is what every stage that ran read, in order"
     );
-    // The second stage's filter was resolved from what the first folded: one order for
-    // customer 7, so it narrows to `customer_id: 1` rather than to the seed.
+    // The second stage's filter was resolved from what the first folded: the last
+    // `@order.placed` for this order belongs to customer 9, so it narrows to 9 rather
+    // than to the 7 the run was given.
     assert_eq!(
         second.slices[0].filters,
-        vec![("customer_id".to_string(), Value::Int(1))]
+        vec![("customer_id".to_string(), Value::Int(9))]
     );
 }
 

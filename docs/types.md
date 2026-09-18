@@ -37,6 +37,7 @@ which is the same thing `docs/effects.md` rule 12 says about the decrypt boundar
 | `Uuid` | `Uuid` | written as a string literal (`docs/declarations.md`) |
 | `Timestamp` | `Timestamp` | written as an RFC 3339 string literal |
 | an enum | its name | declared by `enum` |
+| a subject | its name | declared by `subject`; its values are that namespace's ids |
 | a record | its name | declared by `record` |
 | `Json` | `Json` | opaque; read with the accessors in `docs/effects.md` rule 8 |
 | `List(T)` | `List(Int)` | `docs/containers.md` |
@@ -60,13 +61,21 @@ Three more exist and **cannot be written in a type position**:
 - `Rounding`, the mode a `mul` or `div` takes. Its values are the bare words `HalfUp`, `HalfEven`
   and `Down`.
 
-And one is **derived rather than written**: `Sealed(T, subject)`, which an event field gets from
+And one is **derived rather than written**: `Sealed(T, Subject)`, which an event field gets from
 `@subject(...)`. `docs/effects.md` rule 12 is the whole of it. `Opt` stays outermost, so
-`String? @subject(x)` is `Opt(Sealed(String, x))`.
+`String? @subject(buyer)` is `Opt(Sealed(String, Customer))`.
 
 **Type equality is exact and structural.** `Decimal(2)` is not `Decimal(3)`, `Money(2)` is not
-`Decimal(2)`, and content sealed under one subject is not content sealed under another. Nothing
-widens, nothing coerces numerically, and there is no subtyping except the one rule in section 3.
+`Decimal(2)`, content sealed under one subject is not content sealed under another, and a `Customer`
+is not a `Shop` however alike their ids look. Nothing widens, nothing coerces numerically, and there
+is no subtyping except the one rule in section 3.
+
+**A subject is nominal to the checker and its scalar to the runtime.** `subject Customer(Int)` makes
+`Customer` a type whose values are customer ids; every position that asks a structural question of
+one (an entity key, an index column, a map key, a partition key, an ordering, the JSON boundary)
+reads through to the `Int`. Arithmetic and methods do not, because they have no row for it, which is
+how "an id is an id and nothing else" costs no rule of its own. `docs/effects.md` rule 12 is the
+whole of it.
 
 ## 2. Synthesis: what an expression's type is
 

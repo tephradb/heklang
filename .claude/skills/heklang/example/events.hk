@@ -1,6 +1,12 @@
 // Every fact this application records. An event is written whole and never changes,
 // so a field with a hole in it would be a different fact.
 
+// A key namespace, declared. Its values are attendee ids, and a field of this type is
+// what `@subject(...)` files a key under: the field could be called `who` and it would
+// still be the same namespace, because the type carries the identity and the name does
+// not.
+subject Attendee(Int)
+
 event @workshop.opened {
   workshop_id: Uuid,
   title: String @max(120),
@@ -11,10 +17,11 @@ event @workshop.opened {
 event @seat.booked {
   workshop_id: Uuid,
   booking_id: Uuid,
-  attendee_id: Int,
-  // `@subject(attendee_id)` makes this Sealed(String, attendee_id): a projector may
-  // store it, only an effect may `reveal` it, and `erase(attendee_id)` makes every
-  // seal filed under that id permanently unreadable.
+  attendee_id: Attendee,
+  // `@subject(attendee_id)` makes this Sealed(String, Attendee): a projector may store
+  // it, only an effect may `reveal` it, and `erase(e.attendee_id)` makes every seal
+  // filed under that id permanently unreadable. The seal carries the *subject*, which is
+  // what a key store files under; the annotation names the sibling field holding the id.
   email: String @subject(attendee_id) @max(200),
   paid: Money(2),
 }
@@ -22,7 +29,7 @@ event @seat.booked {
 event @seat.released {
   workshop_id: Uuid,
   booking_id: Uuid,
-  attendee_id: Int,
+  attendee_id: Attendee,
 }
 
 event @booking.confirmed {

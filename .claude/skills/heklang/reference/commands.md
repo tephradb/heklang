@@ -1,9 +1,11 @@
 # Commands, guards and refusals
 
 ```hek
+subject Customer(Int)
+
 refusal TooManyOpen "too many open orders"
 
-guard UnderOpenOrderLimit(customer_id: Int) {
+guard UnderOpenOrderLimit(customer_id: Customer) {
   fold open: Int = 0
     on @order.placed(customer_id) => open + 1
     on @order.cancelled(customer_id) => open - 1
@@ -13,7 +15,7 @@ guard UnderOpenOrderLimit(customer_id: Int) {
   }
 }
 
-command PlaceOrder(order_id: Uuid, customer_id: Int, email: String, total: Money(2)) {
+command PlaceOrder(order_id: Uuid, customer_id: Customer, email: String, total: Money(2)) {
   guard UnderOpenOrderLimit { customer_id }
 
   emit @order.placed { order_id, customer_id, email, total }
@@ -222,7 +224,7 @@ check stays inline as a `fold` and an `if`, and so does every refusal below it, 
 at the front of the body and would refuse the replay:
 
 ```hek
-command RecordWarrantySale(warranty_id: Uuid, shop_id: Int, premium: Bool) {
+command RecordWarrantySale(warranty_id: Uuid, shop_id: Shop, premium: Bool) {
   guard ShopIsConnected { shop_id }
 
   fold already_sold: Bool = false

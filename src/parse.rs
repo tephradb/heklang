@@ -10,7 +10,7 @@ use crate::ir::{
     EntityField, EnumDef, EnvField, EventDef, EventPath, Expect, Expr, ExprId, Exprs, FieldDef,
     Filter, Function, Given, Guard, Handler, Ident, Index, Iter, Literal, MessagePart, Number,
     Param, Pos, Program, Projector, RecordDef, RecordField, RefusalDef, RefusalParam, ReplySpec,
-    Return, SecretDef, Setup, Slot, Span, Stage, Stmt, Test, Type, UnOp, Update,
+    Return, SecretDef, Setup, Slot, Span, Stage, Stmt, SubjectDef, Test, Type, UnOp, Update,
 };
 use crate::lex::{Keyword, Spanned, Sym, Token, lex};
 use crate::scaled::{self, MAX_SCALE, Rounding};
@@ -76,6 +76,19 @@ pub fn check_files<'a>(
 struct Lower {
     b: Builder,
     defaults: HashMap<ExprId, Number>,
+    /// Literal nodes that resolved against a subject, and which subject.
+    ///
+    /// A `Literal` cannot hold one: it lowers to a `Value`, and a subject id **is** its
+    /// scalar at run time, which is the whole of rule 12's "positional at the edge". So
+    /// the nominal half lives here, beside the `defaults` that records the same kind of
+    /// fact about a number's scale, and `type_of` reads it back.
+    ///
+    /// **Keyed by node rather than decided by shape, and that is the point.** A `const`
+    /// is inlined, so it lowers to an `Expr::Lit` too: asking "is this node a literal?"
+    /// at the write site would let `const N: Int = 7` fill a `Customer`, and a `Shop`
+    /// const fill one as well. Only a literal *token* resolved here, so only a literal
+    /// token is in this map. See `docs/literal-inference.md`.
+    subjects: HashMap<ExprId, Type>,
 }
 
 /// Parsing state that the expression ladder needs but cannot be threaded through it,
@@ -137,6 +150,10 @@ struct Parser {
     /// enum shadows one of these, which is why they are two lists rather than one.
     module_enums: Vec<EnumDef>,
     records: Vec<RecordDef>,
+    /// Every declared key namespace. Collected in pass A beside the enums, because a
+    /// record field in pass B and an event field in pass C may both name one, and
+    /// global rather than module-scoped for the reason `SubjectDef` gives.
+    subjects: Vec<SubjectDef>,
     /// Every const, resolved. Filled on demand by `resolve_const` rather than in
     /// declaration order, because a const may name one declared later.
     consts: Vec<ConstDef>,
@@ -294,6 +311,7 @@ impl Parser {
             entities: Vec::new(),
             module_enums: Vec::new(),
             records: Vec::new(),
+            subjects: Vec::new(),
             consts: Vec::new(),
             shells: Vec::new(),
             pending_absent: Vec::new(),
@@ -622,22 +640,6 @@ impl Parser {
             )
     }
 
-    /// `erase(subject, value)` rather than `erase(value)`: a bare name, then a comma
-    /// that is not the trailing one. The third token is load-bearing, because
-    /// `erase(customer_id,)` is a legal one-argument call and a two-token lookahead
-    /// would reparse it as a malformed two-argument one.
-    fn at_named_subject(&self) -> bool {
-        matches!(self.peek(), Token::Ident(_))
-            && matches!(
-                self.tokens.get(self.pos + 1).map(|spanned| &spanned.token),
-                Some(Token::Sym(Sym::Comma))
-            )
-            && !matches!(
-                self.tokens.get(self.pos + 2).map(|spanned| &spanned.token),
-                Some(Token::Sym(Sym::RParen))
-            )
-    }
-
     /// Closes a call's argument list. The last argument may carry a comma, the way the
     /// last item of every other comma-separated list in the language already may: a
     /// call written across lines gets one from any formatter, and where a comma is
@@ -704,11 +706,16 @@ impl Parser {
     /// const, an event field may name a record, and a body may name anything, so the
     /// boundaries are not arbitrary. See `docs/declarations.md`.
     fn program(&mut self) -> Result<Program, Diagnostic> {
-        // A: enums, and the names of records, so a record field may name a record.
+        // A: enums, subjects, and the names of records, so a record field may name a
+        // record or a subject.
         self.pos = 0;
         let items = self.pos;
         self.sweep(items, |parser| parser.name_item())?;
         self.settled()?;
+
+        // Every `under`, now that every subject name is in. Between A and B rather than
+        // inside A, because a parent may be declared below its child or in another file.
+        self.resolve_subjects()?;
 
         // B: record fields, now that every type they might name has a name.
         let mut index = 0usize;
@@ -764,6 +771,7 @@ impl Parser {
             refusals: self.refusals.clone(),
             enums: self.module_enums.clone(),
             records: self.records.clone(),
+            subjects: self.subjects.clone(),
             consts: self.consts.clone(),
             secrets: self.secrets.clone(),
             functions: bodies.functions,
@@ -867,6 +875,7 @@ impl Parser {
             functions: _,
             module_enums: _,
             records: _,
+            subjects: _,
             consts: _,
             shells: _,
             pending_absent: _,
@@ -925,8 +934,11 @@ impl Parser {
         }
     }
 
-    /// Pass A: enums, and the names of records.
+    /// Pass A: enums, subjects, and the names of records.
     fn name_item(&mut self) -> Result<(), Diagnostic> {
+        if self.at_subject_item() {
+            return self.subject_item();
+        }
         match self.peek() {
             Token::Word(Keyword::Enum) => {
                 let named = self.pos + 1;
@@ -1016,7 +1028,7 @@ impl Parser {
         events: &mut Vec<EventDef>,
         projectors: &mut Vec<Projector>,
     ) -> Result<(), Diagnostic> {
-        if self.at_secret_item() {
+        if self.at_secret_item() || self.at_subject_item() {
             return self.skip_item();
         }
         match self.peek() {
@@ -1068,7 +1080,7 @@ impl Parser {
         projectors: &mut [Projector],
         out: &mut Bodies,
     ) -> Result<(), Diagnostic> {
-        if self.at_secret_item() {
+        if self.at_secret_item() || self.at_subject_item() {
             return self.skip_item();
         }
         match self.peek() {
@@ -1436,6 +1448,7 @@ impl Parser {
         let mut lower = Lower {
             b: Builder::new(&name),
             defaults: HashMap::new(),
+            subjects: HashMap::new(),
         };
         lower.b.in_module(module.as_deref());
 
@@ -1914,6 +1927,183 @@ impl Parser {
             )
     }
 
+    /// Whether the cursor is on a `subject` declaration.
+    ///
+    /// Soft for the reason `secret` is, and claimed on the same two tokens: `@subject`
+    /// is an annotation and lexes apart from this, but a field, parameter or binding
+    /// called `subject` is writable today and stays that way. Two tokens rather than
+    /// also demanding the `(`, so that `subject Customer` with the id type left off is
+    /// still read as this declaration and told what is missing.
+    fn at_subject_item(&self) -> bool {
+        self.at_soft("subject")
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|spanned| &spanned.token),
+                Some(Token::Ident(_))
+            )
+    }
+
+    /// Pass A: one key namespace. `subject Customer(Int) under Shop`.
+    ///
+    /// The parent is stored **unresolved**, because it may be declared below this one or
+    /// in another file; `resolve_subjects` closes that once pass A has seen every name,
+    /// which is the same shape `resolve_absences` and `resolve_const` have.
+    fn subject_item(&mut self) -> Result<(), Diagnostic> {
+        let module = self.module_at(self.pos).map(str::to_string);
+        let named = self.pos + 1;
+        self.bump();
+        let name = self.expect_ident()?;
+
+        self.expect_sym(Sym::LParen)?;
+        let at = self.span_here();
+        let id = self.type_ref()?;
+        // The set is `interp::subject_id`'s, and it is not a matter of taste: a key is
+        // filed under *text*, so an id has to have one canonical form a host can put in
+        // a column and a CLI can take as an argument. `Timestamp` orders and can be an
+        // entity key and is still refused, because a moment is not an identity.
+        if !matches!(id, Type::Int | Type::String | Type::Uuid) {
+            return Err(self
+                .err(
+                    Code::BadType,
+                    format!("a subject's ids cannot be {}", a(&id)),
+                    at,
+                )
+                .with_hint(
+                    "`Int`, `String` and `Uuid` are the three a key can be filed under, because a key store files one under its text",
+                ));
+        }
+        self.expect_sym(Sym::RParen)?;
+
+        let parent = if self.eat_soft("under") {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+
+        if self.subject_def(&name).is_some() {
+            return Err(self.declared_twice(
+                "subject",
+                &name,
+                format!("subject `{name}` is declared twice"),
+                self.token_span(named),
+            ));
+        }
+        // `type_ref` resolves enum, then record, then subject, so a name taken by either
+        // of the first two leaves this declaration unreachable: a field written
+        // `buyer: Customer` gets the record, `@subject(buyer)` then reports that `buyer`
+        // is "a Customer rather than a subject id", and the erase-safety this exists to
+        // add is silently off. Refused rather than shadowed, because a namespace nothing
+        // can name is worse than a name collision.
+        for (kind, taken) in [
+            ("enum", self.enum_def(&name).is_some()),
+            ("record", self.record_def(&name).is_some()),
+        ] {
+            if taken {
+                return Err(self
+                    .err(
+                        Code::DeclaredTwice,
+                        format!(
+                            "`{name}` is already the name of {}",
+                            if kind == "enum" {
+                                "an enum"
+                            } else {
+                                "a record"
+                            }
+                        ),
+                        self.token_span(named),
+                    )
+                    .with_hint(
+                        "a subject is a type, and a type name resolves to one declaration",
+                    ));
+            }
+        }
+        self.declare("subject", &name, named);
+        self.subjects.push(SubjectDef {
+            name,
+            id,
+            parent,
+            module,
+            span: self.token_span(named),
+        });
+        Ok(())
+    }
+
+    /// Every `under` names a declared subject, and the graph they form has no cycle.
+    ///
+    /// Run between pass A and pass B, the first point where every subject name exists.
+    /// One parent each makes the graph a forest, so a cycle is the only failure a walk
+    /// can find, and the graph is over type names so it is finite and static.
+    fn resolve_subjects(&mut self) -> Result<(), Diagnostic> {
+        for index in 0..self.subjects.len() {
+            let Some(parent) = self.subjects[index].parent.clone() else {
+                continue;
+            };
+            let def = &self.subjects[index];
+            let (name, span) = (def.name.clone(), def.span);
+            if self.subject_def(&parent).is_none() {
+                return Err(self
+                    .err(
+                        Code::UnknownType,
+                        format!("`{name}` sits under `{parent}`, which is not a declared subject"),
+                        span,
+                    )
+                    .with_hint(
+                        "a parent is a subject, so that a key can be wrapped under its key",
+                    ));
+            }
+
+            // Walk up from the parent looking for the way back down. Bounded by the
+            // number of declarations, which is what makes this safe without a cap.
+            let mut chain = vec![name.clone()];
+            let mut at = Some(parent);
+            while let Some(step) = at {
+                if step == name {
+                    chain.push(step);
+                    let route = chain.join(" under ");
+                    return Err(self
+                        .err(
+                            Code::BadType,
+                            format!("`{name}` sits under itself: {route}"),
+                            span,
+                        )
+                        .with_hint(
+                            "one hierarchy means one place a delete starts from, and a cycle has none",
+                        ));
+                }
+                if chain.len() > self.subjects.len() {
+                    break;
+                }
+                chain.push(step.clone());
+                at = self
+                    .subject_def(&step)
+                    .and_then(|def| def.parent.as_ref())
+                    .cloned();
+            }
+        }
+        Ok(())
+    }
+
+    fn subject_def(&self, name: &str) -> Option<&SubjectDef> {
+        self.subjects.iter().find(|def| def.name == name)
+    }
+
+    /// A subject's parents, nearest first. [`Program::ancestors`] over the parser's own
+    /// table, for the checks that run before a `Program` exists.
+    fn subject_ancestors(&self, name: &str) -> Vec<&SubjectDef> {
+        let mut chain = Vec::new();
+        let mut at = self.subject_def(name).and_then(|def| def.parent.as_deref());
+        while let Some(parent) = at {
+            let Some(def) = self.subject_def(parent) else {
+                break;
+            };
+            if chain.len() >= self.subjects.len() {
+                break;
+            }
+            chain.push(def);
+            at = def.parent.as_deref();
+        }
+        chain
+    }
+
     /// Pass C0: one deployment credential's name. Unlike a const there is no value to
     /// read and so no second pass to resolve one: a `secret` declares that a deployment
     /// owes this program a credential, and the value never enters the program at all.
@@ -2216,6 +2406,30 @@ impl Parser {
             self.eat_sym(Sym::Question);
             return Ok(());
         }
+        // A fourth. `subject Customer(Int) under Shop` closes at its parent, or at the
+        // `)` when it is a root, so the parens are what has to be stepped over.
+        //
+        // Every step is guarded, because this runs over a declaration that **failed**:
+        // `subject Customer` with the id type left off is a shape `at_subject_item`
+        // claims on purpose so it can say what is missing, and an unguarded
+        // `skip_group` there starts at the next declaration and swallows it whole.
+        if self.at_subject_item() {
+            self.bump();
+            self.bump();
+            if self.at_sym(Sym::LParen) {
+                self.skip_group();
+            }
+            if self.at_soft("under")
+                && matches!(
+                    self.tokens.get(self.pos + 1).map(|spanned| &spanned.token),
+                    Some(Token::Ident(_))
+                )
+            {
+                self.bump();
+                self.bump();
+            }
+            return Ok(());
+        }
         self.bump();
         self.skip_braced()
     }
@@ -2503,7 +2717,12 @@ impl Parser {
         // Every shape below resolves against the inner type, so a bare literal in an
         // optional position reads exactly as it does anywhere else. The wrap happens
         // once, at the end.
-        let target = inner_of(ty);
+        //
+        // `id_shape` first, so a subject resolves a literal as the scalar its ids are:
+        // `Customer(Uuid)` takes the string-is-a-Uuid arm below and `Customer(Int)` takes
+        // the number one, rather than each needing a subject case of its own.
+        let resolved = ty.id_shape();
+        let target = inner_of(&resolved);
 
         let lit = match spanned.token {
             Token::Number(number) => {
@@ -2660,14 +2879,20 @@ impl Parser {
         };
 
         let found = value::literal(&lit).ty();
-        if !fills(&found, ty) {
+        // Against `resolved` as well as `ty`, which is the whole of the literal rule:
+        // most arms above resolved against the scalar a subject's ids are, so that is
+        // what they fill. **`none` is the exception**, and needs `ty`: it is built from
+        // the declared optional's own inner type, so `Customer?` yields an
+        // `Opt(Customer)` rather than the `Opt(Int)` `resolved` describes, and checking
+        // it against the scalar alone reported `a Customer? const cannot be a Customer?`.
+        if !fills(&found, &resolved) && !fills(&found, ty) {
             return Err(self.err(
                 Code::BadLiteral,
                 format!("{} {what} cannot be {}", a(ty), a(&found)),
                 at,
             ));
         }
-        Ok(wrap(lit, &found, ty))
+        Ok(wrap(lit, &found, &resolved))
     }
 
     /// Every enum a name could resolve against here: the projector's own first, then
@@ -2699,6 +2924,7 @@ impl Parser {
         let mut lower = Lower {
             b: Builder::new(projector),
             defaults: HashMap::new(),
+            subjects: HashMap::new(),
         };
 
         let envelope = if self.eat_word(Keyword::As) {
@@ -2981,6 +3207,9 @@ impl Parser {
         self.expect_sym(Sym::LBrace)?;
 
         let mut fields = Vec::new();
+        // Where each `@subject` was written, so `check_subjects` underlines the annotation
+        // rather than the closing brace the cursor has reached by the time it runs.
+        let mut subject_at: Vec<(Ident, Span)> = Vec::new();
         while !self.at_sym(Sym::RBrace) {
             let name = self.expect_ident()?;
             self.expect_sym(Sym::Colon)?;
@@ -3003,6 +3232,7 @@ impl Parser {
                         self.expect_sym(Sym::LParen)?;
                         field = field.subject(self.expect_ident()?);
                         self.expect_sym(Sym::RParen)?;
+                        subject_at.push((name.clone(), mark));
                     }
                     "max" => {
                         let max = self.max_annotation(&field.ty.clone(), &name)?;
@@ -3028,12 +3258,6 @@ impl Parser {
                 self.check_absent(&name, field.subject.as_deref(), field.max_len, value, at)?;
             }
 
-            // Rule 12: the annotation is the authored form and the type is what
-            // propagates from it. Sealed after the annotation loop, so `@max` still
-            // measures the value rather than its wrapper.
-            if let Some(subject) = field.subject.clone() {
-                field.ty = seal(field.ty, subject);
-            }
             fields.push(field);
             if !self.eat_sym(Sym::Comma) {
                 break;
@@ -3042,39 +3266,131 @@ impl Parser {
 
         self.expect_sym(Sym::RBrace)?;
 
-        let def = EventDef::new(path, fields);
-        self.check_subjects(&def)?;
+        let mut def = EventDef::new(path, fields);
+        self.check_subjects(&def, &subject_at)?;
+        seal_subjects(&mut def);
         Ok(def)
     }
 
     /// Rule 12: a subject id is the name a key is filed under, so it has to be a value
     /// that is always there and that does not itself need a key. Checked where the
     /// annotation is written rather than where a `reveal` finds it.
-    fn check_subjects(&self, def: &EventDef) -> Result<(), Diagnostic> {
+    fn check_subjects(&self, def: &EventDef, spans: &[(Ident, Span)]) -> Result<(), Diagnostic> {
         for field in &def.fields {
             let Some(subject) = &field.subject else {
                 continue;
             };
             let name = &field.name;
+            // The annotation, which is what an author has to change. Without it these
+            // land on the closing brace: the cursor is past the body by the time this
+            // runs, and pointing at the whole declaration is what hekla's copy of the
+            // ancestry check will do. Being able to point at the line is the reason
+            // heklang keeps a copy at all.
+            let at = spans
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, at)| *at)
+                .unwrap_or_default();
             let Some(id) = def.field(subject) else {
-                return self.fail(
+                return Err(self.err(
                     Code::BadAnnotation,
                     format!(
                         "`@subject({subject})` on `{name}` names no field of {}",
                         def.path
                     ),
-                );
+                    at,
+                ));
             };
             if id.subject.is_some() {
-                return self.fail_hint(
-                    Code::BadAnnotation,
-                    format!("`@subject({subject})` on `{name}` names a subject-encrypted field"),
-                    "a subject id is the name a key is filed under, so it cannot need a key itself",
-                );
+                return Err(self
+                    .err(
+                        Code::BadAnnotation,
+                        format!("`@subject({subject})` on `{name}` names a subject-encrypted field"),
+                        at,
+                    )
+                    .with_hint("a subject id is the name a key is filed under, so it cannot need a key itself"));
             }
             if matches!(id.ty, Type::Opt(_)) {
-                return self.fail_hint(Code::BadAnnotation, format!("`@subject({subject})` on `{name}` names an optional field"), "a subject id is the name a key is filed under, so a missing one is not `no key`, it is no question at all");
+                return Err(self
+                    .err(
+                        Code::BadAnnotation,
+                        format!("`@subject({subject})` on `{name}` names an optional field"),
+                        at,
+                    )
+                    .with_hint("a subject id is the name a key is filed under, so a missing one is not `no key`, it is no question at all"));
             }
+            // The check that could not exist before, and the one that closes the
+            // wrong-namespace hole at the declaration rather than at the `erase`. A
+            // subject is a declared type now, so "which key namespace is this" is a
+            // question the field's type answers instead of one a spelling implied.
+            let Type::Subject(sub) = &id.ty else {
+                return Err(self
+                    .err(
+                        Code::BadAnnotation,
+                        format!(
+                            "`@subject({subject})` on `{name}` names `{subject}`, which is {} rather than a subject id",
+                            a(&id.ty)
+                        ),
+                        at,
+                    )
+                    .with_hint("declare the namespace and give the id field its type, so that the field's type says which keys it names: `subject Customer(Int)`, then `buyer: Customer`"));
+            };
+            self.check_ancestry(def, name, &sub.name, at)?;
+        }
+        Ok(())
+    }
+
+    /// Every ancestor of a sealed field's subject is on the event, in plaintext.
+    ///
+    /// This is hekla's constraint and it is not avoidable: minting customer 88's key
+    /// wraps it inside shop 7's key at that moment, and the only place the runtime can
+    /// learn "7" is the event in front of it. Without this it meets an event it cannot
+    /// file a key under, at write time.
+    ///
+    /// **Transitive, not the immediate parent.** Under `Customer under Shop under
+    /// Marketplace`, minting the customer's key needs the shop's *secret*, which lives
+    /// in the shop's row; if that row is not there yet the runtime has to mint it too,
+    /// and minting it needs the marketplace id. At depth one the two rules coincide,
+    /// which is why the shorter one reads correct.
+    ///
+    /// The trigger is a **sealed field**, never a subject-typed one: an event that
+    /// carries a `Customer` and seals nothing mints no key and needs no parent. That is
+    /// what keeps this from spreading to every event that merely mentions one.
+    fn check_ancestry(
+        &self,
+        def: &EventDef,
+        sealed: &Ident,
+        subject: &str,
+        at: Span,
+    ) -> Result<(), Diagnostic> {
+        let ancestry = self.subject_ancestors(subject);
+        for ancestor in &ancestry {
+            let carried = def.fields.iter().any(|field| {
+                field.subject.is_none()
+                    && matches!(&field.ty, Type::Subject(sub) if sub.name == ancestor.name)
+            });
+            if carried {
+                continue;
+            }
+            // The whole chain, so the rule teaches itself where it is broken rather
+            // than naming one type the author never wrote on this event. Off the walk
+            // already taken rather than a second one, so the two cannot disagree.
+            let chain = ancestry
+                .iter()
+                .map(|def| format!("under `{}`", def.name))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let ancestor = &ancestor.name;
+            return Err(self
+                .err(
+                    Code::BadAnnotation,
+                    format!(
+                        "{} seals `{sealed}` under `{subject}`, which sits {chain}, but carries no `{ancestor}` field",
+                        def.path
+                    ),
+                    at,
+                )
+                .with_hint("a child's key is wrapped under its parent's, so every ancestor's id has to be on the event the key is minted from; it cannot be optional and cannot itself be sealed"));
         }
         Ok(())
     }
@@ -3144,13 +3460,18 @@ impl Parser {
                 Some(def) => Type::Enum(def.name.clone()),
                 None => match self.record_def(other) {
                     Some(def) => Type::Record(def.name.clone()),
-                    None => {
-                        return Err(self.err(
-                            Code::UnknownType,
-                            format!("unknown type `{other}`"),
-                            named,
-                        ));
-                    }
+                    // A subject's ids, spelled by the subject's own name. The `(Int)`
+                    // belongs to the declaration, so a use site never repeats it.
+                    None => match self.subject_def(other) {
+                        Some(def) => Type::subject_ty(def.name.clone(), def.id.clone()),
+                        None => {
+                            return Err(self.err(
+                                Code::UnknownType,
+                                format!("unknown type `{other}`"),
+                                named,
+                            ));
+                        }
+                    },
                 },
             },
         };
@@ -3168,6 +3489,7 @@ impl Parser {
         let mut lower = Lower {
             b: Builder::new(&name),
             defaults: HashMap::new(),
+            subjects: HashMap::new(),
         };
         lower.b.in_module(module.as_deref());
         self.decl_params(&mut lower)?;
@@ -3186,6 +3508,7 @@ impl Parser {
         let mut lower = Lower {
             b: Builder::new(&name),
             defaults: HashMap::new(),
+            subjects: HashMap::new(),
         };
         lower.b.in_module(module.as_deref());
         self.decl_params(&mut lower)?;
@@ -3871,6 +4194,7 @@ impl Parser {
         let mut lower = Lower {
             b: Builder::new(name.clone()),
             defaults: HashMap::new(),
+            subjects: HashMap::new(),
         };
         lower.b.in_module(module.as_deref());
         self.expect_sym(Sym::LBrace)?;
@@ -4048,9 +4372,75 @@ impl Parser {
     fn erased_decl(&mut self, lower: &mut Lower) -> Result<Setup, Diagnostic> {
         let span = self.span_here();
         self.bump();
-        let subject = self.expect_ident()?;
+        let at = self.span_here();
+        let subject = self.expect_subject_name()?;
         let id = self.expr(lower, Some(Type::String))?;
+        self.check_subject_id(lower, &subject, id, at);
         Ok(Setup::Erased { subject, id, span })
+    }
+
+    /// A declared subject, by name, for the two places in the test language that name a
+    /// **key row** rather than a value: `erased Customer "7"` and
+    /// `expect erase(Customer, "7")`.
+    ///
+    /// The statement takes one argument now and these still take a name and a text id,
+    /// which is deliberate: what a test states is what the key store was asked to do,
+    /// and that is a namespace and the id as a host files it, the same pair
+    /// `hekla erase Customer 7` takes on a command line.
+    fn expect_subject_name(&mut self) -> Result<Ident, Diagnostic> {
+        let at = self.span_here();
+        let name = self.expect_ident()?;
+        if self.subject_def(&name).is_none() {
+            return Err(self
+                .err(
+                    Code::EraseSubject,
+                    format!("`{name}` is not a declared subject"),
+                    at,
+                )
+                .with_hint("a key is filed under a subject, so there is nothing to erase under a name that declares none"));
+        }
+        Ok(name)
+    }
+
+    /// The text id these two name a key row with, checked against the subject's declared
+    /// id type when it is written as a literal.
+    ///
+    /// Without it an id of the wrong shape is a **silent no-op**: `erased Person "7"`
+    /// where `Person(Uuid)` files nothing under the key `seal` will later look for, so
+    /// the setup does nothing, the test takes the un-erased path, and it passes for the
+    /// wrong reason. A test that quietly stops testing what it says it tests is the one
+    /// failure a test suite cannot have.
+    ///
+    /// Only a literal is checked. The id is an ordinary expression, so it may be a
+    /// `const` or an interpolation, and this skips what it cannot see the way every
+    /// other check here skips an unknown type rather than guessing.
+    fn check_subject_id(&self, lower: &Lower, subject: &str, id: ExprId, at: Span) {
+        let Some(Expr::Lit(Literal::Str(text))) = lower.b.exprs().get(id) else {
+            return;
+        };
+        let Some(def) = self.subject_def(subject) else {
+            return;
+        };
+        let fits = match &def.id {
+            Type::Int => text.parse::<i64>().is_ok(),
+            Type::Uuid => uuid::Uuid::parse_str(text).is_ok(),
+            _ => true,
+        };
+        if !fits {
+            self.note(
+                self.err(
+                    Code::EraseSubject,
+                    format!(
+                        "`{subject}` files its keys under {}, and {text:?} is not one",
+                        a(&def.id)
+                    ),
+                    at,
+                )
+                .with_hint(
+                    "a key row is found by this text, so an id of another shape erases nothing at all",
+                ),
+            );
+        }
     }
 
     /// A `{ ... }` in body position, which is where an object literal is claimed.
@@ -4397,10 +4787,12 @@ impl Parser {
         }
         if self.eat_soft("erase") {
             self.expect_sym(Sym::LParen)?;
-            let subject = self.expect_ident()?;
+            let at = self.span_here();
+            let subject = self.expect_subject_name()?;
             self.expect_sym(Sym::Comma)?;
             let id = self.expr(lower, Some(Type::String))?;
             self.end_args()?;
+            self.check_subject_id(lower, &subject, id, at);
             return Ok(Expect::Erase { subject, id, span });
         }
         if self.eat_soft("log") {
@@ -4944,7 +5336,7 @@ impl Parser {
                 )
             }
             Token::Ident(name) if self.starts_effect_statement(name) => {
-                self.effect_statement(lower, events)
+                self.effect_statement(lower)
             }
             Token::Ident(name) if self.starts_void_call(name) => self.void_call(lower),
             other => self.fail(
@@ -5401,7 +5793,12 @@ impl Parser {
             // There is no Uuid literal token, so the target type is what makes a string
             // one (`docs/declarations.md`). The same rule a `const` and an entity default
             // already followed, which is where it used to stop.
-            Token::Text(text) if matches!(expect.as_ref().map(inner_of), Some(Type::Uuid)) => {
+            //
+            // `id_shape` as well as `inner_of`, so a subject whose ids are `Uuid` takes a
+            // written one: `subject Person(Uuid)` is the case that otherwise had no
+            // literal at all, since a `Person` position reached neither this arm nor the
+            // `Str` fallback's type.
+            Token::Text(text) if self.literal_target(&expect, &Type::Uuid) => {
                 if uuid::Uuid::parse_str(&text).is_err() {
                     return Err(self.err(
                         Code::BadLiteral,
@@ -5409,14 +5806,23 @@ impl Parser {
                         span,
                     ));
                 }
-                Ok(lower.b.lit(Literal::Uuid(text.into())))
+                let id = lower.b.lit(Literal::Uuid(text.into()));
+                self.note_expected_subject(lower, id, &expect);
+                Ok(id)
             }
             // The same rule for a `Timestamp`, in the expression half of it.
-            Token::Text(text) if matches!(expect.as_ref().map(inner_of), Some(Type::Timestamp)) => {
+            Token::Text(text) if self.literal_target(&expect, &Type::Timestamp) => {
                 let Some(micros) = value::timestamp(&text) else {
                     return Err(self.advised(Code::BadLiteral, not_a_timestamp(&text), span));
                 };
                 Ok(lower.b.lit(Literal::Timestamp(micros)))
+            }
+            // A `String` subject's ids are written as plain strings, so the fallback
+            // below builds the right literal and this is only the nominal half.
+            Token::Text(text) if self.literal_target(&expect, &Type::String) => {
+                let id = lower.b.lit(Literal::Str(text.into()));
+                self.note_expected_subject(lower, id, &expect);
+                Ok(id)
             }
             Token::Text(text) => Ok(lower.b.lit(Literal::Str(text.into()))),
             Token::Word(Keyword::True) => Ok(lower.b.bool(true)),
@@ -5559,8 +5965,14 @@ impl Parser {
                     return self.record_literal(lower, name, span);
                 }
                 if let Some(def) = self.const_def(&name) {
-                    let value = def.value.clone();
-                    return Ok(lower.b.lit(value));
+                    let (value, ty) = (def.value.clone(), def.ty.clone());
+                    let id = lower.b.lit(value);
+                    // A `const` is inlined, so what lands here is a literal node holding
+                    // the scalar. Its **declared** type is what says which subject it is,
+                    // and carrying that through is what keeps `const HOUSE: Customer = 1`
+                    // usable while `const N: Int = 7` stays refused at the same position.
+                    self.note_subject(lower, id, &ty);
+                    return Ok(id);
                 }
                 if let Some(def) = self.secret_def(&name) {
                     let optional = def.optional;
@@ -5670,9 +6082,14 @@ impl Parser {
         // is the encrypting direction, which rule 12 says needs no ceremony. Without it
         // a sealed numeric column never received its declared type, so the literal
         // defaulted to `Decimal` and then failed to fill the field it was written into.
+        //
+        // `as_scalar` too, and for a third reading of the same sentence: a subject is
+        // transparent to a literal, so `buyer: 7` resolves against `Customer(Int)` as an
+        // `Int`. A *name* of type `Int` still cannot fill that position, which is the
+        // whole point and is `fills`' business rather than this one's.
         let target = expect.filter(|ty| {
             matches!(
-                inner_of(ty).peeled(),
+                inner_of(ty).peeled().as_scalar(),
                 Type::Int | Type::Decimal(_) | Type::Money(_)
             )
         });
@@ -5690,7 +6107,42 @@ impl Parser {
         if defaulted {
             lower.defaults.insert(id, number);
         }
+        // `Number::resolve` read the subject through to the scalar its ids are, so the
+        // node holds an `Int` and this is what remembers it was written as a `Customer`.
+        // Recorded here, where a literal *token* was read, rather than inferred later
+        // from the node's shape: an inlined `const` is a literal node too.
+        self.note_subject(lower, id, &ty);
         Ok(id)
+    }
+
+    /// Whether a literal written here resolves against `want`, reading an optional and a
+    /// subject through. One place, so the `Uuid`, `Timestamp` and `String` arms above
+    /// cannot drift apart about which targets a written string may take.
+    fn literal_target(&self, expect: &Option<Type>, want: &Type) -> bool {
+        matches!(expect.as_ref().map(|ty| inner_of(ty).as_scalar()), Some(found) if found == want)
+    }
+
+    /// [`Parser::note_subject`] against a declared position rather than a resolved type,
+    /// for the arms that build their literal straight from the token.
+    fn note_expected_subject(&self, lower: &mut Lower, id: ExprId, expect: &Option<Type>) {
+        let Some(ty) = expect.as_ref().map(inner_of) else {
+            return;
+        };
+        let ty = ty.clone();
+        self.note_subject(lower, id, &ty);
+    }
+
+    /// Remembers that a literal node resolved against a subject, so [`Parser::type_of`]
+    /// answers with the subject rather than with the scalar underneath it.
+    ///
+    /// This is what makes a literal fill a subject position without any position having
+    /// to learn a coercion rule: `fills` sees `Customer` against `Customer` and needs no
+    /// second chance, and the comparison table, the lift and every declared position all
+    /// go on asking exactly what they asked before.
+    fn note_subject(&self, lower: &mut Lower, id: ExprId, ty: &Type) {
+        if matches!(ty, Type::Subject(_)) {
+            lower.subjects.insert(id, ty.clone());
+        }
     }
 
     fn hint_from(&self, lower: &Lower, id: ExprId) -> Option<Type> {
@@ -5737,6 +6189,12 @@ impl Parser {
         if let Ok(lit) = number.resolve(inner_of(ty)) {
             lower.b.patch(id, Expr::Lit(lit));
             lower.defaults.remove(&id);
+            // The nominal half, for the same reason `number` records it: this is the
+            // path a literal written *before* its neighbour's type was known takes, so
+            // without it `7 == buyer` kept the `Int` it defaulted to while `buyer == 7`
+            // resolved, and a comparison answered differently by direction.
+            let ty = inner_of(ty).clone();
+            self.note_subject(lower, id, &ty);
         }
     }
 
@@ -5773,7 +6231,13 @@ impl Parser {
     /// expression's type is only decided at run time, which most of them are.
     fn type_of(&self, lower: &Lower, id: ExprId) -> Option<Type> {
         match lower.b.exprs().get(id)? {
-            Expr::Lit(lit) => Some(value::literal(lit).ty()),
+            // A literal that resolved against a subject answers with it. The node holds
+            // the scalar, because that is what a subject id is at run time, and
+            // `Lower::subjects` is where the nominal half was kept.
+            Expr::Lit(lit) => Some(match lower.subjects.get(&id) {
+                Some(subject) => subject.clone(),
+                None => value::literal(lit).ty(),
+            }),
             Expr::Load(slot) => lower.b.slot_type(*slot).cloned(),
             // `!` answers Bool whatever it was handed. Passing the operand's type through
             // was what made `if !id` fail with "found Int": right answer, wrong reason,
@@ -6264,6 +6728,7 @@ impl Parser {
         let mut lower = Lower {
             b: Builder::new(effect),
             defaults: HashMap::new(),
+            subjects: HashMap::new(),
         };
 
         let envelope = if self.eat_word(Keyword::As) {
@@ -6467,11 +6932,7 @@ impl Parser {
         }
     }
 
-    fn effect_statement(
-        &mut self,
-        lower: &mut Lower,
-        events: &[EventDef],
-    ) -> Result<Stmt, Diagnostic> {
+    fn effect_statement(&mut self, lower: &mut Lower) -> Result<Stmt, Diagnostic> {
         let span = self.span_here();
         let Token::Ident(name) = self.peek().clone() else {
             return self.fail(Code::ExpectedToken, "expected a statement");
@@ -6535,60 +6996,28 @@ impl Parser {
                 self.bump();
                 self.expect_sym(Sym::LParen)?;
 
-                // Naming the subject is what a value the parser cannot trace back to a
-                // field needs, and it is the spelling `docs/testing.md` already uses
-                // for the matching expectation.
-                let named = if self.at_named_subject() {
-                    let name = self.expect_ident()?;
-                    self.expect_sym(Sym::Comma)?;
-                    Some(name)
-                } else {
-                    None
-                };
-
                 let at = self.span_here();
                 let value = self.expr(lower, None)?;
                 self.end_args()?;
 
-                let subject = match named {
-                    Some(name) => {
-                        self.check_named_subject(lower, &name, value, at)?;
-                        name
-                    }
-                    // Without a name the subject has to be recovered, and only a
-                    // trigger field carries one. Rule 12's fold path does not apply:
-                    // it tracks the subject of a *value*, and this is the id itself.
-                    None => {
-                        let Some(subject) = self.trigger_field(lower, value) else {
-                            return Err(self.err(Code::EraseSubject,
-                                "`erase` takes a field of the triggering event, like `e.customer_id`, or names its subject: `erase(customer_id, id)`"
-                                    .to_string(),
-                                at,
-                            ));
-                        };
-                        subject
-                    }
-                };
-
-                let Some(field) = subject_field(events, &subject) else {
-                    return Err(self.err(Code::EraseSubject, format!("nothing is scoped to `{subject}`, so there is no key to erase"), at).with_hint("`erase` takes the subject id that a field is declared `@subject(...)` of"));
-                };
-                // The declared type of the field the key is filed under. Skipped when
-                // the value's type is unknown, the way every other optional check here
-                // is skipped rather than guessed.
-                if let Some(found) = self.type_of(lower, value)
-                    && &found != field
-                {
-                    return Err(self.err(
-                        Code::EraseSubject,
-                        format!(
-                            "`{subject}` files its keys under {}, so `erase` cannot take {}",
-                            a(field),
-                            a(&found)
-                        ),
-                        at,
+                // One argument, because the value's **type** names the namespace. This
+                // used to be two forms: one that recovered the subject from the field a
+                // slot was loaded from, and one that let the author assert a name the
+                // language could not check. Both are gone. A subject is a declared type
+                // now, so `erase(id)` says which keys it destroys and `erase(e.shop)`
+                // cannot be the customer's by accident.
+                let found = self.type_of(lower, value);
+                let Some(Type::Subject(sub)) = found.as_ref() else {
+                    let what = match &found {
+                        Some(ty) => format!("`erase` takes a subject id, and this is {}", a(ty)),
+                        None => "`erase` takes a subject id".to_string(),
+                    };
+                    return Err(self.err(Code::EraseSubject, what, at).with_hint(
+                        "declare the namespace and give the id its type: `subject Customer(Int)`, then `erase(e.buyer)` erases exactly that customer's key",
                     ));
-                }
+                };
+                let subject = sub.name.clone();
+                self.check_erased_id(lower, &subject, value, at)?;
                 Ok(Stmt::Erase {
                     subject,
                     value,
@@ -6603,11 +7032,15 @@ impl Parser {
         }
     }
 
-    /// Rule 9's second rule, which only the named form can reach: an id learned by
-    /// revealing must not be erased, because a repeat request for an already-erased
-    /// subject then cannot be read at all. The inferring form cannot reach it, since a
-    /// `reveal` is not a trigger field load.
-    fn check_named_subject(
+    /// Rule 9's second rule: an id learned by revealing must not be erased, because a
+    /// repeat request for an already-erased subject then cannot be read at all.
+    ///
+    /// It used to be reachable only from the two-argument form, since a `reveal` is not
+    /// a trigger field load and the one-argument form recovered its subject from one.
+    /// With the subject in the type it is reachable from the only form there is: a
+    /// sealed field may itself hold a subject id (`former: Customer @subject(buyer)`),
+    /// so `erase(reveal(e.former))` is well-typed and still has to be refused.
+    fn check_erased_id(
         &self,
         lower: &Lower,
         subject: &str,
@@ -6619,7 +7052,7 @@ impl Parser {
                 .err(
                     Code::EraseOrder,
                     format!(
-                        "this id was learned by revealing, so `erase({subject}, ...)` would make a repeat request for an erased subject unreadable"
+                        "this id was learned by revealing, so erasing `{subject}` with it would make a repeat request for an erased subject unreadable"
                     ),
                     at,
                 )
@@ -7132,23 +7565,6 @@ impl Parser {
 
         lower.b.at(span);
         Ok(lower.b.expr(Expr::Reveal { value, ty: held }))
-    }
-
-    /// The triggering event's field this expression loads, if it is one. The only
-    /// caller left is `erase`'s inferring form: a subject **id** is plaintext, so no
-    /// type says which key namespace it names and the field it was bound from is the
-    /// only place to recover that. See `docs/effects.md` rule 9.
-    fn trigger_field(&self, lower: &Lower, value: ExprId) -> Option<Ident> {
-        // A narrowed load is still that load: proving a value present says nothing
-        // about where it came from.
-        let value = match lower.b.exprs().get(value) {
-            Some(Expr::Unwrap(inner)) => *inner,
-            _ => value,
-        };
-        let Some(Expr::Load(slot)) = lower.b.exprs().get(value) else {
-            return None;
-        };
-        lower.b.bound_field(*slot).map(str::to_string)
     }
 
     /// `TextOpen`, then a hole, then a `TextPart` before each further hole, then
@@ -8797,7 +9213,7 @@ fn holds_secret(ty: &Type) -> bool {
 }
 
 /// The frame slot an expression loads, if it is exactly a load. A narrowed load is
-/// still that load, the same reason `trigger_field` peels one.
+/// still that load, the same reason a `reveal` check peels one.
 fn loaded_slot(exprs: &Exprs, value: ExprId) -> Option<Slot> {
     let value = match exprs.get(value) {
         Some(Expr::Unwrap(inner)) => *inner,
@@ -8813,7 +9229,8 @@ fn loaded_slot(exprs: &Exprs, value: ExprId) -> Option<Slot> {
 /// handler's binds carry every field it reads, destructured or reached through the
 /// envelope binding, so both spellings resolve the same way.
 fn loaded_field(handler: &Handler, value: ExprId) -> Option<&str> {
-    // A narrowed load is still that load, the same reason `trigger_field` peels one.
+    // A narrowed load is still that load: proving a value present says nothing about
+    // where it came from.
     let value = match handler.exprs.get(value) {
         Some(Expr::Unwrap(inner)) => *inner,
         _ => value,
@@ -9138,23 +9555,30 @@ fn scan(exprs: &Exprs, stmts: &[Stmt], incoming: Option<Span>) -> Result<Reach, 
     })
 }
 
-/// The declared type of the field a subject files its keys under. `@subject(x)` must
-/// name a field of the same event, so the event carrying the annotation carries `x`
-/// too; absent when nothing is scoped to the name at all.
-fn subject_field<'a>(events: &'a [EventDef], subject: &str) -> Option<&'a Type> {
-    events
+/// Rule 12: the annotation is the authored form and the type is what propagates from it.
+///
+/// After the field loop rather than inside it, for two reasons. `@max` still measures the
+/// value rather than its wrapper, which is why it was after the *annotation* loop before.
+/// And the seal now carries the **subject's** name, which is read off the id field's
+/// type, so `@subject(buyer)` has to work whether `buyer` was declared above this field
+/// or below it. Runs after `check_subjects`, so every lookup here already held.
+fn seal_subjects(def: &mut EventDef) {
+    let sealed: Vec<(usize, Ident)> = def
+        .fields
         .iter()
-        .filter(|def| {
-            def.fields
-                .iter()
-                .any(|field| field.subject.as_deref() == Some(subject))
+        .enumerate()
+        .filter_map(|(index, field)| {
+            let id = def.field(field.subject.as_deref()?)?;
+            let Type::Subject(sub) = &id.ty else {
+                return None;
+            };
+            Some((index, sub.name.clone()))
         })
-        .find_map(|def| {
-            def.fields
-                .iter()
-                .find(|field| field.name == subject)
-                .map(|field| &field.ty)
-        })
+        .collect();
+    for (index, subject) in sealed {
+        let field = &mut def.fields[index];
+        field.ty = seal(field.ty.clone(), subject);
+    }
 }
 
 /// The first `reveal` anywhere in one expression, by span. The statement-level

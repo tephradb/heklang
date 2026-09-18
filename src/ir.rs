@@ -82,6 +82,24 @@ pub enum Type {
     Money(u8),
     Enum(Ident),
     Record(Ident),
+    /// A declared subject's ids: `subject Customer(Int)` makes `Customer` a type whose
+    /// values are customer ids. Nominal to the checker and structural to the runtime,
+    /// which is `docs/effects.md` rule 12's "nominal inside, positional at the edge"
+    /// made structural: a `Customer` *is* a [`Value::Int`](crate::value::Value::Int) at
+    /// run time, so there is no tag for a boundary to fabricate and nothing to believe.
+    ///
+    /// `id` rides here rather than being looked up from `Program::subjects` the way
+    /// [`Type::Enum`] looks up its variants, because every structural question about a
+    /// type is asked where no `Defs` is in hand: `has_type`, `same_unsealed` and
+    /// `types::comparable` are all on the write path.
+    ///
+    /// Behind an `Arc` for one reason and it is measurable: `Type` is 32 bytes, and it is
+    /// 32 because the tag rides in a niche that the largest variant leaves. A second
+    /// variant holding a name *and* a pointer exhausts that niche and every `Type` in the
+    /// program grows to 40, which carried `interp::Error` from 120 bytes to 136 and past
+    /// the point clippy calls a `Result` too large to return. One pointer keeps the niche,
+    /// and a clone becomes a refcount bump rather than a `String` copy.
+    Subject(Arc<SubjectTy>),
     Rounding,
     Json,
     Response,
@@ -91,10 +109,16 @@ pub enum Type {
     /// key is restricted to, which is where sorted iteration comes from.
     Map(Box<Type>, Box<Type>),
     Opt(Box<Type>),
-    /// Content behind the decrypt boundary, and the subject field its key is filed
-    /// under. Built from `@subject(...)` on an event field and nowhere else: it is not
+    /// Content behind the decrypt boundary, and the **subject** its key is filed under.
+    /// Built from `@subject(...)` on an event field and nowhere else: it is not
     /// spellable, so an author writes the annotation and the type is derived. `Opt` is
-    /// always outermost, so `String? @subject(x)` is `Opt(Sealed(String, x))`.
+    /// always outermost, so `String? @subject(buyer)` is `Opt(Sealed(String, Customer))`.
+    ///
+    /// The `Ident` is the **subject's declared name**, not the field the annotation
+    /// named. That is what a host files a key under and what crosses the seam as
+    /// [`Value::Sealed::subject`](crate::value::Value::Sealed); the field name stays on
+    /// [`FieldDef::subject`], which is where `interp::seal` reads it to find the id in
+    /// the sibling field. The annotation is local to one declaration, the type is not.
     /// See `docs/effects.md` rule 12.
     Sealed(Box<Type>, Ident),
     /// A deployment credential: what a `secret` declaration reads as. Spellable in a
@@ -119,6 +143,46 @@ impl Type {
 
     pub fn sealed(inner: Type, subject: impl Into<Ident>) -> Self {
         Type::Sealed(Box::new(inner), subject.into())
+    }
+
+    pub fn subject_ty(name: impl Into<Ident>, id: Type) -> Self {
+        Type::Subject(Arc::new(SubjectTy {
+            name: name.into(),
+            id,
+        }))
+    }
+
+    /// This type with a subject read through to the scalar its ids are, and every other
+    /// type unchanged. What the runtime sees: a `Customer` is an `Int`, and a
+    /// `List(Customer)` is a list of them.
+    ///
+    /// One level deep on purpose. Every caller is a structural question about a position
+    /// (`can_key`, `zero`, `read_json`, an ordering), and each of those recurses on its
+    /// own already.
+    pub fn as_scalar(&self) -> &Type {
+        match self {
+            Type::Subject(sub) => &sub.id,
+            other => other,
+        }
+    }
+
+    /// The shape a **literal** written at this position resolves against: a subject read
+    /// through to the scalar its ids are, under any optional.
+    ///
+    /// `Customer` is `Int` and `Customer?` is `Int?`, so `buyer: 7` reads as a customer
+    /// id by the same rule that makes `total: 25.99` read as money. This is the only
+    /// place a bare scalar reaches a subject position, and it is deliberately about the
+    /// literal rather than about the types: a literal token carries no identity of its
+    /// own to launder, and a *name* does. See `docs/literal-inference.md`.
+    ///
+    /// Through `Opt` and no further. A `List(Customer)` is written as a list of literals
+    /// and each element resolves against `Customer` on its own.
+    pub fn id_shape(&self) -> Type {
+        match self {
+            Type::Subject(sub) => sub.id.clone(),
+            Type::Opt(inner) => Type::opt(inner.id_shape()),
+            other => other.clone(),
+        }
     }
 
     /// The subject this type's content is filed under, looking through `Opt` because
@@ -154,7 +218,11 @@ impl Type {
             (Type::Map(one_key, one_value), Type::Map(two_key, two_value)) => {
                 one_key.same_unsealed(two_key) && one_value.same_unsealed(two_value)
             }
-            (one, two) => one == two,
+            // `as_scalar` for the same reason `peeled` is above: a subject is nominal to
+            // the checker and an ordinary scalar to the runtime, and this question is the
+            // runtime's. A `Value::Opt` holding an `Int` where a `Customer?` is declared
+            // is that customer's id, not a shape mismatch.
+            (one, two) => one.as_scalar() == two.as_scalar(),
         }
     }
 
@@ -183,6 +251,9 @@ impl fmt::Display for Type {
             Type::Timestamp => f.write_str("Timestamp"),
             Type::Money(scale) => write!(f, "Money({scale})"),
             Type::Enum(name) | Type::Record(name) => f.write_str(name),
+            // The name alone, which is the whole of how one is spelled at a use site.
+            // `(Int)` belongs to the declaration.
+            Type::Subject(sub) => f.write_str(&sub.name),
             Type::Rounding => f.write_str("Rounding"),
             Type::Json => f.write_str("Json"),
             Type::Response => f.write_str("Response"),
@@ -235,6 +306,10 @@ pub struct Program {
     /// Module scope, shadowed inside a projector by one of its own.
     pub enums: Vec<EnumDef>,
     pub records: Vec<RecordDef>,
+    /// Key namespaces, in declaration order. Global rather than module-scoped: a
+    /// module-local subject would put back the two-spellings-one-person defect the
+    /// declaration exists to remove. See `docs/effects.md` rule 12.
+    pub subjects: Vec<SubjectDef>,
     pub consts: Vec<ConstDef>,
     /// Deployment credentials, in declaration order. See `docs/effects.md` rule 16.
     pub secrets: Vec<SecretDef>,
@@ -272,6 +347,10 @@ impl Program {
 
     pub fn record(&self, name: &str) -> Option<&RecordDef> {
         self.records.iter().find(|def| def.name == name)
+    }
+
+    pub fn subject(&self, name: &str) -> Option<&SubjectDef> {
+        self.subjects.iter().find(|def| def.name == name)
     }
 
     pub fn constant(&self, name: &str) -> Option<&ConstDef> {
@@ -381,6 +460,40 @@ pub struct SecretDef {
     /// declares an unresolved credential is most of what makes that report actionable.
     /// Nothing in heklang reports about a `secret` after the passes, so no diagnostic
     /// here needs it.
+    pub span: Span,
+}
+
+/// What a [`Type::Subject`] holds: the subject's declared name and the scalar its ids
+/// are. The parent is deliberately **not** here: a parent is a property of the
+/// declaration rather than of the type, so `Type` equality does not compare one and
+/// adding or removing a parent moves no type's digest. [`SubjectDef`] is where it lives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubjectTy {
+    pub name: Ident,
+    /// `Int`, `String` or `Uuid`, which is what a key can be filed under.
+    pub id: Type,
+}
+
+/// A subject: a key namespace with a name, a type for its ids, and at most one parent.
+///
+/// It exists so that the namespace is *declared* rather than conjured by writing a field
+/// name. Before this, a subject was resolved by scanning every event for a field of that
+/// name, so `owner_id` on two unrelated events was one key row and `customer_id` against
+/// `cust_id` were two different people, with nothing saying either. See
+/// `docs/effects.md` rule 12.
+#[derive(Debug, Clone)]
+pub struct SubjectDef {
+    pub name: Ident,
+    /// `Int`, `String` or `Uuid`. The set is `interp::subject_id`'s, because a key is
+    /// filed under text and those are the three with one canonical form to file it as.
+    pub id: Type,
+    /// `under Parent`. A child's key is wrapped under its parent's, so deleting the
+    /// parent makes every key beneath it unwrappable in one row delete.
+    ///
+    /// **One parent, forever.** A subject reachable by two routes would have two answers
+    /// to "is this erased", and a delete would have two places to start from.
+    pub parent: Option<Ident>,
+    pub module: Option<Ident>,
     pub span: Span,
 }
 
@@ -1194,7 +1307,9 @@ impl Number {
         // `Money(2) @subject(shop_id)` field is the encrypting direction, which rule 12
         // says needs no ceremony, and the scale being resolved against is the
         // content's rather than the seal's.
-        let ty = &ty.unsealed();
+        // And a subject is transparent to one too: `Customer(Int)` resolves a number
+        // exactly as `Int` does, which is what makes `buyer: 7` writable.
+        let ty = &ty.unsealed().id_shape();
         let target = match ty {
             Type::Int => 0,
             Type::Decimal(scale) | Type::Money(scale) => *scale,

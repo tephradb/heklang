@@ -5,11 +5,12 @@ use std::fs;
 
 use heklang::{Interpreter, Value, parse, parse_files};
 
-const EVENTS: &str = "event @order.placed { order_id: Uuid, customer_id: Int, total: Money(2) }
+const EVENTS: &str = "subject Customer(Int)
+event @order.placed { order_id: Uuid, customer_id: Customer, total: Money(2) }
 event @order.shipped { order_id: Uuid, tracking: String }
 ";
 
-const COMMAND: &str = "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+const COMMAND: &str = "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
   guard @order.placed(order_id)
   emit @order.placed { order_id, customer_id, total }
 }

@@ -96,7 +96,7 @@ is about rather than where the parser noticed. Those are different in three ways
   editor can underline only one of them.
 - **A name is about the name.** A field the event does not have used to report at the cursor, which
   by then had moved past the name onto the `:` after it. An annotation had the same fault in four
-  places, so `@subject(shop_id)` on a column that cannot take one was reported at its `(`.
+  places, so `@subject(shop)` on a column that cannot take one was reported at its `(`.
 
 That last one is worth its own paragraph, because it kept coming back. `emit @shop.reconneced { ... }`
 underlined the `{`: `event_def` reported with the cursor, and all six of its callers had just

@@ -449,7 +449,8 @@ fn an_equality_across_an_optional_still_needs_the_pair_to_meet() {
 #[test]
 fn arithmetic_on_sealed_content_is_rejected() {
     let message = parse(
-        "event @order.paid { order_id: Int, customer_id: Int, tip: Money(2) @subject(customer_id) }
+        "subject Customer(Int)
+event @order.paid { order_id: Int, customer_id: Customer, tip: Money(2) @subject(customer_id) }
 
 effect E {
   on @order.paid as e { @key order_id, tip } {
@@ -461,7 +462,7 @@ effect E {
     .expect_err("a sum of sealed content reads it")
     .text();
     assert!(
-        message.contains("sealed under `customer_id`"),
+        message.contains("sealed under `Customer`"),
         "got: {message}"
     );
     assert!(message.contains("arithmetic"), "got: {message}");
@@ -700,15 +701,17 @@ fn the_shorthand_still_wraps_and_still_propagates() {
   emit @thing.touched { id }
 }",
         // sealed content into a column, which propagates rather than reading
-        "event @person.seen { person_id: Int, email: String @subject(person_id) }
+        "subject Person(Int)
+event @person.seen { person_id: Person, email: String @subject(person_id) }
 projector P {
-  entity Row { person_id: Int @key, email: String }
+  entity Row { person_id: Person @key, email: String }
   on @person.seen { person_id, email } {
     put Row { person_id, email }
   }
 }",
         // sealed content as a filter, which narrows a slice rather than reading
-        "event @person.seen { person_id: Int, email: String @subject(person_id) }
+        "subject Person(Int)
+event @person.seen { person_id: Person, email: String @subject(person_id) }
 command C(id: Int, email: String) {
   fold seen: Bool = false
     on @person.seen(email) => true
@@ -1171,4 +1174,133 @@ fn a_boolean_operand_that_is_one_is_accepted() {
 fn a_negation_synthesises_bool() {
     let body = "command C(b: Bool) {\n  emit @thing.happened { id: !b, name: \"n\", maybe: none, at: \"2026-01-01T00:00:00Z\", total: 0, rate: 0, status: Draft, tags: [], facts: Facts { note: \"n\", count: 0 }, blob: Json.empty }\n}";
     assert_eq!(err(body), "expected Int, found Bool");
+}
+
+// ---------------------------------------------------------------------------------
+// A subject is nominal to the checker and its scalar at run time.
+// `docs/effects.md` rule 12 and `docs/literal-inference.md` are the contract.
+
+const SUBJECTS: &str = "subject Customer(Int)
+subject Shop(Int)
+event @order.placed { order_id: Uuid, buyer: Customer, shop: Shop }
+";
+
+fn subject_err(body: &str) -> String {
+    parse(&format!("{SUBJECTS}{body}\n"))
+        .expect_err("expected this to be rejected")
+        .text()
+}
+
+/// A **literal** resolves against a subject exactly as against the scalar its ids are.
+#[test]
+fn a_literal_fills_a_subject_position() {
+    parse(&format!(
+        "{SUBJECTS}command C(order_id: Uuid) {{ emit @order.placed {{ order_id, buyer: 7, shop: 1 }} }}"
+    ))
+    .expect("a literal is how a subject id is written down");
+
+    parse(
+        "subject Person(Uuid)
+event @p.seen { person_id: Person }
+command C() { emit @p.seen { person_id: \"11111111-1111-1111-1111-111111111111\" } }
+",
+    )
+    .expect("a Uuid-id subject takes a written uuid");
+
+    parse(
+        "subject Tenant(String)
+event @t.seen { tenant: Tenant }
+command C() { emit @t.seen { tenant: \"acme\" } }
+",
+    )
+    .expect("a String-id subject takes a written string");
+}
+
+/// And a **name** does not, which is the whole of the guarantee: a `const` is inlined, so
+/// it reaches a write site as a literal node, and asking "is this node a literal?" there
+/// would let a shop id fill a customer position. The declared type is what decides.
+#[test]
+fn a_name_of_the_underlying_scalar_does_not_fill_a_subject() {
+    let message = subject_err(
+        "const N: Int = 7
+command C(order_id: Uuid, shop: Shop) { emit @order.placed { order_id, buyer: N, shop } }",
+    );
+    assert_eq!(message, "expected Customer, found Int");
+
+    let message = subject_err(
+        "command C(order_id: Uuid, n: Int, shop: Shop) { emit @order.placed { order_id, buyer: n, shop } }",
+    );
+    assert_eq!(message, "expected Customer, found Int");
+}
+
+/// A `const` of the **wrong** subject is the same mistake wearing the right shape, and
+/// the message names the subject rather than the `Int` underneath it.
+#[test]
+fn a_const_of_another_subject_does_not_fill_one() {
+    let message = subject_err(
+        "const S1: Shop = 1
+command C(order_id: Uuid, shop: Shop) { emit @order.placed { order_id, buyer: S1, shop } }",
+    );
+    assert_eq!(message, "expected Customer, found Shop");
+}
+
+/// A `const` of the right subject does fill it: the declared type travels with the
+/// inlined value.
+#[test]
+fn a_const_of_the_subject_fills_it() {
+    parse(&format!(
+        "{SUBJECTS}const HOUSE: Customer = 1
+command C(order_id: Uuid, shop: Shop) {{ emit @order.placed {{ order_id, buyer: HOUSE, shop }} }}"
+    ))
+    .expect("a Customer const is a customer id");
+}
+
+/// Two subjects are two types however alike their ids look, which is the mix-up the
+/// declaration exists to catch.
+#[test]
+fn one_subject_does_not_fill_another() {
+    let message = subject_err(
+        "command C(order_id: Uuid, buyer: Customer, shop: Shop) { emit @order.placed { order_id, buyer: shop, shop: buyer } }",
+    );
+    assert!(
+        message.contains("expected Customer, found Shop"),
+        "got: {message}"
+    );
+}
+
+/// An id is an id and nothing else: no arithmetic, and no methods, both of which fall out
+/// of the operator and method tables having no row for one rather than from a rule.
+#[test]
+fn a_subject_id_does_no_arithmetic_and_has_no_methods() {
+    let message = subject_err(
+        "command C(order_id: Uuid, buyer: Customer, shop: Shop) { emit @order.placed { order_id, buyer: buyer + 1, shop } }",
+    );
+    // `+` cross-hints, so the literal takes the receiver's type and the pair reads as two
+    // `Customer`s. Either way there is no row for it: an id does no arithmetic.
+    assert_eq!(message, "cannot apply `+` to Customer and Customer");
+
+    let message = subject_err(
+        "command C(order_id: Uuid, buyer: Customer, shop: Shop) { emit @order.placed { order_id, buyer: buyer.pad(4), shop } }",
+    );
+    assert!(message.contains("pad"), "got: {message}");
+}
+
+/// Equality holds within one subject, and against a literal on either side. The optional
+/// form is the one that has to lift, and it used to typecheck and then wedge at run time.
+#[test]
+fn a_subject_compares_within_itself_and_against_a_literal() {
+    parse(&format!(
+        "{SUBJECTS}command C(order_id: Uuid, buyer: Customer, other: Customer, shop: Shop) {{
+  if buyer == other {{ return }}
+  if buyer == 7 {{ return }}
+  if 7 == buyer {{ return }}
+  emit @order.placed {{ order_id, buyer, shop }}
+}}"
+    ))
+    .expect("equality within one subject, and against a literal");
+
+    let message = subject_err(
+        "command C(order_id: Uuid, buyer: Customer, shop: Shop) { if buyer == shop { return } emit @order.placed { order_id, buyer, shop } }",
+    );
+    assert_eq!(message, "cannot apply `==` to Customer and Shop");
 }

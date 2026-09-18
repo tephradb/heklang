@@ -152,7 +152,7 @@ test "a placed order writes the row and counts the customer" {
   project Orders
 
   expect Order[ADA] { customer_id: 1, total: 25.99, status: Placed, tracking: none }
-  expect Customer[1] { order_count: 1, lifetime_spend: 25.99, name: "unknown" }
+  expect CustomerTotals[1] { order_count: 1, lifetime_spend: 25.99, name: "unknown" }
 }
 
 test "a purged order does not come back on a late shipment" {
@@ -170,7 +170,11 @@ test "a purged order does not come back on a late shipment" {
 
   project Orders
 
-  expect Order[ADA] { total: 0.00, status: Shipped, tracking: "TRK-1" }
+  // It really does not come back, which it used to: a `patch` materialized the row from
+  // its columns' zeros, and the zero of `customer_id` was customer 0. Now that a subject
+  // id has no zero, `check_zeros` refuses that materialization, and `update` says what
+  // the handler meant anyway: a shipment for an order nobody placed changes nothing.
+  expect no Order[ADA]
 }
 
 test "confirming an order reveals the email and records the notification" {
@@ -258,7 +262,7 @@ test "an erased customer skips rather than sending plaintext" {
     notes: "",
   }
 
-  erased customer_id "1"
+  erased Customer "1"
 
   deliver NotifyCustomer
 

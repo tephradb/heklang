@@ -197,7 +197,7 @@ test "an erased attendee skips rather than sending plaintext" {
     paid: 40.00,
   }
 
-  erased attendee_id "7"
+  erased Attendee "7"
 
   deliver ConfirmBooking
 

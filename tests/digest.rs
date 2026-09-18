@@ -7,8 +7,9 @@ use heklang::digest::VERSION;
 use heklang::{Digest, Entry, Kind, parse, parse_files};
 
 const EVENTS: &str = "\
-event @order.placed { order_id: Uuid, customer_id: Int, total: Money(2) }
-event @order.cancelled { order_id: Uuid, customer_id: Int }
+subject Customer(Int)
+event @order.placed { order_id: Uuid, customer_id: Customer, total: Money(2) }
+event @order.cancelled { order_id: Uuid, customer_id: Customer }
 ";
 
 fn digest(source: &str) -> Digest {
@@ -49,11 +50,11 @@ fn entry<'a>(digest: &'a Digest, name: &str) -> &'a heklang::Entry {
 #[test]
 fn a_local_name_is_not_in_the_form() {
     same(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            let doubled = total + total
            emit @order.placed { order_id, customer_id, total: doubled }
          }",
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            let twice = total + total
            emit @order.placed { order_id, customer_id, total: twice }
          }",
@@ -68,7 +69,7 @@ fn a_local_name_is_not_in_the_form() {
 #[test]
 fn a_lifted_comparison_is_in_the_form() {
     const LIFTED: &str =
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2), note: String?) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2), note: String?) {
            if note == \"gift\" {
              invalid \"no gifts\"
            }
@@ -90,13 +91,13 @@ fn a_lifted_comparison_is_in_the_form() {
 #[test]
 fn comments_and_layout_are_not_in_the_form() {
     same(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            emit @order.placed { order_id, customer_id, total }
          }",
         "// what this does, at length
          command Place(
            order_id: Uuid,
-           customer_id: Int,   // the customer
+           customer_id: Customer,   // the customer
            total: Money(2),
          ) {
 
@@ -114,10 +115,10 @@ fn comments_and_layout_are_not_in_the_form() {
 #[test]
 fn the_two_spellings_of_a_field_are_one() {
     same(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            emit @order.placed { order_id, customer_id, total }
          }",
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            emit @order.placed { order_id: order_id, customer_id: customer_id, total: total }
          }",
         "the shorthand builds the same load the long form does",
@@ -127,19 +128,19 @@ fn the_two_spellings_of_a_field_are_one() {
 #[test]
 fn a_written_decimal_place_is_not_the_value() {
     same(
-        "command Fee(order_id: Uuid, customer_id: Int) {
+        "command Fee(order_id: Uuid, customer_id: Customer) {
            emit @order.placed { order_id, customer_id, total: 1000 }
          }",
-        "command Fee(order_id: Uuid, customer_id: Int) {
+        "command Fee(order_id: Uuid, customer_id: Customer) {
            emit @order.placed { order_id, customer_id, total: 1000.00 }
          }",
         "both are a hundred thousand units at scale two",
     );
     differs(
-        "command Fee(order_id: Uuid, customer_id: Int) {
+        "command Fee(order_id: Uuid, customer_id: Customer) {
            emit @order.placed { order_id, customer_id, total: 1000 }
          }",
-        "command Fee(order_id: Uuid, customer_id: Int) {
+        "command Fee(order_id: Uuid, customer_id: Customer) {
            emit @order.placed { order_id, customer_id, total: 1000.01 }
          }",
         "a different amount is a different program",
@@ -181,10 +182,10 @@ fn a_command_parameter_keeps_its_name_and_a_fn_parameter_does_not() {
         "a `fn`'s arguments are positional, so its parameter names are local",
     );
     differs(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            emit @order.placed { order_id, customer_id, total }
          }",
-        "command Place(order: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order: Uuid, customer_id: Customer, total: Money(2)) {
            emit @order.placed { order_id: order, customer_id, total }
          }",
         "a command's parameter names are the request body's keys, so they leave the program",
@@ -194,7 +195,7 @@ fn a_command_parameter_keeps_its_name_and_a_fn_parameter_does_not() {
 #[test]
 fn an_event_path_is_written_out_at_every_use() {
     let digest = with_events(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            emit @order.placed { order_id, customer_id, total }
          }",
     );
@@ -216,7 +217,7 @@ fn slots_are_numbered_from_zero_with_no_gaps() {
     let digest = with_events(
         "refusal TooMany \"too many\"
 
-         guard UnderLimit(customer_id: Int) {
+         guard UnderLimit(customer_id: Customer) {
            fold open: Int = 0
              on @order.placed(customer_id) => open + 1
              on @order.cancelled(customer_id) => open - 1
@@ -226,7 +227,7 @@ fn slots_are_numbered_from_zero_with_no_gaps() {
            }
          }
 
-         command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+         command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            guard @order.placed(order_id)
            guard UnderLimit { customer_id }
            emit @order.placed { order_id, customer_id, total }
@@ -258,16 +259,16 @@ fn slots_are_numbered_from_zero_with_no_gaps() {
 #[test]
 fn declaration_order_within_a_file_does_not_matter() {
     same(
-        "command A(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command A(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            emit @order.placed { order_id, customer_id, total }
          }
-         command B(order_id: Uuid, customer_id: Int) {
+         command B(order_id: Uuid, customer_id: Customer) {
            emit @order.cancelled { order_id, customer_id }
          }",
-        "command B(order_id: Uuid, customer_id: Int) {
+        "command B(order_id: Uuid, customer_id: Customer) {
            emit @order.cancelled { order_id, customer_id }
          }
-         command A(order_id: Uuid, customer_id: Int, total: Money(2)) {
+         command A(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            emit @order.placed { order_id, customer_id, total }
          }",
         "declarations are a set; the entries are sorted by kind and name",
@@ -276,7 +277,7 @@ fn declaration_order_within_a_file_does_not_matter() {
 
 #[test]
 fn file_boundaries_do_not_matter() {
-    const COMMAND: &str = "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+    const COMMAND: &str = "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
       emit @order.placed { order_id, customer_id, total }
     }
     ";
@@ -313,7 +314,7 @@ fn an_index_written_two_ways_is_one_index() {
         "projector P {
            entity E {
              id: Uuid @key,
-             owner: Int @index,
+             owner: Customer @index,
            }
            on @order.placed { order_id, customer_id } {
              put E { id: order_id, owner: customer_id }
@@ -322,7 +323,7 @@ fn an_index_written_two_ways_is_one_index() {
         "projector P {
            entity E {
              id: Uuid @key,
-             owner: Int,
+             owner: Customer,
 
              index (owner),
            }
@@ -337,12 +338,12 @@ fn an_index_written_two_ways_is_one_index() {
 #[test]
 fn swapping_two_statements_is_a_change() {
     differs(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            let one = total + total
            let two = total
            emit @order.placed { order_id, customer_id, total: one }
          }",
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            let two = total
            let one = total + total
            emit @order.placed { order_id, customer_id, total: one }
@@ -358,10 +359,10 @@ fn swapping_two_statements_is_a_change() {
 #[test]
 fn reordering_the_fields_of_an_emit_changes_nothing() {
     same(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            emit @order.placed { order_id, customer_id, total }
          }",
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            emit @order.placed { total, customer_id, order_id }
          }",
         "the event declares the fields, so which order they were written in is not observable",
@@ -442,27 +443,27 @@ fn a_json_key_is_quoted_because_it_is_not_an_identifier() {
 #[test]
 fn a_const_is_its_value_and_not_its_name() {
     same(
-        "const LIMIT: Int = 5
-         command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-           if customer_id >= LIMIT { return }
+        "const LIMIT: Money(2) = 5.00
+         command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
+           if total >= LIMIT { return }
            emit @order.placed { order_id, customer_id, total }
          }",
-        "const CAP: Int = 5
-         command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-           if customer_id >= CAP { return }
+        "const CAP: Money(2) = 5.00
+         command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
+           if total >= CAP { return }
            emit @order.placed { order_id, customer_id, total }
          }",
         "a const is inlined, so its name never reaches the IR",
     );
     differs(
-        "const LIMIT: Int = 5
-         command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-           if customer_id >= LIMIT { return }
+        "const LIMIT: Money(2) = 5.00
+         command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
+           if total >= LIMIT { return }
            emit @order.placed { order_id, customer_id, total }
          }",
-        "const LIMIT: Int = 6
-         command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-           if customer_id >= LIMIT { return }
+        "const LIMIT: Money(2) = 6.00
+         command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
+           if total >= LIMIT { return }
            emit @order.placed { order_id, customer_id, total }
          }",
         "its value is what runs, and it runs at the use site",
@@ -473,13 +474,13 @@ fn a_const_is_its_value_and_not_its_name() {
 fn a_refusal_message_reaches_every_reject() {
     let before = with_events(
         "refusal Nope \"not this time\"
-         command A(order_id: Uuid, customer_id: Int) { reject Nope }
-         command B(order_id: Uuid, customer_id: Int) { reject Nope }",
+         command A(order_id: Uuid, customer_id: Customer) { reject Nope }
+         command B(order_id: Uuid, customer_id: Customer) { reject Nope }",
     );
     let after = with_events(
         "refusal Nope \"not today\"
-         command A(order_id: Uuid, customer_id: Int) { reject Nope }
-         command B(order_id: Uuid, customer_id: Int) { reject Nope }",
+         command A(order_id: Uuid, customer_id: Customer) { reject Nope }
+         command B(order_id: Uuid, customer_id: Customer) { reject Nope }",
     );
 
     assert_ne!(
@@ -500,11 +501,11 @@ fn a_refusal_message_reaches_every_reject() {
 #[test]
 fn an_unused_refusal_is_not_in_the_form() {
     same(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            emit @order.placed { order_id, customer_id, total }
          }",
         "refusal NeverSaid \"nothing rejects this\"
-         command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+         command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            emit @order.placed { order_id, customer_id, total }
          }",
         "a refusal nothing names runs nowhere",
@@ -516,7 +517,7 @@ fn a_guard_is_printed_where_it_runs() {
     let digest = with_events(
         "refusal TooMany \"too many\"
 
-         guard UnderLimit(customer_id: Int) {
+         guard UnderLimit(customer_id: Customer) {
            fold open: Int = 0
              on @order.cancelled(customer_id) => open + 1
 
@@ -525,7 +526,7 @@ fn a_guard_is_printed_where_it_runs() {
            }
          }
 
-         command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+         command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            guard @order.placed(order_id)
            guard UnderLimit { customer_id }
            emit @order.placed { order_id, customer_id, total }
@@ -557,7 +558,7 @@ fn a_guard_is_printed_where_it_runs() {
 #[test]
 fn every_entry_carries_its_own_kind_name_and_hash() {
     let digest = with_events(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            emit @order.placed { order_id, customer_id, total }
          }",
     );
@@ -565,7 +566,7 @@ fn every_entry_carries_its_own_kind_name_and_hash() {
     let kinds: Vec<Kind> = digest.entries().iter().map(|entry| entry.kind).collect();
     assert_eq!(
         kinds,
-        vec![Kind::Event, Kind::Event, Kind::Command],
+        vec![Kind::Subject, Kind::Event, Kind::Event, Kind::Command],
         "entries are sorted by kind first, in the order the kinds are declared"
     );
     let place = entry(&digest, "Place");
@@ -581,18 +582,18 @@ fn every_entry_carries_its_own_kind_name_and_hash() {
 #[test]
 fn changing_one_command_leaves_every_other_entry_alone() {
     let before = with_events(
-        "command A(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command A(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            emit @order.placed { order_id, customer_id, total }
          }
-         command B(order_id: Uuid, customer_id: Int) {
+         command B(order_id: Uuid, customer_id: Customer) {
            emit @order.cancelled { order_id, customer_id }
          }",
     );
     let after = with_events(
-        "command A(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command A(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            emit @order.placed { order_id, customer_id, total: total + total }
          }
-         command B(order_id: Uuid, customer_id: Int) {
+         command B(order_id: Uuid, customer_id: Customer) {
            emit @order.cancelled { order_id, customer_id }
          }",
     );
@@ -613,12 +614,12 @@ fn changing_one_command_leaves_every_other_entry_alone() {
 #[test]
 fn a_test_is_not_in_the_program_hash() {
     let without = with_events(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            emit @order.placed { order_id, customer_id, total }
          }",
     );
     let with = with_events(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            emit @order.placed { order_id, customer_id, total }
          }
 
@@ -658,7 +659,7 @@ fn a_test_is_not_in_the_program_hash() {
 #[test]
 fn the_version_line_opens_the_form() {
     let digest = with_events(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            emit @order.placed { order_id, customer_id, total }
          }",
     );
@@ -678,7 +679,7 @@ fn the_version_line_opens_the_form() {
 #[test]
 fn one_program_digests_the_same_bytes_twice() {
     let source = format!(
-        "{EVENTS}command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {{
+        "{EVENTS}command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {{
            emit @order.placed {{ order_id, customer_id, total }}
          }}"
     );
@@ -695,8 +696,11 @@ fn one_program_digests_the_same_bytes_twice() {
 /// program, whichever kind of declaration it is.
 #[test]
 fn a_change_to_any_declaration_reaches_the_hash() {
-    let field =
-        |extra: &str| format!("event @order.placed {{ order_id: Uuid, customer_id: Int{extra} }}");
+    let field = |extra: &str| {
+        format!(
+            "subject Customer(Int)\nevent @order.placed {{ order_id: Uuid, customer_id: Customer{extra} }}"
+        )
+    };
     assert_ne!(
         digest(&field("")).hash(),
         digest(&field(", note: String @max(20)")).hash(),
@@ -711,13 +715,13 @@ fn a_change_to_any_declaration_reaches_the_hash() {
     );
 
     differs(
-        "command Count(order_id: Uuid, customer_id: Int) {
+        "command Count(order_id: Uuid, customer_id: Customer) {
            fold seen: Int = 0
              on @order.placed(customer_id) => seen + 1
            if seen > 0 { return }
            emit @order.cancelled { order_id, customer_id }
          }",
-        "command Count(order_id: Uuid, customer_id: Int) {
+        "command Count(order_id: Uuid, customer_id: Customer) {
            fold seen: Int = 1
              on @order.placed(customer_id) => seen + 1
            if seen > 0 { return }
@@ -728,11 +732,11 @@ fn a_change_to_any_declaration_reaches_the_hash() {
 
     differs(
         "projector P {
-           entity E { id: Uuid @key, owner: Int }
+           entity E { id: Uuid @key, owner: Customer }
            on @order.placed { order_id, customer_id } { put E { id: order_id, owner: customer_id } }
          }",
         "projector P {
-           entity E { id: Uuid @key, owner: Int @index }
+           entity E { id: Uuid @key, owner: Customer @index }
            on @order.placed { order_id, customer_id } { put E { id: order_id, owner: customer_id } }
          }",
         "an index is a read path the projector now keeps",
@@ -755,7 +759,7 @@ fn a_change_to_any_declaration_reaches_the_hash() {
 /// program, so every ordering is the same hash. `tests/modules.rs` states the parsing half.
 #[test]
 fn no_ordering_of_the_same_modules_changes_the_hash() {
-    const COMMAND: &str = "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+    const COMMAND: &str = "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
       emit @order.placed { order_id, customer_id, total }
     }
     ";
@@ -895,12 +899,12 @@ fn signature(digest: &Digest, name: &str) -> String {
 #[test]
 fn a_body_change_leaves_the_signature_alone() {
     let before = with_events(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            emit @order.placed { order_id, customer_id, total }
          }",
     );
     let after = with_events(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            emit @order.placed { order_id, customer_id, total: total + total }
          }",
     );
@@ -928,10 +932,10 @@ fn a_signature_moves_when_something_outside_could_notice() {
             .collect::<Vec<_>>()
     };
 
-    let base = "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+    let base = "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
       emit @order.placed { order_id, customer_id, total }
     }";
-    let retyped = "command Place(order_id: Uuid, customer_id: Int, total: Money(3)) {
+    let retyped = "command Place(order_id: Uuid, customer_id: Customer, total: Money(3)) {
       emit @order.placed { order_id, customer_id, total: 0.00 }
     }";
     assert_ne!(
@@ -940,7 +944,7 @@ fn a_signature_moves_when_something_outside_could_notice() {
         "a parameter's type is the request body's shape"
     );
 
-    let renamed = "command Place(order_id: Uuid, customer: Int, total: Money(2)) {
+    let renamed = "command Place(order_id: Uuid, customer: Customer, total: Money(2)) {
       emit @order.placed { order_id, customer_id: customer, total }
     }";
     assert_ne!(
@@ -954,7 +958,7 @@ fn a_signature_moves_when_something_outside_could_notice() {
 fn a_command_signature_names_the_codes_it_can_answer_with() {
     let digest = with_events(
         "refusal TooMany \"too many\"
-         command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+         command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            fold open: Int = 0
              on @order.placed(customer_id) => open + 1
            if open >= 10 {
@@ -986,7 +990,7 @@ fn a_refusal_decided_in_a_fn_still_reaches_the_signature() {
            return none
          }
 
-         command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+         command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
            fold open: Int = 0
              on @order.placed(customer_id) => open + 1
 
@@ -1359,7 +1363,7 @@ fn a_field_without_an_absent_value_renders_as_it_always_did() {
     assert!(packed.contains("(f title String (max 20))"), "{packed}");
     assert!(packed.contains("(f total (Money 2))"), "{packed}");
     assert_eq!(
-        VERSION, "hek-digest 2",
+        VERSION, "hek-digest 3",
         "an optional node is not a new digest version"
     );
 }

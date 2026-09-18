@@ -60,6 +60,7 @@ module.exports = grammar({
         $.record_declaration,
         $.const_declaration,
         $.secret_declaration,
+        $.subject_declaration,
         $.function_declaration,
         $.event_declaration,
         $.refusal_declaration,
@@ -116,6 +117,20 @@ module.exports = grammar({
     // expects it, and a field or parameter of that name still lexes as an identifier.
     secret_declaration: ($) =>
       seq('secret', field('name', $.identifier), optional('?')),
+
+    // A key namespace: its name, the type its ids are, and at most one parent. No
+    // closing token either, like `const` and `secret`: it ends at the `)`, or at the
+    // parent when it has one. Both `subject` and `under` stay soft for the reason
+    // `secret` does, and `@subject(x)` is an `annotation` and never reaches here.
+    subject_declaration: ($) =>
+      seq(
+        'subject',
+        field('name', $._type_name),
+        '(',
+        field('id', $.type),
+        ')',
+        optional(seq('under', field('parent', $._type_name))),
+      ),
 
     // The result is optional because an effect-local `fn` may omit it: `fail` is its
     // only other way out, so there is nothing for a caller to decide from. A module

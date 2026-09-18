@@ -256,7 +256,7 @@ These are not functions in the sense above. They reach the world, and the right-
 | `http.delete(url)` | `Response` | yes |
 | `invoke Name { ... }` | `Outcome` | yes |
 | `now()` | `Timestamp` | yes, pinned once per invocation |
-| `erase(value)` / `erase(subject, value)` | nothing | yes |
+| `erase(value)` | nothing | yes |
 | `log(message)` | nothing | **no** |
 | `fail "<message>"` | nothing, terminal | n/a |
 | `reveal(value)` | `String` | **no**, re-decrypts every attempt |

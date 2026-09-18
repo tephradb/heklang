@@ -14,11 +14,18 @@ record Address {
   postcode: String @max(10),
 }
 
+// subjects/customer.hk
+
+// A subject is a declared type whose values are its ids, so `customer_id: Customer` is
+// what says which keys `@subject(customer_id)` files under. The field could be called
+// `buyer` and it would still be the same namespace.
+subject Customer(Int)
+
 // events/order.hk
 
 event @order.placed {
   order_id: Uuid,
-  customer_id: Int,
+  customer_id: Customer,
   email: String @subject(customer_id) @max(200),
   // Sealed whole. The seal is a property of the type, so the annotation applies at
   // record granularity and `reveal` hands an `Address` back rather than its text.
@@ -30,12 +37,12 @@ event @order.placed {
 
 event @order.cancelled {
   order_id: Uuid,
-  customer_id: Int,
+  customer_id: Customer,
   refund: Money(2),
 }
 
 event @customer.blocked {
-  customer_id: Int,
+  customer_id: Customer,
   reason: String,
 }
 
@@ -55,7 +62,7 @@ refusal TooManyOpen "too many open orders"
 // asserts rather than for the entity it reads. The order they appear in the command is
 // the order they refuse in.
 
-guard CustomerIsNotBlocked(customer_id: Int) {
+guard CustomerIsNotBlocked(customer_id: Customer) {
   // A leading `let` a filter names is hoisted here exactly as it is in a command: a
   // guard's prologue is a command's prologue.
   let customer = customer_id
@@ -76,7 +83,7 @@ guard EmailIsUnused(email: String) {
   }
 }
 
-guard UnderOpenOrderLimit(customer_id: Int) {
+guard UnderOpenOrderLimit(customer_id: Customer) {
   fold open_orders: Int = 0
     on @order.placed(customer_id) => open_orders + 1
     on @order.cancelled(customer_id) => open_orders - 1
@@ -90,7 +97,7 @@ guard UnderOpenOrderLimit(customer_id: Int) {
 
 command PlaceOrder(
   order_id: Uuid,
-  customer_id: Int,
+  customer_id: Customer,
   email: String,
   address: Address,
   total: Money(2),

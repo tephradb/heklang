@@ -810,7 +810,7 @@ fn digest_prints_the_form_and_nothing_else() {
     assert!(output.status.success(), "{}", stderr(&output));
 
     let form = stdout(&output);
-    assert!(form.starts_with("hek-digest 2\n"), "{form}");
+    assert!(form.starts_with("hek-digest 3\n"), "{form}");
     assert!(
         form.contains("(event @order.placed (f order_id Int) (f total (Money 2)))"),
         "{form}"
@@ -836,7 +836,7 @@ fn digest_packed_is_one_line_per_declaration() {
     let packed = stdout(&run(&root, &["digest", "--packed"]));
 
     let lines: Vec<&str> = packed.trim_end().lines().collect();
-    assert_eq!(lines[0], "hek-digest 2");
+    assert_eq!(lines[0], "hek-digest 3");
     assert_eq!(
         lines.len(),
         3,
@@ -921,7 +921,7 @@ fn digest_json_carries_every_entry() {
         json.starts_with('{') && json.trim_end().ends_with('}'),
         "{json}"
     );
-    assert!(json.contains("\"version\":\"hek-digest 2\""), "{json}");
+    assert!(json.contains("\"version\":\"hek-digest 3\""), "{json}");
     assert!(json.contains("\"kind\":\"command\""), "{json}");
     assert!(json.contains("\"name\":\"Place\""), "{json}");
     assert!(json.contains("\"entries\":["), "{json}");
@@ -953,7 +953,7 @@ fn digest_from_stdin_reads_one_module() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(
         stdout(&output),
-        "hek-digest 2\n(event @order.placed (f order_id Int))\n"
+        "hek-digest 3\n(event @order.placed (f order_id Int))\n"
     );
 }
 

@@ -45,6 +45,12 @@ side effect, or an unrepeatable observation, is done once and remembered.
 They bundle into `Host` because `Effects` holds one trait object and Rust has no `dyn A + B`. The
 bundle is the plumbing; the five are the meaning.
 
+**`subject` is a declared name.** `decrypt` and `erase` take the subject a key is filed under, and
+since `docs/effects.md` rule 12 made a subject a declared type, that string is the type's name
+(`Customer`) rather than the name of whichever field the annotation pointed at. A host keys its
+store by it, so it is one of the names `docs/digest.md` rule 3 keeps verbatim: renaming a subject
+re-partitions every key row.
+
 **`Keys` is asked one question and it is a lifecycle one.** `decrypt` answers with the plaintext or
 with `None`, and `None` is the key being gone. It is not an `Err`: an erased subject is an outcome
 `docs/effects.md` rule 12 names and a program meets, not a host that failed. A host that also wants

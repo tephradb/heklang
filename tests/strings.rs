@@ -508,13 +508,14 @@ fn truncate_is_not_a_method_on_an_optional() {
 /// bound on one is met from the plaintext side. Only a sealed **receiver** is refused.
 #[test]
 fn a_sealed_destination_is_bounded_from_the_plaintext_side() {
-    const EVENT: &str = "event @person.registered {
-  person_id: Uuid,
+    const EVENT: &str = "subject Person(Uuid)
+event @person.registered {
+  person_id: Person,
   email: String @subject(person_id) @max(20),
 }
 ";
     parse(&format!(
-        "{EVENT}command Register(person_id: Uuid, email: String) {{
+        "{EVENT}command Register(person_id: Person, email: String) {{
   emit @person.registered {{ person_id, email: email.truncate(20) }}
 }}
 "
@@ -524,7 +525,7 @@ fn a_sealed_destination_is_bounded_from_the_plaintext_side() {
     let sealed_receiver = format!(
         "{EVENT}projector People {{
   entity Person {{
-    person_id: Uuid @key,
+    person_id: Person @key,
     email: String @max(20),
   }}
 
@@ -538,7 +539,7 @@ fn a_sealed_destination_is_bounded_from_the_plaintext_side() {
         .expect_err("a sealed receiver is refused")
         .text();
     assert!(
-        message.starts_with("`truncate` reads content sealed under `person_id`"),
+        message.starts_with("`truncate` reads content sealed under `Person`"),
         "{message}"
     );
 }

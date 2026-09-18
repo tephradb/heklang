@@ -43,9 +43,9 @@ projector Plans {
 }
 ";
 
-const EFFECTS: &str =
-    "event @shop.connected { shop_id: Int, domain: String, token: String @subject(shop_id) }
-event @shop.sync.requested { shop_id: Int }
+const EFFECTS: &str = "subject Shop(Int)
+event @shop.connected { shop_id: Shop, domain: String, token: String @subject(shop_id) }
+event @shop.sync.requested { shop_id: Shop }
 
 effect SyncShop {
   on @shop.sync.requested { @key shop_id } {
@@ -60,7 +60,9 @@ effect SyncShop {
       return
     }
     http.post(\"https://{domain}/sync\", { \"shop\": shop_id })
-    invoke RecordSync { plan_id: shop_id }
+    // A literal, because a shop id is not a plan id and the types say so now. What this
+    // fixture is here for is an effect reaching `invoke` at all.
+    invoke RecordSync { plan_id: 1 }
   }
 }
 ";
@@ -216,7 +218,7 @@ fn erased_makes_a_shredded_key_writable() {
         "test \"a shredded key skips terminally\" {
   given @shop.connected { shop_id: 3, domain: \"three.example\", token: \"shpat\" }
   given @shop.sync.requested { shop_id: 3 }
-  erased shop_id \"3\"
+  erased Shop \"3\"
   deliver SyncShop
   expect skipped
 }",
@@ -640,9 +642,10 @@ test \"a bad uuid\" {
 /// optionals differed by a type nobody wrote and both printed the same.
 #[test]
 fn an_absent_subject_bound_optional_matches_an_absent_one() {
-    let source = "event @a.b { owner: Int, note: String? @subject(owner) }
+    let source = "subject Owner(Int)
+event @a.b { owner: Owner, note: String? @subject(owner) }
 
-command Make(owner: Int, note: String?) {
+command Make(owner: Owner, note: String?) {
   emit @a.b { owner, note }
 }
 
@@ -668,11 +671,12 @@ test \"present\" {
 /// content and not about the key, so the two meet unsealed.
 #[test]
 fn a_sealed_column_can_be_asserted_by_its_content() {
-    let source = "event @shop.connected { shop_id: Int, shop_name: String @subject(shop_id) }
+    let source = "subject Shop(Int)
+event @shop.connected { shop_id: Shop, shop_name: String @subject(shop_id) }
 
 projector Shops {
   entity Shop {
-    shop_id: Int @key,
+    shop_id: Shop @key,
     shop_name: String,
   }
 
@@ -695,11 +699,12 @@ test \"a personal column is readable\" {
 /// must not make every value match every other one.
 #[test]
 fn a_sealed_column_holding_something_else_still_fails() {
-    let source = "event @shop.connected { shop_id: Int, shop_name: String @subject(shop_id) }
+    let source = "subject Shop(Int)
+event @shop.connected { shop_id: Shop, shop_name: String @subject(shop_id) }
 
 projector Shops {
   entity Shop {
-    shop_id: Int @key,
+    shop_id: Shop @key,
     shop_name: String,
   }
 
@@ -890,16 +895,17 @@ fn a_world_that_cannot_be_built_errors_rather_than_fails() {
 #[test]
 fn a_literal_takes_its_type_through_a_seal() {
     let program = parse(
-        "event @t.happened {
+        "subject Org(Int)
+event @t.happened {
   id: Uuid,
-  org: Int,
+  org: Org,
   amount: Money(2) @subject(org),
   count: Int @subject(org),
 }
 projector P {
   entity Row {
     id: Uuid @key,
-    org: Int,
+    org: Org,
     amount: Money(2)?,
     count: Int?,
   }

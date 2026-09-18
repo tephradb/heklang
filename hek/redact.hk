@@ -1,27 +1,38 @@
-// A mandatory redaction, and the two shapes of `erase` side by side. One subject id is
-// on the event being handled; the rest have to be found by folding the log, which is
-// what a "delete everything you hold for this tenant" request always needs.
+// A mandatory redaction, and what a subject being a declared type buys. One id is on the
+// event being handled; the rest have to be found by folding the log, which is what a
+// "delete everything you hold for this tenant" request always needs. Both reach `erase`
+// the same way, because the value's type is the namespace.
+
+// subjects/tenant.hk
+
+// A member belongs to a tenant, so the member's key is wrapped under the tenant's and
+// deleting the tenant's row makes every member key beneath it unwrappable at once. That
+// is what `under` declares, and it is why every event sealing anything under a `Member`
+// has to carry a `Tenant` too: the runtime learns which key to wrap under from the event
+// in front of it, and there is nowhere else for it to look.
+subject Tenant(Int)
+subject Member(Int) under Tenant
 
 // events/tenant.hk
 
 event @tenant.connected {
-  tenant_id: Int,
+  tenant_id: Tenant,
   api_key: String @subject(tenant_id) @no_index @max(4096),
 }
 
 event @tenant.member.joined {
-  tenant_id: Int,
-  member_id: Int,
+  tenant_id: Tenant,
+  member_id: Member,
   email: String @subject(member_id) @max(200),
 }
 
 event @tenant.member.left {
-  tenant_id: Int,
-  member_id: Int,
+  tenant_id: Tenant,
+  member_id: Member,
 }
 
 event @tenant.redact.requested {
-  tenant_id: Int,
+  tenant_id: Tenant,
 }
 
 // effects/redact_tenant.hk
@@ -31,22 +42,25 @@ effect RedactTenant {
     // Every member the tenant still holds data for. A cursor would page this; a fold
     // does not, and a redact is rare and one-shot, so the width is acceptable here in
     // a way it would not be on a hot path.
-    fold members: List(Int) = []
+    //
+    // `List(Member)` rather than `List(Int)`, and that is the whole difference: the
+    // element type is what the `erase` below reads its namespace from.
+    fold members: List(Member) = []
       on @tenant.member.joined(tenant_id) { member_id } =>
         if members.contains(member_id) { members } else { members.push(member_id) }
       on @tenant.member.left(tenant_id) { member_id } => members.remove(member_id)
 
-    // The ids come from a fold of plaintext tags, so there is no field name for the
-    // parser to recover and the subject is named instead. What it gives up is the
-    // check that this Int really is a `member_id`; what it buys is the only shape a
-    // bulk erase has.
+    // Nothing is named, because nothing has to be. `id` is a `Member`, so this destroys
+    // a member's key and could not destroy a tenant's. The two-argument form existed
+    // because a folded id had no field name to recover a namespace from; the type has
+    // one, so there is nothing left for an author to assert and get wrong.
     for id in members {
-      erase(member_id, id)
+      erase(id)
     }
 
-    // The tenant's own key is on the trigger, so this one infers. Both forms in one
-    // arm is the point: reach for the inferring one wherever it reaches.
-    erase(tenant_id)
+    // The same statement for the tenant, reading the same way. One form, and the type
+    // tells the two apart.
+    erase(e.tenant_id)
 
     log("redacted {members.len()} members and the tenant key")
   }

@@ -79,7 +79,7 @@ The set is closed: every diagnostic heklang can produce is one of these.
 | Code | Means | Fix |
 | --- | --- | --- |
 | `unknown-annotation` | `@nope` | events take `@subject`, `@max`, `@absent`, `@no_index`; entities `@key`, `@index`, `@max`; records `@max`, `@absent`; enum variants `@default`; an effect arm's trigger destructure `@key` |
-| `bad-annotation` | a known annotation in a place or shape it does not take | `@max` bounds a `String`; a record field cannot be `@subject`; a `@subject` id may not be optional or itself sealed; an optional column may not default to `none`; an optional or `@subject` field takes no `@absent`, nor does one whose value is past its own `@max`; `@key` goes on an effect arm's trigger destructure and nowhere else |
+| `bad-annotation` | a known annotation in a place or shape it does not take | `@max` bounds a `String`; a record field cannot be `@subject`; a `@subject` id must be a declared subject, and may not be optional or itself sealed; an optional column may not default to `none`; an optional or `@subject` field takes no `@absent`, nor does one whose value is past its own `@max`; `@key` goes on an effect arm's trigger destructure and nowhere else |
 | `empty-declaration` | a declaration whose body would be empty | |
 | `arm-shape` | an effect arm with no `@key` | every arm names the trigger field that identifies its lane: `{ @key shop_id }` |
 | `entity-shape` | an entity with no `@key`, more than one, an unorderable key, or an index on a field it has not got | |
@@ -104,7 +104,7 @@ The set is closed: every diagnostic heklang can produce is one of these.
 | Code | Means | Fix |
 | --- | --- | --- |
 | `seal-boundary` | sealed content leaving without `reveal` | move it, ask `.is_some()`/`.is_none()`, or `reveal` it in an effect arm; a `fn` parameter, an interpolation, a comparison, a body and `unwrap_or` all take it out; a sealed field cannot be an arm's `@key` either |
-| `erase-subject` | an `erase` whose subject or id is not one | the inferring form takes a trigger field; the named form takes a declared subject name and a value of the id's type, with no `reveal` in it |
+| `erase-subject` | an `erase` whose value is not a subject id | `erase` takes one argument and the value's type is the namespace, so give the id a declared subject type; a `Uuid`, a bare literal and a plain `Int` are all refused, and so is an id learned by revealing |
 | `erase-order` | a `reveal` reachable from an `erase` | move the reveal above the erase, or into a branch the erase cannot reach; inside a `for` body, any erase reaches every reveal |
 | `secret-boundary` | a deployment credential reaching something that observes it | send it instead: a url, a header value, a body member, or an interpolation that becomes one. `log`, `fail`, `emit`, `invoke`, a comparison, a list, a record, `Json.encode` and every method are all out; a `fold` reading one is `fold-restriction`, and reading one outside an effect is `wrong-context` |
 

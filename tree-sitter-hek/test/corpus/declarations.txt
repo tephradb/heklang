@@ -336,3 +336,52 @@ fn sign(secret: String) -> String {
     (block
       (return_statement
         (identifier)))))
+
+================================================================================
+subject, rooted and parented, beside a field that is still an identifier
+================================================================================
+
+subject Shop(Int)
+subject Customer(Int) under Shop
+
+event @order.placed {
+  buyer: Customer,
+  shop: Shop,
+  subject: String,
+  email: String? @subject(buyer),
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (subject_declaration
+    (type_identifier)
+    (type
+      (primitive_type)))
+  (subject_declaration
+    (type_identifier)
+    (type
+      (primitive_type))
+    (type_identifier))
+  (event_declaration
+    (event_path)
+    (event_field
+      (identifier)
+      (type
+        (type_identifier)))
+    (event_field
+      (identifier)
+      (type
+        (type_identifier)))
+    (event_field
+      (identifier)
+      (type
+        (primitive_type)))
+    (event_field
+      (identifier)
+      (type
+        (primitive_type))
+      (annotation
+        (annotation_name)
+        (annotation_arguments
+          (identifier))))))

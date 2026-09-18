@@ -333,9 +333,10 @@ fn an_absent_refusal_covers_the_absent_annotation() {
 
 /// Enough of a program for a subject-bound field and an effect to have something to
 /// trigger on, since half the codes below need one.
-const PRELUDE: &str = "event @order.placed {
+const PRELUDE: &str = "subject Customer(Int)
+event @order.placed {
   order_id: Int,
-  customer_id: Int,
+  customer_id: Customer,
   email: String @subject(customer_id),
   total: Money(2),
 }
@@ -501,7 +502,7 @@ effect E {
         (
             Code::EraseSubject,
             "effect E {
-  on @order.placed as e { @key order_id } { erase(order_id, \"1\") }
+  on @order.placed as e { @key order_id } { erase(order_id) }
 }",
         ),
         (
@@ -515,7 +516,7 @@ effect E {
         ),
         (
             Code::SelfTrigger,
-            "command Again(order_id: Int, customer_id: Int) {
+            "command Again(order_id: Int, customer_id: Customer) {
   emit @order.placed { order_id, customer_id, email: \"x\", total: 1.00 }
 }
 effect E {
@@ -618,7 +619,8 @@ fn c(n: Int) -> Int { return a(n) }
 #[test]
 fn an_erase_order_diagnostic_points_at_the_erase() {
     let err = parse(
-        "event @order.placed { order_id: Int, customer_id: Int, email: String @subject(customer_id) }
+        "subject Customer(Int)
+event @order.placed { order_id: Int, customer_id: Customer, email: String @subject(customer_id) }
 effect E {
   on @order.placed as e { @key order_id } {
     erase(e.customer_id)
@@ -630,11 +632,11 @@ effect E {
     .expect_err("the `reveal` can run after the `erase`");
 
     assert_eq!(err.message, "this `reveal` can run after the `erase`");
-    assert_eq!(err.span.start.line, 5, "the `reveal`");
+    assert_eq!(err.span.start.line, 6, "the `reveal`");
     let [erase] = err.related.as_slice() else {
         panic!("expected the `erase`, got: {:?}", err.related)
     };
-    assert_eq!(erase.span.start.line, 4);
+    assert_eq!(erase.span.start.line, 5);
 }
 
 /// Rule 4 in a third place. A path is one token and a diagnostic about one covers it;

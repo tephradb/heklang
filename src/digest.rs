@@ -34,7 +34,7 @@ use crate::ir::{
     Absent, Action, Arm, Bind, Builtin, Command, Effect, EntityDef, EntityField, EnumDef, EnvBind,
     EnvField, EventDef, Expect, Expr, ExprId, Exprs, FieldDef, Function, Handler, Ident, Iter,
     Literal, Program, Projector, RecordDef, RecordField, ReplySpec, Return, Setup, Slice, Slot,
-    Stage, Stmt, Test, Type, UnOp,
+    Stage, Stmt, SubjectDef, Test, Type, UnOp,
 };
 use crate::parse::children;
 use crate::value::Json;
@@ -46,7 +46,7 @@ use crate::value::Json;
 /// what a hash means. Bumping this moves every hash at once, which is the point: a global
 /// change of hash then has one legible cause instead of looking like every declaration was
 /// edited on the same day.
-pub const VERSION: &str = "hek-digest 2";
+pub const VERSION: &str = "hek-digest 3";
 
 /// A SHA-256 over a packed form. Rendered as sixty-four lowercase hex digits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -84,6 +84,9 @@ impl fmt::Display for Hash {
 /// fixed before any name is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Kind {
+    /// First, because it is the declaration every other one can name: an event field,
+    /// a command parameter and an entity column all reach a subject by its type.
+    Subject,
     Event,
     Enum,
     Record,
@@ -97,6 +100,7 @@ pub enum Kind {
 impl Kind {
     pub fn name(self) -> &'static str {
         match self {
+            Kind::Subject => "subject",
             Kind::Event => "event",
             Kind::Enum => "enum",
             Kind::Record => "record",
@@ -110,6 +114,7 @@ impl Kind {
 
     pub fn lookup(head: &str) -> Option<Self> {
         Some(match head {
+            "subject" => Kind::Subject,
             "event" => Kind::Event,
             "enum" => Kind::Enum,
             "record" => Kind::Record,
@@ -226,6 +231,9 @@ impl Digest {
     pub fn of(program: &Program) -> Self {
         let mut forms: Vec<(Kind, String, Sexp)> = Vec::new();
 
+        for def in &program.subjects {
+            forms.push((Kind::Subject, def.name.clone(), subject(def)));
+        }
         for def in &program.events {
             forms.push((Kind::Event, def.path.to_string(), event(def)));
         }
@@ -471,7 +479,7 @@ fn signature(kind: Kind, form: &Sexp, helpers: &HashMap<String, Sexp>) -> Option
         // An event, an enum and a record are all shape and no body, so the signature is
         // the declaration. Uniform rather than absent: a caller compares signature to
         // signature without a special case per kind.
-        Kind::Event | Kind::Enum | Kind::Record => {
+        Kind::Subject | Kind::Event | Kind::Enum | Kind::Record => {
             parts.extend(form.rest().iter().skip(1).cloned());
         }
         Kind::Command => {
@@ -554,9 +562,16 @@ fn event(def: &EventDef) -> Sexp {
     fields.sort_by(|one, two| one.name.cmp(&two.name));
     let mut parts = vec![atom(def.path.to_string())];
     for field in fields {
-        // The type carries `@subject(x)` already: a subject-bound field *is* a `Sealed`,
-        // so printing `FieldDef::subject` beside it would say it twice.
         let mut part = vec![atom(field.name.clone()), ty(&field.ty)];
+        // The **field** the annotation named, which the type no longer says. It used to:
+        // `Sealed`'s second element was the field name, so printing this beside it said
+        // the same thing twice. Now that element is the *subject's* name, and the two are
+        // not the same fact. With `from: Customer, to: Customer` on one event, a field
+        // sealed under `from` and one sealed under `to` are both `(Sealed String
+        // Customer)` and are different keys, so without this they would digest alike.
+        if let Some(under) = &field.subject {
+            part.push(node("subject", [atom(under.clone())]));
+        }
         if let Some(max) = field.max_len {
             part.push(node("max", [atom(max.to_string())]));
         }
@@ -572,6 +587,22 @@ fn event(def: &EventDef) -> Sexp {
         parts.push(node("f", part));
     }
     node("event", parts)
+}
+
+/// A key namespace: its name, the type its ids are, and the subject its keys are wrapped
+/// under.
+///
+/// It earns an entry rather than being inlined at each use, which is what `const`,
+/// `refusal` and `guard` get, because **the parent appears nowhere else in the program**.
+/// A subject's name and id type both reach a use site through its type; `under` reaches
+/// nothing. Without this, declaring or removing a parent would change how every key
+/// beneath it is wrapped and move no hash at all.
+fn subject(def: &SubjectDef) -> Sexp {
+    let mut parts = vec![atom(def.name.clone()), node("id", [ty(&def.id)])];
+    if let Some(parent) = &def.parent {
+        parts.push(node("under", [atom(parent.clone())]));
+    }
+    node("subject", parts)
 }
 
 fn enumeration(def: &EnumDef) -> Sexp {
@@ -1356,6 +1387,10 @@ fn ty(value: &Type) -> Sexp {
         Type::Money(scale) => node("Money", [atom(scale.to_string())]),
         Type::Enum(name) => node("Enum", [atom(name.clone())]),
         Type::Record(name) => node("Record", [atom(name.clone())]),
+        // The name and not the id type, for the reason `Enum` and `Record` print no
+        // definition either: it lives in that declaration's own entry, and a consumer
+        // running a compatibility check compares every signature hash rather than one.
+        Type::Subject(sub) => node("Subject", [atom(sub.name.clone())]),
         Type::Rounding => atom("Rounding"),
         Type::Json => atom("Json"),
         Type::Response => atom("Response"),

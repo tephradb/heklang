@@ -4,7 +4,7 @@
 command BookSeat(
   workshop_id: Uuid,
   booking_id: Uuid,
-  attendee_id: Int,
+  attendee_id: Attendee,
   email: String,
   paid: Money(2),
 ) {
@@ -23,7 +23,7 @@ command BookSeat(
   emit @seat.booked { workshop_id, booking_id, attendee_id, email, paid }
 }
 
-command ReleaseSeat(workshop_id: Uuid, booking_id: Uuid, attendee_id: Int) {
+command ReleaseSeat(workshop_id: Uuid, booking_id: Uuid, attendee_id: Attendee) {
   guard WorkshopIsOpen { workshop_id }
 
   // An idempotent no-op is not a guard: a replay has to answer `ok` here, so this

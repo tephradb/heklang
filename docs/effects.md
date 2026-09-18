@@ -394,7 +394,7 @@ rounded and no float in between.
 **A `null` fills an optional and nothing else.** An absent object key reads as `null`, so a missing
 optional is absent and a missing required field is an error rather than a zero quietly standing in.
 
-**A seal is not in the JSON.** `Sealed(T, subject)` reads as its content, because a seal carries the
+**A seal is not in the JSON.** `Sealed(T, Subject)` reads as its content, because a seal carries the
 subject's id and that lives in a sibling field. A host that stores sealed content rebuilds the seal,
 and `Value::Sealed` is public for exactly that; `docs/host.md` section 7 has the read-model side.
 
@@ -457,58 +457,62 @@ declare its own helpers, and one of those may call out. It may not `reveal` or `
 the arm, so this analysis never has to follow a call, never needs a summary per function, and never
 has to explain a path through code the author was not looking at. See `docs/functions.md`.
 
-### Naming the subject
+### What it takes: a value whose type is a subject
 
-`erase(value)` recovers the subject from the value: it must be a field of the triggering event, and
-the `@subject(...)` declaration on that event says which key namespace it names. When the id does
-not come from the trigger there is no name to recover, so the second form supplies it:
+`erase(value)` destroys the key for the subject the value's **type** names, and there is one form:
 
 ```
-on @shop.redact.received as e { @key shop_id } {
-  fold customers: List(Int) = []
-    on @order.paid(shop_id) { customer_id } => customers.push(customer_id)
+subject Shop(Int)
+subject Customer(Int) under Shop
+
+on @shop.redact.received as e { @key shop } {
+  fold customers: List(Customer) = []
+    on @order.paid(shop) { buyer } => customers.push(buyer)
 
   for id in customers {
-    erase(customer_id, id)          // the subject name, then the value
+    erase(id)                       // `id` is a Customer, so this is a customer's key
   }
-  erase(shop_id)                    // the inferring form, unchanged
+  erase(e.shop)                     // and this one is a shop's
 }
 ```
 
 This is the shape a mandatory GDPR shop-redact has: one webhook, and every customer the shop holds
 data for. The ids come from a fold of plaintext tags, which is as deterministic and replayable as a
-trigger field; what a fold cannot supply is the **name**.
+trigger field, and the fold's **element type** is what says which keys they are.
 
-`docs/testing.md` already spells the matching expectation `expect erase(<subject>, "<id>")`, so the
-statement and the expectation now read the same.
+**This used to be two forms, and the second one was a hole.** `erase(value)` recovered the subject
+by looking at the field the value was loaded from, so it reached trigger fields and nothing else; a
+folded id had no field to recover from, so `erase(customer_id, id)` let the author assert the
+namespace instead. heklang could not check that assertion. `erase(customer_id, some_other_int)`
+compiled, and erasing the **wrong namespace** destroys the wrong subject's key. A subject is a
+declared type now, so the value says which keys it names and there is nothing left to assert.
 
-**What it gives up, said plainly.** heklang cannot check that the value really is a `customer_id`,
-only that the author said so: `erase(customer_id, some_other_int)` compiles. Erasing a key that does
-not exist is a no-op, but erasing the **wrong namespace** destroys the wrong subject's key. That is
-why the inferring form stays the default and this one is for the case it cannot reach.
+**Rejected, and now obsolete: inferring the name through the fold.** The objection was that it would
+mean proving every element of `customers` is a customer id, which needs element-level provenance
+through `List.push`, inside a fold arm, through an `if`/`else`. That was the right objection to
+*inference*. It does not apply to a *type*: `List(Customer)` carries the answer by construction, and
+nothing has to be traced. The analysis that was too expensive to build is the one the declaration
+made unnecessary.
 
-Three things are still checked:
+Two things are checked, and the second is rule 9's:
 
-- the name is a declared subject, the same check the inferring form makes;
-- the value's type is the type of the field the keys are filed under, so
-  `erase(customer_id, e.email)` is rejected, and so is an optional id;
-- **the value contains no `reveal`**, which is rule 9's second rule below. The inferring form cannot
-  reach it, because a `reveal` is not a trigger field load, so it becomes reachable exactly here and
-  arrives with this form.
+- **the value is a subject id.** `erase(e.order_id)` is refused because a `Uuid` names no namespace,
+  and `erase(e.shop)` inside an arm holding a `Customer` erases the shop, not the customer, because
+  that is what its type says. A bare literal has no target here, so `erase(7)` is refused too: an
+  `erase` takes a value that knows what it is.
+- **the value contains no `reveal`.** hekla says do not erase a subject whose id you learned by
+  revealing, because a repeat request for an already-erased subject then cannot be read at all. This
+  used to be reachable only from the two-argument form, since a `reveal` is not a trigger field
+  load. It is still reachable: a sealed field may itself hold a subject id, so
+  `erase(reveal(e.former_owner))` is well-typed and is rejected by span. What is still not caught is
+  an id that round-trips through an HTTP response, which needs data flow this pass does not build.
+  Take subject ids from a plaintext field.
 
-**Rejected: inferring the name through the fold.** It would mean proving every element of
-`customers` is a `customer_id`: element-level provenance through `List.push`, inside a fold arm,
-through an `if`/`else`. That is more analysis than anything else in the language, rule 12's "a
-transformed arm drops the binding" already points against it, and it would have to be *exact*,
-because a wrong namespace destroys the wrong key. The choice is between exact inference and an
-explicit name, and there is no third option that is both safe and cheap.
-
-**The second rule holds where it can be reached.** hekla also says do not erase a subject whose id
-you learned by revealing, because a repeat request for an already-erased subject then cannot be read
-at all. The inferring form cannot express it: a `reveal` is not a trigger field load. The named form
-can, so it checks the value for one and rejects it by span. What is still not caught is an id that
-round-trips through an HTTP response, which needs data flow this pass does not build. Take subject
-ids from a plaintext field.
+**The test language still names the row.** `erased Customer "7"` and `expect erase(Customer, "7")`
+keep a subject and a text id, and that is deliberate rather than left over: they name a **key row**,
+which is a namespace and the id as a host files it, rather than a value in the program. It is the
+same pair `hekla erase Customer 7` takes on a command line. So the statement and the expectation no
+longer read the same, and they are no longer about the same thing.
 
 ## 10. No marker on unjournaled builtins
 
@@ -549,7 +553,7 @@ of every secret. What it does do is put a third entry in rule 14's list of what 
 | `Uuid.derive(seed, name)` | `Uuid` | pure |
 | `log(message)` | nothing | **no** |
 | `reveal(field)` | `String` | **no**, re-decrypts every attempt |
-| `erase(value)` / `erase(subject, value)` | nothing | yes |
+| `erase(value)` | nothing | yes |
 
 **There is no `Uuid.new`, no `Uuid.random` and no `random`, anywhere in the language.** Not in
 effects, not in commands, not in projectors. "Never mint a random id" is therefore unrepresentable
@@ -649,11 +653,119 @@ there is no bare `Uuid` expression, only the qualified call.
 `reveal` takes a subject-bound value and hands back the plaintext. It decides nothing about it;
 everything below is about the two ways it can hand back something else.
 
+### A subject is a declared type
+
+A subject is a **key namespace with a name**, and its values are its ids:
+
+```
+subject Shop(Int)
+subject Customer(Int) under Shop
+```
+
+The type is spelled by its name at every use site, and the `(Int)` belongs to the declaration:
+
+```
+event @order.placed {
+  order_id: Uuid,
+  buyer: Customer,
+  shop: Shop,
+  email: String? @subject(buyer) @max(200),
+  order_total: Money(2) @subject(shop),
+}
+```
+
+**The field name stops carrying identity.** Call it `buyer`, `cust` or `who` and it is still a
+`Customer`, because the *type* says so. Before this, a subject was an anonymous namespace conjured
+by writing `@subject(field_name)` and resolved by scanning every event for a field of that name, so
+`owner_id` on two unrelated events was one key row and one erasure, `customer_id` in one event
+against `cust_id` in another were two different people, and nothing said either. It also made
+`from: Customer, to: Customer` on one event unwritable: both fields would have had to be literally
+named `customer_id`.
+
+**An id may be an `Int`, a `String` or a `Uuid`, and nothing else.** A key is filed under *text*, and
+those are the three with one canonical form a host can put in a column and a CLI can take as an
+argument. `Timestamp` orders and can be an entity key and is still refused: a moment is not an
+identity.
+
+**A subject id is an id and nothing else.** Equality within one subject type, yes, and against a
+literal. Use as an entity key, an index column, a map key and a partition key, yes, reading through
+to the scalar its ids are. Arithmetic, no. Mixing a `Customer` with a `Shop`, no, which is the point
+of the whole thing: both are `Int` underneath and were spelled the same way before.
+
+**Nominal inside, positional at the edge.** `{"buyer": 7}` reads as a `Customer` because the
+declaration says that position is one. JSON carries no type tag, so nothing can verify that 7 is a
+customer id rather than a shop id, and a caller that swaps two ids is not caught and *cannot* be.
+What is caught is every mix-up past the boundary, `erase(Customer's id)` against a shop's among
+them, which is where the damage lives. Written down here because "subjects are types" otherwise
+reads later as "the API validates them". At run time a subject id **is** its scalar: there is no
+tag on the value, so there is nothing for a boundary to fabricate and nothing to believe.
+
+**A literal resolves against a subject exactly as it resolves against its id type.** `buyer: 7` is a
+customer id by the same rule that makes `order_total: 25.99` money. A *name* does not: an `Int` that
+is really a shop id cannot fill a `Customer`, which is the mistake the declaration exists to catch.
+A literal token has no identity of its own to launder and a name does. `docs/literal-inference.md`
+is the contract.
+
+**There is deliberately no conversion.** `Customer(n)` is unspellable, so an `Int` that arrives
+untyped (out of an HTTP response body, say) cannot be made into a customer id. That is the escape
+hatch this feature exists to close, and nothing in the corpus needs it; the spelling is written down
+here so the next person finds a decision rather than a gap.
+
+### `under`: one subject's keys wrapped under another's
+
+`subject Customer(Int) under Shop` says a customer's key is wrapped under its shop's, so deleting
+the shop's key row makes every customer key beneath it unwrappable in one row delete rather than one
+journaled `erase` per customer. A 50,000-customer tenant is one delete.
+
+**One parent, forever.** A `Customer` under a `Shop` cannot also sit under a `Marketplace` in another
+flow: one hierarchy means one place a delete starts from, and a subject reachable by two routes
+would have two answers to "is this erased". The graph is over type names, so it is finite, checked
+acyclic at load, and a recursive unwrap is safe without a magic cap.
+
+**Every event that seals under a subject carries every ancestor of it**, in plaintext, non-optional
+and not itself sealed. This is the runtime's constraint and it is not avoidable: minting customer
+88's key wraps it inside shop 7's key at that moment, and the only place the runtime can learn "7"
+is the event in front of it. So this is refused:
+
+```
+event @customer.contacted {
+  buyer: Customer,
+  note: String @subject(buyer),   // no Shop anywhere: nothing to file the key under
+}
+```
+
+**Transitive, not the immediate parent.** Under `Customer under Shop under Marketplace`, minting the
+customer's key needs the shop's *secret*, which lives in the shop's key row; if that row does not
+exist yet the runtime has to mint it too, and minting it needs the marketplace id. At depth one the
+two rules coincide, which is why the shorter one reads correct.
+
+**The trigger is a sealed field, not a subject-typed one.** An event that carries a `Customer` and
+seals nothing mints no key and needs no parent, which is what keeps this from spreading to every
+event that merely mentions one.
+
+**What a parent gives up, said plainly.** Per-field subjects are sold on exactly this: erasing a
+shop provably cannot touch a customer's `email`. Under a parent it does, deliberately, and there is
+no way to have both for one pair of subjects.
+
+**And what nothing can check.** The parent relation is asserted per event, and heklang cannot verify
+it. If one event says customer 88 is in shop 7 and another says shop 9, the key was minted once,
+under whichever arrived first. Deleting shop 9 then leaves customer 88 readable, and deleting shop 7
+destroys data the author believes belongs to shop 9. Both events are individually well-formed, so
+there is nothing to point at. Getting the parent right is the author's, and it is worth saying out
+loud beside a feature whose whole job is irreversible destruction.
+
 ### The seal is in the type
 
-`@subject(customer_id)` on an event field is the authored form; `Sealed(String, customer_id)` is what
-propagates from it. `Opt` stays outermost, so `String? @subject(x)` is `Opt(Sealed(String, x))` and
-everything that already looks through an optional keeps working with one extra unwrap.
+`@subject(buyer)` on an event field is the authored form; `Sealed(String, Customer)` is what
+propagates from it. `Opt` stays outermost, so `String? @subject(buyer)` is
+`Opt(Sealed(String, Customer))` and everything that already looks through an optional keeps working
+with one extra unwrap.
+
+**The annotation names a sibling field and the type carries the subject.** Those are two different
+facts and they stay apart: `@subject(buyer)` is local to one declaration, which is what keeps
+`from: Customer, to: Customer` disambiguable, and `Customer` is what a host files the key under and
+what crosses the seam on the value. The annotation may only name a field whose type is a subject, so
+`@subject(some_int)` is refused where it is written.
 
 `Sealed` is not spellable. An author writes the annotation and never the type, which is what keeps
 one place able to create a seal.
@@ -715,6 +827,10 @@ size for something identical at every run.
 so content moved into another position still decrypts under the name it was sealed with. Moving it
 is the one thing rule 12 allows without a key, and this is what makes that safe rather than lucky.
 
+**`subject` is the subject's declared name**, which is what a key store files under, and it is read
+off the type of the field the annotation named rather than off the annotation. So the two facts stay
+where they belong: `field` is local to one declaration and `subject` is the namespace.
+
 ### A composite seals as the JSON rule 8 already writes
 
 `@subject(...)` takes any declared type, and a record, a list and a map are not scalars: the text a
@@ -757,7 +873,7 @@ shredded one is still terminal and still names the field.
 
 **This replaced a companion fold.** Each subject-bound variable used to get a second, hidden state
 variable that folded the subject id alongside the value, because the id could not come from the
-slice's filter: a fold of `customer_name @subject(customer_id)` filtered on `warranty_id` is an
+slice's filter: a fold of `customer_name @subject(buyer)` filtered on `warranty_id` is an
 ordinary shape. Carrying the id on the value deletes that machinery, along with `FoldSubject`,
 `StateVar.subject` and `Parser::subject_source`.
 
@@ -844,11 +960,14 @@ The rules are about the variable, so they hold in a command as well as an effect
 
 ### `@subject(...)` names a field that always has a value
 
-`@subject(x)` must name a field of the same event, `x` may not itself be subject-bound, and **`x` may
-not be optional**. A subject id is the name a key is filed under, so a missing id is not "no key", it
-is no question at all: there is nothing to look up and nothing for `erase` to remove. Checked where
-the annotation is written, which is where the mistake is, and it costs one check to keep absence from
-having to mean two things.
+`@subject(x)` must name a field of the same event, `x` must be a **declared subject**, `x` may not
+itself be subject-bound, and **`x` may not be optional**. A subject id is the name a key is filed
+under, so a missing id is not "no key", it is no question at all: there is nothing to look up and
+nothing for `erase` to remove. Checked where the annotation is written, which is where the mistake
+is, and it costs one check to keep absence from having to mean two things.
+
+The subject check is the one that could not exist before. `@subject(some_int)` used to be accepted
+and quietly conjure a namespace spelled `some_int`; the field's type answers it now.
 
 ### An optional in, an optional out
 

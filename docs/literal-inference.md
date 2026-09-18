@@ -17,6 +17,8 @@ A literal resolves against a **target type**, which is either known from context
 - Against `Decimal(s)`, the literal widens from its written scale to `s`. Widening is exact.
 - Against `Money(n)`, exactly as for `Decimal(n)`: the literal widens from its written scale to `n`.
   Currency is not involved, because it is not in the type (see `docs/money.md`).
+- Against a subject, exactly as against the scalar its ids are: `subject Customer(Int)` resolves a
+  literal the way `Int` does.
 - Against any other type, it is an error.
 
 Widening is the only rescale allowed. A literal written with **more** decimal places than the target
@@ -54,9 +56,21 @@ and the author never wrote a type at all.
 both give `Decimal(1) + Decimal(1)`. Since widening is exact, the more precise side is always the
 safe target.
 
-**A target that cannot hold a number is not a target.** Only `Int`, `Decimal(n)` and `Money(n)` are,
-and a literal offered anything else takes its default and lets the position it is in say what it
-actually wanted. This is not leniency: it moves the report from the literal to the mistake.
+**A subject resolves a literal exactly as its id type does.** `subject Customer(Int)` makes `buyer: 7`
+an `Int` literal, and `subject Tenant(Uuid)` makes `tenant: "1111-..."` a `Uuid` one, by the rules
+above rather than by rules of its own. A *name* does not coerce: an `Int` in scope cannot fill a
+`Customer`, because a literal token has no identity of its own to launder and a name does, and that
+mix-up is what the declaration exists to catch (`docs/effects.md` rule 12).
+
+**A `const` goes by its declared type, not by the value it holds.** `const HOUSE: Customer = 1` fills
+a `Customer` and `const LIMIT: Int = 1` does not, though both inline to the same `1`. That is the
+same rule rather than an exception to it: nothing coerced, because `HOUSE` already *is* a customer
+id. It is worth stating because a const is inlined, so both reach a use site as a literal value, and
+only the declaration tells them apart.
+
+**A target that cannot hold a number is not a target.** Only `Int`, `Decimal(n)`, `Money(n)` and a
+subject whose ids are one of those are, and a literal offered anything else takes its default and
+lets the position it is in say what it actually wanted. This is not leniency: it moves the report from the literal to the mistake.
 
 ```
 if owner_email > 0            → cannot apply `>` to String and Int

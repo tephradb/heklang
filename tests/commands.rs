@@ -4,14 +4,15 @@
 
 use heklang::{Event, EventPath, Interpreter, Outcome, Program, Value, parse};
 
-const PRELUDE: &str = "event @order.placed {
+const PRELUDE: &str = "subject Customer(Int)
+event @order.placed {
   order_id: Uuid,
-  customer_id: Int,
+  customer_id: Customer,
   email: String @subject(customer_id) @max(200),
   total: Money(2),
 }
-event @order.cancelled { order_id: Uuid, customer_id: Int }
-event @customer.blocked { customer_id: Int, reason: String }
+event @order.cancelled { order_id: Uuid, customer_id: Customer }
+event @customer.blocked { customer_id: Customer, strikes: Int, reason: String }
 refusal Blocked \"this customer cannot place orders\"
 refusal NoneLive \"nothing open\"
 refusal Unexpected(saw: String) \"{saw}\"
@@ -48,7 +49,7 @@ fn placed(seq: u32, customer_id: i64, total: i64) -> Event {
 // ---------------------------------------------------------------------------------
 // `fold` is a read declaration: the slices it names are the append condition.
 
-const COUNTING: &str = "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+const COUNTING: &str = "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
   fold open: Int = 0
     on @order.placed(customer_id) => open + 1
     on @order.cancelled(customer_id) => open - 1
@@ -110,7 +111,7 @@ fn a_slice_carries_the_values_it_was_narrowed_to() {
 #[test]
 fn a_let_puts_nothing_in_the_append_condition() {
     let program = program(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
   let doubled = total + total
 
   emit @order.placed { order_id, customer_id, email: \"x@example.com\", total: doubled }
@@ -138,7 +139,7 @@ fn a_let_puts_nothing_in_the_append_condition() {
 #[test]
 fn a_guard_is_a_slice_that_binds_nothing() {
     let program = program(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
   guard @order.placed(order_id), @order.cancelled(order_id)
 
   emit @order.placed { order_id, customer_id, email: \"x@example.com\", total }
@@ -164,7 +165,7 @@ fn a_guard_is_a_slice_that_binds_nothing() {
 #[test]
 fn the_condition_comes_back_for_every_outcome() {
     let program = program(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
   fold blocked: Bool = false
     on @customer.blocked(customer_id) => true
 
@@ -206,6 +207,7 @@ fn the_condition_comes_back_for_every_outcome() {
             EventPath::new(["customer", "blocked"]),
             [
                 ("customer_id", Value::Int(7)),
+                ("strikes", Value::Int(1)),
                 ("reason", Value::str("fraud")),
             ],
         )],
@@ -251,7 +253,7 @@ fn after_is_the_log_length_before_the_fold() {
 #[test]
 fn a_filter_may_name_a_let_above_the_declarations() {
     let program = program(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
   let who = customer_id
 
   fold blocked: Bool = false
@@ -266,6 +268,7 @@ fn a_filter_may_name_a_let_above_the_declarations() {
             EventPath::new(["customer", "blocked"]),
             [
                 ("customer_id", Value::Int(7)),
+                ("strikes", Value::Int(1)),
                 ("reason", Value::str("fraud")),
             ],
         )],
@@ -288,7 +291,7 @@ fn a_filter_may_name_a_let_above_the_declarations() {
 #[test]
 fn a_filter_naming_a_later_let_says_to_move_it() {
     let message = err(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
   fold blocked: Bool = false
     on @customer.blocked(customer_id: who) => true
 
@@ -310,7 +313,7 @@ fn a_filter_naming_a_later_let_says_to_move_it() {
 #[test]
 fn a_let_reading_a_fold_runs_after_it() {
     let program = program(
-        "command Count(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Count(order_id: Uuid, customer_id: Customer, total: Money(2)) {
   fold open: Int = 0
     on @order.placed(customer_id) => open + 1
   fold shut: Int = 0
@@ -342,7 +345,7 @@ fn a_let_reading_a_fold_runs_after_it() {
 #[test]
 fn a_let_reading_a_folded_let_stays_with_it() {
     let program = program(
-        "command Count(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Count(order_id: Uuid, customer_id: Customer, total: Money(2)) {
   fold open: Int = 0
     on @order.placed(customer_id) => open + 1
 
@@ -374,7 +377,7 @@ fn a_let_reading_a_folded_let_stays_with_it() {
 #[test]
 fn a_seed_may_not_read_another_fold() {
     let message = err(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
   fold open: Int = 0
     on @order.placed(customer_id) => open + 1
   fold seen: Int = open
@@ -399,8 +402,8 @@ fn a_seed_may_not_read_another_fold() {
 #[test]
 fn a_seed_may_read_a_parameter_or_a_let_above_it() {
     let program = program(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-  let base = customer_id * 2
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2), seats: Int) {
+  let base = seats * 2
 
   fold open: Int = base
     on @order.placed(customer_id) => open + 1
@@ -419,6 +422,7 @@ fn a_seed_may_read_a_parameter_or_a_let_above_it() {
                 ("order_id", Value::uuid(ORDER)),
                 ("customer_id", Value::Int(7)),
                 ("total", Value::money(100, 2)),
+                ("seats", Value::Int(7)),
             ],
         )
         .expect("ran");
@@ -433,13 +437,13 @@ fn a_seed_may_read_a_parameter_or_a_let_above_it() {
 #[test]
 fn a_filter_may_name_a_let_that_reads_an_earlier_stage() {
     let program = program(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
   fold open: Int = 0
     on @order.placed(customer_id) => open + 1
 
   let who = open
   fold blocked: Bool = false
-    on @customer.blocked(customer_id: who) => true
+    on @customer.blocked(strikes: who) => true
 
   if blocked {
     reject Blocked
@@ -452,13 +456,17 @@ fn a_filter_may_name_a_let_that_reads_an_earlier_stage() {
     assert_eq!(command.stages.len(), 2, "the `let` splits the declarations");
 
     // Two orders are on the log, so `open` folds to 2 and the second stage's filter
-    // resolves to `customer_id: 2` rather than to the seed.
+    // resolves to `strikes: 2` rather than to the seed.
     let mut interpreter = Interpreter::new(&program);
     interpreter.append(placed(1, 7, 100));
     interpreter.append(placed(2, 7, 100));
     interpreter.append(Event::new(
         EventPath::new(["customer", "blocked"]),
-        [("customer_id", Value::Int(2)), ("reason", Value::str("no"))],
+        [
+            ("customer_id", Value::Int(7)),
+            ("strikes", Value::Int(2)),
+            ("reason", Value::str("no")),
+        ],
     ));
 
     let execution = interpreter
@@ -484,8 +492,8 @@ fn a_filter_may_name_a_let_that_reads_an_earlier_stage() {
 #[test]
 fn fold_and_guard_may_not_be_declared_inside_a_block() {
     let message = err(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
-  if customer_id > 0 {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
+  if total > 0.00 {
     fold open: Int = 0
       on @order.placed(customer_id) => open + 1
   }
@@ -509,7 +517,7 @@ fn fold_and_guard_may_not_be_declared_inside_a_block() {
 #[test]
 fn a_destructure_reads_the_event_where_a_filter_reads_the_command() {
     let program = program(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
   fold spend: Money(2) = 0
     on @order.placed(customer_id) { total } => spend + total
 
@@ -543,7 +551,7 @@ fn a_destructure_reads_the_event_where_a_filter_reads_the_command() {
 #[test]
 fn a_destructure_does_not_rename() {
     let message = err(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
   fold spend: Money(2) = 0
     on @order.placed(customer_id) { total: amount } => spend + amount
 
@@ -558,7 +566,7 @@ fn a_destructure_does_not_rename() {
 #[test]
 fn a_destructure_reaches_no_envelope() {
     let message = err(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
   fold last: Int = 0
     on @order.placed(customer_id) { position } => position
 
@@ -576,7 +584,7 @@ fn a_destructure_reaches_no_envelope() {
 
 fn body_is_rejected(body: &str) -> String {
     err(&format!(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {{\n  {body}\n  return\n}}"
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {{\n  {body}\n  return\n}}"
     ))
 }
 
@@ -601,7 +609,7 @@ fn a_command_cannot_invoke() {
 #[test]
 fn a_command_cannot_decrypt() {
     let message = err(
-        "command Place(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Place(order_id: Uuid, customer_id: Customer, total: Money(2)) {
   fold held: String = \"\"
     on @order.placed(customer_id) { email } => email
 
@@ -640,11 +648,11 @@ fn a_statement_after_the_answer_is_refused() {
     for body in [
         "  reject Blocked\n  emit @order.cancelled { order_id, customer_id }",
         "  invalid \"no\"\n  return",
-        "  reject Blocked\n  let x = customer_id + 1\n  return",
+        "  reject Blocked\n  let x = 1 + 1\n  return",
         "  if true {\n    reject Blocked\n    return\n  }\n  return",
     ] {
         let message = err(&format!(
-            "command C(order_id: Uuid, customer_id: Int) {{\n{body}\n}}"
+            "command C(order_id: Uuid, customer_id: Customer) {{\n{body}\n}}"
         ));
         assert!(
             message.contains("this statement is after the answer, so it never runs"),
@@ -659,7 +667,7 @@ fn a_statement_after_the_answer_is_refused() {
 /// `fold` would also contradict the message the next line over calls it a declaration.
 #[test]
 fn a_declaration_after_the_answer_keeps_its_own_message() {
-    let message = err("command C(order_id: Uuid, customer_id: Int) {
+    let message = err("command C(order_id: Uuid, customer_id: Customer) {
   reject Blocked
   fold seen: Bool = false
     on @order.placed(customer_id) => true
@@ -678,7 +686,7 @@ fn a_declaration_after_the_answer_keeps_its_own_message() {
 #[test]
 fn a_return_above_an_answer_reads_as_the_old_spelling() {
     let message =
-        err("command C(order_id: Uuid, customer_id: Int) {\n  return\n  reject Blocked\n}");
+        err("command C(order_id: Uuid, customer_id: Customer) {\n  return\n  reject Blocked\n}");
     assert!(
         message.contains("`reject` takes no `return`"),
         "got: {message}"
@@ -690,8 +698,8 @@ fn a_return_above_an_answer_reads_as_the_old_spelling() {
 #[test]
 fn an_answer_may_end_a_block() {
     program(
-        "command C(order_id: Uuid, customer_id: Int) {
-  if customer_id < 0 {
+        "command C(order_id: Uuid, customer_id: Customer) {
+  if customer_id == 0 {
     reject Blocked
   }
   emit @order.placed { order_id, customer_id, email: \"a@b.c\", total: 0.00 }
@@ -704,7 +712,7 @@ fn an_answer_may_end_a_block() {
 #[test]
 fn a_command_may_move_sealed_content_without_revealing() {
     program(
-        "command Replace(order_id: Uuid, customer_id: Int, total: Money(2)) {
+        "command Replace(order_id: Uuid, customer_id: Customer, total: Money(2)) {
   fold held: String = \"\"
     on @order.placed(customer_id) { email } => email
 
@@ -772,7 +780,7 @@ fn an_emit_gives_every_field() {
 /// And gives each of them once, which the same gap allowed.
 #[test]
 fn an_emit_gives_each_field_once() {
-    let message = err("command Cancel(order_id: Uuid, customer_id: Int) {
+    let message = err("command Cancel(order_id: Uuid, customer_id: Customer) {
   emit @order.cancelled { order_id, order_id, customer_id }
 }");
     assert_eq!(message, "`order_id` is given twice");

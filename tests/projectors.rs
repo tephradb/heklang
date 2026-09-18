@@ -5,9 +5,10 @@ use std::fs;
 use heklang::ir::Stmt;
 use heklang::{Event, EventPath, Interpreter, Key, Store, Value, parse};
 
-const EVENTS: &str = "event @order.placed {
+const EVENTS: &str = "subject Customer(Int)
+event @order.placed {
   order_id: Uuid,
-  customer_id: Int,
+  customer_id: Customer,
   email: String @subject(customer_id) @max(200),
   total: Money(2),
 }
@@ -23,14 +24,17 @@ fn source(body: &str) -> String {
 
   entity Order {{
     order_id: Uuid @key,
-    customer_id: Int @index,
+    // A subject id has no zero, the way a `Uuid` and a `Timestamp` have none: customer 0
+    // is a customer rather than an absence. So a materializing `patch` needs the author to
+    // choose a placeholder rather than have one invented, which is what this is.
+    customer_id: Customer @index = 0,
     total: Money(2),
     status: Status,
     tracking: String?,
   }}
 
   entity Customer {{
-    customer_id: Int @key,
+    customer_id: Customer @key,
     order_count: Int,
     lifetime_spend: Money(2),
   }}
@@ -109,14 +113,18 @@ fn a_handler_without_as_cannot_reach_the_envelope() {
 #[test]
 fn as_binds_at_id_and_position() {
     let store = project(
-        "  on @order.placed as e { order_id } {
+        "  on @order.placed as e { order_id, customer_id } {
     put Order {
       order_id: e.id,
-      customer_id: e.position,
+      customer_id,
       total: e.total,
       status: Placed,
       tracking: none,
     }
+    // A position is a position. It used to be written into `customer_id`, which was an
+    // `Int` column then and is a `Customer` now, so the types say what the test never
+    // meant: the second event is at position 1 and nobody is customer 1 because of it.
+    patch Customer[customer_id] { order_count: e.position }
   }",
         vec![placed(9, 7, 2_599), placed(1, 7, 500)],
     );
@@ -128,7 +136,15 @@ fn as_binds_at_id_and_position() {
             &Key::Uuid("0190d1a1-0000-7000-9000-000000000001".into()),
         )
         .expect("`e.id` became the key");
-    assert_eq!(row.field("customer_id"), Some(&Value::Int(1)));
+    assert_eq!(row.field("customer_id"), Some(&Value::Int(7)));
+    assert_eq!(
+        store
+            .get("Customer", &Key::Int(7))
+            .expect("the patch landed")
+            .field("order_count"),
+        Some(&Value::Int(1)),
+        "`e.position` is the second event's"
+    );
     assert_eq!(
         row.field("total"),
         Some(&Value::money(500, 2)),
@@ -657,6 +673,7 @@ fn a_default_or_a_zero_always_has_the_declared_type() {
         + &fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/hek/orders.hk"))
             .expect("the demo projector source");
     let program = parse(&source).unwrap_or_else(|err| panic!("{err}"));
+    let mut checked = 0usize;
 
     for projector in &program.projectors {
         for entity in &projector.entities {
@@ -669,12 +686,15 @@ fn a_default_or_a_zero_always_has_the_declared_type() {
                     enums: &program.enums,
                     records: &program.records,
                 };
-                let value = heklang::value::initial(field, defs).unwrap_or_else(|| {
-                    panic!(
-                        "{}.{} has neither default nor zero",
-                        entity.name, field.name
-                    )
-                });
+                // Not every column has one, and that is the rule rather than a gap: a
+                // `Uuid`, a `Timestamp` and a subject id have no zero, because nil,
+                // epoch-zero and customer 0 are real data rather than absences.
+                // `check_zeros` is what demands a default, and only for an entity some
+                // `patch` materializes. What this test is about is the other half: when
+                // there *is* one, it has the column's declared type.
+                let Some(value) = heklang::value::initial(field, defs) else {
+                    continue;
+                };
                 // `has_type` rather than `==`: a sealed column stores a plain value,
                 // because the store holds plaintext and the seal is a parse-time
                 // rule. See `docs/effects.md` rule 12.
@@ -686,9 +706,19 @@ fn a_default_or_a_zero_always_has_the_declared_type() {
                     value.ty(),
                     field.ty
                 );
+                checked += 1;
             }
         }
     }
+    // The `continue` above makes a vacuous pass reachable: if `initial` started
+    // answering `None` for everything, the loop body would never run and this would go
+    // green having asserted nothing. The demo carries well over a dozen columns with a
+    // default or a zero, so a floor well below that catches the rot without pinning a
+    // number the demo has to keep.
+    assert!(
+        checked >= 10,
+        "only {checked} columns had an initial value; this test asserts nothing without them"
+    );
 }
 
 #[test]
@@ -889,7 +919,7 @@ fn indexes_are_recorded_in_the_ir() {
   enum Status {{ @default Placed, Shipped }}
   entity Order {{
     order_id: Uuid @key,
-    customer_id: Int @index,
+    customer_id: Customer @index,
     status: Status,
 
     index (customer_id, status)
@@ -1328,11 +1358,12 @@ fn a_computed_value_is_not_two_declarations_disagreeing() {
 fn emitted(source: &str, target: &str, sealed: bool) -> Result<(), String> {
     let subject = if sealed { " @subject(customer_id)" } else { "" };
     let source = format!(
-        "event @order.placed {{ order_id: Uuid, customer_id: Int, note: String{subject}{source} }}
-event @order.copied {{ order_id: Uuid, customer_id: Int, note: String{subject}{target} }}
+        "subject Customer(Int)
+event @order.placed {{ order_id: Uuid, customer_id: Customer, note: String{subject}{source} }}
+event @order.copied {{ order_id: Uuid, customer_id: Customer, note: String{subject}{target} }}
 
 refusal Nothing \"nothing to copy\"
-command Copy(order_id: Uuid, customer_id: Int) {{
+command Copy(order_id: Uuid, customer_id: Customer) {{
   fold note: String? = none
     on @order.placed(customer_id) {{ note }} => note
 
@@ -1402,12 +1433,13 @@ command Copy(order_id: Uuid, note: String) {
 #[test]
 fn one_transforming_arm_makes_the_fold_unknown() {
     parse(
-        "event @order.placed { order_id: Uuid, customer_id: Int, note: String @max(200) }
-event @order.trimmed { order_id: Uuid, customer_id: Int, note: String @max(200) }
-event @order.copied { order_id: Uuid, customer_id: Int, note: String @max(5) }
+        "subject Customer(Int)
+event @order.placed { order_id: Uuid, customer_id: Customer, note: String @max(200) }
+event @order.trimmed { order_id: Uuid, customer_id: Customer, note: String @max(200) }
+event @order.copied { order_id: Uuid, customer_id: Customer, note: String @max(5) }
 
 refusal Nothing \"nothing to copy\"
-command Copy(order_id: Uuid, customer_id: Int) {
+command Copy(order_id: Uuid, customer_id: Customer) {
   fold note: String? = none
     on @order.placed(customer_id) { note } => note
     on @order.trimmed(customer_id) { note } => note.trim()
@@ -1522,7 +1554,7 @@ fn a_subject_propagates_from_the_event_into_the_entity_field() {
 
     assert_eq!(
         customer.field("note").expect("declared").subject.as_deref(),
-        Some("customer_id"),
+        Some("Customer"),
         "the subject propagated from @order.placed.email"
     );
     assert_eq!(
@@ -1567,8 +1599,10 @@ fn a_handler_may_omit_the_destructure_block() {
 #[test]
 fn two_handlers_cannot_seal_one_column_under_two_subjects() {
     let message = parse(
-        "event @order.placed { order_id: Uuid, customer_id: Int, email: String @subject(customer_id) }
-event @shop.noted { order_id: Uuid, shop_id: Int, note: String @subject(shop_id) }
+        "subject Customer(Int)
+event @order.placed { order_id: Uuid, customer_id: Customer, email: String @subject(customer_id) }
+subject Shop(Int)
+event @shop.noted { order_id: Uuid, shop_id: Shop, note: String @subject(shop_id) }
 
 projector P {
   entity Row { order_id: Uuid @key, text: String }
@@ -1580,7 +1614,7 @@ projector P {
     .expect_err("one column, one subject")
     .text();
     assert!(
-        message.contains("`Row.text` already holds content sealed under `customer_id`"),
+        message.contains("`Row.text` already holds content sealed under `Customer`"),
         "got: {message}"
     );
     assert!(
@@ -1594,8 +1628,9 @@ projector P {
 #[test]
 fn two_handlers_may_seal_one_column_under_one_subject() {
     parse(
-        "event @order.placed { order_id: Uuid, customer_id: Int, email: String @subject(customer_id) }
-event @order.reconfirmed { order_id: Uuid, customer_id: Int, email: String @subject(customer_id) }
+        "subject Customer(Int)
+event @order.placed { order_id: Uuid, customer_id: Customer, email: String @subject(customer_id) }
+event @order.reconfirmed { order_id: Uuid, customer_id: Customer, email: String @subject(customer_id) }
 
 projector P {
   entity Row { order_id: Uuid @key, email: String }
