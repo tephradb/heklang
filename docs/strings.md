@@ -96,7 +96,9 @@ because the receiver always is one: a `String.pad_start(2, "0")` would make `"{y
 "0")}"` the way to write a two-digit month, which is a nested interpolation to pad a number.
 
 It is `truncate`'s pair. One bounds a string above and one bounds it below, both count the characters
-`len` counts, and both hand back the receiver unchanged rather than reporting that it already fitted.
+`len` counts, and neither reports that the value already fitted: `truncate` hands the string straight
+back, and `pad` writes the number's own text, which is a `String` either way because that is what
+`pad` returns.
 
 ## Raw multi-line strings
 

@@ -404,6 +404,59 @@ field or a sealed container element, so `reveal` at the point of use and pass pl
 **Writing plain content into a seal is free**: a command holding an ordinary `String` may `emit` it
 into a `@subject(...)` field with no ceremony. Only reading back out needs `reveal`.
 
+### A composite seals whole
+
+`@subject(...)` takes **any declared type**. A record, a list and a map seal as the whole JSON
+document rule 8 writes, and `reveal` parses it back against the declared type, so an effect gets an
+`Address` rather than its text.
+
+```hek
+subject Customer(Int)
+
+record Address {
+  line1: String @max(200),
+  city: String @max(100),
+}
+
+event @order.placed {
+  order_id: Uuid,
+  customer_id: Customer,
+  ship_to: Address @subject(customer_id),
+}
+```
+
+**This is the shape to reach for.** The alternative is one sealed `String` per part, where adding a
+part is a schema-evolution event on every event that carries one, and a `@subject` field takes `?`
+and never `@absent`, so evolution is tighter there than anywhere else.
+
+- **The annotation goes on the event field, never inside the record.** `@subject(x)` names a sibling
+  field holding the id, and a field reached through a container has no sibling to name. A record
+  *type* on a subject-bound event field is fine; `@subject` on a field of a `record` declaration is
+  refused.
+- **`@max` goes on the record's parts**, because the field's type is the record and there is no
+  syntax for a field inside it. An over-length value reports the path (`ship_to.line1`).
+- **It goes whole or not at all.** A part of one is not reachable by name: `e.ship_to.city` and
+  `for item in e.items` are refused at the seal boundary the way a method call on one is, and
+  `reveal` is what opens the document. Erasure is whole in the same way: an erased subject's record
+  does not come back with its parts missing, the `reveal` ends the arm exactly as a scalar one does.
+- **A seal is read as stored history, not as a request body**, so a part added to the record today
+  reads as its `@absent` literal on every seal already written, wherever that seal is revealed. (A
+  sealed read-model column is opaque text and is never read against the record, so `@absent` answers
+  at the `reveal` and nowhere else.) An `@absent` literal or a `?` is the whole of what makes a
+  subject-bound record safe to grow: a part added with neither wedges every `reveal` of every seal
+  already written, forever, because the plaintext is behind a key and no migration is available even
+  in principle.
+- **A `Json` seals whole, quotes and all.** It is the one type that needs saying, because its value
+  can itself be a string that looks like another: flattening `Json::Str("42")` to `42` would read
+  back as a number and `.string("sku")` would answer `none` for a key that is there. The reader also
+  has a depth limit the writer does not check, above what a host's own parser hands over but not
+  unbounded, so a `Json` built past it would seal and never reveal.
+- **A store handing back something that is not that document is a mismatch**, which is data rather
+  than a broken host, and the message names the type the declaration promised.
+
+None of the rules above move. A composite seal is moved, asked about and revealed exactly as a scalar
+one is, and a `reveal` of a shredded one is still terminal and still names the field.
+
 ### Folding a credential out of the log
 
 A credential is almost never on the event being handled, so the seal propagates through a `fold`

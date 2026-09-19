@@ -137,18 +137,21 @@ annotation stays out of this declaration.
 whose *type* is a record seals the whole record, which is the shape an author wants anyway:
 
 ```
+subject Customer(Int)
+
 event @order.placed {
   order_id: Uuid,
-  customer_ref: String,
-  ship_to: Address @subject(customer_ref),
+  customer_id: Customer,
+  ship_to: Address @subject(customer_id),
 }
 ```
 
-The id is a sibling of `ship_to`, so nothing has to be recovered from inside the record; `reveal`
-hands back an `Address` and `.city` reads it. The alternative is nine parallel optional sealed fields
-for one address, where adding a tenth is a schema-evolution event and `@subject` fields take `?` and
-never `@absent`. `docs/effects.md` rule 12 has the rules, and the seal's text for a composite is the
-JSON rule 8 already writes.
+The id is a sibling of `ship_to` and carries the namespace in its own type, so nothing has to be
+recovered from inside the record; `reveal` hands back an `Address` and `.city` reads it. Reading
+`.city` off the sealed field instead is refused, because the seal holds one document rather than
+parts. The alternative is nine parallel optional sealed fields for one address, where adding a tenth
+is a schema-evolution event and `@subject` fields take `?` and never `@absent`. `docs/effects.md`
+rule 12 has the rules, and the seal's text for a composite is the JSON rule 8 already writes.
 
 ### `@absent` on a field younger than the log
 

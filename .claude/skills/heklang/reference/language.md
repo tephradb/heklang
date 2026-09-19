@@ -35,7 +35,8 @@ cannot be passed through a `fn` parameter.
 
 One more is **derived rather than written**: `Sealed(T, Subject)`, which an event field gets from
 `@subject(...)`. `Opt` stays outermost, so `String? @subject(buyer)` is
-`Opt(Sealed(String, Customer))`.
+`Opt(Sealed(String, Customer))`. `T` is any declared type, so a record, a list and a map seal whole
+(`effects.md`, "A composite seals whole").
 
 And one is **declared**: `subject Customer(Int)` makes `Customer` a type whose values are customer
 ids, and `subject Customer(Int) under Shop` wraps a customer's key under its shop's, so deleting the
@@ -425,9 +426,13 @@ field is read with `.field`. **Every field must be given.** There is no record u
 (`base with { .. }`) and no partial literal.
 
 `@max(n)` and `@absent(<literal>)` are the annotations a record field takes. **A record field cannot be
-`@subject`**, so a record cannot carry subject-bound personal data. `@absent` means here exactly what it
-means on an event field, because a record reached from an event is stored inside that event's payload
-and so has the same history one level down.
+`@subject`**, because `@subject(x)` names a *sibling* field holding the id, and a record reached
+through a container has no sibling the parser can name. That does **not** mean a record cannot carry
+personal data: `@subject` on an event field whose *type* is a record seals the whole record, and that
+is the shape to reach for (`effects.md`). `@absent` means here exactly what it means on an event
+field, because a record reached from an event is stored inside that event's payload and so has the
+same history one level down, **and that holds through a seal**: a part added to a subject-bound
+record reads as its `@absent` literal on every seal already written.
 
 A `Name {` is read as a record literal only when `Name` is a declared record, is not shadowed by a
 local, and no `if` or `for` header is waiting for its block. Inside parentheses the restriction

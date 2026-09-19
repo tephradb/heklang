@@ -839,9 +839,15 @@ it back against the declared type, which is the reading half of the same table r
 `value::sealed_text` is the writing half. The two are stated as one property over generated values in
 `tests/roundtrip.rs` so they cannot drift.
 
-This is what makes `ship_to: Address? @subject(customer_ref)` work, which is the shape any application
-handling personal data reaches for first: one address rather than nine parallel optional sealed
-fields, where adding a tenth is a schema-evolution event on every event that carries it.
+This is what makes `ship_to: Address? @subject(customer_id)` work, over a sibling `customer_id:
+Customer`, which is the shape any application handling personal data reaches for first: one address
+rather than nine parallel optional sealed fields, where adding a tenth is a schema-evolution event on
+every event that carries it.
+
+**A part of a composite is not reachable by name.** `e.ship_to.city` and `for item in e.items` are
+refused at the seal boundary the way a method call on one is, because the content is one document and
+`reveal` is what opens it. Reading the field off what `reveal` hands back is the way, and it is the
+only way.
 
 **A `Json` is written whole, quotes and all**, and it is the one type that needs saying. It is the
 only one whose value can itself be a string that looks like another: flattening `Json::Str("42")` to

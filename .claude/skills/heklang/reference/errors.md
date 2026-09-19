@@ -79,7 +79,7 @@ The set is closed: every diagnostic heklang can produce is one of these.
 | Code | Means | Fix |
 | --- | --- | --- |
 | `unknown-annotation` | `@nope` | events take `@subject`, `@max`, `@absent`, `@no_index`; entities `@key`, `@index`, `@max`; records `@max`, `@absent`; enum variants `@default`; an effect arm's trigger destructure `@key` |
-| `bad-annotation` | a known annotation in a place or shape it does not take | `@max` bounds a `String`; a record field cannot be `@subject`; a `@subject` id must be a declared subject, and may not be optional or itself sealed; an optional column may not default to `none`; an optional or `@subject` field takes no `@absent`, nor does one whose value is past its own `@max`; `@key` goes on an effect arm's trigger destructure and nowhere else |
+| `bad-annotation` | a known annotation in a place or shape it does not take | `@max` bounds a `String`; a field *inside* a `record` declaration cannot be `@subject`, though an event field whose *type* is a record is fine and seals it whole; a `@subject` id must be a declared subject, and may not be optional or itself sealed; an optional column may not default to `none`; an optional or `@subject` field takes no `@absent`, nor does one whose value is past its own `@max`; `@key` goes on an effect arm's trigger destructure and nowhere else |
 | `empty-declaration` | a declaration whose body would be empty | |
 | `arm-shape` | an effect arm with no `@key` | every arm names the trigger field that identifies its lane: `{ @key shop_id }` |
 | `entity-shape` | an entity with no `@key`, more than one, an unorderable key, or an index on a field it has not got | |

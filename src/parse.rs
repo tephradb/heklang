@@ -5727,10 +5727,28 @@ impl Parser {
                 continue;
             }
 
+            let receiver = self.type_of(lower, value);
+
+            // Rule 12 again, one line down from the method call above: a composite
+            // seals whole, so a part of it is not a name the declaration offers. Said
+            // before the table below, which knows nothing about seals and would answer
+            // `did you mean city()?`, sending the author to the same wall twice.
+            if let Some(subject) = receiver.as_ref().and_then(Type::subject) {
+                return Err(self
+                    .err(
+                        Code::SealBoundary,
+                        format!("`{name}` reads content sealed under `{subject}`"),
+                        at,
+                    )
+                    .with_hint(
+                        "`reveal` it first and read the field off what it hands back: a seal holds one document, not parts",
+                    ));
+            }
+
             // Parenless, so a field rather than a method. Only a `Response` has any,
             // and where the receiver's type is known the mistake is caught here rather
             // than at run time, which is where `total.trim` used to be caught.
-            match self.type_of(lower, value) {
+            match receiver {
                 Some(Type::Response) if response_field(&name).is_some() => {}
                 Some(Type::Response) => {
                     return Err(self.err(
@@ -6411,11 +6429,13 @@ fn no_method(receiver: &Type, name: &str) -> (String, Option<String>) {
         // list of the type's real methods would answer a different question than the one
         // that was put. `String` gets its own wording for the first two, above.
         (_, "unwrap_or") => Some(format!(
-            "a {receiver} is already there, so there is nothing to fall back to"
+            "{} is already there, so there is nothing to fall back to",
+            a(receiver)
         )),
         (_, "is_none" | "is_some") => Some(format!(
-            "{} is always there, so there is no presence to ask about. Absence is what a {receiver}? is for",
-            a(receiver)
+            "{} is always there, so there is no presence to ask about. Absence is what {} is for",
+            a(receiver),
+            a(&Type::opt(receiver.clone()))
         )),
         (Type::Timestamp, _) => Some(
             "a Timestamp has `year()`, `month()`, `day()`, `hour()`, `minute()`, `second()` and the fixed-length `add_seconds`, `add_minutes`, `add_hours` and `add_days`".to_string(),
@@ -7781,7 +7801,21 @@ impl Parser {
         let over = self.header_expr(lower, None)?;
         let over_at = self.span_from(start);
 
-        let (index_ty, item_ty) = match self.type_of(lower, over) {
+        // Walking a sealed container reads its elements, so the answer is `reveal`
+        // rather than the shape complaint below, which would name a type the author did
+        // write and leave nothing to do about it.
+        let over_ty = self.type_of(lower, over);
+        if let Some(subject) = over_ty.as_ref().and_then(Type::subject) {
+            return Err(self
+                .err(
+                    Code::SealBoundary,
+                    format!("`for` reads content sealed under `{subject}`"),
+                    over_at,
+                )
+                .with_hint("`reveal` it first and walk what it hands back"));
+        }
+
+        let (index_ty, item_ty) = match over_ty {
             Some(Type::List(item)) => (second.as_ref().map(|_| Type::Int), item.as_ref().clone()),
             Some(Type::Map(key, value)) => {
                 if second.is_none() {

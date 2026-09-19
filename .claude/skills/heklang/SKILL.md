@@ -239,7 +239,9 @@ test "a first order is appended as written" {
 ```
 
 Annotations, exhaustively: an **event field** takes `@subject(field)` (naming a sibling field whose
-type is a declared subject), `@max(n)`, `@absent(<literal>)` and `@no_index`; an **entity field** takes `@key`, `@index` and `@max(n)`, plus `= <literal>` for a
+type is a declared subject; the annotated field may be **any declared type**, so a record, a list or
+a map seals whole and `reveal` hands the record back), `@max(n)`, `@absent(<literal>)` and
+`@no_index`; an **entity field** takes `@key`, `@index` and `@max(n)`, plus `= <literal>` for a
 default and an entity-level `index (a, b)`; a **record field** takes `@max(n)` and
 `@absent(<literal>)`; an **enum variant** takes `@default`; an **effect arm's trigger destructure**
 takes `@key`. `@max` applies to `String` and `String?` and nothing else. **`@max` never truncates on
@@ -298,6 +300,7 @@ if c { a } else { b }                     // value position
 x.method(arg)  record.field  response.status  response.body  .stored_column
 Uuid.derive(seed, name)  Json.empty  Json.encode(v)  Map.empty
 Timestamp.parse(t)  Timestamp.from_parts(y, mo, d, h, mi, s)  Money.parse(t)  Decimal.parse(t)
+t.add_seconds(n)  t.add_minutes(n)  t.add_hours(n)  t.add_days(n)  n.pad(width)
 http.get(url)  http.post(url, body, headers = { "K": "v" })  now()  reveal(x)
 invoke C { .. }                         // reject / invalid / fail are statements, not values
 ```
@@ -334,9 +337,11 @@ A comment is `//` to the end of the line. Put one on its own line, leading whate
    is unequal to every present one. Ordering an optional is still an error. Narrowing is about a
    **name**: `if item.plan_id.is_some()` narrows nothing, so bind it with a `let` first.
 7. **Sealed content may only be moved, asked about, or revealed.** A field with `@subject(...)`
-   cannot be interpolated, compared, sent in a body, passed to `invoke`, `unwrap_or`ed or read
-   through a method. Move it into a same-subject position, ask `.is_some()`, or `reveal(x)` in an
-   effect arm.
+   cannot be interpolated, compared, sent in a body, passed to `invoke`, `unwrap_or`ed, read through
+   a method or a field, or walked by `for`. Move it into a same-subject position, ask `.is_some()`,
+   or `reveal(x)` in an effect arm. The annotated field may be any declared type, so seal an address
+   as one record rather than as nine parallel fields; a composite is moved, asked about and revealed
+   exactly as a scalar, so `e.ship_to.city` waits for the `reveal` like everything else.
 8. **Only an effect calls out**, and only an effect arm may `reveal` or `erase`. A helper takes the
    already-revealed value as a parameter.
 9. **No minted identity.** `Uuid.derive(seed, name)` is the whole story, usually

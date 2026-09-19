@@ -110,9 +110,41 @@ whatever the author wrote, so `total.mul(0.9, HalfUp)` takes a `Decimal(1)`.
 
 ### `Timestamp`
 
-`year()`, `month()`, `day()`, `hour()`, `minute()`, `second()`, each an `Int`, each in UTC. There is
-no `add`, no duration type and no `format`: calendar arithmetic is written as a `fn`, because
-month-end clamping is one opinion among several.
+| Method | Returns | |
+| --- | --- | --- |
+| `year()`, `month()`, `day()`, `hour()`, `minute()`, `second()` | `Int` | in UTC |
+| `add_seconds(n)`, `add_minutes(n)`, `add_hours(n)`, `add_days(n)` | `Timestamp` | `n` may be negative |
+
+**The fixed-length units are here; the calendar ones are not.** A minute is sixty seconds and a UTC
+day is twenty-four hours, so `add_minutes` has nothing to clamp. `add_months` and `add_years` are the
+opinion, so they stay absent and calendar arithmetic is written as a `fn` over the calendar fields
+above plus `Timestamp.from_parts` (under Constructors).
+
+- **A count, not a magnitude.** `add_minutes(-30)` goes backwards, so there is no `sub_` family.
+- **Sub-second precision survives**, which a `fn` over the calendar fields could not manage:
+  `from_parts` is on the second, so every hand-written `add_minutes` silently dropped microseconds.
+- **Overflow is an error**, not an optional, the same answer `Int` and `Money` arithmetic give.
+
+There is still no duration type and no `format`.
+
+### `Int`
+
+| Method | Returns | |
+| --- | --- | --- |
+| `pad(width)` | `String` | zero-filled on the left; the receiver's own text when it already fits |
+
+The only `Int` method, and it is about text: the arithmetic is the operators. Interpolation has no
+format specifiers, so `"{y}-{mo}"` writes `2026-9` and a billing-period key is silently wrong for
+nine months of the year. `"{y}-{mo.pad(2)}"` is the shape it exists for, and the receiver is the
+number so that padding one needs no nested interpolation.
+
+The sign comes first and the zeros after it, and `width` counts the whole rendering. A width at or
+below zero pads nothing. **A width past 4096 is a runtime error**: `pad` is the only method that makes
+a string longer, so an unbounded width reaching it from a request would allocate whatever it says.
+
+It is `truncate`'s pair: one bounds a string above, one below, both count the characters `len` counts,
+and neither reports that the value already fitted. `truncate` hands the string straight back; `pad`
+writes the number's own text, and its result is a `String` either way.
 
 ### `Outcome`
 
@@ -205,15 +237,18 @@ script the world instead.
 Each of these is a decision, not a gap.
 
 - **No `+` on strings, no `str()`, no `.to_string()`, no format specifiers.** Interpolation is the
-  whole mechanism and the JSON text table is the whole text form.
+  whole mechanism and the JSON text table is the whole text form. `Int.pad(width)` is the one thing a
+  specifier would have been reached for that the table cannot say, and it is a method rather than a
+  specifier so nothing about the string syntax changes.
 - **No `sort`, `map`, `filter` or `fold` methods.** A comprehension covers map and filter, iteration
   order is already defined, and a fold over a container is a `for` inside a pure `fn`.
 - **No set type and no tuple type.** `Map(K, Bool)` covers membership and a record covers two values
   that travel together.
 - **No `x.expect("reason")`.** `unwrap_or` and narrowing cover it without a panic.
 - **No random, no `uuid4`, no minted identity.** `Uuid.derive` is a pure function of its arguments.
-- **No duration type and no timestamp arithmetic.** The calendar fields plus `from_parts` make it
-  writable as a `fn`, which is where the clamping rule belongs.
+- **No duration type, and no `add_months` or `add_years`.** The fixed-length units are in the
+  language because they carry no opinion; the calendar ones are the opinion, so the calendar fields
+  plus `from_parts` make them writable as a `fn`, which is where the clamping rule belongs.
 - **No regular expressions.** `contains`, `starts_with` and `after_last` cover what came up.
 - **No `Money` conversion and no rate type.** Both need currency back in the type, and currency is
   deliberately not in the type: declare an ordinary field beside the amount.

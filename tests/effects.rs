@@ -1580,6 +1580,46 @@ fn a_composite_seal_holding_something_else_is_a_mismatch() {
     );
 }
 
+/// A composite seals whole, so a part of one is not a name the declaration offers. The
+/// wording is the method call's because it is the same wall: the table that answers
+/// `no field` knows nothing about seals and used to offer `city()`, which is the same
+/// refusal one step later.
+#[test]
+fn a_field_read_off_a_composite_seal_asks_for_reveal() {
+    let message = err("effect E {
+  on @order.addressed as e { @key customer_id } {
+    log(e.ship_to.city)
+  }
+}");
+    assert!(
+        message.contains("`city` reads content sealed under `Customer`"),
+        "got: {message}"
+    );
+    assert!(message.contains("`reveal` it first"), "got: {message}");
+}
+
+/// And walking one reads its elements, so `for` is the same refusal rather than the
+/// shape complaint, which would name a type the author did write and leave nothing to
+/// do about it.
+#[test]
+fn walking_a_sealed_container_asks_for_reveal() {
+    let message = err("effect E {
+  on @order.addressed as e { @key customer_id } {
+    for tag in e.tags {
+      log(tag)
+    }
+  }
+}");
+    assert!(
+        message.contains("`for` reads content sealed under `Customer`"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("walk what it hands back"),
+        "got: {message}"
+    );
+}
+
 // Rule 12: what `reveal` takes. The credential is folded off an event that happened
 // long before the one being handled, which is the shape every real effect has.
 

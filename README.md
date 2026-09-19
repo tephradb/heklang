@@ -24,21 +24,23 @@ the first place.
 ## What it looks like
 
 ```hek
+subject Customer(Int)
+
 event @order.placed {
   order_id: Uuid,
-  customer_id: Int,
+  customer_id: Customer,
   email: String @subject(customer_id) @max(200),
   total: Money(2),
 }
 
 event @order.cancelled {
   order_id: Uuid,
-  customer_id: Int,
+  customer_id: Customer,
 }
 
 refusal TooManyOpen "this customer has too many open orders"
 
-command PlaceOrder(order_id: Uuid, customer_id: Int, email: String, total: Money(2)) {
+command PlaceOrder(order_id: Uuid, customer_id: Customer, email: String, total: Money(2)) {
   // What this folds is what it conflicts on: if another writer lands in the same
   // slice first, the append is rejected and the whole command retries.
   fold open_orders: Int = 0
@@ -60,8 +62,9 @@ command PlaceOrder(order_id: Uuid, customer_id: Int, email: String, total: Money
   you conflict on, so optimistic concurrency falls out of the code instead of being configured
   beside it. That is why the keyword is not `let`.
 
-- **Crypto-shredding is a type.** `@subject(customer_id)` makes a field a `Sealed(String,
-  customer_id)`, which propagates through folds and read models untouched. Only an effect may
+- **Crypto-shredding is a type.** `subject Customer(Int)` declares a key namespace, and
+  `@subject(customer_id)` on a field whose sibling is one makes it a `Sealed(String,
+  Customer)`, which propagates through folds and read models untouched. Only an effect may
   `reveal` one, and erasing a subject's key makes every seal bearing it permanently unreadable.
   Moving sealed content is not reading it, and the difference is checked rather than trusted.
 
