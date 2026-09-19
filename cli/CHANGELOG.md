@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2](https://git.tqwewe.com/tephra/heklang/compare/v0.5.1...v0.5.2) - 2026-09-18
+
+### Added
+
+- a subject is a declared type whose values are its ids
+
 ## [0.5.1](https://git.tqwewe.com/tephra/heklang/compare/v0.5.0...v0.5.1) - 2026-09-15
 
 ### Fixed

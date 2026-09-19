@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://git.tqwewe.com/tephra/heklang/compare/heklang-v0.8.0...heklang-v0.9.0) - 2026-09-18
+
+### Added
+
+- a subject is a declared type whose values are its ids
+- the fixed-length timestamp units, and Int.pad(width)
+
+### Fixed
+
+- a sealed record, list or map reveals as what it was sealed from
+
+### Other
+
+- the demo's address is a record, sealed whole
+
 ## [0.8.0](https://git.tqwewe.com/tephra/heklang/compare/heklang-v0.7.0...heklang-v0.8.0) - 2026-09-15
 
 ### Added
