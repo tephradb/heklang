@@ -207,19 +207,35 @@ if found.is_some() {
 }
 ```
 
-Three lines of rule:
+Four lines of rule:
 
 - `x.is_some()` narrows the **then** branch, `x.is_none()` narrows the **else** branch, and `!` swaps
   which;
+- **`&&` carries what its halves prove where it is true, `||` where it is false**, and neither proves
+  anything on the other side;
 - when the then branch never falls through, the test also narrows the **rest of the enclosing
   block**, which is the early-return shape above;
 - a narrowing ends where its block does.
 
+So both of these narrow `a` and `b`, and they are the two shapes to reach for:
+
+```hek
+if a.is_some() && b.is_some() { use(a, b) }       // proved inside
+
+if a.is_none() || b.is_none() { reject Missing }
+use(a, b)                                          // proved after
+```
+
+The other sides prove **nothing**: `if a.is_some() || b.is_some()` narrows neither in either branch,
+because a true `||` does not say which half made it true. An operand is also narrowed by the ones
+before it, so `if x.is_some() && x > y` orders a value already proved present rather than being
+refused, and `if x.is_none() || x < y` is the mirror.
+
 **What deliberately does not narrow**: a receiver that is not a name (`if item.plan_id.is_some()`
 narrows nothing, because a narrowing rewrites a *slot* and a field access is not one; bind it with a
-`let` first and the `if` narrows that), a compound condition (`if a.is_some() && b.is_some()` narrows
-neither), the value-position `if`, an `else if`, and an equality (`if x == "a"` does prove `x`
-present, and says so nowhere). Where narrowing does not reach, `unwrap_or` does.
+`let` first and the `if` narrows that), the value-position `if`, an `else if`, and an equality
+(`if x == "a"` does prove `x` present, and says so nowhere). Where narrowing does not reach,
+`unwrap_or` does.
 
 ## 6. Strings
 

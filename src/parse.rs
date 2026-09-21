@@ -4136,22 +4136,30 @@ impl Parser {
         Ok(stmts)
     }
 
-    /// Narrows for one branch of an `if`, when the proof is about that branch.
+    /// Narrows every slot the proof puts on this branch, and hands back what each one
+    /// was so `release` can put it all back.
+    ///
+    /// A slot named twice narrows once: the second `narrow` sees a type that is no
+    /// longer an `Opt` and answers `None`, so it never reaches the list and never gets
+    /// widened twice. That is what keeps `if x.is_some() && x.is_some()` honest
+    /// without a set here.
     fn hold(
         &self,
         lower: &mut Lower,
-        proof: Option<(Slot, bool)>,
+        proof: &[(Slot, bool)],
         branch: bool,
-    ) -> Option<(Slot, Option<Type>)> {
-        let (slot, present) = proof?;
-        if present != branch {
-            return None;
-        }
-        lower.b.narrow(slot).map(|previous| (slot, previous))
+    ) -> Vec<(Slot, Option<Type>)> {
+        proof
+            .iter()
+            .filter(|(_, present)| *present == branch)
+            .filter_map(|(slot, _)| lower.b.narrow(*slot).map(|previous| (*slot, previous)))
+            .collect()
     }
 
-    fn release(&self, lower: &mut Lower, held: Option<(Slot, Option<Type>)>) {
-        if let Some((slot, previous)) = held {
+    /// In reverse, so nested narrowings of one slot unwind in the order they were laid
+    /// down even though `hold` is what keeps that from arising.
+    fn release(&self, lower: &mut Lower, held: Vec<(Slot, Option<Type>)>) {
+        for (slot, previous) in held.into_iter().rev() {
             lower.b.widen(slot, previous);
         }
     }
@@ -5002,13 +5010,13 @@ impl Parser {
                 // `let` written inside a branch came to outlive it: on the path that
                 // skipped the branch its slot was read having never been assigned, and
                 // a program that checked clean died at the read.
-                let held = self.hold(lower, proof, true);
+                let held = self.hold(lower, &proof, true);
                 lower.b.push_scope();
                 let then = self.block(lower, events)?;
                 lower.b.pop_scope();
                 self.release(lower, held);
 
-                let held = self.hold(lower, proof, false);
+                let held = self.hold(lower, &proof, false);
                 let otherwise = if self.eat_word(Keyword::Else) {
                     // `else if` is one statement rather than a block, so a chain of
                     // conditions reads as a chain instead of nesting one level per arm.
@@ -5031,12 +5039,13 @@ impl Parser {
                 self.release(lower, held);
 
                 // The early-return shape: reaching past this `if` means the condition
-                // was false, because the branch it guards never falls through.
-                if let Some((slot, false)) = proof
-                    && always_returns(&then)
-                    && let Some(previous) = lower.b.narrow(slot)
-                {
-                    self.narrowings.push((slot, previous));
+                // was false, because the branch it guards never falls through. Every
+                // slot the false side proves present, which is what makes
+                // `if a.is_none() || b.is_none() { reject ... }` narrow both.
+                if always_returns(&then) {
+                    for (slot, previous) in self.hold(lower, &proof, false) {
+                        self.narrowings.push((slot, previous));
+                    }
                 }
 
                 Ok(Stmt::If {
@@ -5493,7 +5502,12 @@ impl Parser {
         while let Some(span) = self.eat_at(Sym::OrOr) {
             self.check_bool(lower, lhs, lhs_at);
             let from = self.here();
+            // The right operand of a `||` runs only when the left was false, so what
+            // the left proves on its false side holds while it is parsed. Sound
+            // because `||` short-circuits: `docs/optionals.md`.
+            let held = self.hold(lower, &narrowing(lower, lhs), false);
             let rhs = self.and_expr(lower, Some(Type::Bool))?;
+            self.release(lower, held);
             self.check_bool(lower, rhs, self.span_from(from));
             lower.b.at(span);
             lhs = lower.b.binary(BinOp::Or, lhs, rhs);
@@ -5510,7 +5524,12 @@ impl Parser {
         while let Some(span) = self.eat_at(Sym::AndAnd) {
             self.check_bool(lower, lhs, lhs_at);
             let from = self.here();
+            // The mirror of `||` above: the right operand of a `&&` runs only when the
+            // left was true, so `x.is_some() && x > y` orders a value already proved
+            // present instead of being refused for ordering an optional.
+            let held = self.hold(lower, &narrowing(lower, lhs), true);
             let rhs = self.cmp_expr(lower, Some(Type::Bool))?;
+            self.release(lower, held);
             self.check_bool(lower, rhs, self.span_from(from));
             lower.b.at(span);
             lhs = lower.b.binary(BinOp::And, lhs, rhs);
@@ -6615,39 +6634,90 @@ fn uuid_member(member: &str) -> (String, Option<String>) {
     }
 }
 
-/// What a condition proves about one optional, and on which branch: `true` means the
-/// value is present in the `then` branch. Recognised on a single test, because a
-/// conjunction and a disjunction narrow in opposite directions and getting that wrong
-/// is silent. See `docs/optionals.md`.
-fn narrowing(lower: &Lower, cond: ExprId) -> Option<(Slot, bool)> {
+/// What a condition proves about the optionals in it, as `(slot, sense)` pairs read
+/// "when this condition evaluates to `sense`, that slot holds a value".
+///
+/// One list rather than one per branch, because an atomic test only ever proves
+/// *presence*, and it proves it on exactly one side. That is what makes the two
+/// directions a filter instead of two code paths: `hold` keeps the pairs whose sense
+/// matches the branch it is narrowing.
+///
+/// The recursion is the whole rule:
+///
+/// - `!e` flips the sense of everything `e` proved, since `!e` is `w` exactly when `e`
+///   is `!w`;
+/// - `a && b` is true only if both were, so the pairs proved **on the true side** carry
+///   over and the false side learns nothing: a false conjunction does not say which
+///   half failed;
+/// - `a || b` is the mirror. A false disjunction means both were false, so the pairs
+///   proved on the **false** side carry over and the true side learns nothing.
+///
+/// Those opposite directions are why this stayed one test for a long time. They are
+/// written down here once instead of left to the reader. See `docs/optionals.md`.
+fn narrowing(lower: &Lower, cond: ExprId) -> Vec<(Slot, bool)> {
+    let mut proof = Vec::new();
+    collect_narrowing(lower, cond, true, &mut proof);
+    proof
+}
+
+/// `sense` is the branch the caller is still describing, flipped by every `!` on the
+/// way down, so the leaf never has to know how deep it sits.
+fn collect_narrowing(lower: &Lower, cond: ExprId, sense: bool, out: &mut Vec<(Slot, bool)>) {
     let exprs = lower.b.exprs();
-    let (test, sense) = match exprs.get(cond)? {
+    let Some(expr) = exprs.get(cond) else {
+        return;
+    };
+    match expr {
         Expr::Unary {
             op: UnOp::Not,
             operand,
-        } => (*operand, false),
-        _ => (cond, true),
-    };
-    let Expr::Method {
-        receiver,
-        method,
-        args,
-    } = exprs.get(test)?
-    else {
-        return None;
-    };
-    if !args.is_empty() {
-        return None;
+        } => collect_narrowing(lower, *operand, !sense, out),
+        // A connective can speak for one side only. A conjunction is true exactly when
+        // both halves are, so it carries what they prove on the side it is true for; a
+        // disjunction is false exactly when both halves are, so it carries the other
+        // side. `sense` flips which that is, because under an odd number of `!` an
+        // `&&` is describing the side a bare `||` would.
+        //
+        // The filter is the load-bearing half rather than the recursion. Both halves
+        // are walked at the same sense, and then everything proved about the side the
+        // connective cannot speak for is dropped: `a.is_some() || b.is_some()` walks
+        // to two present-when-true pairs and keeps neither, because a true disjunction
+        // does not say which half made it true.
+        Expr::Binary {
+            op: op @ (BinOp::And | BinOp::Or),
+            lhs,
+            rhs,
+        } => {
+            let speaks_for = if *op == BinOp::And { sense } else { !sense };
+            let mut both = Vec::new();
+            collect_narrowing(lower, *lhs, sense, &mut both);
+            collect_narrowing(lower, *rhs, sense, &mut both);
+            out.extend(both.into_iter().filter(|(_, side)| *side == speaks_for));
+        }
+        Expr::Method {
+            receiver,
+            method,
+            args,
+        } => {
+            if !args.is_empty() {
+                return;
+            }
+            let present = match method.as_str() {
+                "is_some" => sense,
+                "is_none" => !sense,
+                _ => return,
+            };
+            // The receiver has to be a name: a narrowing rewrites the declared type of
+            // a slot, and a field access is not one. See `docs/optionals.md`.
+            let Some(Expr::Load(slot)) = exprs.get(*receiver) else {
+                return;
+            };
+            if matches!(lower.b.slot_type(*slot), Some(Type::Opt(_))) {
+                out.push((*slot, present));
+            }
+        }
+        _ => {}
     }
-    let present = match method.as_str() {
-        "is_some" => sense,
-        "is_none" => !sense,
-        _ => return None,
-    };
-    let Expr::Load(slot) = exprs.get(*receiver)? else {
-        return None;
-    };
-    matches!(lower.b.slot_type(*slot), Some(Type::Opt(_))).then_some((*slot, present))
 }
 impl Parser {
     fn effect_decl(&mut self, events: &[EventDef]) -> Result<Effect, Diagnostic> {

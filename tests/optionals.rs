@@ -43,6 +43,35 @@ fn err(body: &str) -> String {
         .text()
 }
 
+/// The same, for a `Make` taking two optionals. A compound condition needs two to say
+/// anything, since the interesting part is which of them a connective can speak for.
+fn run_with(body: &str, text: Option<&str>, tag: Option<&str>) -> Outcome {
+    let program = source(body);
+    let program = parse(&program).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+    let arg = |value: Option<&str>| match value {
+        Some(value) => Value::some(Value::str(value)),
+        None => Value::none(Type::String),
+    };
+    Interpreter::new(&program)
+        .run(
+            "Make",
+            vec![
+                ("id", Value::uuid(ID)),
+                ("text", arg(text)),
+                ("tag", arg(tag)),
+            ],
+        )
+        .unwrap_or_else(|err| panic!("expected this to run: {err}"))
+        .outcome
+}
+
+fn made_with(body: &str, text: Option<&str>, tag: Option<&str>) -> Value {
+    match run_with(body, text, tag) {
+        Outcome::Ok(events) => events[0].field("text").cloned().expect("the field"),
+        other => panic!("expected an append, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------------
 // Comparing one
 
@@ -289,21 +318,118 @@ fn an_else_if_does_not_leak_its_narrowing() {
     parse(&program).expect("an else if narrows nothing beyond itself");
 }
 
-/// A conjunction and a disjunction narrow in opposite directions, and getting that
-/// wrong is silent, so neither narrows.
+/// A conjunction carries what its halves prove where it is **true**, and a
+/// disjunction where it is **false**. The pair below is the whole rule: the same two
+/// tests, the same branch, opposite answers.
 #[test]
-fn a_compound_condition_narrows_nothing() {
-    for cond in ["text.is_none() || id != id", "text.is_none() && id == id"] {
+fn a_conjunction_and_a_disjunction_prove_opposite_sides() {
+    // `||` false means both halves were false, so reaching past the early exit proves
+    // both present. This is the shape a port wrote as two nested `if`s.
+    const EITHER: &str = "command Make(id: Uuid, text: String?, tag: String?) {
+  if text.is_none() || tag.is_none() {
+    invalid \"needs both\"
+  }
+  emit @note.made { id, text: \"{text}{tag}\" }
+}";
+    assert_eq!(
+        made_with(EITHER, Some("a"), Some("b")),
+        Value::str("ab"),
+        "past the exit both are present"
+    );
+    assert!(matches!(
+        run_with(EITHER, None, Some("b")),
+        Outcome::Invalid(_)
+    ));
+    assert!(matches!(
+        run_with(EITHER, Some("a"), None),
+        Outcome::Invalid(_)
+    ));
+
+    // `&&` true means both halves were true, so the body is where both are present.
+    const BOTH: &str = "command Make(id: Uuid, text: String?, tag: String?) {
+  if text.is_some() && tag.is_some() {
+    emit @note.made { id, text: \"{text}{tag}\" }
+    return
+  }
+  invalid \"needs both\"
+}";
+    assert_eq!(made_with(BOTH, Some("a"), Some("b")), Value::str("ab"));
+    assert!(matches!(
+        run_with(BOTH, None, Some("b")),
+        Outcome::Invalid(_)
+    ));
+}
+
+/// The half that has to stay refused. A true disjunction does not say which side made
+/// it true, and a false conjunction does not say which side failed, so neither proves
+/// anything and `unwrap_or` is still the only way through.
+#[test]
+fn neither_connective_proves_the_side_it_cannot_speak_for() {
+    for cond in [
+        "text.is_some() || tag.is_some()",
+        "!(text.is_none() && tag.is_none())",
+    ] {
         let program = source(&format!(
-            "command Make(id: Uuid, text: String?) {{
+            "command Make(id: Uuid, text: String?, tag: String?) {{
   if {cond} {{
-    invalid \"no text\"
+    emit @note.made {{ id, text }}
+    return
   }}
-  emit @note.made {{ id, text: text.unwrap_or(\"\") }}
+  invalid \"needs one\"
 }}"
         ));
-        parse(&program).unwrap_or_else(|err| panic!("for {cond}: {err}"));
+        let message = parse(&program)
+            .expect_err(&format!("{cond} proves nothing in its then branch"))
+            .text();
+        assert!(
+            message.starts_with("expected String, found String?"),
+            "for {cond}: {message}"
+        );
     }
+
+    // And the sides they *can* speak for are still the other way round: the `else` of
+    // an `&&` and the body of a `||` both learn nothing.
+    let program = source(
+        "command Make(id: Uuid, text: String?, tag: String?) {
+  if text.is_some() && tag.is_some() {
+    invalid \"has both\"
+  } else {
+    emit @note.made { id, text: text.unwrap_or(\"\") }
+  }
+}",
+    );
+    parse(&program).expect("the else of an && proves nothing, so unwrap_or is still there");
+}
+
+/// The right operand of a `&&` runs only when the left was true, so it is parsed with
+/// the left's proof in hand. Without this `if x.is_some() && x > y` is refused for
+/// ordering an optional, which is the one the port hit most.
+#[test]
+fn an_operand_sees_what_the_operand_before_it_proved() {
+    const ORDERED: &str = "command Make(id: Uuid, text: String?, tag: String?) {
+  if text.is_some() && text > \"m\" {
+    emit @note.made { id, text }
+    return
+  }
+  invalid \"no\"
+}";
+    assert_eq!(made_with(ORDERED, Some("z"), None), Value::str("z"));
+    // Short-circuit is what makes it sound: with `text` absent the comparison is never
+    // reached, so the unwrap a narrowed load lowers to is never evaluated.
+    assert!(matches!(run_with(ORDERED, None, None), Outcome::Invalid(_)));
+
+    // The mirror: a `||`'s right operand runs only when the left was false.
+    const MIRRORED: &str = "command Make(id: Uuid, text: String?, tag: String?) {
+  if text.is_none() || text < \"m\" {
+    invalid \"no\"
+  }
+  emit @note.made { id, text }
+}";
+    assert_eq!(made_with(MIRRORED, Some("z"), None), Value::str("z"));
+    assert!(matches!(
+        run_with(MIRRORED, None, None),
+        Outcome::Invalid(_)
+    ));
 }
 
 // ---------------------------------------------------------------------------------

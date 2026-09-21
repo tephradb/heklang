@@ -146,13 +146,48 @@ if found.is_some() {
 }
 ```
 
-The rule is three lines:
+The rule is four lines:
 
 - `x.is_some()` narrows the **then** branch, `x.is_none()` narrows the **else** branch, and `!` swaps
   which;
+- **`&&` carries what its halves prove where it is true, `||` where it is false**, and neither proves
+  anything on the other side;
 - when the then branch never falls through, the test also narrows the **remainder of the enclosing
   block**, which is the early-return shape above;
 - a narrowing ends where its block does.
+
+The second line is one rule read in two directions rather than two rules. A conjunction is true only
+if both halves were, so a true `&&` carries both:
+
+```
+if a.is_some() && b.is_some() {
+  use(a, b)                         // both are present here
+}
+```
+
+A disjunction is false only if both halves were, so a **false** `||` carries both, which is the
+early-exit shape:
+
+```
+if a.is_none() || b.is_none() {
+  reject Missing
+}
+use(a, b)                           // and both are present here
+```
+
+The sides they cannot speak for stay closed, and that is the half worth checking: a true `||` does
+not say which half made it true, and a false `&&` does not say which half failed. So
+`if a.is_some() || b.is_some()` narrows neither, in either branch.
+
+An operand is narrowed by the operands before it, because that is when it runs:
+
+```
+if x.is_some() && x > y { ... }     // `x > y` orders a value already proved present
+if x.is_none() || x < y { ... }     // and the mirror, where the left proved it by failing
+```
+
+Both rest on `&&` and `||` short-circuiting, which they do. Without this the first is refused
+outright for ordering an optional, and splitting it into nested `if`s is the only way to write it.
 
 Nothing about this is a new kind of scope. Statically the slot's declared type becomes `T`; at
 runtime a load of a narrowed slot lowers to an unwrap node no source token can spell, and reaching it
@@ -163,9 +198,18 @@ fixed once bound and a proof about it cannot go stale. "Never falls through" is 
 same analysis that checks a `fn` returns on every path. And the parser lowers a condition before it
 parses either of its blocks, so a single-pass parser needs no backtracking to know what it proved.
 
+**The compound line was deliberately absent until a port asked for it.** The stated worry was that a
+conjunction and a disjunction narrow in opposite directions and that getting it wrong would be
+silent, so the first version recognised a single test and nothing else. What settled it was a
+19,300-line port splitting the shapes above into nested `if`s three or four times, and an
+implementation where the two directions are one filter rather than two code paths: a condition
+collects `(slot, side)` pairs, and a connective keeps the pairs for the side it can speak for. The
+sides it cannot are what `neither_connective_proves_the_side_it_cannot_speak_for` in
+`tests/optionals.rs` holds down, because that is the half a wrong answer would be silent about.
+
 ## What deliberately does not narrow
 
-Each of these is sound in principle, and leaving them out is what keeps the rule three lines instead
+Each of these is sound in principle, and leaving them out is what keeps the rule four lines instead
 of a paragraph with exceptions. The first is the one a later port did reach for, and it is listed
 first for that reason; none of the rest has come up in real code yet.
 
@@ -176,9 +220,6 @@ first for that reason; none of the rest has come up in real code yet.
   item.plan_id` binds a slot, and the `if` below it narrows that like any other local. Nothing is
   mutable, so a path would be as fixed as a slot and this would be sound; what it would cost is a
   second thing a narrowing can be about, because the unwrap a narrowed load lowers to names a slot.
-- **Compound conditions.** `if a.is_some() && b.is_some()` narrows neither, and
-  `if a.is_none() || b { return }` narrows nothing after it. A conjunction and a disjunction narrow
-  in opposite directions, and getting that wrong is silent.
 - **The value-position `if`.** `let x = if y.is_some() { y } else { z }` is an expression, and
   narrowing inside it would mean the two branches disagree about a slot's type while both are being
   typed against one target.
