@@ -116,6 +116,27 @@ every `order_count` in every handler that destructures it.
 `.field` is legal only in a `patch` or `update` value position. Not in `put`, which writes a whole
 row and has no prior value to read, and not in filters.
 
+**The stored value is an ordinary value of the column's type**, with every method that type has, so a
+write can be computed from what is there rather than only added to it. What that buys is a handler
+that is idempotent in its own row: a value expression idempotent in the stored value survives being
+applied twice, so a set-valued column counts a repeated id once, given a `seen: Map(Uuid, Bool)`
+alongside the counter:
+
+```
+patch Customer[customer_id] {
+  seen: .seen.set(order_id, true),
+  order_count: .seen.set(order_id, true).len(),
+}
+```
+
+`Map.set` and `List.remove` are idempotent and `+ 1` is not, which is the whole difference between
+that and `order_count: .order_count + 1`. The dedupe has to *be* the written value, because the
+decision is out of reach: `if .seen.contains(order_id)` is rule 4's error, while the same
+`.seen.contains(order_id)` in a value position is fine. What it costs is a row carrying every id it
+has seen, so this is for a bounded set rather than a log's worth of them, and a duplicate that should
+never have been appended is the command's append condition to prevent (`docs/commands.md`) rather
+than the projector's.
+
 Inside an `update` the story is cleaner than inside a `patch`: the statement only proceeds when the
 row exists, so a stored load is always filled from a real row and the zero table of rule 5 is not
 consulted at all on this path.
@@ -140,7 +161,8 @@ whole reason the read-model seam reads as well as writes.
 
 A handler cannot read entity state except through rule 3. It cannot read a different entity, cannot
 read a different row, and cannot branch on stored state, with the one narrow exception `update`
-carves out below.
+carves out below. The line is between a value and a decision: a stored value shapes what its own
+column is written to, and never which statement runs.
 
 This keeps a projector a pure fold over the event log, so rebuild determinism is structural rather
 than a rule authors can violate.
@@ -158,8 +180,8 @@ nowhere above it to go:
 reading any row through the current batch's uncommitted writes. It is more expressive, and it makes
 read-modify-write across entities possible. It lost because with it, whether a projector rebuilds to
 the same rows depends on the handler bodies being written carefully; without it, that property holds
-by construction. Rule 3 covers the read-modify-write case that actually comes up, which is
-incrementing a counter on the row being written.
+by construction. Rule 3 covers read-modify-write on the row being written, of which incrementing a
+counter is the common case rather than the limit.
 
 ### What `update` reads, and why it is not a read
 
@@ -187,8 +209,11 @@ against a missing key can always build the row.
 | `String` | `""` |
 | `T?` | `none` |
 | an enum | its `@default` variant (rule 6) |
+| `List(T)`, `Map(K, V)` | empty |
+| a record | its fields' zeros |
 | `Uuid` | none: no zero exists |
 | `Timestamp` | none: no zero exists |
+| a subject id | none: no zero exists, since customer 0 is a customer |
 
 `= <literal>` on a field overrides the zero. An **optional field takes no default**, because it
 already has one: `none`. Anything else would need a literal for `some(x)`, which the language has no

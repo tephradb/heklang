@@ -326,6 +326,43 @@ fn each_stored_field_is_loaded_once_per_patch() {
     assert_eq!(loads[0].field, "total");
 }
 
+/// What rule 3 buys beyond a counter: a value expression that is idempotent in its own
+/// stored value dedupes the row without ever branching on what is stored, which is the
+/// half of read-modify-write `+ 1` cannot do. The fixture entity has no set-valued
+/// column, so this case brings its own.
+#[test]
+fn an_idempotent_stored_value_write_counts_a_repeated_id_once() {
+    let source = format!(
+        "{EVENTS}projector P {{
+  entity Customer {{
+    customer_id: Customer @key,
+    seen: Map(Uuid, Bool),
+    order_count: Int,
+  }}
+
+  on @order.placed {{ order_id, customer_id }} {{
+    patch Customer[customer_id] {{
+      seen: .seen.set(order_id, true),
+      order_count: .seen.set(order_id, true).len(),
+    }}
+  }}
+}}
+"
+    );
+    let program = parse(&source).unwrap_or_else(|err| panic!("{err}"));
+    let log = vec![placed(1, 7, 2_599), placed(1, 7, 2_599), placed(2, 7, 100)];
+    let store = Interpreter::with_log(&program, log)
+        .project("P")
+        .unwrap_or_else(|err| panic!("{err}"));
+
+    let row = store.get("Customer", &Key::Int(7)).expect("the row exists");
+    assert_eq!(
+        row.field("order_count"),
+        Some(&Value::Int(2)),
+        "three events, two of them the same order, and a `Map` column materialized empty"
+    );
+}
+
 // Rule 4: no general reads.
 
 #[test]

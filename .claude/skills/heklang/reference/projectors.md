@@ -103,11 +103,20 @@ that field. A bare name always means a local binding (a destructured field, the 
 `.field` is legal only in a `patch` or `update` value position. Not in a `put`, which has no prior
 value, and not in a key or a filter.
 
+The stored value is an ordinary value of the column's type, with every method that type has, so a
+write can be computed from what is there rather than only added to it. That is what lets a handler
+dedupe its own row: `seen: .seen.set(order_id, true)` beside
+`order_count: .seen.set(order_id, true).len()` counts a repeated id once, where `.order_count + 1`
+counts it twice. The dedupe has to *be* the written value, since `if .seen.contains(order_id)` is
+rule 4's error while the same call in a value position is fine, and it costs a row carrying every id
+it has seen. A duplicate that should never have been appended belongs to the command's fold instead.
+
 ## 4. No general reads
 
 A handler cannot read entity state except through rule 3. It cannot read a different entity, cannot
 read a different row, and cannot branch on stored state. There is no `get(entity, key)`. That is what
-makes rebuild determinism structural rather than a discipline.
+makes rebuild determinism structural rather than a discipline. A stored value shapes what its own
+column is written to, never which statement runs.
 
 `update` is the one carve-out: it looks at whether the row is there, but no value derived from that
 look reaches the program, so the one bit decides whether a write lands and nothing else.
@@ -125,8 +134,11 @@ A `patch` against a missing key materializes the row, so every column it might f
 | `String` | `""` |
 | `T?` | `none` |
 | an enum | its `@default` variant |
+| `List(T)`, `Map(K, V)` | empty |
+| a record | its fields' zeros |
 | `Uuid` | **none: no zero exists** |
 | `Timestamp` | **none: no zero exists** |
+| a subject id | **none: no zero exists**, since customer 0 is a customer |
 
 `Uuid` and `Timestamp` have no zero because the nil UUID and epoch zero are real values that get
 mistaken for data. Both are writable as a `= <literal>` default (a string in each case).
