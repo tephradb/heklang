@@ -99,6 +99,22 @@ impl Builder {
             .find_map(|scope| scope.get(name).copied())
     }
 
+    /// The same, skipping the innermost scope: the binding a new one written here would
+    /// hide rather than replace.
+    ///
+    /// The distinction is the whole rule a `let` is checked against. Rebinding a name
+    /// in the scope that already holds it is sequential and reads correctly, which is
+    /// what `let email = email.trim()` relies on. Hiding one from an enclosing scope
+    /// reads the same and does something else: the new slot dies with the block, so the
+    /// write is discarded and every later read still finds the old value.
+    pub fn outer(&self, name: &str) -> Option<Slot> {
+        self.scopes
+            .iter()
+            .rev()
+            .skip(1)
+            .find_map(|scope| scope.get(name).copied())
+    }
+
     pub fn param(&mut self, name: &str, ty: Type) -> Slot {
         let slot = self.alloc(name, Some(ty.clone()));
         self.params.push(Param {

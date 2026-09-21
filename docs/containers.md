@@ -183,6 +183,47 @@ Immutability is also what makes the rest of the language's promises cheap. A fol
 new state cannot alias the old one, a value passed to a helper cannot come back changed, and a replay
 cannot diverge because something was written twice in a different order.
 
+### A `let` cannot hide one from an enclosing block
+
+The shape an author reaches for the moment they want a total is the accumulator, and it is the one
+thing on this page that has to be rejected rather than merely absent:
+
+```
+let running = 0
+for a in ns { let running = running + a }   // rejected: `running` is already in scope
+return running
+```
+
+There is no `var`, so the inner `let` was never the assignment it reads as. It bound a second
+`running` that died with the loop body, which left the loop doing nothing and `return running`
+answering `0` for every input. Nothing about it is ill-typed, so it checked clean and the wrong
+answer arrived at runtime.
+
+So a `let` may not bind a name an **enclosing** scope already bound. Rebinding in the scope that
+already holds the name is still fine, because there it is sequential and reads correctly:
+
+```
+let email = email.trim().lower()   // fine: same scope, and every later read sees this one
+```
+
+The same rule catches the branch form, where the loop is not what misleads:
+
+```
+let tier = Free
+if total > 100 { let tier = Paid }   // rejected: this `tier` ends with the branch
+```
+
+A branch is a block like any other, which is also why a `let` written inside one is not in scope
+after it. That had been the other half of the same hole: the binding outlived the branch it was
+written in, and reading it on the path that skipped the branch killed a program that had checked
+clean.
+
+**A total over a container has no spelling today.** A comprehension maps and filters, and there is no
+`sum` and no `fold` method, so `fn total_of(ns: List(Int)) -> Int` cannot be written: `fn` is not
+recursive either. Accumulation across *events* is a `fold` arm and is unaffected. This is a real gap
+rather than a thing the rejection above redirects you to, and the diagnostic says what exists rather
+than pretending the shape is covered.
+
 ## What is deliberately absent
 
 - **No set type.** A `Map(K, Bool)` covers membership, and the one place a port wanted a set it
@@ -191,6 +232,7 @@ cannot diverge because something was written twice in a different order.
   A record is the answer when two values genuinely travel together.
 - **No nested-container literal shorthand.** `[[1, 2]]` works because a list literal is an ordinary
   expression; there is simply no special form for it.
-- **No `sort`, `map`, `filter` or `fold` methods.** A comprehension covers `map` and `filter`,
-  iteration order is already defined, and a fold over a container is a `for` in a pure `fn`. Adding
-  a second way to spell a comprehension is the kind of surface this language is trying not to grow.
+- **No `sort`, `map`, `filter` or `fold` methods.** A comprehension covers `map` and `filter`, and
+  iteration order is already defined. Adding a second way to spell a comprehension is the kind of
+  surface this language is trying not to grow. `fold` is the one that is genuinely missing rather
+  than covered: see the note below.

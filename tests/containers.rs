@@ -408,6 +408,66 @@ fn there_are_no_mutable_bindings() {
     // absent rather than merely unused.
 }
 
+/// The accumulator, which is what an author reaches for the moment they want a total,
+/// and the one shape on this page that has to be rejected rather than merely absent.
+///
+/// It used to check clean and answer with the seed: the inner `let` is not the
+/// assignment it reads as, so it bound a second `running` that died with the loop body
+/// and left the loop doing nothing at all.
+#[test]
+fn a_let_cannot_hide_one_from_an_enclosing_block() {
+    let body = format!(
+        "  let running = 0\n  for a in [1, 2] {{\n    let running = running + a\n  }}\n{}",
+        emitting("[running]")
+    );
+    assert_eq!(
+        err("", &body),
+        "`running` is already in scope; this binds a second `running` that ends with the body, and there is no `var`, so a loop cannot accumulate"
+    );
+
+    // The branch form, where the loop is not what misleads. A branch is a block like
+    // any other, so the second `tier` ends with it.
+    let branch = format!(
+        "  let tier = 1\n  if true {{\n    let tier = 2\n  }}\n{}",
+        emitting("[tier]")
+    );
+    assert_eq!(
+        err("", &branch),
+        "`tier` is already in scope; a `let` ends with the block it is written in, so this one cannot change the outer `tier`"
+    );
+}
+
+/// The other half of the same hole: a `let` written in a branch used to outlive it,
+/// and on the path that skipped the branch its slot was read having never been
+/// assigned. A program that checked clean died at the read; now it does not check.
+#[test]
+fn a_let_in_a_branch_does_not_escape_it() {
+    let body = format!("  if true {{\n    let n = 1\n  }}\n{}", emitting("[n]"));
+    assert_eq!(err("", &body), "`n` is not in scope");
+}
+
+/// Rebinding in the scope that already holds the name stays legal, because there it is
+/// sequential and reads correctly. `let email = email.trim()` is the shape, and the
+/// rejection above must not take it with them.
+#[test]
+fn a_let_may_rebind_a_name_its_own_scope_holds() {
+    let body = format!("  let tag = tag.trim().upper()\n{}", describing("tag"));
+    assert_eq!(
+        label(&fired(
+            &format!("{NO_ITEMS}, tag: String"),
+            &body,
+            vec![empty_list(), ("tag", Value::str("  ada  "))]
+        )),
+        "ADA",
+        "the rebound `tag` is what the emit reads"
+    );
+
+    // A `for` binding is in the loop's own scope, so a `let` beside it is rebinding
+    // rather than hiding, and is legal for the same reason.
+    let inner = format!("  for x in [1] {{\n    let x = 2\n  }}\n{}", emitting("[]"));
+    assert!(parse(&source("", &inner)).is_ok());
+}
+
 #[test]
 fn there_is_no_break_or_continue() {
     for word in ["break", "continue"] {

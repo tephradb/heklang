@@ -54,7 +54,7 @@ The set is closed: every diagnostic heklang can produce is one of these.
 
 | Code | Means | Fix |
 | --- | --- | --- |
-| `declared-twice` | a name, field, variant, arm or annotation given twice, or a guard named twice on the same arguments | names are global across files; the related note points at the first |
+| `declared-twice` | a name, field, variant, arm or annotation given twice, a guard named twice on the same arguments, or a `let` hiding a name from an enclosing block | names are global across files; the related note points at the first. A `let` in a `for` or `if` body cannot accumulate into an outer name: there is no `var` |
 | `not-declared` | spelled fine, declared nowhere (usually an event path) | declare it, or fix the spelling |
 | `not-in-scope` | declared somewhere, but not visible here | an effect-local `fn` is visible only in its effect; an entity or projector enum only in its projector |
 | `unknown-member` | a field, method, parameter, variant or verb the receiver has not got | check `stdlib.md`; the commonest pair is `is_empty()` asked of a `String?` and `is_none()` asked of a `String` |

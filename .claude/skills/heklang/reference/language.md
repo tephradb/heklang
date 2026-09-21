@@ -289,8 +289,28 @@ A `for` runs once per element of a finite container and always terminates. There
 `break` and no `continue`. A `return` inside a `for` does propagate out of it, which is how a search
 is written. One name over a map is an error: there is no pair type.
 
-**There are no mutable bindings.** `let` only, no `var`. Every accumulation is a comprehension or a
-fold arm returning new state, and every search is a `fn` whose `for` body returns.
+**There are no mutable bindings.** `let` only, no `var`. A search is a `fn` whose `for` body
+returns; an accumulation across *events* is a fold arm returning new state.
+
+**A `let` cannot bind a name an enclosing block already bound**, which is what makes the accumulator
+a compile error rather than a wrong answer:
+
+```hek
+let running = 0
+for a in ns { let running = running + a }   // [declared-twice] `running` is already in scope
+```
+
+The inner `let` is not an assignment: it binds a second `running` that ends with the loop body, so
+this used to check clean and return `0`. The same applies to an `if` branch, which is a block like
+any other. Rebinding in the *same* scope is still fine, and is how a value is normalised:
+
+```hek
+let given = sku.unwrap_or("").trim()   // fine, even where `sku` is the parameter's name
+```
+
+**A total over a container has no spelling.** There is no `sum` and no `fold` method, a comprehension
+only maps and filters, and a `fn` cannot recurse, so `fn total_of(ns: List(Int)) -> Int` cannot be
+written. Sum across events with a fold arm, or across rows with a projector's `patch`.
 
 ## 8. `fn`
 

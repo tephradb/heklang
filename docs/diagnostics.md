@@ -181,7 +181,7 @@ be the whole of it:
 | `bad-path` | an `@` with no name after it |
 | `unexpected-character` | a character with no token in the language |
 | `expected-token` | a token the grammar cannot take here |
-| `declared-twice` | a name, field, variant, arm or annotation given twice |
+| `declared-twice` | a name, field, variant, arm or annotation given twice, or a `let` binding a name an enclosing block already bound |
 | `not-declared` | a name that is spelled fine and declared nowhere |
 | `not-in-scope` | a name declared somewhere, and not here |
 | `unknown-member` | a field, method, parameter, variant or verb the receiver has not got |

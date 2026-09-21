@@ -202,6 +202,18 @@ struct Parser {
     /// declaration and never named the first, because the lists these checks walk carry
     /// no position. One map beside them rather than a span on every IR declaration.
     declared: HashMap<(String, Ident), Related>,
+    /// Where each `let` bound its name, so one that hides another can point at it.
+    /// Keyed by slot rather than by name because the slot is what survives the scope
+    /// map: `Builder::alloc` overwrites the entry the second binder would need.
+    ///
+    /// A parameter and a `for` binding are not in here, and the diagnostic reads the
+    /// same way `declared_twice` does when its pass has not run: it names what is being
+    /// hidden and leaves the related line off.
+    bound: HashMap<Slot, Related>,
+    /// How many `for` bodies enclose the statement being parsed. Reusing a name is the
+    /// same error at any depth, but inside a loop it is nearly always the accumulator
+    /// shape, which has something different to say.
+    loops: u32,
 }
 
 /// A record field's `@absent` with its value still unread: which field it is on and
@@ -325,6 +337,8 @@ impl Parser {
             envelope: None,
             stored: None,
             declared: HashMap::new(),
+            bound: HashMap::new(),
+            loops: 0,
         })
     }
 
@@ -385,6 +399,53 @@ impl Parser {
         self.declared
             .get(&(kind.to_string(), name.to_string()))
             .cloned()
+    }
+
+    /// Rejects a `let` that hides a name an enclosing scope already bound.
+    ///
+    /// There is no `var`, so a `let` cannot be the assignment it looks like. Written in
+    /// the scope that already holds the name it is close enough: the binding is
+    /// replaced from there on, which is what `let email = email.trim()` wants and what
+    /// `Builder::alloc` does. Written one block in it is not: the new slot dies with the
+    /// block, so the write goes nowhere and every read outside still finds the old
+    /// value. That shape checked clean, because nothing about it is ill-typed, and the
+    /// accumulator people reach for first
+    ///
+    /// ```text
+    /// let running = 0
+    /// for a in ns { let running = running + a }
+    /// ```
+    ///
+    /// returned its seed for every input.
+    ///
+    /// Reported against the name rather than the statement: the value is usually right
+    /// and it is the name that has to change.
+    fn reused_name(&self, lower: &Lower, name: &str, span: Span) -> Result<(), Diagnostic> {
+        let Some(slot) = lower.b.outer(name) else {
+            return Ok(());
+        };
+        let error = self.err(
+            Code::DeclaredTwice,
+            format!("`{name}` is already in scope"),
+            span,
+        );
+        // Inside a loop this is nearly always the accumulator, and renaming is not the
+        // answer. Say what actually happens instead, and do not redirect to a
+        // comprehension: that covers `map` and `filter`, and a total over a container
+        // has no spelling at all, so naming one here would send the author in a circle.
+        let error = if self.loops > 0 {
+            error.with_hint(format!(
+                "this binds a second `{name}` that ends with the body, and there is no `var`, so a loop cannot accumulate"
+            ))
+        } else {
+            error.with_hint(format!(
+                "a `let` ends with the block it is written in, so this one cannot change the outer `{name}`"
+            ))
+        };
+        Err(match self.bound.get(&slot) {
+            Some(first) => error.with_related(first.clone()),
+            None => error,
+        })
     }
 
     /// A second declaration of a name, pointing at the first if the pass that would
@@ -901,6 +962,8 @@ impl Parser {
             triggers,
             envelope,
             stored,
+            bound,
+            loops,
         } = self;
         *prologue = false;
         *folding = false;
@@ -915,6 +978,8 @@ impl Parser {
         *event = None;
         *envelope = None;
         *stored = None;
+        *loops = 0;
+        bound.clear();
         local_fns.clear();
         enums.clear();
         entities.clear();
@@ -4932,8 +4997,15 @@ impl Parser {
                 // parsed, which is what lets a single-pass parser narrow at all.
                 let proof = narrowing(lower, cond);
 
+                // A branch is a block, so what it binds ends with it. `for` and a
+                // comprehension always pushed one and an `if` did not, which is how a
+                // `let` written inside a branch came to outlive it: on the path that
+                // skipped the branch its slot was read having never been assigned, and
+                // a program that checked clean died at the read.
                 let held = self.hold(lower, proof, true);
+                lower.b.push_scope();
                 let then = self.block(lower, events)?;
+                lower.b.pop_scope();
                 self.release(lower, held);
 
                 let held = self.hold(lower, proof, false);
@@ -4948,7 +5020,10 @@ impl Parser {
                         self.unnarrow(lower, depth);
                         vec![stmt]
                     } else {
-                        self.block(lower, events)?
+                        lower.b.push_scope();
+                        let block = self.block(lower, events)?;
+                        lower.b.pop_scope();
+                        block
                     }
                 } else {
                     Vec::new()
@@ -5298,11 +5373,16 @@ impl Parser {
             }
             Token::Word(Keyword::Let) => {
                 self.bump();
+                let at = self.pos;
+                let mark = self.span_here();
                 let name = self.expect_ident()?;
+                self.reused_name(lower, &name, mark)?;
                 self.expect_sym(Sym::Assign)?;
                 let value = self.expr(lower, None)?;
                 let ty = self.type_of(lower, value);
                 let slot = lower.b.alloc(&name, ty);
+                let site = self.at_token(format!("`{name}` is bound here"), at);
+                self.bound.insert(slot, site);
                 Ok(Stmt::Assign { slot, value })
             }
             Token::Word(Keyword::Invoke) => {
@@ -5315,7 +5395,9 @@ impl Parser {
                 self.bump();
                 lower.b.push_scope();
                 let iter = self.iter_bindings(lower)?;
+                self.loops += 1;
                 let body = self.block(lower, events)?;
+                self.loops -= 1;
                 lower.b.pop_scope();
                 Ok(Stmt::For { iter, body })
             }

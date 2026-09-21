@@ -322,7 +322,8 @@ Each of these is a decision with an argument behind it, not a gap waiting to be 
   `Int.pad(width)` is the one thing a specifier would have been reached for that the table cannot
   say, and it is a method rather than a syntax for exactly that reason.
 - **No `sort`, `map`, `filter` or `fold` methods.** A comprehension covers map and filter, iteration
-  order is already defined, and a fold over a container is a `for` inside a pure `fn`.
+  order is already defined. `fold` is the one that is genuinely missing: a total over a container has
+  no spelling, because a `let` cannot accumulate across a `for` body and a `fn` is not recursive.
 - **No set type and no tuple type.** `Map(K, Bool)` covers membership and a record covers two values
   that travel together. The one place a port wanted a set it wanted an ordered one, which is a list.
 - **No `x.expect("reason")`.** `unwrap_or` and narrowing cover it without a panic.
