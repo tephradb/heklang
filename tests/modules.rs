@@ -74,6 +74,45 @@ fn module_order_does_not_matter() {
     }
 }
 
+/// Order held for the declarations that reference each other; it did not hold for the
+/// two whose keyword is soft. A module declaring a `refusal` read before the module
+/// declaring a `subject` swallowed the subject: a refusal ends where its message does,
+/// so the scan for the next item is what ends it, and the soft word looked like part of
+/// the message. `Shop` was then an unknown type in every file that named it, and the
+/// file it actually went missing from said nothing.
+#[test]
+fn a_subject_survives_any_module_read_before_it() {
+    const PERMUTATIONS: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+
+    for above in [
+        (
+            "refusals.hk",
+            "refusal NoToken \"this shop has no token\"\n",
+        ),
+        ("limits.hk", "const LIMIT: Int = 10\n"),
+    ] {
+        let files = [
+            above,
+            ("subjects.hk", "subject Shop(Int)\n"),
+            ("events.hk", "event @shop.installed { shop_id: Shop }\n"),
+        ];
+        for order in PERMUTATIONS {
+            let ordered: Vec<(&str, &str)> = order.iter().map(|index| files[*index]).collect();
+            let names: Vec<&str> = ordered.iter().map(|(name, _)| *name).collect();
+            let program = parse_files(ordered).unwrap_or_else(|err| panic!("for {names:?}: {err}"));
+            assert_eq!(program.subjects.len(), 1, "for {names:?}");
+            assert_eq!(program.events.len(), 1, "for {names:?}");
+        }
+    }
+}
+
 #[test]
 fn a_syntax_error_names_its_module() {
     let broken = "command Broken(x: Int) {\n  let y = nope\n  return\n}\n";

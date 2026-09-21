@@ -745,3 +745,31 @@ fn a_malformed_subject_does_not_swallow_what_follows() {
         "got: {text:?}"
     );
 }
+
+/// The other direction: a declaration that **succeeds** must not take the next one with
+/// it either. A `refusal` and a `const` end where their value does, so the scan for the
+/// next item is what ends them, and that scan knew only the hard keywords: `subject` and
+/// `secret` lex as identifiers, so a refusal written above one ran straight through it.
+/// Nothing was reported where the declaration was lost, and every use of its name, in
+/// every file, then read as an unknown type.
+#[test]
+fn a_declaration_that_ends_in_a_value_does_not_swallow_a_soft_one() {
+    for above in [
+        "refusal NoToken \"this shop has no token\"",
+        "const LIMIT: Int = 10",
+        "const LIMITS: List(Int) = [1, 2, 3]",
+    ] {
+        let source =
+            format!("{above}\nsubject Shop(Int)\nsecret TOKEN\nevent @e {{ shop: Shop }}\n");
+        let program = parse(&source).unwrap_or_else(|err| panic!("below {above:?}: {err}"));
+        assert!(
+            program.subject("Shop").is_some(),
+            "the subject below {above:?} is in the program"
+        );
+        assert_eq!(
+            program.secrets.len(),
+            1,
+            "the secret below {above:?} is in the program"
+        );
+    }
+}

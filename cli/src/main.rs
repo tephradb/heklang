@@ -439,6 +439,7 @@ fn counts(program: &Program) -> String {
     count(program.functions.len(), "fn", "fns");
     count(program.records.len(), "record", "records");
     count(program.enums.len(), "enum", "enums");
+    count(program.subjects.len(), "subject", "subjects");
     count(program.consts.len(), "const", "consts");
     // What a deployment owes this program, which is the one count an operator reads for
     // something other than curiosity.

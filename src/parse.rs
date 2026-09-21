@@ -1028,7 +1028,7 @@ impl Parser {
         events: &mut Vec<EventDef>,
         projectors: &mut Vec<Projector>,
     ) -> Result<(), Diagnostic> {
-        if self.at_secret_item() || self.at_subject_item() {
+        if self.at_soft_item() {
             return self.skip_item();
         }
         match self.peek() {
@@ -1080,7 +1080,7 @@ impl Parser {
         projectors: &mut [Projector],
         out: &mut Bodies,
     ) -> Result<(), Diagnostic> {
-        if self.at_secret_item() || self.at_subject_item() {
+        if self.at_soft_item() {
             return self.skip_item();
         }
         match self.peek() {
@@ -1942,6 +1942,24 @@ impl Parser {
             )
     }
 
+    /// Whether the cursor is on a declaration whose keyword is **soft**: the two that
+    /// lex as identifiers, and so are invisible to [`starts_item`].
+    ///
+    /// One place to add the third, whenever there is one. A soft declaration missing
+    /// from a list like this is not an error at its own position: whatever was scanning
+    /// for the next item runs straight through it, and it goes missing from the program
+    /// silently. `refusal R "..."` above `subject Shop(Int)` took the subject out of
+    /// pass A that way, and every `Shop` in every file then read as an unknown type.
+    fn at_soft_item(&self) -> bool {
+        self.at_secret_item() || self.at_subject_item()
+    }
+
+    /// Whether the cursor is on the first token of a declaration, hard keyword or soft.
+    /// What anything scanning forward for the next item has to ask.
+    fn at_item(&self) -> bool {
+        matches!(self.peek(), Token::Word(word) if starts_item(*word)) || self.at_soft_item()
+    }
+
     /// Pass A: one key namespace. `subject Customer(Int) under Shop`.
     ///
     /// The parent is stored **unresolved**, because it may be declared below this one or
@@ -2201,10 +2219,7 @@ impl Parser {
         // A literal ends the declaration, so the next token belongs to the next item.
         // Checked here rather than by the caller, because the caller has seeked away
         // and would never see a trailing `+ 1`.
-        if !matches!(self.peek(), Token::End)
-            && !matches!(self.peek(), Token::Word(word) if starts_item(*word))
-            && !self.at_secret_item()
-        {
+        if !matches!(self.peek(), Token::End) && !self.at_item() {
             return self.fail(Code::ExpectedToken, Self::expected_item(self.peek()));
         }
         self.resolving.pop();
@@ -2460,12 +2475,10 @@ impl Parser {
                 Token::End => return,
                 Token::Sym(Sym::LBrace | Sym::LBracket | Sym::LParen) => depth += 1,
                 Token::Sym(Sym::RBrace | Sym::RBracket | Sym::RParen) => depth -= 1,
-                Token::Word(word) if depth == 0 && starts_item(*word) => return,
-                // The soft one. Without this a `const` declared above a `secret` runs
-                // straight through it: `starts_item` only sees hard keywords, and a
-                // value that swallowed the next declaration would take it out of the
-                // program silently rather than loudly.
-                Token::Ident(_) if depth == 0 && self.at_secret_item() => return,
+                // `at_item` rather than `starts_item`, because `secret` and `subject`
+                // lex as identifiers: a value that ran through one of those would take
+                // the declaration out of the program silently rather than loudly.
+                _ if depth == 0 && self.at_item() => return,
                 _ => {}
             }
             self.bump();

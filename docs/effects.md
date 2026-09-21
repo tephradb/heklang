@@ -1697,11 +1697,11 @@ it, because a narrowed load lowers differently.
   yield one. Nothing real wants it, and allowing it would put a type in diagnostics that no author
   could have written -- and `.contains` over such a list would answer, in a loggable `Bool`,
   whether two credentials are equal.
-- **A `const` named `secret` collides with the declaration** (rule 16). `secret` is a soft word
-  claimed by two tokens, so `const B: Int = secret` immediately above a `secret FOO` reads as a
-  declaration and the parse stops with an unhelpful message. It is loud rather than silent, and it
-  needs a const named `secret` in a language whose consts are screaming case, so it is recorded
-  rather than fixed.
+- **A `const` named `secret` or `subject` collides with the declaration** (rules 16 and 12). Both
+  are soft words claimed by two tokens, so `const B: Int = secret` immediately above a `secret FOO`
+  reads as a declaration and the parse stops with an unhelpful message. It is loud rather than
+  silent, and it needs a const named after one of them in a language whose consts are screaming
+  case, so it is recorded rather than fixed.
 - **Journaled response bodies are stored in the clear.** An OAuth token exchange writes its access
   token into whatever a host keeps as the recorded result. That is a host's retention question and
   not a language one, and it is listed here so it is not mistaken for something rule 16 covers.
