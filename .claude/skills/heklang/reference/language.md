@@ -261,8 +261,13 @@ fold skus: Map(Uuid, String) = Map.empty
 ```
 
 `List(T)`: `.len()`, `.is_empty()`, `.contains(x)`, `.first() -> T?`, `.push(x) -> List(T)`,
-`.remove(x) -> List(T)`. `push` and `remove` build a **new** list; nothing mutates. `remove` drops
-every equal element, so it is idempotent. There is no indexing.
+`.concat(xs) -> List(T)`, `.remove(x) -> List(T)`, `.sum() -> T`. `push`, `concat` and `remove`
+build a **new** list; nothing mutates. `remove` drops every equal element, so it is idempotent.
+There is no indexing.
+
+`sum` exists **only where `+` does**: `Int`, `Decimal(n)` and `Money(n)`. Same scale in and out, an
+empty list is zero rather than `none`, and overflow is an error. It is the only reduction there is,
+so a total is `[line.tax for line in lines].sum()` and a product or a maximum cannot be written.
 
 `Map(K, V)`: `.get(k) -> V?`, `.set(k, v)`, `.remove(k)`, `.contains(k)`, `.len()`, `.is_empty()`,
 `.keys() -> List(K)`, `.values() -> List(V)`.
@@ -308,9 +313,9 @@ any other. Rebinding in the *same* scope is still fine, and is how a value is no
 let given = sku.unwrap_or("").trim()   // fine, even where `sku` is the parameter's name
 ```
 
-**A total over a container has no spelling.** There is no `sum` and no `fold` method, a comprehension
-only maps and filters, and a `fn` cannot recurse, so `fn total_of(ns: List(Int)) -> Int` cannot be
-written. Sum across events with a fold arm, or across rows with a projector's `patch`.
+**A total is `.sum()`, and it is the only reduction.** `[line.tax for line in lines].sum()`: a
+comprehension selects, `sum` adds. It exists only where `+` does. Anything that is not addition (a
+product, a maximum, a string join) cannot be written, and a `fn` cannot recurse to fake one.
 
 ## 8. `fn`
 

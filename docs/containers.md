@@ -21,16 +21,34 @@ let ids = [first_id, second_id]
 | `.contains(x)` | `Bool` |
 | `.first()` | `T?` |
 | `.push(x)` | `List(T)` |
+| `.concat(xs)` | `List(T)` |
 | `.remove(x)` | `List(T)` |
+| `.sum()` | `T`, where `T + T` is a `T` |
 
 An element written into a `List(T?)` or a `Map(K, V?)` wraps if it is a bare `T`, the same rule that
 applies at every other declared position (`docs/optionals.md`). So `xs.push(name)` on a
 `List(String?)` stores `some(name)`, and `.first()` on it reads back a `String??` that is `some` twice
 over rather than a shape nothing can branch on.
 
-**`push` and `remove` return a new list.** Nothing mutates, so a fold arm still returns new
+**`push`, `concat` and `remove` return a new list.** Nothing mutates, so a fold arm still returns new
 state and a value that was handed to something else cannot change underneath it. That is the same
 property the fold already relied on for scalars, extended rather than excepted.
+
+`concat` is `push`'s other half: one element, or a whole list of them. The element types have to
+agree exactly, so a `List(String)` does not join a `List(String?)`; the one-level wrap above is for
+an *element* arriving at a declared position, and a whole container does not widen anywhere else
+either.
+
+**`sum` is the one reduction, and it exists exactly where `+` does**: `Int`, `Decimal(n)` and
+`Money(n)`, which is the same row of the operator table rather than a second list that could drift
+from it. A type with no `+` has no `sum`, and the error says which receiver it was asked of.
+
+The element type is the result type. That is what leaves nothing to decide: the scale in is the
+scale out, an empty list is that type's zero rather than a `none`, and overflow is an error the way
+it is for `+`. It is also why this is a method and not a general `fold` expression. A `fold` takes
+an arbitrary arm, an arbitrary arm over `Money` is where an amount learns to round, and a new
+binding form plus a grammar rule is a large thing to add to serve what a 19,300-line program needed
+three times.
 
 `remove(x)` drops **every** element equal to `x`, not the first. That makes it idempotent, which
 matches `Map`'s `remove` and matches how it is actually used: a fold arm removing an id from an
@@ -218,11 +236,15 @@ after it. That had been the other half of the same hole: the binding outlived th
 written in, and reading it on the path that skipped the branch killed a program that had checked
 clean.
 
-**A total over a container has no spelling today.** A comprehension maps and filters, and there is no
-`sum` and no `fold` method, so `fn total_of(ns: List(Int)) -> Int` cannot be written: `fn` is not
-recursive either. Accumulation across *events* is a `fold` arm and is unaffected. This is a real gap
-rather than a thing the rejection above redirects you to, and the diagnostic says what exists rather
-than pretending the shape is covered.
+**A total is `sum`, and it is the only reduction there is.** `[line.tax for line in lines].sum()` is
+the shape the rejected loop was reaching for: a comprehension selects and `sum` adds. Anything that
+is not addition (a product, a maximum, a string join, an arbitrary arm) still has no spelling, and
+`fn` is not recursive, so it cannot be written as a helper either. Accumulation across *events* is a
+`fold` arm and was never affected.
+
+The loop diagnostic deliberately does not name `sum`: the shapes overlap only when the loop was
+adding, and pointing an author who was doing something else at a method that cannot do it is worse
+than saying plainly that the `let` ends with the body.
 
 ## What is deliberately absent
 
@@ -232,7 +254,7 @@ than pretending the shape is covered.
   A record is the answer when two values genuinely travel together.
 - **No nested-container literal shorthand.** `[[1, 2]]` works because a list literal is an ordinary
   expression; there is simply no special form for it.
-- **No `sort`, `map`, `filter` or `fold` methods.** A comprehension covers `map` and `filter`, and
-  iteration order is already defined. Adding a second way to spell a comprehension is the kind of
-  surface this language is trying not to grow. `fold` is the one that is genuinely missing rather
-  than covered: see the note below.
+- **No `sort`, `map`, `filter` or general `fold` methods.** A comprehension covers `map` and
+  `filter`, iteration order is already defined, and `sum` covers the one reduction that came up.
+  Adding a second way to spell a comprehension is the kind of surface this language is trying not to
+  grow, and a general `fold` would buy the rest of them at the price of an arm that can round money.

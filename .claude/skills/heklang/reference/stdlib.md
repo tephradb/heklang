@@ -69,17 +69,26 @@ otherwise write.
 
 ### `List(T)`
 
-| Method | Returns |
-| --- | --- |
-| `first()` | `T?` |
-| `push(T)` | `List(T)` |
-| `remove(T)` | `List(T)` |
-| `contains(T)` | `Bool` |
-| `len()` | `Int` |
-| `is_empty()` | `Bool` |
+| Method | Returns | |
+| --- | --- | --- |
+| `first()` | `T?` | |
+| `push(T)` | `List(T)` | |
+| `concat(List(T))` | `List(T)` | |
+| `remove(T)` | `List(T)` | |
+| `contains(T)` | `Bool` | |
+| `len()` | `Int` | |
+| `is_empty()` | `Bool` | |
+| `sum()` | `T` | only `Int`, `Decimal(n)`, `Money(n)` |
 
-`push` and `remove` build a new list rather than mutating one. `remove` removes **every** equal
-element, so it is idempotent. There is no indexing.
+`push`, `concat` and `remove` build a new list rather than mutating one. `remove` removes **every**
+equal element, so it is idempotent. There is no indexing. `concat` takes a whole `List(T)` at the
+same element type exactly: a `List(T)` does not join a `List(T?)`.
+
+`sum` exists exactly where `+` does, so a `List(String)` or a `List(Int?)` has none and the error
+says so. The element type is the result type: same scale in and out, an empty list is that type's
+zero rather than a `none`, and overflow is an error. `[line.tax for line in lines].sum()` is the
+shape for a total: a comprehension selects, `sum` adds. There is no other reduction, so a product, a
+maximum or a string join cannot be written at all.
 
 ### `Map(K, V)`
 

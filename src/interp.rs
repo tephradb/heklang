@@ -3013,6 +3013,59 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
                 items,
             })
         }
+        // Every element added at one scale, so the answer carries that scale and never
+        // rounds. The element type rather than the first element decides it, which is
+        // what gives an empty list a zero to be.
+        (Value::List { inner, items }, "sum") => {
+            expect_arity(method, 0, &args)?;
+            let mut total: i64 = 0;
+            for item in items {
+                let units = match (inner, item) {
+                    (Type::Int, Value::Int(value)) => *value,
+                    (
+                        Type::Decimal(scale),
+                        Value::Decimal {
+                            units,
+                            scale: found,
+                        },
+                    )
+                    | (
+                        Type::Money(scale),
+                        Value::Money {
+                            units,
+                            scale: found,
+                        },
+                    ) if found == scale => *units,
+                    _ => return Err(ErrorKind::MalformedIr),
+                };
+                total = scaled::add(total, units).map_err(ErrorKind::from)?;
+            }
+            Ok(match inner {
+                Type::Decimal(scale) => Value::Decimal {
+                    units: total,
+                    scale: *scale,
+                },
+                Type::Money(scale) => Value::money(total, *scale),
+                _ => Value::Int(total),
+            })
+        }
+        // A new list, like `push` and for the same reason. The element type is the
+        // receiver's, so a value arriving from the argument fits the same way one
+        // arriving from `push` does.
+        (Value::List { inner, items }, "concat") => {
+            expect_arity(method, 1, &args)?;
+            let Some(Value::List { items: tail, .. }) = args.into_iter().next() else {
+                return Err(ErrorKind::MalformedIr);
+            };
+            let mut items = items.clone();
+            for item in tail {
+                items.push(fitted(item, inner)?);
+            }
+            Ok(Value::List {
+                inner: inner.clone(),
+                items,
+            })
+        }
         (Value::List { inner, items }, "remove") => {
             expect_arity(method, 1, &args)?;
             // Every equal element, not the first, which makes it idempotent the way

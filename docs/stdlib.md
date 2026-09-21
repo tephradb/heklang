@@ -86,18 +86,30 @@ of the calls an author would otherwise write.
 
 ### `List(T)`
 
-| Method | Returns |
-| --- | --- |
-| `first()` | `T?` |
-| `push(T)` | `List(T)` |
-| `remove(T)` | `List(T)` |
-| `contains(T)` | `Bool` |
-| `len()` | `Int` |
-| `is_empty()` | `Bool` |
+| Method | Returns | |
+| --- | --- | --- |
+| `first()` | `T?` | |
+| `push(T)` | `List(T)` | |
+| `concat(List(T))` | `List(T)` | |
+| `remove(T)` | `List(T)` | |
+| `contains(T)` | `Bool` | |
+| `len()` | `Int` | |
+| `is_empty()` | `Bool` | |
+| `sum()` | `T` | only where `T + T` is a `T`: `Int`, `Decimal(n)`, `Money(n)` |
 
-`push` and `remove` build a new list rather than mutating one, which is what keeps a fold arm's
-result a new state and keeps a value nothing can change once it is handed over. `remove` removes
-**every** equal element, not the first, so it is idempotent the way a map's is.
+`push`, `concat` and `remove` build a new list rather than mutating one, which is what keeps a fold
+arm's result a new state and keeps a value nothing can change once it is handed over. `remove`
+removes **every** equal element, not the first, so it is idempotent the way a map's is. `concat` is
+`push`'s other half: one element, or a whole list of them, and the element types have to agree
+exactly because a `List(T)` does not fill a `List(T?)` here any more than it does anywhere else.
+
+`sum` is the one reduction, and its row is read off the operator table above rather than written as
+a list of its own, so the two cannot drift: a type with no `+` has no `sum`, and the error says so.
+The element type is the result type, which is what leaves no rounding question to ask. The scale in
+is the scale out, an empty list is that type's zero rather than a `none`, and overflow is an error
+exactly as it is for `+`. That is also the argument for it being a method instead of a general
+`fold`: a `fold` takes an arbitrary arm, and an arbitrary arm over `Money` is where an amount learns
+to round.
 
 ### `Map(K, V)`
 
@@ -321,9 +333,10 @@ Each of these is a decision with an argument behind it, not a gap waiting to be 
   whole mechanism and rule 8's table is the whole text form. A second spelling could drift from it.
   `Int.pad(width)` is the one thing a specifier would have been reached for that the table cannot
   say, and it is a method rather than a syntax for exactly that reason.
-- **No `sort`, `map`, `filter` or `fold` methods.** A comprehension covers map and filter, iteration
-  order is already defined. `fold` is the one that is genuinely missing: a total over a container has
-  no spelling, because a `let` cannot accumulate across a `for` body and a `fn` is not recursive.
+- **No `sort`, `map`, `filter` or general `fold` methods.** A comprehension covers map and filter,
+  iteration order is already defined, and `sum` covers the one reduction a large program actually
+  reached for. A general `fold` would take an arbitrary arm to serve what was, across 19,300 lines,
+  three sums and one concat, and an arbitrary arm over `Money` is where an amount learns to round.
 - **No set type and no tuple type.** `Map(K, Bool)` covers membership and a record covers two values
   that travel together. The one place a port wanted a set it wanted an ordered one, which is a list.
 - **No `x.expect("reason")`.** `unwrap_or` and narrowing cover it without a panic.

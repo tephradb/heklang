@@ -160,6 +160,71 @@ fn push_and_remove_return_new_lists() {
     assert_eq!(items(&event), [1, 2, 3]);
 }
 
+/// The union half, which pairs with `push`: one element, or a whole list of them.
+#[test]
+fn concat_joins_two_lists_into_a_new_one() {
+    let event = fired("", &emitting("[1, 2].concat([3, 4])"), vec![]);
+    assert_eq!(items(&event), [1, 2, 3, 4]);
+
+    // A new list like `push`'s, so neither side is changed by being joined.
+    let body = format!(
+        "  let xs = [1, 2]\n  let ys = xs.concat([3])\n{}",
+        describing(r#""{xs.len()} {ys.len()}""#)
+    );
+    assert_eq!(label(&fired(NO_ITEMS, &body, vec![empty_list()])), "2 3");
+
+    let empty = fired("", &emitting("[].concat([1])"), vec![]);
+    assert_eq!(items(&empty), [1], "an empty side contributes nothing");
+
+    // Exact rather than coercing: the argument is a `List(T)` at the receiver's own
+    // element type, so a mismatched element is caught against that hint.
+    assert_eq!(
+        err("", &emitting("[1].concat([\"a\"])")),
+        "expected Int, found String",
+        "the element types have to agree"
+    );
+}
+
+/// The one reduction, and it exists exactly where `+` does. The element type is the
+/// result type, so the scale in is the scale out and an empty list is that type's
+/// zero: there is no rounding question to ask and nothing to widen.
+#[test]
+fn sum_totals_a_list_where_addition_is_defined() {
+    let event = fired("", &emitting("[[1, 2, 3].sum()]"), vec![]);
+    assert_eq!(items(&event), [6]);
+
+    let empty = fired(NO_ITEMS, &emitting("[no_items.sum()]"), vec![empty_list()]);
+    assert_eq!(
+        items(&empty),
+        [0],
+        "an empty list sums to zero, not to none"
+    );
+
+    // Overflow is an error rather than a wrap, the same as it is for `+`.
+    let body = emitting("[[9223372036854775807, 1].sum()]");
+    let program = parse(&source("", &body)).expect("the table takes a List(Int)");
+    let mut interpreter = Interpreter::new(&program);
+    let err = interpreter
+        .run("Fill", vec![("basket_id", Value::uuid(BASKET))])
+        .expect_err("expected the overflow to be reported");
+    assert_eq!(err.kind.to_string(), "arithmetic overflow");
+}
+
+/// `sum` is spelled off the operator table rather than off a list of its own, so the
+/// types that have no `+` have no `sum` either and the two cannot drift apart.
+#[test]
+fn sum_is_absent_where_addition_is() {
+    for element in ["String", "Bool", "Uuid", "Timestamp", "Int?"] {
+        let params = format!(", xs: List({element})");
+        let body = format!("  let total = xs.sum()\n{}", emitting("[]"));
+        assert_eq!(
+            err(&params, &body),
+            format!("no method `sum` on List({element})"),
+            "a List({element}) has no `+`, so it has no `sum`"
+        );
+    }
+}
+
 /// Every equal element, not the first, which is what makes running a fold arm twice
 /// the same as running it once.
 #[test]

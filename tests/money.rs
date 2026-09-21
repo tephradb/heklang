@@ -165,6 +165,51 @@ command Split(total: Money(3)) {
     );
 }
 
+/// `sum` over amounts is the one reduction, and it is on the table for the same
+/// reason `*` is off it: there is exactly one answer and no rounding to defer. The
+/// scale in is the scale out, so this can never be the thing that quietly loses a cent.
+#[test]
+fn amounts_sum_at_their_own_scale() {
+    let program = parse(
+        "event @quoted.out { tax: Money(2) }
+command Quote(lines: List(Money(2))) {
+  emit @quoted.out { tax: lines.sum() }
+}
+",
+    )
+    .expect("a List(Money(2)) sums");
+    let mut interpreter = Interpreter::new(&program);
+    interpreter
+        .run(
+            "Quote",
+            [(
+                "lines",
+                Value::list(heklang::Type::Money(2), [money(125), money(250), money(75)]),
+            )],
+        )
+        .expect("ran");
+    assert_eq!(
+        interpreter.log()[0].event.field("tax"),
+        Some(&money(450)),
+        "three tax lines at scale 2 total at scale 2"
+    );
+
+    // Two scales do not meet here either, which is the same row `+` is missing.
+    let message = parse(
+        "event @quoted.out { tax: Money(3) }
+command Quote(lines: List(Money(2))) {
+  emit @quoted.out { tax: lines.sum() }
+}
+",
+    )
+    .expect_err("a Money(2) total is not a Money(3)")
+    .text();
+    assert!(
+        message.starts_with("expected Money(3), found Money(2)"),
+        "got: {message}"
+    );
+}
+
 #[test]
 fn a_scale_is_a_storage_floor_not_a_currency() {
     // A zero-fraction amount in a `Money(2)` field is exact; nothing about the scale

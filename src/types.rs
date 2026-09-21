@@ -227,6 +227,25 @@ pub fn method_sig(receiver: &Type, method: &str) -> Option<Sig> {
         (Type::List(inner), "contains") => sig(vec![inner.as_ref().clone()], Type::Bool),
         (Type::List(_), "len") => sig(Vec::new(), Type::Int),
         (Type::List(_), "is_empty") => sig(Vec::new(), Type::Bool),
+        // The one reduction, and it exists exactly where `+` above does: an `Int`, or
+        // two `Decimal`s or two amounts at one scale. Written as the same condition
+        // rather than a list of its own so the two cannot drift, and so the answer to
+        // "can I sum this" is the operator table an author already knows.
+        //
+        // The element type is the result type, which is what leaves no rounding
+        // question to ask: the scale in is the scale out, an empty list is that type's
+        // zero, and overflow is an error the way it is for `+`. That is the whole
+        // reason this is a method and a general `fold` is not: a `fold` would have to
+        // take an arbitrary arm, and the arm is where money learns to round.
+        (Type::List(inner), "sum")
+            if arithmetic(BinOp::Add, inner, inner).as_ref() == Some(inner.as_ref()) =>
+        {
+            sig(Vec::new(), inner.as_ref().clone())
+        }
+        // The union half, which pairs with `push` the way `push` pairs with a literal:
+        // one element, or a whole list of them. Exact rather than coercing, because a
+        // `List(T)` does not fill a `List(T?)` anywhere else either.
+        (Type::List(_), "concat") => sig(vec![receiver.clone()], receiver.clone()),
 
         (Type::Map(key, value), "get") => sig(
             vec![key.as_ref().clone()],
