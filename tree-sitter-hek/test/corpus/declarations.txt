@@ -391,7 +391,7 @@ a fn that returns an event
 ================================================================================
 
 fn t_order(order_id: Int, total: Money(3)) -> @order.placed {
-  return @order.placed { order_id: order_id, total: total }
+  return @order.placed { order_id, total }
 }
 
 --------------------------------------------------------------------------------
@@ -416,8 +416,6 @@ fn t_order(order_id: Int, total: Money(3)) -> @order.placed {
           (event_path)
           (field_initializer_list
             (field_initializer
-              (identifier)
               (identifier))
             (field_initializer
-              (identifier)
               (identifier))))))))

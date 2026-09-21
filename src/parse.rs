@@ -4589,11 +4589,23 @@ impl Parser {
             if fields.iter().any(|(seen, _)| seen == &name) {
                 return Err(self.err(Code::DuplicateField, format!("`{name}` is given twice"), at));
             }
-            self.expect_sym(Sym::Colon)?;
             // The unsealed type: a test writes the content, and the runtime is what
             // seals it on the way into the log. Hinting the sealed type would ask an
             // author to produce ciphertext, which nothing in the language can do.
-            let value = self.expr(lower, Some(declared.ty.unsealed()))?;
+            let expected = declared.ty.unsealed();
+            // The eighth site of the bare-name shorthand, and the one a fixture wants:
+            // a helper's parameters are named after the fields they fill, so without it
+            // a 26-field fixture writes `order_id: order_id` twenty-six times. In a test
+            // body nothing is ever in scope, so `{ order_id }` reports exactly what
+            // `{ order_id: order_id }` reports there, which is what keeps the two forms
+            // one rule rather than two.
+            let value = if self.eat_sym(Sym::Colon) {
+                self.expr(lower, Some(expected))?
+            } else if lower.b.lookup(&name).is_none() {
+                self.record(lower, self.not_in_scope(&name, at))
+            } else {
+                self.shorthand(lower, &name, &expected, at)
+            };
             fields.push((name, value));
             if !self.eat_sym(Sym::Comma) {
                 break;

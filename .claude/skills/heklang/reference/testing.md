@@ -42,9 +42,11 @@ stays writable elsewhere. `test` is the only word this construct reserves outrig
 ## 2. `given` is a log, and it is literal
 
 `given @event.path { field: value, ... }` appends one event, and several `given`s make a log in the
-order written. **Every field must be given**, the same rule `emit` follows, and unlike `emit` a
-`given` takes no bare-name shorthand: write `field: value` for every one. The values are ordinary
-expressions: literals, `const`s, enum variants, `fn` calls, interpolation, containers.
+order written. **Every field must be given**, the same rule `emit` follows, and the block takes the
+same bare-name shorthand: `{ order_id }` is `{ order_id: order_id }`. A test body binds nothing, so
+that only resolves inside a fixture `fn`, whose parameters are named after the fields they fill.
+The values are ordinary expressions: literals, `const`s, enum variants, `fn` calls, interpolation
+and containers.
 
 A `fn` is how a suite gets a helper for near-identical events, for a field value:
 

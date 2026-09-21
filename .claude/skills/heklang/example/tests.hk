@@ -18,8 +18,8 @@ fn seats_for(n: Int) -> Int {
 fn a_seat(booking_id: Uuid, attendee_id: Attendee) -> @seat.booked {
   return @seat.booked {
     workshop_id: RUST,
-    booking_id: booking_id,
-    attendee_id: attendee_id,
+    booking_id,
+    attendee_id,
     email: "ada@example.com",
     paid: 40.00,
   }

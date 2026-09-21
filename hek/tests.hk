@@ -24,11 +24,11 @@ fn placed(
   total: Money(2),
 ) -> @order.placed {
   return @order.placed {
-    order_id: order_id,
-    customer_id: customer_id,
-    email: email,
+    order_id,
+    customer_id,
+    email,
     address: address(12),
-    total: total,
+    total,
     tax_rate: 0.2000,
     notes: "",
   }

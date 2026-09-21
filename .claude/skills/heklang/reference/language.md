@@ -35,7 +35,7 @@ A third is spellable only in a **module** `fn`'s **return type**, and not even a
   value, so nothing else may name one and `List(@order.placed)` is an unknown type. It is made by
   `return @order.placed { ... }` and taken by a `given` or an `expect`; see `testing.md`.
 
-A third, `Rounding`, is spellable **nowhere**: `Rounding` as a type name is `unknown type`, and its
+A fourth, `Rounding`, is spellable **nowhere**: `Rounding` as a type name is `unknown type`, and its
 values reach `.mul` and `.div` as the bare words `HalfUp`, `HalfEven` and `Down`. So a rounding mode
 cannot be passed through a `fn` parameter.
 
@@ -379,7 +379,8 @@ fn t_order(order_id: Int, total: Money(3)) -> @order.placed {
 ```
 
 `@order.placed { ... }` is written after a `return` and nowhere else, so there is no
-`let e = @order.placed { ... }`; every field is written out, with no bare-name shorthand. An event
+`let e = @order.placed { ... }`; every field is written out, with the bare-name shorthand every
+other block takes, so a parameter named after the field it fills is just `{ order_id }`. An event
 cannot be a parameter, cannot be optional, cannot be compared, interpolated, put in a list or a body,
 or bound with `let`, and an effect-local `fn` may not return one. A
 

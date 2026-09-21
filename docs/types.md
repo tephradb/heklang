@@ -207,7 +207,7 @@ together.
 **The bare-name shorthand was the second exception, and it was the larger one.** `{ id }` is
 `{ id: id }`, so it is the same position and takes the same check. It took neither. The long form
 funnels through the call site above; the shorthand skipped it and built its load directly, at all
-seven places that accept one: an `emit` field, a slice filter, a guard argument, a refusal field, a
+seven places that accepted one: an `emit` field, a slice filter, a guard argument, a refusal field, a
 record literal field, a `put`/`patch`/`update` column and an `invoke` argument. So this passed
 `hek check` and reported only when a test ran it:
 
@@ -220,8 +220,18 @@ command C(order_id: Uuid, sku: Int) {
 
 Which is this document's opening defect exactly, on the path an author actually writes: the corpus
 uses the shorthand wherever the names line up, so the checked spelling was the rarer one. Both
-checks now run in one helper the seven sites share, `Parser::shorthand`, rather than in seven copies
+checks now run in one helper those sites share, `Parser::shorthand`, rather than in seven copies
 that a new site could be added without.
+
+**An event's field block is the eighth site**, which is `given`, `expect @path` and the literal a
+fixture returns. It is the fixture that wanted it: a helper's parameters are named after the fields
+they fill, so without the shorthand a 26-field fixture writes `order_id: order_id` twenty-six times.
+Being the same helper, it is checked the same way, and the block still has to name every field.
+
+In a test body nothing is ever in scope, so `{ order_id }` there reports exactly what
+`{ order_id: order_id }` reports: `order_id` is not in scope. That is the point rather than a
+shortcoming. The two spellings are one rule, and a rule that held in a `fn` body and not in a test
+would be two.
 
 **The equality operands are the third, and a different kind of exception.** Every other position here
 has a declared type: somewhere, something wrote down what goes there. A comparison writes down

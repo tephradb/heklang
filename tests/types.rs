@@ -1386,3 +1386,45 @@ fn an_event_is_not_spellable_where_a_type_is_declared() {
         );
     }
 }
+
+/// The eighth shorthand site. The fixture is what wanted it: a helper's parameters are
+/// named after the fields they fill, so without it a 26-field fixture writes
+/// `order_id: order_id` twenty-six times.
+#[test]
+fn an_event_field_block_takes_the_bare_name_shorthand() {
+    let body = "fn t(id: Int, name: String) -> @thing.touched {\n  return @thing.touched { id }\n}\ncommand C(id: Int) {\n  emit @thing.touched { id }\n}\n";
+    program(body);
+}
+
+/// Being the same helper, it takes the same two checks. This is the defect
+/// `Parser::shorthand` exists for, at the site that just gained it.
+#[test]
+fn the_shorthand_in_an_event_block_is_checked_like_the_long_form() {
+    let body = "fn t(id: String) -> @thing.touched {\n  return @thing.touched { id }\n}\ncommand C(id: Int) {\n  emit @thing.touched { id }\n}\n";
+    assert_eq!(err(body), "expected Int, found String");
+}
+
+/// A test body binds nothing, so both spellings report the same thing there. That is
+/// what keeps them one rule rather than two.
+#[test]
+fn the_two_spellings_agree_where_nothing_is_in_scope() {
+    let run = "command C(id: Int) {\n  emit @thing.touched { id }\n}\n";
+    let short = format!(
+        "{run}test \"t\" {{\n  given @thing.touched {{ id }}\n  run C {{ id: 1 }}\n  expect @thing.touched {{ id: 1 }}\n}}\n"
+    );
+    let long = format!(
+        "{run}test \"t\" {{\n  given @thing.touched {{ id: id }}\n  run C {{ id: 1 }}\n  expect @thing.touched {{ id: 1 }}\n}}\n"
+    );
+    assert_eq!(err(&short), "`id` is not in scope");
+    assert_eq!(err(&short), err(&long));
+}
+
+/// It is a spelling of a field and never a way to leave one out.
+#[test]
+fn the_shorthand_does_not_excuse_a_missing_field() {
+    let body = "fn t(id: Int) -> @thing.happened {\n  return @thing.happened { id }\n}\ncommand C(id: Int) {\n  emit @thing.touched { id }\n}\n";
+    assert_eq!(
+        err(body),
+        "`return @thing.happened` needs `name`; an event is written whole"
+    );
+}

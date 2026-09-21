@@ -325,8 +325,7 @@ A comment is `//` to the end of the line. Put one on its own line, leading whate
    between the two runs to make a second stage.
 3. **Everything is written whole.** `emit`, `put`, `given`, `invoke`, a record literal, `reject` with
    fields and `guard Name { .. }` all require every declared field, once each. `{ order_id }` is
-   shorthand for `{ order_id: order_id }` everywhere except in a `given`, which spells every field
-   out.
+   shorthand for `{ order_id: order_id }` in every one of those blocks, and is checked the same way.
 4. **`patch` materializes, `update` drops.** A `patch` on an absent row builds it from zeros, which
    is right for counters and wrong for identities: use `update` for anything the read model treats as
    a thing that exists. `Uuid` and `Timestamp` have no zero.

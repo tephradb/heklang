@@ -80,6 +80,11 @@ the same device the soft builtin names use (`docs/effects.md` rule 11).
 order written. Every field must be given, the same rule `emit` and `put` follow, and the values are
 ordinary expressions: literals, `const`s, enum variants, `fn` calls, interpolation, containers.
 
+The block takes the bare-name shorthand every other block takes, so `{ order_id }` is
+`{ order_id: order_id }` and is checked as one (`docs/types.md`). A test body binds nothing, so both
+spellings report the same thing there; where it earns its keep is the fixture below, whose parameters
+are named after the fields they fill.
+
 **A `fn` is how a test gets a helper.** The suite this construct was designed against leans on
 helper functions to build near-identical events, and `fn` already covers it:
 
