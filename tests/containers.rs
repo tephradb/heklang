@@ -437,6 +437,59 @@ fn an_empty_comprehension_keeps_its_declared_element_type() {
     assert_eq!(event.field("items"), Some(&Value::list(Type::Int, [])));
 }
 
+/// And where no target supplied one, it comes from the yield. This is the half that was
+/// missing: a `let` is not a target, so an empty comprehension under one had no element
+/// type at all and the interpreter fell back to `List(Json)` while the checker had
+/// typed it as a list of the yield. The two only ever disagreed on the path where the
+/// loop matched nothing, which is why `hek check` passed and the failure landed at run
+/// time on a zero-rated basket.
+#[test]
+fn an_empty_comprehension_takes_its_element_type_from_the_yield() {
+    // `sum` is where it surfaced: a `List(Json)` holding nothing summed to `Int(0)`,
+    // and `Money(2)` was declared. Run rather than parsed, because the static side was
+    // right all along and only the value was wrong.
+    let body = "  let quoted = [line * 1 for line in [1, 2] if line > 9]\n".to_string()
+        + &emitting("[quoted.sum()]");
+    let event = fired("", &body, vec![]);
+    assert_eq!(
+        items(&event),
+        [0],
+        "the zero is an Int because the yield is"
+    );
+
+    // The surfaces this hole was originally found through, all on the same shape: a
+    // filter that excludes everything, under a `let` that declares nothing.
+    let source = "event @note.made { id: Uuid, tags: List(String), note: String }
+
+command Make(id: Uuid, ys: List(String)) {
+  let xs = [y for y in ys if y == \"zzz\"]
+  emit @note.made { id, tags: xs, note: xs.first().unwrap_or(\"none\") }
+}
+";
+    let program = parse(source).expect("checks, and always did");
+    let mut interpreter = Interpreter::new(&program);
+    let execution = interpreter
+        .run(
+            "Make",
+            vec![
+                ("id", Value::uuid(BASKET)),
+                ("ys", Value::list(Type::String, [Value::str("a")])),
+            ],
+        )
+        .expect("and now runs");
+    match execution.outcome {
+        Outcome::Ok(events) => {
+            assert_eq!(
+                events[0].field("tags"),
+                Some(&Value::list(Type::String, [])),
+                "a List(String) rather than the List(Json) it used to build"
+            );
+            assert_eq!(events[0].field("note"), Some(&Value::str("none")));
+        }
+        other => panic!("expected an append, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------------
 // A fold arm accumulating a container, which is the shape the port needed.
 

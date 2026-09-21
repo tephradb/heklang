@@ -298,6 +298,11 @@ method argument that already knows. A `let` is **not** a target, because `let` t
 annotation. Inside a JSON object literal `[]` needs no target, since a body's values are typed by
 what they are.
 
+**A comprehension needs no target**, because it writes its element expression down:
+`[line.amount for line in lines]` is a `List(Money(3))` however many elements it ends up with. So
+`[line.amount for line in lines].sum()` is a `Money(3)` even for an empty `lines`, and needs no
+helper `fn` to give it somewhere to land.
+
 ```hek
 for id in ids { .. }              // one name over a list
 for plan_id, plan in plans { .. } // key and value over a map

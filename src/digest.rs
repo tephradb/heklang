@@ -46,7 +46,7 @@ use crate::value::Json;
 /// what a hash means. Bumping this moves every hash at once, which is the point: a global
 /// change of hash then has one legible cause instead of looking like every declaration was
 /// edited on the same day.
-pub const VERSION: &str = "hek-digest 3";
+pub const VERSION: &str = "hek-digest 4";
 
 /// A SHA-256 over a packed form. Rendered as sixty-four lowercase hex digits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

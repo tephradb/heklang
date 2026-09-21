@@ -114,6 +114,26 @@ target: a `fold` declaration, a command or `fn` parameter, an event or entity fi
 position of a method that already knows (`plans.get(id).unwrap_or(Map.empty)` takes it from `plans`).
 Without one, both are a compile error that names those places.
 
+**A comprehension is not on that list, because it never needs to be.** It writes its element
+expression down, so `[line.amount for line in lines]` is a `List(Money(3))` whether or not `lines`
+has anything in it and whether or not a target said so. The target still wins where there is one, for
+the coercion every declared position does; the yield is what answers when there is none.
+
+That second half was missing, and the shape it cost is worth keeping in view:
+
+```
+fn amounts_total(lines: List(Line)) -> Money(3) {
+  return [line.amount for line in lines].sum()
+}
+```
+
+A `let` is not a target and neither is a `return`'s own expression on the way in, so an empty
+comprehension had no element type to carry. The checker had typed it `List(Money(3))` from the yield
+all along; the value it built was a list of nothing in particular, and `sum` over that answered an
+`Int`. The two only disagreed when the loop matched nothing, so it checked clean and failed at run
+time on the one input least likely to be in a test: the empty basket, the filter that excluded
+everything, the zero-rated order.
+
 **Inside an object literal there is no target, and `[]` needs none.** A JSON body's values are typed
 by what they are rather than by where they land, so `{ "tags": [] }` is an empty array and there is
 nothing left to decide: it serialises the same whatever it would have held. Demanding a declaration

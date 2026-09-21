@@ -7965,6 +7965,19 @@ impl Parser {
         self.pos = end;
         lower.b.pop_scope();
         lower.b.at(span);
+        // The element type, from the target where there was one and from the yield
+        // otherwise, so that a comprehension always carries one.
+        //
+        // Without the second half, an empty one had no element to take a type from and
+        // the interpreter fell back to `List(Json)`, while `type_of` had all along
+        // answered `List(<the yield's type>)`. The two only disagreed on the path where
+        // the loop matched nothing, so `hek check` passed and the failure arrived at run
+        // time, on the input least likely to be in a test: an empty basket, a filter
+        // that excluded everything, a zero-rated order.
+        //
+        // The yield's type can itself be unknown, so this narrows the hole rather than
+        // closing it and the interpreter's fallback still has to exist.
+        let inner = inner.or_else(|| self.type_of(lower, yields));
         Ok(lower.b.expr(Expr::Comp {
             iter,
             cond,

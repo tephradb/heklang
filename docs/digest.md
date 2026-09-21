@@ -244,11 +244,28 @@ carries, and a reader never has to go looking for what one covered.
 
 ## 11. The version line is part of the hash
 
-The first line is `hek-digest 3`, and it is hashed with the rest. The digest is the meaning of a
+The first line is `hek-digest 4`, and it is hashed with the rest. The digest is the meaning of a
 program *as this version of heklang reads it*, so a change to how the parser desugars, or to the
 packed form's own spelling, is a change to what a hash means. Bumping the version moves every hash
 at once, which is the point: a global change then has one legible cause instead of looking like
 every declaration was edited on the same day.
+
+**What each bump was for**, so a hash that moved has somewhere to be looked up:
+
+| Version | Cause |
+| --- | --- |
+| 2 | the hash covers the packed form rather than the readable one, so improving the layout stops invalidating stored hashes |
+| 3 | the packed form's own spelling |
+| 4 | a comprehension carries its element type even when nothing declared one, so `(comp ...)` gained an `(of T)` it used to omit |
+
+Version 4 is the shape the rule is about, and it is worth being concrete. A comprehension used to
+record an element type only where a target had supplied one; it now always records one, taken from
+the yield where there was no target. The reason is a defect rather than a spelling preference: an
+empty comprehension with no recorded type evaluated to `List(Json)` while the checker had typed it as
+`List(<the yield>)`, so a program passed `hek check` and failed at run time on the path where the
+loop matched nothing. Only declarations holding an un-hinted comprehension render differently, but
+the version moves for everyone, because a hash that changed for a subset with no nameable cause is
+the thing this line exists to prevent.
 
 ## 12. A program that does not check has no digest form
 
@@ -294,7 +311,7 @@ That is one small set to keep rather than a field table per head.
 Packed, which is what is hashed:
 
 ```
-hek-digest 3
+hek-digest 4
 (event @order.placed (f customer_id Int) (f order_id Uuid) (f total (Money 2)))
 (command Place (params (p order_id Uuid) (p customer_id Int) (p total (Money 2))) (stage (fold $3 Int (int 0)) (slice @order.placed (filter customer_id $1) (acc $3 Int (+ $3 (int 1)))) (post (if (>= $3 (int 10)) (then (return (reject (str "too_many_open") (str "too many open orders"))))) (emit @order.placed (f customer_id $1) (f order_id $0) (f total $2)))))
 ```

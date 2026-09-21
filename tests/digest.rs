@@ -1362,10 +1362,12 @@ fn a_field_without_an_absent_value_renders_as_it_always_did() {
     assert!(packed.contains("(f note String no_index)"), "{packed}");
     assert!(packed.contains("(f title String (max 20))"), "{packed}");
     assert!(packed.contains("(f total (Money 2))"), "{packed}");
-    assert_eq!(
-        VERSION, "hek-digest 3",
-        "an optional node is not a new digest version"
-    );
+
+    // This used to pin `VERSION` at the number it had when `@absent` landed, as a
+    // marker that an optional node is not a new digest version. The number has since
+    // moved for an unrelated reason (a comprehension now carries its element type, so
+    // the form it renders did change), which is what the version line is for. The
+    // claim above is the real one, and the assertions above it are what hold it.
 }
 
 /// `absent` names a part of its parent rather than a value in it, so the JSON form has to

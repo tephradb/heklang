@@ -3040,13 +3040,19 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
                 };
                 total = scaled::add(total, units).map_err(ErrorKind::from)?;
             }
+            // Named exhaustively rather than defaulting to `Int`, because the empty
+            // case is the one nothing else checks: with no element to disagree with,
+            // a wrong element type walks straight out as a zero of the wrong kind.
+            // That is exactly how a `List(Json)` from an un-hinted empty comprehension
+            // came back as `Int(0)` where a `Money(3)` was declared.
             Ok(match inner {
+                Type::Int => Value::Int(total),
                 Type::Decimal(scale) => Value::Decimal {
                     units: total,
                     scale: *scale,
                 },
                 Type::Money(scale) => Value::money(total, *scale),
-                _ => Value::Int(total),
+                _ => return Err(ErrorKind::MalformedIr),
             })
         }
         // A new list, like `push` and for the same reason. The element type is the
