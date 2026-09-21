@@ -1598,6 +1598,27 @@ fn a_field_read_off_a_composite_seal_asks_for_reveal() {
     assert!(message.contains("`reveal` it first"), "got: {message}");
 }
 
+/// An array in a body is the one position a seal could still leave through: a member
+/// holding one directly is refused and so is a nested object's, but the element of an
+/// array is neither, and `List(Sealed(..))` is a type nothing else in the language can
+/// produce. Rule 16 keeps a `Secret` out of a list for the same reason and at the same
+/// place, which is what keeps every sink check a shallow match on the type.
+#[test]
+fn a_seal_cannot_be_an_element_of_an_array_in_a_body() {
+    let message = err("effect E {
+  on @order.addressed as e { @key customer_id } {
+    let to = e.ship_to
+    http.post(\"https://x.example\", { \"many\": [to] })
+  }
+}");
+    assert!(
+        message.contains(
+            "this is content sealed under `Customer`, so it cannot be an element of a list without `reveal`"
+        ),
+        "got: {message}"
+    );
+}
+
 /// And walking one reads its elements, so `for` is the same refusal rather than the
 /// shape complaint, which would name a type the author did write and leave nothing to
 /// do about it.

@@ -190,6 +190,18 @@ Two checks hold:
 - **Sealed content may not be written where the seal is discarded**, which is the same boundary rule
   every other position keeps.
 
+**Erasure empties the column.** A read model holding sealed content holds the only copy outside the
+log, so shredding the key empties it there too: a column whose subject key is gone reads back as
+`none`, indistinguishable from a column the handler never wrote. That is what makes an erase
+observable through a projection and not only through a `reveal`, and it is what `expect Row[k] {
+col: none }` asserts after an `erased` line. **Declare a sealed column optional**: a required one
+has no value that says the content is gone, so writing to one after the key is erased raises.
+
+**A seal does not survive being put in a box.** The seal propagates from the whole value written
+into the column, so `many: [email]`, `c: C { email: email }` and a comprehension yielding sealed
+content are all refused the way any other unsealed position is. A `fold` is the same. `reveal` first
+if the value really belongs in a container, which is a decision worth writing down.
+
 ## 9. The `@max` invariant
 
 > A bounded position's `@max` must be no tighter than the `@max` of every field written into it, and

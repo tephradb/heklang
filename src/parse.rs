@@ -7274,6 +7274,19 @@ impl Parser {
 
     /// The same rule where nothing declares a type: an interpolation hole, a
     /// comparison, an HTTP body. Reading content into any of them is reading it.
+    ///
+    /// Also **a position a seal cannot be carried through**, whatever is declared
+    /// there: a list element, a record literal's field. A `Type` carries one seal, so
+    /// there is no `List(Sealed(..))` and no per-field seal in a record declaration,
+    /// and content put in one has nowhere to carry its subject. That is the same reason
+    /// rule 16 refuses a `Secret` element, and refusing it at the element is what keeps
+    /// every sink check here a shallow match rather than a traversal: the deeper type
+    /// never gets built.
+    ///
+    /// Unexempted by `folding` and `propagating` on purpose. Both take the seal from
+    /// the **whole** value written into a `fold` or a column, so a value inside a box
+    /// is not one of them: it would leave the column holding plaintext with no seal
+    /// declared on it, where `erase` can never reach it again.
     fn no_seal(&self, lower: &Lower, value: ExprId, what: &str, at: Span) {
         let Some(subject) = self
             .type_of(lower, value)
@@ -7720,6 +7733,12 @@ impl Parser {
             // a type the checker could infer and no author could spell, since `Secret`
             // lives in a `fn` signature and a list's element goes through `type_ref`.
             self.no_secret(lower, item, "be an element of a list", at);
+            // Rule 12, for the same reason and with the same consequence: there is no
+            // `List(Sealed(..))`, so a seal put in one has nowhere to carry its subject
+            // and is simply dropped. The column or the body is then holding plaintext
+            // that nothing records as sealed, which is what makes it unreachable by
+            // `erase`.
+            self.no_seal(lower, item, "be an element of a list", at);
             // An array in a body is JSON too, so its numbers follow the same rule its
             // sibling members do. Outside one `in_body` is false and a list of
             // `Decimal(2)` stays a list of `Decimal(2)`.
@@ -7782,6 +7801,9 @@ impl Parser {
         // synthesises `List(Secret)`, and `.contains` on one is an equality oracle over
         // two credentials that answers in a loggable `Bool`.
         self.no_secret(lower, yields, "be an element of a list", yielded);
+        // Rule 12, the same as a list literal's element: the list this builds is the
+        // same list, and a seal has nowhere to live in one.
+        self.no_seal(lower, yields, "be an element of a list", yielded);
         if self.pos != at {
             return self.fail(
                 Code::ExpectedToken,
@@ -8053,6 +8075,12 @@ impl Parser {
                 }
                 self.shorthand(lower, &field, &expected, at)
             };
+            // Rule 12: `@subject` inside a record declaration is refused, so a record
+            // has no per-field seal to carry one into. `check_seal` at the declared
+            // position would have said so already, except where the record is on its
+            // way into a `fold` or a column: those exempt the whole value, because they
+            // take the seal from it, and neither can take one out of a box.
+            self.no_seal(lower, value, "be a field of a record", at);
             fields.push((field, value));
             if !self.eat_sym(Sym::Comma) {
                 break;

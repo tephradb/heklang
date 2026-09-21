@@ -67,6 +67,52 @@ effect SyncShop {
 }
 ";
 
+/// A subject with a parent, a projector that stores a column sealed under the child,
+/// and an effect that reveals the same content. Two ways to reach one seal, which is
+/// what rule 3's `erased` has to answer the same way for both.
+const SEALED: &str = "subject Shop(Int)
+subject Buyer(Int) under Shop
+event @contact.recorded {
+  shop_id: Shop,
+  buyer_id: Buyer,
+  email: String? @subject(buyer_id),
+  note: String @subject(buyer_id),
+  at: Timestamp,
+}
+
+projector Contacts {
+  entity Contact {
+    buyer_id: Buyer @key,
+    email: String?,
+    at: Timestamp,
+  }
+
+  on @contact.recorded { buyer_id, email, at } { put Contact { buyer_id, email, at } }
+}
+
+projector Required {
+  entity Note {
+    buyer_id: Buyer @key,
+    note: String,
+  }
+
+  on @contact.recorded { buyer_id, note } { put Note { buyer_id, note } }
+}
+
+effect Mail {
+  on @contact.recorded { @key buyer_id } {
+    fold email: String? = none
+      on @contact.recorded(buyer_id) { email } => email
+
+    let to = reveal(email)
+    if to.is_none() {
+      return
+    }
+    http.post(\"https://mail.example/send\", { \"to\": to })
+  }
+}
+";
+
 /// Parses `PRELUDE` plus `body` and runs every test in it.
 fn verdicts(body: &str) -> Vec<TestResult> {
     let source = format!("{PRELUDE}\n{body}");
@@ -77,6 +123,13 @@ fn verdicts(body: &str) -> Vec<TestResult> {
 /// The same, with the effect declarations in scope too.
 fn effect_verdicts(body: &str) -> Vec<TestResult> {
     let source = format!("{PRELUDE}\n{EFFECTS}\n{body}");
+    let program = parse(&source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+    run_tests(&program)
+}
+
+/// The same, against the sealed-column declarations.
+fn sealed_verdicts(body: &str) -> Vec<TestResult> {
+    let source = format!("{PRELUDE}\n{SEALED}\n{body}");
     let program = parse(&source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
     run_tests(&program)
 }
@@ -221,6 +274,166 @@ fn erased_makes_a_shredded_key_writable() {
   erased Shop \"3\"
   deliver SyncShop
   expect skipped
+}",
+    );
+    assert!(only(&results).passed(), "{}", only(&results));
+}
+
+/// `erased` is a property of the world and not of the action taken in it. A projector
+/// **moves** sealed content into a column without ever revealing it
+/// (`docs/projectors.md` rule 9), so a read model holds the only copy of the personal
+/// data outside the log, and an erase that stopped at the decrypt boundary would leave
+/// it there to read. The two tests differ in one line, which is the point.
+#[test]
+fn a_shredded_key_empties_the_sealed_column_a_projection_wrote() {
+    let results = sealed_verdicts(
+        "test \"the read model has it too\" {
+  given @contact.recorded { shop_id: 1, buyer_id: 7, email: \"ada@example.com\", note: \"n\", at: \"2019-12-31T12:00:00Z\" }
+  erased Buyer \"7\"
+  project Contacts
+  expect Contact[7] { buyer_id: 7, email: none, at: \"2019-12-31T12:00:00Z\" }
+}",
+    );
+    assert!(only(&results).passed(), "{}", only(&results));
+}
+
+#[test]
+fn a_shredded_key_skips_the_effect_that_would_reveal_it() {
+    let results = sealed_verdicts(
+        "test \"the decrypt boundary has it\" {
+  given @contact.recorded { shop_id: 1, buyer_id: 7, email: \"ada@example.com\", note: \"n\", at: \"2019-12-31T12:00:00Z\" }
+  erased Buyer \"7\"
+  deliver Mail
+  expect skipped
+}",
+    );
+    assert!(only(&results).passed(), "{}", only(&results));
+}
+
+/// A child's key is wrapped in its parent's, so one row delete takes every key beneath
+/// it (`docs/effects.md` rule 12). The sibling shop is what says this is the wrapping
+/// and not "any erase empties every column of that type".
+#[test]
+fn erasing_a_parent_empties_a_column_sealed_under_the_child() {
+    let results = sealed_verdicts(
+        "test \"erasing the shop takes its buyers\" {
+  given @contact.recorded { shop_id: 1, buyer_id: 7, email: \"ada@example.com\", note: \"n\", at: \"2019-12-31T12:00:00Z\" }
+  given @contact.recorded { shop_id: 2, buyer_id: 8, email: \"bob@example.com\", note: \"n\", at: \"2019-12-31T12:00:00Z\" }
+  erased Shop \"1\"
+  project Contacts
+  expect Contact[7] { email: none }
+  expect Contact[8] { email: \"bob@example.com\" }
+}",
+    );
+    assert!(only(&results).passed(), "{}", only(&results));
+}
+
+/// The property the design rests on: a reader of the read model cannot tell a subject
+/// that was erased from one whose optional was never written. If it could, the row
+/// would still be saying something about the person it no longer holds anything about.
+#[test]
+fn a_column_never_written_reads_back_as_a_shredded_one() {
+    let results = sealed_verdicts(
+        "test \"absent and erased are one column\" {
+  given @contact.recorded { shop_id: 1, buyer_id: 7, email: none, note: \"n\", at: \"2019-12-31T12:00:00Z\" }
+  given @contact.recorded { shop_id: 1, buyer_id: 8, email: \"ada@example.com\", note: \"n\", at: \"2019-12-31T12:00:00Z\" }
+  erased Buyer \"8\"
+  project Contacts
+  expect Contact[7] { email: none }
+  expect Contact[8] { email: none }
+}",
+    );
+    assert!(only(&results).passed(), "{}", only(&results));
+}
+
+/// The one column that cannot answer. An emptied column holds the absent optional,
+/// which is the value rule 12 gives an erased subject; a required column has no such
+/// value, so the row is refused rather than written holding either the plaintext or a
+/// zero that reads like data. The same thing `@absent` is told where it is written.
+#[test]
+fn a_required_sealed_column_cannot_hold_a_shredded_key() {
+    let results = sealed_verdicts(
+        "test \"a required column has no absent\" {
+  given @contact.recorded { shop_id: 1, buyer_id: 7, email: none, note: \"ada\", at: \"2019-12-31T12:00:00Z\" }
+  erased Buyer \"7\"
+  project Required
+  expect Note[7] { note: \"ada\" }
+}",
+    );
+    let TestOutcome::Errored(why) = &only(&results).outcome else {
+        panic!("expected an error, got {}", only(&results));
+    };
+    assert!(
+        why.contains("`Note.note` holds content sealed under `Buyer` = `7`"),
+        "got: {why}"
+    );
+    assert!(why.contains("Declare the column optional"), "got: {why}");
+}
+
+/// The cascade belongs to the key store, not to the setup line: an effect's own
+/// `erase` destroys the same key row `erased` does, so it has to take the same keys
+/// with it. Expanding the parent into its children at the `erased` line instead left
+/// these two worlds answering differently, and the one written with `erase` was the one
+/// that revealed a shredded buyer's email and sent it.
+#[test]
+fn an_effect_erasing_a_parent_shreds_the_same_keys_the_setup_line_does() {
+    const WIPE: &str = "event @wipe.requested { shop_id: Shop }
+effect Wipe {
+  on @wipe.requested { @key shop_id } { erase(shop_id) }
+
+  on @contact.recorded as e { @key buyer_id } {
+    fold email: String? = none
+      on @contact.recorded(buyer_id: e.buyer_id) { email } => email
+    let to = reveal(email)
+    if to.is_none() {
+      return
+    }
+    http.post(\"https://mail.example/send\", { \"to\": to })
+  }
+}
+";
+    let given = "given @contact.recorded { shop_id: 1, buyer_id: 7, email: \"ada@example.com\", note: \"n\", at: \"2019-12-31T12:00:00Z\" }";
+    let erased = sealed_verdicts(&format!(
+        "{WIPE}
+test \"the setup line\" {{
+  {given}
+  erased Shop \"1\"
+  deliver Wipe
+  expect skipped
+}}"
+    ));
+    assert!(only(&erased).passed(), "{}", only(&erased));
+
+    let ran = sealed_verdicts(&format!(
+        "{WIPE}
+test \"the effect's own erase\" {{
+  given @wipe.requested {{ shop_id: 1 }}
+  {given}
+  deliver Wipe
+  expect erase(Shop, \"1\")
+  expect skipped
+}}"
+    ));
+    assert!(only(&ran).passed(), "{}", only(&ran));
+}
+
+/// Two fields of the ancestor's type and nothing an author wrote says which one minted
+/// the key, so the chain stops rather than taking the first declared: which shop a
+/// buyer's key hangs from must not depend on field order. A runtime stops short for the
+/// same reason, and refuses the project rather than guessing.
+#[test]
+fn an_ancestor_carried_twice_mints_no_wrapping() {
+    let results = sealed_verdicts(
+        "event @contact.moved { from_shop: Shop, to_shop: Shop, buyer_id: Buyer, email: String? @subject(buyer_id) }
+projector Moves {
+  entity Move { buyer_id: Buyer @key, email: String? }
+  on @contact.moved { buyer_id, email } { put Move { buyer_id, email } }
+}
+test \"neither shop claims the buyer\" {
+  given @contact.moved { from_shop: 1, to_shop: 2, buyer_id: 7, email: \"ada@example.com\" }
+  erased Shop \"1\"
+  project Moves
+  expect Move[7] { email: \"ada@example.com\" }
 }",
     );
     assert!(only(&results).passed(), "{}", only(&results));

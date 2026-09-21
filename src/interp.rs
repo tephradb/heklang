@@ -7,7 +7,8 @@ use uuid::Uuid;
 
 use crate::harness::{Harness, Journal, Reply};
 use crate::host::{
-    AppendCondition, Attempt, Calls, Host, Log, Parts, Predicate, Query, Recorded, Request, Rows,
+    AppendCondition, Attempt, Calls, Host, Keys, Log, Parts, Predicate, Query, Recorded, Request,
+    Rows,
 };
 use crate::ir::{
     Absent, Arm, BinOp, Builtin, Command, Delivery, Effect, EntityDef, EnvField, EventPath, Expr,
@@ -41,6 +42,17 @@ pub enum ErrorKind {
     /// makes a local erase-then-reveal a compile error.
     Erased {
         field: Ident,
+        subject: Ident,
+        id: String,
+    },
+    /// Rule 12 in a read model: a sealed column whose key is gone, in a column that
+    /// cannot say so. An erased optional reads back absent; a required column has no
+    /// such value, so the row cannot be written at all.
+    ///
+    /// `column` is `Entity.field`, built the way a bound's path is: three fields rather
+    /// than four keeps `Error` inside the size every other seam here returns it at.
+    ShreddedColumn {
+        column: Ident,
         subject: Ident,
         id: String,
     },
@@ -181,6 +193,17 @@ impl fmt::Display for ErrorKind {
                  The erase need not be in this effect; another effect or a concurrent invocation \
                  can erase a subject between the original run and a replay, and nothing static \
                  catches that"
+            ),
+            ErrorKind::ShreddedColumn {
+                column,
+                subject,
+                id,
+            } => write!(
+                f,
+                "`{column}` holds content sealed under `{subject}` = `{id}`, whose key \
+                 has been erased, and the column is not optional so it cannot read back absent. \
+                 Declare the column optional: the erased case for sealed content is an optional, \
+                 which is what `@absent` is told where it is written"
             ),
             ErrorKind::MissingSecret(name) => write!(
                 f,
@@ -469,6 +492,104 @@ impl Rows for Store {
         }
         Ok(())
     }
+}
+
+/// Read models with a key store beside them: a sealed column whose key is gone is
+/// emptied on the way through, and everything else is passed to `rows` untouched.
+///
+/// **Why a read model needs this at all.** Rule 9 of `docs/projectors.md` lets a
+/// projector *move* sealed content into a column without ever revealing it, so a read
+/// model holds the only copy of the personal data outside the log. An erase that
+/// reached the log and not the read models would leave it there to read, which is the
+/// opposite of what `erase` is for.
+///
+/// **Why here rather than in [`Projection`].** A projection holds no host
+/// (`docs/host.md` section 7) and a `Value::Sealed` is what reaches `Rows::put`, which
+/// is what lets a host store one without opening it. So this is not something the write
+/// path can do on a host's behalf: whoever owns both the keys and the rows does it, and
+/// a host that keeps its own read models does the same in its own `Rows`. This is the
+/// one for the read models heklang keeps itself.
+pub(crate) struct Shredding<'a> {
+    pub keys: &'a dyn Keys,
+    pub rows: &'a mut dyn Rows,
+}
+
+impl Rows for Shredding<'_> {
+    fn row(&self, entity: &str, key: &Key) -> Result<Option<Row>, Error> {
+        self.rows.row(entity, key)
+    }
+
+    fn put(&mut self, entity: &Ident, key: Key, row: Row) -> Result<(), Error> {
+        let row = shredded(self.keys, entity, row)?;
+        self.rows.put(entity, key, row)
+    }
+
+    fn delete(&mut self, entity: &Ident, key: &Key) -> Result<(), Error> {
+        self.rows.delete(entity, key)
+    }
+}
+
+/// One row, with every sealed column the key store can no longer open taken out of it.
+///
+/// The emptied column reads back as the **absent optional**, which is the value rule 12
+/// gives an erased subject and also the value a column the handler never wrote holds.
+/// The two are deliberately indistinguishable: a reader that could tell them apart
+/// would be reading the fact that this subject was erased off a row that no longer
+/// holds anything else about it.
+fn shredded(keys: &dyn Keys, entity: &Ident, mut row: Row) -> Result<Row, Error> {
+    for (name, value) in row.0.iter_mut() {
+        // Nothing is cloned to decide this, because most columns are not seals and a
+        // `Type` clone allocates: the key store's answer is what the arms below branch
+        // on, and only the erased one owns anything.
+        let (subject, id) = {
+            // `Opt` is outermost around a seal (`docs/effects.md` rule 12), so one peel
+            // is the whole of the nesting there is.
+            let sealed = match &*value {
+                held @ Value::Sealed { .. } => held,
+                Value::Opt {
+                    value: Some(held), ..
+                } => &**held,
+                _ => continue,
+            };
+            let Value::Sealed {
+                field,
+                subject,
+                id,
+                content,
+            } = sealed
+            else {
+                continue;
+            };
+            // The lifecycle question, not the content: a projection moves sealed
+            // content and never reads it, so this asks whether the column still has
+            // any rather than what it is.
+            if keys.is_live(subject, id, field, content)? {
+                continue;
+            }
+            (subject.clone(), id.clone())
+        };
+        match value {
+            Value::Opt { inner, .. } => {
+                *value = Value::Opt {
+                    inner: inner.clone(),
+                    value: None,
+                }
+            }
+            // A column that is not optional has no value that says "this is gone": the
+            // erased case for sealed content is an optional, which is the same thing
+            // `@absent` is told where it is written. Loud here rather than a row that
+            // quietly keeps the plaintext or quietly holds a zero.
+            _ => {
+                return Err(ErrorKind::ShreddedColumn {
+                    column: format!("{entity}.{name}"),
+                    subject,
+                    id,
+                }
+                .into());
+            }
+        }
+    }
+    Ok(row)
 }
 
 /// One projector, ready to be applied to records a host supplies.
@@ -937,9 +1058,18 @@ impl<'a, H: Host> Interpreter<'a, H> {
     }
 
     /// Folds the whole log into this projector's read models, in memory.
+    ///
+    /// These are heklang's own rows rather than a host's, so heklang is what shreds a
+    /// sealed column whose key is gone. [`project_into`](Self::project_into) does not:
+    /// the rows there belong to the caller, and `docs/host.md` section 7 is that a
+    /// `Value::Sealed` reaches their `put` so a host can store one without opening it.
     pub fn project(&self, name: &str) -> Result<Store, Error> {
         let mut store = Store::default();
-        self.project_into(name, &mut store)?;
+        let mut rows = Shredding {
+            keys: &self.host,
+            rows: &mut store,
+        };
+        self.project_into(name, &mut rows)?;
         Ok(store)
     }
 
@@ -1679,7 +1809,7 @@ fn exec_stmt(
 /// A subject is identified by a plaintext scalar, which is what `erase` and `reveal`
 /// look the key up by. Absent only for a fold's companion, which holds nothing until
 /// the fold matches something; rule 12 turns on telling that apart from a real id.
-fn subject_id(value: &Value, span: Span) -> Result<Option<String>, Error> {
+pub(crate) fn subject_id(value: &Value, span: Span) -> Result<Option<String>, Error> {
     match value {
         Value::Int(id) => Ok(Some(id.to_string())),
         Value::Str(id) | Value::Uuid(id) => Ok(Some(id.to_string())),

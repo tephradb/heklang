@@ -353,6 +353,28 @@ impl Program {
         self.subjects.iter().find(|def| def.name == name)
     }
 
+    /// One subject's parents, nearest first. A child's key is wrapped in its parent's,
+    /// so this is the chain an erase runs down.
+    ///
+    /// The graph is checked acyclic where it is declared, so the walk terminates; the
+    /// length bound is for an IR that reached here some other way, since a loop here
+    /// would hang a host rather than fail one.
+    pub fn ancestors(&self, name: &str) -> Vec<&SubjectDef> {
+        let mut chain = Vec::new();
+        let mut at = self.subject(name).and_then(|def| def.parent.as_deref());
+        while let Some(parent) = at {
+            let Some(def) = self.subject(parent) else {
+                break;
+            };
+            if chain.len() >= self.subjects.len() {
+                break;
+            }
+            chain.push(def);
+            at = def.parent.as_deref();
+        }
+        chain
+    }
+
     pub fn constant(&self, name: &str) -> Option<&ConstDef> {
         self.consts.iter().find(|def| def.name == name)
     }

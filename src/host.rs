@@ -142,8 +142,9 @@ pub trait Keys {
     /// the content was sealed under rather than where it now sits, because a host
     /// binds its ciphertext to that name and sealed content may be moved.
     ///
-    /// Called once per `reveal` and never otherwise, so a fold pays for the content it
-    /// reads rather than for every record it walks.
+    /// Called once per `reveal`, so a fold pays for the content it reads rather than
+    /// for every record it walks. The other question this seam is asked is
+    /// [`Keys::is_live`], which wants no content and is answered without this.
     fn decrypt(
         &self,
         subject: &str,
@@ -151,6 +152,23 @@ pub trait Keys {
         field: &str,
         content: &str,
     ) -> Result<Option<String>, Error>;
+
+    /// Whether this subject's key is still there: the lifecycle question with no
+    /// content attached.
+    ///
+    /// Asked where a sealed column is written into read models heklang owns
+    /// (`docs/projectors.md` rule 9: an erase has to empty the column, and only the key
+    /// store knows whether it should). A projection moves sealed content without ever
+    /// revealing it, so producing the plaintext to answer a boolean would put personal
+    /// data on a path built not to hold any, and would pay a key use per column per
+    /// row.
+    ///
+    /// Defaulted to `decrypt` so that no host is broken by this arriving, and so that a
+    /// host with nothing cheaper is still correct. Override it wherever the key store
+    /// can answer without unwrapping the content.
+    fn is_live(&self, subject: &str, id: &str, field: &str, content: &str) -> Result<bool, Error> {
+        Ok(self.decrypt(subject, id, field, content)?.is_some())
+    }
 
     fn erase(&mut self, subject: &str, id: &str) -> Result<(), Error>;
 }

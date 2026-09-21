@@ -75,6 +75,13 @@ Replies are a **queue per URL**, taken in order, so `respond url 503` then `resp
 test says the first attempt was absorbed. `erased` is the only way to write a shredded-key test,
 since a test cannot call `erase` itself. The URL may be a `const`.
 
+`erased` belongs to the world, not to the action: the same line makes a `deliver` `expect skipped`
+where it reveals, and empties the sealed column a `project` writes, so `expect Row[k] { col: none }`
+is how a test asserts the personal data left the read model. A parent's erasure takes its children:
+`erased Shop "42"` shreds every `Customer` the given log puts under shop 42, and an effect's own
+`erase(shop_id)` does the same, because the cascade belongs to the key store rather than to the
+setup line.
+
 A declared `secret` needs **no** setup line: it answers `secret:NAME`, so a test that does not care
 about the value writes `respond "secret:HOOK" 200` and expects `http.post("secret:HOOK")`. The
 directive is the override, for a value that has to parse as a URL or carry a prefix an arm branches

@@ -16,7 +16,7 @@ pub mod value;
 pub use build::Builder;
 pub use diagnostic::{Code, Diagnostic, Related, Severity};
 pub use digest::{Digest, Entry, Hash, Kind, Sexp, SexpError};
-pub use harness::{Harness, Journal, Reply, Sandbox};
+pub use harness::{Harness, Journal, Keyring, Models, Reply, Sandbox};
 pub use host::{
     AppendCondition, Attempt, Calls, Clock, Host, Http, Keys, Log, Parts, Predicate, Query,
     Recorded, Request, Rows, Secrets,

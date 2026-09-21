@@ -9,12 +9,13 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use crate::host::{
-    AppendCondition, Attempt, Calls, Clock, Http, Keys, Log, Query, Recorded, Request, Secrets,
+    AppendCondition, Attempt, Calls, Clock, Http, Keys, Log, Query, Recorded, Request, Rows,
+    Secrets,
 };
-use crate::interp::{Error, ErrorKind, Store};
+use crate::interp::{Error, ErrorKind, Row, Shredding, Store};
 use crate::ir::Ident;
 use crate::testing::World;
-use crate::value::{Event, Json, Record};
+use crate::value::{Event, Json, Key, Record};
 
 /// 2020-01-01T00:00:00Z, so a synthesised envelope timestamp reads as a plausible
 /// instant rather than the epoch.
@@ -66,13 +67,119 @@ impl Calls for Journal {
     }
 }
 
+/// The key store, modelled as a lifecycle: a subject is erased or it is not. That is
+/// what rules 9 and 12 turn on. Ciphertext is not modelled; see `docs/effects.md`.
+///
+/// Its own type because a world hands its host and its read models over separately
+/// ([`World::open`]) and **both** have to ask it the same question: an effect asks at a
+/// `reveal`, and a projection asks at every sealed column it writes. A clone is the
+/// whole state, which is what lets the two halves leave together.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Keyring {
+    /// Ids per subject rather than pairs, so a lookup takes `&str`s and allocates
+    /// nothing: this is asked once per sealed column a projection writes.
+    erased: BTreeMap<Ident, BTreeSet<String>>,
+    /// What each key is wrapped inside, nearest first. The half of a key store this
+    /// cannot see for itself: heklang mints nothing, so a world is told.
+    under: BTreeMap<Ident, BTreeMap<String, Vec<(Ident, String)>>>,
+}
+
+/// Longer than any declared hierarchy, and a backstop rather than a rule: the subject
+/// graph is checked acyclic where it is declared, but [`Keyring::wrapped_in`] is public
+/// and a cycle fed through it would recurse until the stack ran out.
+const MAX_WRAP_DEPTH: usize = 64;
+
+impl Keyring {
+    pub fn erase_subject(&mut self, subject: &str, id: &str) {
+        self.erased
+            .entry(subject.to_string())
+            .or_default()
+            .insert(id.to_string());
+    }
+
+    /// Records that one key was minted wrapped inside `under`, nearest first.
+    ///
+    /// **First mint wins**, so a repeat is dropped: a key is minted once, under
+    /// whichever event arrived first, and `docs/effects.md` rule 12 says as much about
+    /// two events that disagree.
+    pub fn wrapped_in(&mut self, subject: &str, id: &str, under: &[(Ident, String)]) {
+        self.under
+            .entry(subject.to_string())
+            .or_default()
+            .entry(id.to_string())
+            .or_insert_with(|| under.to_vec());
+    }
+
+    /// Whether this subject's content is unreadable: its own key shredded, or any key
+    /// it was wrapped inside shredded, since that is what a parent's row going means
+    /// (`docs/effects.md` rule 12).
+    ///
+    /// Asked here rather than expanded at the erase, so that every way a key dies gives
+    /// the same answer: the `erased` a test declares, an effect's own `erase`, and an
+    /// embedder calling [`Harness::erase_subject`] all land in one set.
+    pub fn is_erased(&self, subject: &str, id: &str) -> bool {
+        self.gone(subject, id, 0)
+    }
+
+    fn gone(&self, subject: &str, id: &str, depth: usize) -> bool {
+        if self.erased.get(subject).is_some_and(|ids| ids.contains(id)) {
+            return true;
+        }
+        if depth >= MAX_WRAP_DEPTH {
+            return false;
+        }
+        self.under
+            .get(subject)
+            .and_then(|ids| ids.get(id))
+            .is_some_and(|under| {
+                under
+                    .iter()
+                    .any(|(subject, id)| self.gone(subject, id, depth + 1))
+            })
+    }
+}
+
+impl Keys for Keyring {
+    /// The harness's ciphertext is its plaintext. It models the key lifecycle and not
+    /// crypto, so "decrypt" is the lifecycle question and nothing else: content behind
+    /// a live key reads back as it was stored, and content behind a destroyed one does
+    /// not read back at all.
+    fn decrypt(
+        &self,
+        subject: &str,
+        id: &str,
+        _field: &str,
+        content: &str,
+    ) -> Result<Option<String>, Error> {
+        if self.is_erased(subject, id) {
+            return Ok(None);
+        }
+        Ok(Some(content.to_string()))
+    }
+
+    /// The lifecycle question the whole type is, so it is answered without copying the
+    /// content the default would have handed back and dropped.
+    fn is_live(
+        &self,
+        subject: &str,
+        id: &str,
+        _field: &str,
+        _content: &str,
+    ) -> Result<bool, Error> {
+        Ok(!self.is_erased(subject, id))
+    }
+
+    fn erase(&mut self, subject: &str, id: &str) -> Result<(), Error> {
+        self.erase_subject(subject, id);
+        Ok(())
+    }
+}
+
 /// A log, a key store and a network, none of them real.
 #[derive(Debug, Clone, Default)]
 pub struct Harness {
     records: Vec<Record>,
-    /// The key store, modelled as a lifecycle: a subject is erased or it is not. That
-    /// is what rules 9 and 12 turn on. Ciphertext is not modelled; see `docs/effects.md`.
-    keys: BTreeSet<(Ident, String)>,
+    keys: Keyring,
     scripted: BTreeMap<String, VecDeque<Reply>>,
     /// Deployment credentials a test supplied. Empty is the common case: a name nothing
     /// mentions answers `secret:NAME` rather than nothing, so no test needs setup to run
@@ -122,7 +229,19 @@ impl Harness {
     /// Marks a subject erased without an effect having done it, which is the case rule
     /// 12's message is about: the erase is usually not local.
     pub fn erase_subject(&mut self, subject: &str, id: &str) {
-        self.keys.insert((subject.to_string(), id.to_string()));
+        self.keys.erase_subject(subject, id);
+    }
+
+    /// The key store on its own, for the half of a world that is not the host: a
+    /// projection writing a sealed column asks it the same question a `reveal` does.
+    pub fn keys(&self) -> &Keyring {
+        &self.keys
+    }
+
+    /// The key store to write: what a world mints into, and what an embedder shreds
+    /// through when it wants more than [`Harness::erase_subject`].
+    pub fn keys_mut(&mut self) -> &mut Keyring {
+        &mut self.keys
     }
 
     /// Gives one deployment credential the value a test wrote, overriding the
@@ -224,26 +343,22 @@ impl Secrets for Harness {
 }
 
 impl Keys for Harness {
-    /// The harness's ciphertext is its plaintext. It models the key lifecycle and not
-    /// crypto, so "decrypt" is the lifecycle question and nothing else: content behind
-    /// a live key reads back as it was stored, and content behind a destroyed one does
-    /// not read back at all.
     fn decrypt(
         &self,
         subject: &str,
         id: &str,
-        _field: &str,
+        field: &str,
         content: &str,
     ) -> Result<Option<String>, Error> {
-        if self.keys.contains(&(subject.to_string(), id.to_string())) {
-            return Ok(None);
-        }
-        Ok(Some(content.to_string()))
+        self.keys.decrypt(subject, id, field, content)
+    }
+
+    fn is_live(&self, subject: &str, id: &str, field: &str, content: &str) -> Result<bool, Error> {
+        self.keys.is_live(subject, id, field, content)
     }
 
     fn erase(&mut self, subject: &str, id: &str) -> Result<(), Error> {
-        self.erase_subject(subject, id);
-        Ok(())
+        self.keys.erase(subject, id)
     }
 }
 
@@ -267,6 +382,53 @@ impl Http for Harness {
     }
 }
 
+/// The harness's read models: a [`Store`], with the key store beside it.
+///
+/// A sealed column whose subject key is gone is emptied as it is written, which is the
+/// same write a host makes in its own `Rows` and for the same reason: a projector may
+/// move sealed content into a column without ever revealing it (`docs/projectors.md`
+/// rule 9), so an erase that reached the log and not the read models would leave the
+/// personal data sitting in one. The emptied column reads back as the absent optional,
+/// which is also what a column the handler never wrote reads back as.
+///
+/// **The key store here is a copy**, taken where [`World::open`] splits the world in
+/// two. Setup runs before that and a `project` writes no keys, so a test cannot tell;
+/// an embedder that erases through the host half after `open` and then projects can,
+/// and should erase through both or project before erasing.
+///
+/// `PartialEq` because this stands where a bare [`Store`] used to, and comparing two
+/// of those is something an embedder does.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Models {
+    keys: Keyring,
+    store: Store,
+}
+
+impl Models {
+    /// The rows as they stand, for an embedder that wants more than `Rows::row` gives.
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+}
+
+impl Rows for Models {
+    fn row(&self, entity: &str, key: &Key) -> Result<Option<Row>, Error> {
+        self.store.row(entity, key)
+    }
+
+    fn put(&mut self, entity: &Ident, key: Key, row: Row) -> Result<(), Error> {
+        Shredding {
+            keys: &self.keys,
+            rows: &mut self.store,
+        }
+        .put(entity, key, row)
+    }
+
+    fn delete(&mut self, entity: &Ident, key: &Key) -> Result<(), Error> {
+        self.store.delete(entity, key)
+    }
+}
+
 /// The harness as a world a test runs in: this log, these read models, these scripted
 /// replies. The in-memory answer to `docs/testing.md` section 3, and the one
 /// `run_tests` uses when an embedder does not bring its own.
@@ -278,7 +440,7 @@ pub struct Sandbox {
 
 impl World for Sandbox {
     type Host = Harness;
-    type Rows = Store;
+    type Rows = Models;
 
     fn given(&mut self, event: Event) -> Result<(), Error> {
         self.harness.push(event);
@@ -303,7 +465,25 @@ impl World for Sandbox {
         Ok(())
     }
 
-    fn open(self) -> Result<(Harness, Store), Error> {
-        Ok((self.harness, self.store))
+    /// Recorded, because this is the half of a key store the harness cannot see for
+    /// itself: it models the lifecycle and mints nothing, so what a key was wrapped
+    /// inside has to arrive from the outside for `erase` on a parent to mean anything.
+    fn wrapping(&mut self, key: (&str, &str), under: &[(Ident, String)]) -> Result<(), Error> {
+        self.harness.keys_mut().wrapped_in(key.0, key.1, under);
+        Ok(())
+    }
+
+    /// Setup is finished, so the keys it shredded are final: the read models leave with
+    /// a copy of the key store, because the host leaves with the original and both
+    /// halves have the same question to ask of it.
+    fn open(self) -> Result<(Harness, Models), Error> {
+        let keys = self.harness.keys().clone();
+        Ok((
+            self.harness,
+            Models {
+                keys,
+                store: self.store,
+            },
+        ))
     }
 }

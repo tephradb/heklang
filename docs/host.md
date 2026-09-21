@@ -62,6 +62,16 @@ survives because an absent optional never reaches here at all.
 its whole boundary without asking for a key: only the content a handler actually reveals costs one.
 A host that decrypts on the way in instead pays per record for content nothing reads.
 
+**The other question is `is_live`, and it wants no content.** A column whose key is gone has to read
+back absent (`docs/projectors.md` rule 9), so the read models heklang keeps itself
+(`Interpreter::project`, and the `project` a test asserts on) ask once per sealed column written.
+That is a lifecycle question and not a read: a projection **moves** sealed content and never reveals
+it, so producing the plaintext to answer a boolean would put personal data on a path built not to
+hold any, and would spend a key use per column per row. It is defaulted to `decrypt`, so a host is
+correct without implementing it and better off overriding it wherever its key store can answer
+without unwrapping. A host that keeps its own read models asks its own store instead, in its own
+`Rows`; `project_into` writes through to those rows and asks nothing here.
+
 **The plaintext is text, and for a composite that text is JSON.** `@subject(...)` takes any declared
 type, so a field declared a record, a list, a map or a `Json` seals as the document rule 8 writes and
 `Value::from_sealed` parses it back against the declaration. A host neither builds that text nor reads
@@ -283,6 +293,12 @@ handlers may select one record and the second has to see the first's.
 deliberately not what a host sees, because a host taking a delta while `Store` took a whole row would
 be two write paths with nothing comparing them against each other. *Converting at the boundary* below
 has the `patch` and `update` rows.
+
+**A sealed column is the host's to empty.** The `Value::Sealed` reaching `put` is what lets a host
+store one without opening it, and it is the same fact that makes the erase the host's: a column whose
+subject key is gone has to read back absent (`docs/projectors.md` rule 9), and the key store is on
+the host's side of this seam. heklang empties the columns of the rows it owns, which are
+`Interpreter::project`'s, and never the rows that arrive here.
 
 **`Projection` holds no host.** `docs/projectors.md` rule 4 gives a projector no general read and
 `docs/effects.md` rule 11 gives it no clock, so the program and the rows it writes through are the

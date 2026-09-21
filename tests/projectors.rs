@@ -80,6 +80,14 @@ fn err(body: &str) -> String {
         .text()
 }
 
+/// The same, for a case that brings its own declarations rather than the fixture's:
+/// the subject rules need their own subjects.
+fn refused(source: &str) -> String {
+    parse(source)
+        .expect_err("expected this program to be rejected")
+        .text()
+}
+
 /// Runs a projector over `log` and returns its read models.
 fn project(body: &str, log: Vec<Event>) -> Store {
     let source = source(body);
@@ -993,19 +1001,82 @@ fn a_name_from_one_handler_is_not_in_scope_in_another() {
     assert_eq!(message, "`mine` is not in scope");
 }
 
-// Rule 9: subject propagation. The propagation is live; the checks are not, so
-// these are the tests that turn on when `check_subjects` grows a body.
+// Rule 9: subject propagation, and the two checks over it. Both are implemented now;
+// what stood here were two `unimplemented!()` placeholders from before they were. The
+// conflict check is `two_handlers_cannot_seal_one_column_under_two_subjects`, below
+// with the rest of rule 9's messages; the discard check is here, because the case that
+// escaped it is a property of what a column can carry.
 
+/// A column takes sealed content by propagating the seal onto itself, and it takes it
+/// from the **whole** value: a `Type` carries one seal, so content inside a list, a
+/// record or a comprehension has nowhere to carry it. Writing one there used to be
+/// accepted and the column was left holding plaintext with no seal declared on it,
+/// which `erase` could then never reach: the read model kept the personal data after
+/// the key was shredded, and nothing said so.
 #[test]
-#[ignore = "rule 9: the subject conflict check is not implemented yet"]
-fn two_handlers_with_different_subjects_conflict() {
-    unimplemented!("assert that writing `email` under two subjects is rejected")
+fn a_seal_does_not_survive_being_put_in_a_box() {
+    let boxes = [
+        (
+            "be an element of a list",
+            "many: List(String)",
+            "many: [email]",
+        ),
+        (
+            "be an element of a list",
+            "many: List(String)",
+            "many: [email for n in [1]]",
+        ),
+        ("be a field of a record", "c: C", "c: C { email: email }"),
+    ];
+    for (what, column, write) in boxes {
+        let message = refused(&format!(
+            "subject Buyer(Int)
+record C {{ email: String }}
+event @a.b {{ buyer_id: Buyer, email: String @subject(buyer_id) }}
+projector P {{
+  entity E {{ buyer_id: Buyer @key, {column} }}
+  on @a.b {{ buyer_id, email }} {{ put E {{ buyer_id, {write} }} }}
+}}"
+        ));
+        assert!(
+            message.contains(&format!(
+                "this is content sealed under `Buyer`, so it cannot {what} without `reveal`"
+            )),
+            "for {write}: {message}"
+        );
+    }
+
+    // The column itself still takes it, which is the whole point of the propagation.
+    parse(
+        "subject Buyer(Int)
+event @a.b { buyer_id: Buyer, email: String @subject(buyer_id) }
+projector P {
+  entity E { buyer_id: Buyer @key, email: String }
+  on @a.b { buyer_id, email } { put E { buyer_id, email } }
+}",
+    )
+    .expect("a column takes sealed content by propagating the seal onto itself");
 }
 
+/// The same rule one level out: a `fold` propagates a seal the same way a column does,
+/// and loses it the same way when the value is boxed.
 #[test]
-#[ignore = "rule 9: the subject discard check is not implemented yet"]
-fn discarding_a_subject_binding_is_an_error() {
-    unimplemented!("assert that a subject-bound value cannot land in an unbound field")
+fn a_fold_does_not_take_a_seal_out_of_a_box_either() {
+    let message = refused(
+        "subject Buyer(Int)
+event @a.b { buyer_id: Buyer, email: String @subject(buyer_id) }
+effect X {
+  on @a.b as e { @key buyer_id } {
+    fold many: List(String) = []
+      on @a.b(buyer_id: e.buyer_id) { email } => [email]
+    log(\"{many.len()}\")
+  }
+}",
+    );
+    assert!(
+        message.contains("this is content sealed under `Buyer`"),
+        "got: {message}"
+    );
 }
 
 // Declaration collection: a projector may precede the events it uses.

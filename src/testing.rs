@@ -8,8 +8,10 @@ use std::fmt;
 
 use crate::harness::{Reply, Sandbox};
 use crate::host::{Host, Rows};
-use crate::interp::{Effectful, Error, ErrorKind, Interpreter, Outcome, Row, coerce};
-use crate::ir::{Action, Expect, ExprId, Exprs, Ident, Program, ReplySpec, Setup, Test, Type};
+use crate::interp::{Effectful, Error, ErrorKind, Interpreter, Outcome, Row, coerce, subject_id};
+use crate::ir::{
+    Action, Expect, ExprId, Exprs, Ident, Program, ReplySpec, Setup, Span, Test, Type,
+};
 use crate::value::{Event, Json, Key, Value};
 
 /// One test's verdict, in declaration order.
@@ -67,6 +69,19 @@ pub trait World: Sized {
     /// A subject whose key is already destroyed.
     fn erased(&mut self, subject: &str, id: &str) -> Result<(), Error>;
 
+    /// One key row the `given` log minted, and the keys it is wrapped inside, nearest
+    /// first. Called once per minted key, after the log and before any `erased`.
+    ///
+    /// A child's key is wrapped in its parent's, so erasing the parent takes it
+    /// (`docs/effects.md` rule 12). A world with a real key store recorded that when it
+    /// appended and needs nothing here; one that models the lifecycle alone cannot know
+    /// it, because nothing in it ever mints a key. Defaulted to nothing, so a world that
+    /// does not implement it is unaffected, and skipped entirely for a program whose
+    /// subjects declare no parent.
+    fn wrapping(&mut self, _key: (&str, &str), _under: &[(Ident, String)]) -> Result<(), Error> {
+        Ok(())
+    }
+
     /// One deployment credential, or `None` for a deployment that did not set it.
     ///
     /// Defaulted so that an out-of-repo world is not broken by rule 16 arriving: a world
@@ -115,6 +130,82 @@ pub fn run_tests_in<W: World>(
         .collect()
 }
 
+/// The text a key is filed under, which is the interpreter's answer rather than a
+/// second one. `None` is a field holding nothing to file a key under, which the ancestry
+/// rule makes impossible for an ancestor and possible for nothing else here.
+fn id_text(value: &Value) -> Option<String> {
+    subject_id(value, Span::default()).ok().flatten()
+}
+
+/// The key rows one `given` log mints, and what each is wrapped under.
+///
+/// A real key store keeps this: minting a customer's key wraps it inside its shop's, so
+/// deleting the shop's row makes every key beneath it unwrappable in one delete
+/// (`docs/effects.md` rule 12). Nothing here mints anything, so the same fact is
+/// recovered from the log, using the rule that exists so a runtime could mint the key
+/// at all: **every event that seals under a subject carries every ancestor's id**, in
+/// plaintext, on the event itself.
+///
+/// **First mint wins**, which is the one place this could disagree with a store and
+/// does not. Two events putting customer 88 in different shops are both well formed and
+/// the key is minted once, under whichever arrived first; rule 12 says so in as many
+/// words, and says that nothing can check it.
+#[derive(Debug, Default)]
+struct Minted {
+    /// Each key, and the keys its own is wrapped inside. Ordered so a run reports the
+    /// same way twice.
+    under: BTreeMap<(Ident, String), Vec<(Ident, String)>>,
+}
+
+impl Minted {
+    fn of(program: &Program, log: &[Event]) -> Self {
+        let mut under: BTreeMap<(Ident, String), Vec<(Ident, String)>> = BTreeMap::new();
+        for event in log {
+            let Some(def) = program.event(&event.path) else {
+                continue;
+            };
+            for field in &def.fields {
+                // A **sealed** field is what mints a key. A subject-typed field that
+                // seals nothing mints none, which is the trigger the ancestry rule has
+                // where it is checked.
+                let Some(id_field) = &field.subject else {
+                    continue;
+                };
+                let Some(Type::Subject(sub)) = def.field(id_field).map(|def| &def.ty) else {
+                    continue;
+                };
+                let Some(id) = event.fields.get(id_field).and_then(id_text) else {
+                    continue;
+                };
+                let wrap = under.entry((sub.name.clone(), id)).or_default();
+                if !wrap.is_empty() {
+                    continue;
+                }
+                for ancestor in program.ancestors(&sub.name) {
+                    // **Exactly one** field of the ancestor's type, or the chain stops
+                    // here. Two would mean picking one, and nothing an author wrote says
+                    // which: `@subject(...)` disambiguates its own subject by naming a
+                    // sibling and an ancestor gets no such syntax, so choosing the first
+                    // declared would make which shop a customer's key hangs from depend
+                    // on field order. A runtime stops short for the same reason.
+                    let mut carriers = def.fields.iter().filter(|field| {
+                        field.subject.is_none()
+                            && matches!(&field.ty, Type::Subject(sub) if sub.name == ancestor.name)
+                    });
+                    let (Some(carried), None) = (carriers.next(), carriers.next()) else {
+                        break;
+                    };
+                    let Some(id) = event.fields.get(&carried.name).and_then(id_text) else {
+                        break;
+                    };
+                    wrap.push((ancestor.name.clone(), id));
+                }
+            }
+        }
+        Self { under }
+    }
+}
+
 fn run_test<W: World>(program: &Program, test: &Test, world: W) -> TestOutcome {
     match check(program, test, world) {
         Ok(None) => TestOutcome::Passed,
@@ -127,6 +218,14 @@ fn run_test<W: World>(program: &Program, test: &Test, world: W) -> TestOutcome {
 fn check<W: World>(program: &Program, test: &Test, mut world: W) -> Result<Option<String>, String> {
     let mut values = Values::new(program, test);
 
+    // Kept as well as given, so the world can be told what the log minted. Only for a
+    // program that has a subject with a parent, since that is the whole of what the
+    // table decides and most programs have none.
+    let wraps = program
+        .subjects
+        .iter()
+        .any(|subject| subject.parent.is_some());
+    let mut log: Vec<Event> = Vec::new();
     for given in &test.given {
         let def = program
             .event(&given.event)
@@ -138,12 +237,21 @@ fn check<W: World>(program: &Program, test: &Test, mut world: W) -> Result<Optio
             let ty = def.field(name).map(|field| field.ty.clone());
             fields.insert(name.clone(), values.at(*value, ty.as_ref())?);
         }
-        world
-            .given(Event {
-                path: given.event.clone(),
-                fields,
-            })
-            .map_err(|err: Error| err.to_string())?;
+        let event = Event {
+            path: given.event.clone(),
+            fields,
+        };
+        if wraps {
+            log.push(event.clone());
+        }
+        world.given(event).map_err(|err: Error| err.to_string())?;
+    }
+    if wraps {
+        for ((subject, id), under) in &Minted::of(program, &log).under {
+            world
+                .wrapping((subject, id), under)
+                .map_err(|err: Error| err.to_string())?;
+        }
     }
 
     for setup in &test.setup {
@@ -161,6 +269,9 @@ fn check<W: World>(program: &Program, test: &Test, mut world: W) -> Result<Optio
             }
             Setup::Erased { subject, id, .. } => {
                 let id = values.text(*id)?;
+                // One key, the one the test named. What a parent's key row going takes
+                // with it is the key store's answer rather than the runner's, which is
+                // what keeps an effect's own `erase` answering the same way this does.
                 world
                     .erased(subject, &id)
                     .map_err(|err: Error| err.to_string())?;

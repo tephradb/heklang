@@ -118,6 +118,25 @@ Replies are a queue per URL, taken in order, so scripting a 503 then a 200 is ho
 first attempt was absorbed". `erased` is the only way to write a shredded-key test, since a test
 cannot call `erase` itself.
 
+**`erased` is a property of the world rather than of the action taken in it.** One line makes a
+`deliver` skip where it reveals, and empties the sealed column a `project` writes, because both ask
+the key store the same question: `docs/projectors.md` rule 9 lets a projector move sealed content
+into a read model without ever revealing it, and an erase that stopped at the decrypt boundary would
+leave the personal data in the read model. A shredded column reads back as `none`, which is what
+`expect { email: none }` matches and what a column the handler never wrote reads back as too.
+
+**A parent's erasure takes its children with it.** A child's key is wrapped in its parent's, so
+`erased Shop "42"` also shreds every `Customer` the given log shows beneath shop 42 (`docs/effects.md`
+rule 12), and so does an effect's own `erase(shop_id)`: the cascade is the key store's answer rather
+than the setup line's, which is what keeps the two ways of destroying one key row agreeing.
+
+A world with a real key store recorded the wrapping when it appended and needs nothing else. The
+in-memory one mints nothing, so the runner tells it what the log minted (`World::wrapping`), reading
+it off the events where the ancestry rule already put it: every event that seals under a subject
+carries every ancestor's id. Where an event carries **two** fields of an ancestor's type, nothing an
+author wrote says which one minted the key, so the chain stops there rather than taking the first
+declared: which shop a buyer's key hangs from must not depend on field order.
+
 All four script the **harness**, which is the in-memory host `docs/host.md` describes. That is what
 keeps rule 8 honest from the other side too: a test writes a world with the same four levers an
 embedder has, and no more. Each one is a host trait met from the test side: a reply is `Http`, a

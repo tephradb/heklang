@@ -422,6 +422,38 @@ lets a host store it without opening it. The type check at the write is correspo
 heklang cannot type-check content it cannot read, and the propagation above is what checked it,
 statically, where the write was written.
 
+**An erase reaches the column.** Because a projector may move sealed content, a read model holds the
+only copy of it outside the log, and shredding a key has to empty the column too or the personal data
+is still there to read. A column whose subject key is gone reads back as the **absent optional**,
+which is the value rule 12 gives an erased subject and also what a column the handler never wrote
+holds. The two are deliberately indistinguishable: a reader that could tell them apart would be
+reading "this subject was erased" off a row that no longer holds anything else about them.
+
+Who empties it is the seam rather than a second rule. A `Value::Sealed` still reaches `Rows::put`, so
+a host keeping its own read models does it in its own `Rows`, where the ciphertext and the key store
+already are. heklang does the same for the read models it keeps itself, which is `Interpreter::project`
+and every `project` a test asserts on; `project_into` writes through to rows the caller owns and
+leaves them to it.
+
+**A column that is not optional cannot say it.** Writing sealed content whose key is gone into a
+required column raises rather than writing a row, and says to declare the column optional. It is the
+same answer `@absent` gets where it is written: sealed content has no plaintext literal, so the
+erased case for it is an optional and there is nothing else a column could hold. Writing the
+plaintext would be the erase not having happened, and writing a zero would read as data.
+
+**A seal does not survive being put in a box.** The propagation above takes the seal from the
+**whole** value written into the column, because a `Type` carries one seal. Content inside a list, a
+record or a comprehension has nowhere to carry it, so `many: [email]` is rejected exactly as writing
+`email` into any other unsealed position is:
+
+> this is content sealed under `Customer` and a String is not
+
+This used to be accepted, and it was the one way sealed content could leave the boundary silently:
+the column was left holding the plaintext with no seal declared on it, so a host stored it in the
+clear, `erase` could never reach it, and nothing static or dynamic said a word. A `fold` propagates
+the same way and loses it the same way, so it is refused there too. `reveal` first if the value
+genuinely belongs in a box, which is a decision worth having to write down.
+
 **Both checks over it are now implemented**, where the second used to be the literal empty function
 `fn check_subject(_target: &EntityField, _incoming: &Ident) {}`:
 
