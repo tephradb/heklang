@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://git.tqwewe.com/tephra/heklang/compare/heklang-v0.9.0...heklang-v0.10.0) - 2026-09-21
+
+### Fixed
+
+- an erase empties the sealed column too, and a seal cannot be put in a box
+- a value-ending declaration no longer swallows the soft one below it
+
+### Other
+
+- a composite seal is opened by reveal, never read part by part
+
 ## [0.9.0](https://git.tqwewe.com/tephra/heklang/compare/heklang-v0.8.0...heklang-v0.9.0) - 2026-09-18
 
 ### Added
