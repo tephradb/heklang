@@ -237,6 +237,11 @@ A `test` declaration runs nothing in production, so a change confined to one mus
 a deploy gate reads. But it is still a change, so both questions are answerable:
 `Digest::hash` is the program without its tests and `Digest::hash_with_tests` is everything.
 
+**What the section holds is the `test` declarations, and not everything a test reaches.** A `fn` a
+test calls is a module declaration, so declaring one moves `Digest::hash` even when only tests call
+it. That has been true since `fn` existed, `hek/tests.hk` has had such a helper from the start, and
+the alternative is a hash that depends on who calls what.
+
 **`--tests` says what the output holds, in every form it can be read in.** The packed and expanded
 forms gain the section, `--hash` prints the other hash, and the JSON gains a `tests` array and the
 `hash_with_tests` beside it. So every hash in a document is one taken over content that document
@@ -297,10 +302,10 @@ capitalised, which keeps them apart from the lowercase heads a value uses: `(Mon
 | declaration | `subject` `event` `enum` `record` `function` `command` `projector` `effect` `test` |
 | structure | `params` `p` `f` `col` `key` `index` `entity` `on` `events` `delivery` `bind` `env` `now` `stage` `pre` `post` `fold` `slice` `filter` `acc` `variants` `default` `absent` `max` `no_index` `returns` `body` `sig` `rejects` `id` `under` |
 | statement | `set` `if` `then` `else` `emit` `put` `patch` `update` `delete` `fail` `log` `erase` `for` `in` `index` `item` `do` `discard` `call` `return` `value` `outcome` |
-| type | `Bool` `Int` `String` `Uuid` `Timestamp` `Rounding` `Json` `Response` `Outcome` `Secret` `(Decimal n)` `(Money n)` `(Enum N)` `(Record N)` `(List t)` `(Map k v)` `(Opt t)` `(Subject N)` `(Sealed t Subject)` |
+| type | `Bool` `Int` `String` `Uuid` `Timestamp` `Rounding` `Json` `Response` `Outcome` `Secret` `(Event @path)` `(Decimal n)` `(Money n)` `(Enum N)` `(Record N)` `(List t)` `(Map k v)` `(Opt t)` `(Subject N)` `(Sealed t Subject)` |
 | value | `$n` `bool` `int` `dec` `money` `str` `uuid` `ts` `none` `some` `variant` `rounding` `array` `of` `map-empty` `obj` `json-num` `new` |
-| expression | `neg` `not` `+ - * / % == != < <= > >= && \|\|` `.method` `field` `choose` `interp` `fn` `builtin` `invoke` `unwrap` `wrap` `reveal` `secret` `reject` `invalid` `comp` `when` `yield` `bad` |
-| test | `given` `respond` `status` `timeout` `erased` `run` `project` `deliver` `expect` `event` `nothing` `row` `norow` `http` `failed` `skipped` |
+| expression | `neg` `not` `+ - * / % == != < <= > >= && \|\|` `.method` `field` `choose` `interp` `fn` `builtin` `invoke` `unwrap` `wrap` `reveal` `secret` `reject` `invalid` `make` `comp` `when` `yield` `bad` |
+| test | `given` `respond` `status` `timeout` `erased` `run` `project` `deliver` `expect` `event` `from` `nothing` `row` `norow` `http` `failed` `skipped` |
 
 The JSON view turns a list into `{"kind": head, ..}`. A child that is itself a list headed by one of
 the **structure** heads becomes a key of its own; everything else is a value and lands in `args`.
@@ -360,6 +365,11 @@ Writing a node only when it is there is also what lets a new one be added at all
 `@absent` renders exactly as it did before the annotation existed, so its hash does not move and a
 deployment does not read every event in every project as changed the first time a newer version loads
 it. That is why `VERSION` did not need to move for it.
+
+**A `given` made by a `fn` is the second instance, and it was written to be one.** The call rides in a
+`(from ..)` child that a `given` spelling its event out does not carry, so every test already written
+renders byte for byte as before and `hek-digest 4` stayed where it was. `(Event @path)` and `(make
+..)` are the same: a program with no fixture never reaches either.
 
 One child per line when a list has to break, rather than filling the width, because a filled line
 reflows when anything is inserted and a diff should point at what changed.

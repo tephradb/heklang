@@ -1304,3 +1304,85 @@ fn a_subject_compares_within_itself_and_against_a_literal() {
     );
     assert_eq!(message, "cannot apply `==` to Customer and Shop");
 }
+
+// ---------------------------------------------------------------------------------
+// An event is a record, not a value. `docs/functions.md` is the rule and
+// `docs/testing.md` rule 2 is what it is for.
+
+/// The declared positions close themselves, because an event is unspellable in all of
+/// them and `fills` is exact. These are the ones that take their type from the value,
+/// where without a check `[t(1)]` would infer a `List(@thing.touched)` that no
+/// declaration could ever have named.
+#[test]
+fn an_event_reaches_no_position_that_takes_its_type_from_the_value() {
+    let fixture = "fn t(id: Int) -> @thing.touched {\n  return @thing.touched { id: id }\n}\n";
+    let cases = [
+        ("let e = t(1)", "be bound to a name"),
+        ("let xs = [t(1)]", "be an element of a list"),
+        ("let xs = [t(i) for i in [1]]", "be an element of a list"),
+        ("let s = \"{t(1)}\"", "be interpolated into a string"),
+        ("let s = Json.encode(t(1))", "be encoded into a string"),
+    ];
+    for (statement, what) in cases {
+        let body = format!(
+            "{fixture}command C(id: Int) {{\n  {statement}\n  emit @thing.touched {{ id }}\n}}\n"
+        );
+        assert_eq!(
+            err(&body),
+            format!(
+                "@thing.touched is an event, so it cannot {what}; a `given` and an `expect` are the only things that take one"
+            ),
+            "{statement} was accepted",
+        );
+    }
+}
+
+/// A comparison is the one that could have gone the other way: two events compare
+/// purely and totally. It is refused with the rest, because the rule reads better with
+/// no exceptions than it would with one nothing has asked for.
+#[test]
+fn two_events_do_not_compare() {
+    let body = "fn t(id: Int) -> @thing.touched {\n  return @thing.touched { id: id }\n}\ncommand C(id: Int) {\n  if t(1) == t(2) {\n    invalid \"no\"\n  }\n  emit @thing.touched { id }\n}\n";
+    assert!(
+        err(body).contains("@thing.touched is an event, so it cannot be compared"),
+        "got: {}",
+        err(body)
+    );
+}
+
+/// The declared half, for one position, because the relation is the same at all of
+/// them: an event is exactly itself and fills nothing else.
+#[test]
+fn an_event_does_not_fill_a_declared_field() {
+    let body = "fn t(id: Int) -> @thing.touched {\n  return @thing.touched { id: id }\n}\ncommand C(id: Int) {\n  emit @thing.touched { id: t(1) }\n}\n";
+    assert_eq!(err(body), "expected Int, found @thing.touched");
+}
+
+/// It is not a product type either: an event holds fields and none of them is readable,
+/// for the reason an `Outcome` is not taken apart.
+#[test]
+fn an_event_has_no_readable_fields() {
+    let body = "fn t(id: Int) -> @thing.touched {\n  return @thing.touched { id: id }\n}\ncommand C(id: Int) {\n  emit @thing.touched { id: t(1).id }\n}\n";
+    assert!(err(body).contains("no field `id`"), "got: {}", err(body));
+}
+
+/// Every position that writes a type down goes through `type_ref`, which has no
+/// spelling for one. One case per kind of declaration, because the rule is only worth
+/// something if it holds at all of them.
+#[test]
+fn an_event_is_not_spellable_where_a_type_is_declared() {
+    let cases = [
+        "event @other.thing { e: @thing.touched }",
+        "record Held { e: @thing.touched }",
+        "const E: @thing.touched = 1",
+        "command C(e: @thing.touched) {\n  emit @thing.touched { id: 1 }\n}",
+        "projector P {\n  entity R { id: Int @key, e: @thing.touched }\n  on @thing.touched { id } {\n    put R { id, e: 1 }\n  }\n}",
+    ];
+    for case in cases {
+        assert!(
+            err(case).contains("expected a name, found `@thing.touched`"),
+            "{case} was accepted, got: {}",
+            err(case),
+        );
+    }
+}

@@ -269,6 +269,12 @@ enum Kind {
     Guard,
 }
 
+/// What a `given` or an event `expect` names: which event, the call that made it when a
+/// `fn` did, and the fields written at the site. Those are every field when the event is
+/// spelled out and the overrides when a fixture made it, which is exactly the split
+/// [`Given::fields`](crate::ir::Given::fields) carries into the IR.
+type EventHead = (EventPath, Option<ExprId>, Vec<(Ident, ExprId)>);
+
 #[derive(Debug, Clone)]
 struct Signature {
     name: Ident,
@@ -1420,6 +1426,21 @@ impl Parser {
     /// `docs/functions.md`. It sits above `type_ref` rather than inside it, so
     /// `List(Response)` stays rejected along with every other position.
     fn fn_type(&mut self, kind: Kind) -> Result<Type, Diagnostic> {
+        // Reachable only from `param_list`: both return positions try `fn_event_result`
+        // first, so a path that arrives here is one written where a value goes.
+        if matches!(self.peek(), Token::Path(_)) {
+            let at = self.span_here();
+            let path = self.expect_path()?;
+            return Err(self
+                .err(
+                    Code::WrongContext,
+                    format!("an event is a record, not a value: {path} is a `fn`'s return type and nothing else"),
+                    at,
+                )
+                .with_hint(
+                    "a `given` and an `expect` are the only things that take one; pass this helper the fields it needs instead",
+                ));
+        }
         let Token::Ident(name) = self.peek() else {
             return self.type_ref();
         };
@@ -1456,6 +1477,58 @@ impl Parser {
         Ok(ty)
     }
 
+    /// `-> @order.placed`. The one position an event is spellable, and the reason it is
+    /// here rather than in an arm of `fn_type`: that function cannot tell a parameter
+    /// from a result, and a parameter may not be one. `Ok(None)` means this is not a
+    /// path and the ordinary type parser has it.
+    ///
+    /// `events` is `None` in pass C, where the table is still being filled by the same
+    /// sweep that reads this: a check there would answer differently depending on which
+    /// file came first. Pass D has the whole table and is where "this event is declared"
+    /// is asked, which is also where the error belongs, since a `fn` with an early
+    /// `return` could dodge a check made at the literal.
+    fn fn_event_result(
+        &mut self,
+        kind: Kind,
+        events: Option<&[EventDef]>,
+    ) -> Result<Option<Type>, Diagnostic> {
+        if !matches!(self.peek(), Token::Path(_)) {
+            return Ok(None);
+        }
+        let at = self.span_here();
+        let path = self.expect_path()?;
+        // Only a test takes an event, and a test cannot call an effect-local `fn`, so
+        // one returning an event would have a result nothing could ever use.
+        if kind != Kind::Function {
+            return Err(self
+                .err(
+                    Code::WrongContext,
+                    "only a module `fn` can return an event".to_string(),
+                    at,
+                )
+                .with_hint(
+                    "a `given` and an `expect` are what take one, and neither can reach a helper declared inside an effect",
+                ));
+        }
+        if let Some(events) = events
+            && !events.iter().any(|def| def.path == path)
+        {
+            return Err(self.err(
+                Code::NotDeclared,
+                format!("event {path} is not declared"),
+                at,
+            ));
+        }
+        if self.at_sym(Sym::Question) {
+            let mark = self.span_here();
+            self.bump();
+            return Err(self
+                .err(Code::BadType, "an event is not optional", mark)
+                .with_hint("a fixture makes one every time it is called"));
+        }
+        Ok(Some(Type::Event(path)))
+    }
+
     fn fn_signature(&mut self) -> Result<(), Diagnostic> {
         self.expect_word(Keyword::Fn)?;
         let named = self.pos;
@@ -1472,7 +1545,10 @@ impl Parser {
         self.declare("fn", &name, named);
         let params = self.param_list(Some(Kind::Function))?;
         self.expect_sym(Sym::To)?;
-        let ret = self.fn_type(Kind::Function)?;
+        let ret = match self.fn_event_result(Kind::Function, None)? {
+            Some(ty) => ty,
+            None => self.fn_type(Kind::Function)?,
+        };
         self.functions.push(Signature {
             name,
             params,
@@ -1520,7 +1596,7 @@ impl Parser {
         for (param, ty) in self.param_list(Some(kind))? {
             lower.b.param(&param, ty);
         }
-        let ret = self.fn_result(kind)?;
+        let ret = self.fn_result(kind, Some(events))?;
         self.expect_sym(Sym::LBrace)?;
 
         self.kind = kind;
@@ -1548,11 +1624,18 @@ impl Parser {
     /// The `-> Type` after a parameter list. Optional for an effect-local `fn` and
     /// required everywhere else: a pure function that returns nothing does nothing, so
     /// the omission is worth rejecting where the body cannot have an effect.
-    fn fn_result(&mut self, kind: Kind) -> Result<Option<Type>, Diagnostic> {
+    fn fn_result(
+        &mut self,
+        kind: Kind,
+        events: Option<&[EventDef]>,
+    ) -> Result<Option<Type>, Diagnostic> {
         if kind == Kind::EffectFn && !self.at_sym(Sym::To) {
             return Ok(None);
         }
         self.expect_sym(Sym::To)?;
+        if let Some(ty) = self.fn_event_result(kind, events)? {
+            return Ok(Some(ty));
+        }
         Ok(Some(self.fn_type(kind)?))
     }
 
@@ -4329,9 +4412,132 @@ impl Parser {
     fn given_decl(&mut self, lower: &mut Lower, program: &Program) -> Result<Given, Diagnostic> {
         let span = self.span_here();
         self.bump();
+        let (event, from, fields) = self.event_head(lower, program, "given")?;
+        Ok(Given {
+            event,
+            from,
+            fields,
+            span,
+        })
+    }
+
+    /// The head of a `given` or of a `run`'s event expectation: an event written out,
+    /// or a call to a `fn` that makes one with the fields this case is about after it.
+    ///
+    /// Two shapes rather than an arbitrary expression, because only these two can be an
+    /// event and the error for anything else should say so. The completeness rule
+    /// survives either way: a fixture gives every field, and the override replaces the
+    /// ones it names.
+    fn event_head(
+        &mut self,
+        lower: &mut Lower,
+        program: &Program,
+        what: &str,
+    ) -> Result<EventHead, Diagnostic> {
+        let at = self.span_here();
+        if matches!(self.peek(), Token::Path(_)) {
+            let path = self.expect_path()?;
+            let Some(def) = program.event(&path) else {
+                return Err(self.err(
+                    Code::NotDeclared,
+                    format!("event {path} is not declared"),
+                    at,
+                ));
+            };
+            self.expect_sym(Sym::LBrace)?;
+            let fields = self.event_fields(lower, def, what)?;
+            return Ok((path, None, fields));
+        }
+
+        let Token::Ident(name) = self.peek().clone() else {
+            return self.fail(
+                Code::TestShape,
+                format!(
+                    "`{what}` takes an event: `@path {{ .. }}`, or a `fn` that makes one, found {}",
+                    self.peek()
+                ),
+            );
+        };
+        // `self.functions` is the half of the parser `abandon` leaves standing, so a
+        // test in pass E sees every module `fn`; `local_fns` is cleared with its effect,
+        // which is what keeps an effect-local helper out of reach here.
+        let Some(sig) = self.fn_sig(&name).cloned() else {
+            return Err(self.err(
+                Code::NotDeclared,
+                format!("`{name}` is not a declared `fn`"),
+                at,
+            ));
+        };
+        let Some(Type::Event(path)) = sig.ret.clone() else {
+            let ret = sig
+                .ret
+                .map_or("nothing".to_string(), |ty| a(&ty).to_string());
+            return Err(self
+                .err(
+                    Code::TestShape,
+                    format!("`{name}` returns {ret}, and `{what}` takes an event"),
+                    at,
+                )
+                .with_hint("a fixture declares `-> @some.event` and returns one"));
+        };
+        self.bump();
+        let from = self.call_fn(lower, name, at)?;
+        let def = program
+            .event(&path)
+            .expect("a declared return type named a declared event");
+        let fields = if self.at_sym(Sym::LBrace) {
+            let mark = self.span_here();
+            self.bump();
+            self.event_overrides(lower, def, mark)?
+        } else {
+            Vec::new()
+        };
+        Ok((path, Some(from), fields))
+    }
+
+    /// The `{ field: value }` block shared by `given`, `expect @path` and the literal a
+    /// fixture returns. Every field is required, because an event with a hole is not
+    /// one the log could hold.
+    fn event_fields(
+        &mut self,
+        lower: &mut Lower,
+        def: &EventDef,
+        what: &str,
+    ) -> Result<Vec<(Ident, ExprId)>, Diagnostic> {
+        let fields = self.event_field_list(lower, def)?;
+        for declared in &def.fields {
+            if !fields.iter().any(|(name, _)| name == &declared.name) {
+                return self.fail_hint(
+                    Code::MissingField,
+                    format!("`{what} {}` needs `{}`", def.path, declared.name),
+                    "an event is written whole",
+                );
+            }
+        }
+        Ok(fields)
+    }
+
+    /// `@order.placed { .. }` after a `return`, the one way to make an event. The path
+    /// has to be the one the `fn` declared: a signature says which event a fixture
+    /// makes, and a body that answered a different one would make the declaration a
+    /// suggestion.
+    fn event_literal(
+        &mut self,
+        lower: &mut Lower,
+        events: &[EventDef],
+        want: &EventPath,
+        span: Span,
+    ) -> Result<ExprId, Diagnostic> {
         let at = self.span_here();
         let path = self.expect_path()?;
-        let Some(def) = program.event(&path) else {
+        if &path != want {
+            return Err(self.err(
+                Code::TypeMismatch,
+                format!("expected {want}, found {path}"),
+                at,
+            ));
+        }
+        let Some(def) = events.iter().find(|def| def.path == path) else {
             return Err(self.err(
                 Code::NotDeclared,
                 format!("event {path} is not declared"),
@@ -4339,21 +4545,35 @@ impl Parser {
             ));
         };
         self.expect_sym(Sym::LBrace)?;
-        let fields = self.event_fields(lower, def, "given")?;
-        Ok(Given {
-            event: path,
-            fields,
-            span,
-        })
+        let fields = self.event_fields(lower, def, "return")?;
+        lower.b.at(span);
+        Ok(lower.b.expr(Expr::Event { path, fields }))
     }
 
-    /// The `{ field: value }` block shared by `given` and `expect @path`. Every field
-    /// is required, because an event with a hole is not one the log could hold.
-    fn event_fields(
+    /// The fields this case is about, written over the ones a fixture already gave.
+    /// A subset, and never an empty one: a fixture with nothing changed is the fixture.
+    fn event_overrides(
         &mut self,
         lower: &mut Lower,
         def: &EventDef,
-        what: &str,
+        at: Span,
+    ) -> Result<Vec<(Ident, ExprId)>, Diagnostic> {
+        let fields = self.event_field_list(lower, def)?;
+        if fields.is_empty() {
+            return Err(self
+                .err(Code::TestShape, "an override names at least one field", at)
+                .with_hint("`{}` changes nothing, so write the call on its own"));
+        }
+        Ok(fields)
+    }
+
+    /// One `{ field: value }` block against an event's declaration, with no opinion on
+    /// whether the set has to be complete. That is the caller's question, because a
+    /// `given` writes the whole event and an override writes a part of one.
+    fn event_field_list(
+        &mut self,
+        lower: &mut Lower,
+        def: &EventDef,
     ) -> Result<Vec<(Ident, ExprId)>, Diagnostic> {
         let mut fields: Vec<(Ident, ExprId)> = Vec::new();
         while !self.at_sym(Sym::RBrace) {
@@ -4380,15 +4600,6 @@ impl Parser {
             }
         }
         self.expect_sym(Sym::RBrace)?;
-        for declared in &def.fields {
-            if !fields.iter().any(|(name, _)| name == &declared.name) {
-                return self.fail_hint(
-                    Code::MissingField,
-                    format!("`{what} {}` needs `{}`", def.path, declared.name),
-                    "an event is written whole",
-                );
-            }
-        }
         Ok(fields)
     }
 
@@ -4724,19 +4935,17 @@ impl Parser {
                 span,
             });
         }
-        if matches!(self.peek(), Token::Path(_)) {
-            let at = self.span_here();
-            let path = self.expect_path()?;
-            let Some(def) = program.event(&path) else {
-                return Err(self.err(
-                    Code::NotDeclared,
-                    format!("event {path} is not declared"),
-                    at,
-                ));
-            };
-            self.expect_sym(Sym::LBrace)?;
-            let fields = self.event_fields(lower, def, "expect")?;
-            return Ok(Expect::Event { path, fields, span });
+        // A name as well as a path, because a fixture is a call. `invalid`, `reject`
+        // and `nothing` are words rather than idents and were taken above, so nothing
+        // else that belongs here starts with one.
+        if matches!(self.peek(), Token::Path(_) | Token::Ident(_)) {
+            let (path, from, fields) = self.event_head(lower, program, "expect")?;
+            return Ok(Expect::Event {
+                path,
+                from,
+                fields,
+                span,
+            });
         }
         self.fail(
             Code::TestShape,
@@ -5104,6 +5313,15 @@ impl Parser {
                             at,
                         ));
                     }
+                    // The one place an event literal is written, and dispatched on the
+                    // token rather than on `want`: a fixture built on another fixture
+                    // is `return t_order(..)`, which has to keep reaching `expr`.
+                    if let Type::Event(path) = &want
+                        && matches!(self.peek(), Token::Path(_))
+                    {
+                        let value = self.event_literal(lower, events, path, at)?;
+                        return Ok(Stmt::Return(Return::Value(value)));
+                    }
                     let value = self.expr(lower, Some(want))?;
                     return Ok(Stmt::Return(Return::Value(value)));
                 }
@@ -5389,6 +5607,10 @@ impl Parser {
                 self.expect_sym(Sym::Assign)?;
                 let value = self.expr(lower, None)?;
                 let ty = self.type_of(lower, value);
+                // A `let` declares no type, so this is the last position an event could
+                // reach. Binding one would hold a value nothing can do anything with:
+                // it cannot be emitted, stored, compared or read from.
+                self.no_event(lower, value, "be bound to a name", mark);
                 let slot = lower.b.alloc(&name, ty);
                 let site = self.at_token(format!("`{name}` is bound here"), at);
                 self.bound.insert(slot, site);
@@ -5572,6 +5794,10 @@ impl Parser {
         // is nothing to compare it against that a program is allowed to be holding.
         self.no_secret(lower, lhs, "be compared", lhs_at);
         self.no_secret(lower, rhs, "be compared", rhs_at);
+        // An event is not a value, and a comparison is the one position that would
+        // otherwise take one: it declares no type, so nothing else would notice.
+        self.no_event(lower, lhs, "be compared", lhs_at);
+        self.no_event(lower, rhs, "be compared", rhs_at);
         self.settle(lower, lhs, rhs);
         // The comparison, not the operator: what is wrong is the pair, and an editor
         // underlining `>` alone says nothing about which two things did not meet.
@@ -6462,6 +6688,7 @@ impl Parser {
             }),
             Expr::Invoke { .. } => Some(Type::Outcome),
             Expr::Record { ty, .. } => Some(Type::Record(ty.clone())),
+            Expr::Event { path, .. } => Some(Type::Event(path.clone())),
             Expr::CallFn { function, .. } => self.fn_sig(function)?.ret.clone(),
             // Rule 12: an optional in, an optional out, so a `reveal` of a field that may
             // not be there still reads as one.
@@ -6876,7 +7103,7 @@ impl Parser {
         }
         self.declare(&scope, &name, named);
         let params = self.param_list(Some(Kind::EffectFn))?;
-        let ret = self.fn_result(Kind::EffectFn)?;
+        let ret = self.fn_result(Kind::EffectFn, None)?;
         self.local_fns.push(Signature { name, params, ret });
         self.skip_braced()
     }
@@ -7398,6 +7625,30 @@ impl Parser {
         )
     }
 
+    /// An event where nothing declares a type. Every *declared* position is already
+    /// closed, because an event is unspellable in all of them and `types::fills` is
+    /// exact. What is left is the positions that take their type from the value: a
+    /// list element, a comprehension's yield, a comparison operand, an interpolation
+    /// hole, a JSON member, a `Json.encode` argument. Without this, `[t_order(1)]`
+    /// infers a `List(@order.placed)` that no declaration could ever have named.
+    ///
+    /// A comparison is the one that could have gone the other way: two events compare
+    /// purely and totally. It is refused with the rest, because "an event is a record,
+    /// not a value" is worth more than a shape no test has wanted.
+    fn no_event(&self, lower: &Lower, value: ExprId, what: &str, at: Span) {
+        let Some(Type::Event(path)) = self.type_of(lower, value) else {
+            return;
+        };
+        self.note(
+            self.err(
+                Code::NotAValue,
+                format!("{path} is an event, so it cannot {what}"),
+                at,
+            )
+            .with_hint("a `given` and an `expect` are the only things that take one"),
+        );
+    }
+
     /// The same rule where nothing declares a type: a comparison, an interpolation hole
     /// that is not on its way out, a list element. Reading a credential into any of
     /// them is observing it.
@@ -7780,6 +8031,7 @@ impl Parser {
             let at = self.span_here();
             let hole = self.expr(lower, None)?;
             self.no_seal(lower, hole, "be interpolated into a string", at);
+            self.no_event(lower, hole, "be interpolated into a string", at);
             // Rule 16: an *optional* credential has no rendering when it is absent, and
             // the table would give the literal text `null` -- silently, into whatever
             // the interpolation becomes. A url built that way is a request to the wrong
@@ -7891,6 +8143,7 @@ impl Parser {
             // that nothing records as sealed, which is what makes it unreachable by
             // `erase`.
             self.no_seal(lower, item, "be an element of a list", at);
+            self.no_event(lower, item, "be an element of a list", at);
             // An array in a body is JSON too, so its numbers follow the same rule its
             // sibling members do. Outside one `in_body` is false and a list of
             // `Decimal(2)` stays a list of `Decimal(2)`.
@@ -7956,6 +8209,7 @@ impl Parser {
         // Rule 12, the same as a list literal's element: the list this builds is the
         // same list, and a seal has nowhere to live in one.
         self.no_seal(lower, yields, "be an element of a list", yielded);
+        self.no_event(lower, yields, "be an element of a list", yielded);
         if self.pos != at {
             return self.fail(
                 Code::ExpectedToken,
@@ -8154,6 +8408,7 @@ impl Parser {
                 // It takes no target type when the argument is not an object, so the
                 // funnel in `expr` never sees this position.
                 self.no_secret(lower, value, "be encoded into a string", at);
+                self.no_event(lower, value, "be encoded into a string", at);
                 self.in_body = body;
                 self.in_request = request;
                 self.no_record_literal = outer;
@@ -8373,6 +8628,7 @@ impl Parser {
             self.in_request = outer_request;
             self.as_json_number(lower, value);
             self.no_seal(lower, value, "be sent in a request body", at);
+            self.no_event(lower, value, "be a member of an object", at);
             // Rule 16: the one untyped position a credential may occupy, and only when
             // this document is actually going out. A `Json.encode` or a `Json`
             // parameter is an ordinary object and would launder the taint into a
@@ -9564,7 +9820,9 @@ pub(crate) fn children(expr: &Expr) -> Vec<ExprId> {
         Expr::Object(fields) => fields.iter().map(|(_, id)| *id).collect(),
         Expr::Interp(parts) => parts.clone(),
         Expr::List { items, .. } => items.clone(),
-        Expr::Record { fields, .. } => fields.iter().map(|(_, id)| *id).collect(),
+        Expr::Record { fields, .. } | Expr::Event { fields, .. } => {
+            fields.iter().map(|(_, id)| *id).collect()
+        }
         Expr::CallFn { args, .. } => args.clone(),
         Expr::Comp {
             iter, cond, yields, ..

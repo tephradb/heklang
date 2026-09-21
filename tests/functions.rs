@@ -569,3 +569,145 @@ command RecordSale(id: Int, at: Timestamp, months: Int) {
         "and a leap February gets its twenty-ninth"
     );
 }
+
+// ---------------------------------------------------------------------------------
+// An event is a record, not a value: it is spellable as a module `fn`'s return type and
+// nowhere else, which is what lets a test name a whole event once.
+
+/// The shape this exists for. The fixture is an ordinary `fn`, so it takes parameters,
+/// is checked at its call site, and is written once for twenty cases.
+#[test]
+fn a_module_fn_may_return_an_event() {
+    let decls = "
+fn t_plan(plan_id: Uuid) -> @plan.created {
+  return @plan.created { plan_id: plan_id, sku: \"S\", months: 24 }
+}
+";
+    parse(&source(decls, EMIT)).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+}
+
+/// Delegation: a fixture standing on a fixture. This is why the `return` dispatch keys
+/// on the token at the cursor rather than on the declared return type.
+#[test]
+fn a_fixture_may_return_what_another_fixture_made() {
+    let decls = "
+fn t_plan(plan_id: Uuid) -> @plan.created {
+  return @plan.created { plan_id: plan_id, sku: \"S\", months: 24 }
+}
+
+fn t_gift(plan_id: Uuid) -> @plan.created {
+  return t_plan(plan_id)
+}
+";
+    parse(&source(decls, EMIT)).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+}
+
+/// The return position and nowhere else, checked one position at a time, because the
+/// allowance sits above the general type parser rather than inside its recursion.
+#[test]
+fn an_event_is_a_return_type_and_not_a_parameter() {
+    assert_eq!(
+        err("\nfn f(e: @plan.created) -> Int {\n  return 1\n}\n", EMIT),
+        "an event is a record, not a value: @plan.created is a `fn`'s return type and nothing else; a `given` and an `expect` are the only things that take one; pass this helper the fields it needs instead"
+    );
+}
+
+#[test]
+fn an_event_is_not_spellable_under_a_constructor() {
+    for spelling in ["List(@plan.created)", "Map(String, @plan.created)"] {
+        let decls = format!("\nfn f() -> {spelling} {{\n  return []\n}}\n");
+        assert!(
+            err(&decls, EMIT).contains("expected a name, found `@plan.created`"),
+            "{spelling} was accepted",
+        );
+    }
+}
+
+/// An event either was written or was not, so there is no absent one to stand for.
+#[test]
+fn an_event_is_not_optional() {
+    assert_eq!(
+        err("\nfn f() -> @plan.created? {\n  return none\n}\n", EMIT),
+        "an event is not optional; a fixture makes one every time it is called"
+    );
+}
+
+/// The check is in pass D, where the whole event table is in hand. In pass C the table
+/// is still being filled by the same sweep, so the answer would depend on which
+/// declaration came first: this one is written *above* the event it names.
+#[test]
+fn an_undeclared_event_is_reported_wherever_the_declaration_sits() {
+    assert_eq!(
+        err(
+            "\nfn f() -> @nope.thing {\n  return @nope.thing { }\n}\n",
+            EMIT
+        ),
+        "event @nope.thing is not declared"
+    );
+    let source = "fn f() -> @late.declared {\n  return @late.declared { id: 1 }\n}\nevent @late.declared { id: Int }\n";
+    parse(source).unwrap_or_else(|err| panic!("a later declaration is still a declaration: {err}"));
+}
+
+/// Only a test consumes an event, and a test cannot call an effect-local `fn`, so one
+/// returning an event would have a result nothing could ever use.
+#[test]
+fn only_a_module_fn_may_return_an_event() {
+    let decls = "
+effect Sync {
+  fn make(plan_id: Uuid) -> @plan.created {
+    return @plan.created { plan_id: plan_id, sku: \"S\", months: 24 }
+  }
+
+  on @plan.created as e { @key plan_id } {
+    log(\"x\")
+  }
+}
+";
+    assert_eq!(
+        err(decls, EMIT),
+        "only a module `fn` can return an event; a `given` and an `expect` are what take one, and neither can reach a helper declared inside an effect"
+    );
+}
+
+/// A signature says which event a fixture makes, so a body answering a different one
+/// would make the declaration a suggestion.
+#[test]
+fn a_fixture_returns_the_event_it_declared() {
+    assert_eq!(
+        err(
+            "\nfn f(p: Uuid) -> @plan.created {\n  return @plan.sold { plan_id: p }\n}\nevent @plan.sold { plan_id: Uuid }\n",
+            EMIT
+        ),
+        "expected @plan.created, found @plan.sold"
+    );
+    assert_eq!(
+        err("\nfn f() -> @plan.created {\n  return 5\n}\n", EMIT),
+        "expected @plan.created, found Int"
+    );
+}
+
+/// An event is written whole here for the reason a `given` writes one whole: an event
+/// with a hole is not one the log could hold.
+#[test]
+fn a_fixture_writes_every_field() {
+    assert_eq!(
+        err(
+            "\nfn f(p: Uuid) -> @plan.created {\n  return @plan.created { plan_id: p, sku: \"S\" }\n}\n",
+            EMIT
+        ),
+        "`return @plan.created` needs `months`; an event is written whole"
+    );
+}
+
+/// The same falls-through check every other return type gets, and the reason the
+/// article helper reads an event path out as itself.
+#[test]
+fn a_fixture_returns_on_every_path() {
+    assert_eq!(
+        err(
+            "\nfn f(p: Uuid, n: Int) -> @plan.created {\n  if n > 0 {\n    return @plan.created { plan_id: p, sku: \"S\", months: n }\n  }\n}\n",
+            EMIT
+        ),
+        "`f` can finish without returning @plan.created; every path out of a `fn` returns one"
+    );
+}

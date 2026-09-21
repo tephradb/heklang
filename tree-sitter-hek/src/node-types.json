@@ -1527,6 +1527,32 @@
     }
   },
   {
+    "type": "event_literal",
+    "named": true,
+    "fields": {
+      "path": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "event_path",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "field_initializer_list",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "event_path",
     "named": true,
     "fields": {}
@@ -1549,6 +1575,10 @@
         },
         {
           "type": "fail_statement",
+          "named": true
+        },
+        {
+          "type": "fixture_expectation",
           "named": true
         },
         {
@@ -1935,6 +1965,32 @@
     }
   },
   {
+    "type": "fixture_expectation",
+    "named": true,
+    "fields": {
+      "fixture": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "call_expression",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "field_initializer_list",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "fold_arm",
     "named": true,
     "fields": {
@@ -2233,6 +2289,10 @@
         "required": false,
         "types": [
           {
+            "type": "event_path",
+            "named": true
+          },
+          {
             "type": "type",
             "named": true
           }
@@ -2244,9 +2304,19 @@
     "type": "given_clause",
     "named": true,
     "fields": {
+      "fixture": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "call_expression",
+            "named": true
+          }
+        ]
+      },
       "path": {
         "multiple": false,
-        "required": true,
+        "required": false,
         "types": [
           {
             "type": "event_path",
@@ -2257,7 +2327,7 @@
     },
     "children": {
       "multiple": false,
-      "required": true,
+      "required": false,
       "types": [
         {
           "type": "field_initializer_list",
@@ -4192,6 +4262,10 @@
         },
         {
           "type": "decimal_literal",
+          "named": true
+        },
+        {
+          "type": "event_literal",
           "named": true
         },
         {

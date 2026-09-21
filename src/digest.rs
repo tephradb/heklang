@@ -788,6 +788,12 @@ fn test(def: &Test) -> Sexp {
     // `expect` list is matched against events in the order they were appended.
     for given in &def.given {
         let mut part = vec![atom(given.event.to_string())];
+        // Written only when there is one, so a `given` that spells its event out
+        // renders exactly as it did before fixtures existed and its hash does not
+        // move. `docs/digest.md` section 11 is the rule; `@absent` is the precedent.
+        if let Some(from) = given.from {
+            part.push(node("from", [frame.expr(from)]));
+        }
         part.extend(frame.keyed(&given.fields));
         parts.push(node("given", part));
     }
@@ -1061,8 +1067,13 @@ impl<'a> Frame<'a> {
 
     fn expect(&mut self, expect: &Expect) -> Sexp {
         match expect {
-            Expect::Event { path, fields, .. } => {
+            Expect::Event {
+                path, from, fields, ..
+            } => {
                 let mut parts = vec![atom(path.to_string())];
+                if let Some(from) = from {
+                    parts.push(node("from", [self.expr(*from)]));
+                }
                 parts.extend(self.keyed(fields));
                 node("event", parts)
             }
@@ -1204,6 +1215,14 @@ impl<'a> Frame<'a> {
                 let mut parts = vec![atom(name.clone())];
                 parts.extend(self.keyed(fields));
                 node("new", parts)
+            }
+            // `make` rather than `event`, so the expression that builds one and the
+            // `(event ..)` an expectation writes stay apart in a reading, the way
+            // `(new ..)` keeps a record literal apart from its declaration.
+            Expr::Event { path, fields } => {
+                let mut parts = vec![atom(path.to_string())];
+                parts.extend(self.keyed(fields));
+                node("make", parts)
             }
             Expr::CallFn {
                 function,
@@ -1387,6 +1406,7 @@ fn ty(value: &Type) -> Sexp {
         Type::Money(scale) => node("Money", [atom(scale.to_string())]),
         Type::Enum(name) => node("Enum", [atom(name.clone())]),
         Type::Record(name) => node("Record", [atom(name.clone())]),
+        Type::Event(path) => node("Event", [atom(path.to_string())]),
         // The name and not the id type, for the reason `Enum` and `Record` print no
         // definition either: it lives in that declaration's own entry, and a consumer
         // running a compatibility check compares every signature hash rather than one.

@@ -123,6 +123,8 @@ The set is closed: every diagnostic heklang can produce is one of these.
 | Code | Means | Fix |
 | --- | --- | --- |
 | `test-shape` | a test body out of order, or an expectation its action cannot produce | order is `given`, then `respond`/`erased`, then exactly one action, then `expect`; `run` expects events and outcomes, `project` expects rows, `deliver` expects a trace |
+| `test-shape` | a `given` or `expect` naming a `fn` that does not return an event, or an empty `{}` after one | declare the helper `-> @some.event`; an override names at least one field, so write the call alone to change nothing |
+| `not-a-value` | an event used as a value: bound with `let`, compared, interpolated, put in a list or a body | an event is only ever handed to a `given` or an `expect`; pass the helper the fields it needs instead |
 
 ## Reading a run
 

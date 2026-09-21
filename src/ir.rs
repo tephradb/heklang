@@ -82,6 +82,16 @@ pub enum Type {
     Money(u8),
     Enum(Ident),
     Record(Ident),
+    /// One declared event, as the thing a `fn` hands back. Spellable in a module `fn`'s
+    /// return type and nowhere else, the way [`Type::Response`] and [`Type::Outcome`]
+    /// are, for a rule with the same shape: an event is a record, not a value. Making
+    /// one is pure, so a helper may return one; storing one is not, so nothing else may
+    /// name it. A `given` and an `expect` are the only things that take one.
+    ///
+    /// The path rather than a name, because an event has no other identity: it is what
+    /// `program.event(..)` is keyed on and what a log line carries. See
+    /// `docs/testing.md` rule 2.
+    Event(EventPath),
     /// A declared subject's ids: `subject Customer(Int)` makes `Customer` a type whose
     /// values are customer ids. Nominal to the checker and structural to the runtime,
     /// which is `docs/effects.md` rule 12's "nominal inside, positional at the edge"
@@ -251,6 +261,9 @@ impl fmt::Display for Type {
             Type::Timestamp => f.write_str("Timestamp"),
             Type::Money(scale) => write!(f, "Money({scale})"),
             Type::Enum(name) | Type::Record(name) => f.write_str(name),
+            // The path as it is written, `@` and all, so a diagnostic names the thing
+            // an author would have to type to get one.
+            Type::Event(path) => write!(f, "{path}"),
             // The name alone, which is the whole of how one is spelled at a use site.
             // `(Int)` belongs to the declaration.
             Type::Subject(sub) => f.write_str(&sub.name),
@@ -1093,6 +1106,14 @@ pub enum Expr {
         ty: Ident,
         fields: Vec<(Ident, ExprId)>,
     },
+    /// `@order.placed { .. }`, the one way to make a [`Type::Event`]. Written after
+    /// `return` in a `fn` that declares that event and nowhere else, so an event never
+    /// reaches a position that would store it. Every field is here, the same rule an
+    /// `emit` and a `given` follow.
+    Event {
+        path: EventPath,
+        fields: Vec<(Ident, ExprId)>,
+    },
     CallFn {
         function: Ident,
         /// The effect that declares it, when it is effect-local; `None` at module scope.
@@ -1568,10 +1589,16 @@ pub struct Test {
     pub span: Span,
 }
 
-/// Rule 2: one appended event, with every field written out.
+/// Rule 2: one appended event, with every field written out, or made by a `fn` and
+/// then written over.
 #[derive(Debug, Clone)]
 pub struct Given {
     pub event: EventPath,
+    /// The whole event, when a `fn` made it. `None` when it was written out here.
+    pub from: Option<ExprId>,
+    /// Every field when `from` is absent, and the fields this case is about when it is
+    /// present. A fixture gives them all, so the rule that an event is written whole is
+    /// met either way.
     pub fields: Vec<(Ident, ExprId)>,
     pub span: Span,
 }
@@ -1634,6 +1661,8 @@ pub enum Action {
 pub enum Expect {
     Event {
         path: EventPath,
+        /// The whole event, when a `fn` made it, read exactly as [`Given::from`] is.
+        from: Option<ExprId>,
         fields: Vec<(Ident, ExprId)>,
         span: Span,
     },

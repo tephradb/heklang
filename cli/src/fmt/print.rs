@@ -95,7 +95,7 @@ impl<'a> Printer<'a> {
             "erased_clause" => self.keyed("erased", node),
             "respond_clause" => self.respond(node),
             "expect_clause" => self.expect(node),
-            "event_expectation" => self.spaced(node),
+            "event_expectation" | "fixture_expectation" => self.spaced(node),
             "row_expectation" => self.row(node),
 
             // -------------------------------------------------------- statements
@@ -114,6 +114,8 @@ impl<'a> Printer<'a> {
             "refusal_expression" => self.keyed_value("reject", node),
             "fail_statement" => self.keyed_value("fail", node),
             "emit_statement" => self.keyed("emit", node),
+            // The same shape an `emit` writes, one keyword shorter.
+            "event_literal" => self.spaced(node),
             "put_statement" => self.keyed("put", node),
             "patch_statement" => self.keyed_row(node, true),
             "delete_statement" => self.keyed_row(node, false),

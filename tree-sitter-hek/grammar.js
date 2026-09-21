@@ -141,7 +141,11 @@ module.exports = grammar({
         'fn',
         field('name', $.identifier),
         field('parameters', $.parameters),
-        optional(seq('->', field('return_type', $.type))),
+        // An event path is a result and never a parameter, which is a rule the parser
+        // keeps for the reason above: the grammar cannot see which position it is in.
+        optional(
+          seq('->', field('return_type', choice($.type, $.event_path))),
+        ),
         field('body', $.block),
       ),
 
@@ -289,8 +293,20 @@ module.exports = grammar({
         '}',
       ),
 
+    // Two shapes and only two: the event written out, or a call to a `fn` that makes
+    // one with the fields this case is about after it (docs/testing.md rule 2). `{` is
+    // not in a given's follow set, so the optional block is a one-token decision.
     given_clause: ($) =>
-      seq('given', field('path', $.event_path), $.field_initializer_list),
+      seq(
+        'given',
+        choice(
+          seq(field('path', $.event_path), $.field_initializer_list),
+          seq(
+            field('fixture', $.call_expression),
+            optional($.field_initializer_list),
+          ),
+        ),
+      ),
 
     respond_clause: ($) =>
       seq(
@@ -328,6 +344,7 @@ module.exports = grammar({
         'nothing',
         'skipped',
         $.event_expectation,
+        $.fixture_expectation,
         $.row_expectation,
         $.outcome_expression,
         $.refusal_expression,
@@ -339,6 +356,13 @@ module.exports = grammar({
 
     event_expectation: ($) =>
       seq(field('path', $.event_path), $.field_initializer_list),
+
+    // `expect t_order(9002) { status: Edited }`: the event a `fn` made, with the fields
+    // this case is about written over it. The block is required rather than optional,
+    // which is what keeps this apart from the bare `call_expression` already in the
+    // choice above: `expect t_order(9002)` is that, the way `expect log("x")` is.
+    fixture_expectation: ($) =>
+      seq(field('fixture', $.call_expression), $.field_initializer_list),
 
     row_expectation: ($) =>
       seq(
@@ -460,6 +484,10 @@ module.exports = grammar({
           optional(
             choice(
               $._expression,
+              // The one place an event literal is written, which is the parser's rule
+              // too: an event is not a value, so it is here rather than in `_primary`
+              // and there is no `let x = @order.placed { .. }` for either to accept.
+              $.event_literal,
               $.outcome_expression,
               $.refusal_expression,
               alias('fail', $.identifier),
@@ -505,6 +533,11 @@ module.exports = grammar({
 
     emit_statement: ($) =>
       seq('emit', field('path', $.event_path), $.field_initializer_list),
+
+    // `@order.placed { .. }` after a `return`: the same shape an `emit` writes, with
+    // the keyword being the whole of what tells them apart.
+    event_literal: ($) =>
+      seq(field('path', $.event_path), $.field_initializer_list),
 
     put_statement: ($) =>
       seq('put', field('entity', $.identifier), $.field_initializer_list),

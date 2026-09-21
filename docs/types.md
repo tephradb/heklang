@@ -52,6 +52,11 @@ Three more exist and **cannot be written in a type position**:
   `fn` signature and nowhere else. A module `fn` is callable from a command and a projector, so one
   taking a credential would have a parameter nothing could ever fill. Like the two below it, it is
   kept out of `List` and `Map` by living above the ordinary type parser rather than in it.
+- an event, written `@order.placed`, spellable in a **module** `fn`'s **return type** and nowhere
+  else (`docs/functions.md`), because an event is a record and not a value. It is the one of these
+  whose spelling is not a name, so a diagnostic reads it out as itself: "returning @order.placed"
+  rather than "returning a @order.placed". A `given` and an `expect` are the only things that take
+  one (`docs/testing.md` rule 2).
 - `Outcome`, the result of an `invoke`. It has no spelling outside a `fn` signature, and no
   literal at all: `reject` and `invalid` are statements rather than constructors
   (`docs/refusals.md`), so the only way to hold one is to have been handed it. It is
@@ -99,6 +104,7 @@ whole of it.
 | `Timestamp.parse(..)`, `Money.parse(..)` | `Timestamp?`, `Money(n)?` |
 | `invoke C { .. }` | `Outcome` |
 | `Record { .. }` | that record |
+| `@order.placed { .. }` | that event, and only after a `return` in a `fn` that declares it |
 | `f(..)` | the `fn`'s declared return |
 | `reveal(x)` | `x`'s, with the seal off |
 
@@ -177,6 +183,14 @@ of `&&`, `||` and `!` (which is where `if owner_email` stops being a program), a
 `==` and `!=`.
 
 Almost all of them are one call site in the parser, so adding a position cannot forget the rule.
+
+**An event is refused at the positions that declare nothing, one by one.** Every position above has a
+declaration, and an event fills none of them because it is unspellable in all of them and the
+relation is exact. What is left is the seven that take their type from the value: a `let`, a list
+element, a comprehension's yield, a comparison operand, an interpolation hole, a JSON member and a
+`Json.encode` argument. Without a check at each, `[t_order(1)]` infers a `List(@order.placed)` that no
+declaration could have named. That is the hole rule 16 closes for a credential, and it is closed here
+with the helper written beside that one.
 
 **The boolean operands are the exception, and were the one entry this list claimed without
 honouring.** They are not written through that call site: the ladder that parses `&&` and `||` sits

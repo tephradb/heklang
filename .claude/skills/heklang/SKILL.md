@@ -113,7 +113,9 @@ call one. An effect-local `fn` may call out, which is why a fold arm may not cal
 `Bool`, `Int`, `Decimal(n)`, `Money(n)`, `String`, `Uuid`, `Timestamp`, `Json`, an `enum` name, a
 `record` name, a `subject` name, `List(T)`, `Map(K, V)`, and `T?` for the only absence there is.
 
-`Response` and `Outcome` exist and are spellable **only** in a `fn` parameter or return type.
+`Response` and `Outcome` exist and are spellable **only** in a `fn` parameter or return type. An
+event path is spellable **only** as a module `fn`'s return type (`-> @order.placed`), which is how a
+test names a whole event once; an event is a record, not a value, so nothing else may hold one.
 `Rounding` is spellable nowhere: it reaches `.mul` and `.div` as the bare words `HalfUp`, `HalfEven`
 and `Down`. `Sealed(T, Subject)` is derived from `@subject(...)` and is never written. A `Map` key
 must be `Int`, `String`, `Uuid`, `Timestamp`, an enum or a subject. `Money(n)` and `Decimal(n)` cap

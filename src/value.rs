@@ -37,6 +37,10 @@ pub enum Value {
         ty: Ident,
         fields: BTreeMap<Ident, Value>,
     },
+    /// One event a `fn` made, on its way to a `given` or an `expect`. The same
+    /// [`Event`] a log holds, because it is the same thing: a fixture builds the value
+    /// the test would otherwise have written out. Rule 2 of `docs/testing.md`.
+    Event(Event),
     Rounding(Rounding),
     Json(Json),
     Response {
@@ -225,6 +229,7 @@ impl Value {
             Value::Money { scale, .. } => Type::Money(*scale),
             Value::Enum { ty, .. } => Type::Enum(ty.clone()),
             Value::Record { ty, .. } => Type::Record(ty.clone()),
+            Value::Event(event) => Type::Event(event.path.clone()),
             Value::Rounding(_) => Type::Rounding,
             Value::Json(_) => Type::Json,
             Value::Response { .. } => Type::Response,
@@ -344,6 +349,9 @@ impl fmt::Display for Value {
             Value::Timestamp(micros) => write!(f, "{micros}"),
             Value::Enum { variant, .. } => f.write_str(variant),
             Value::Record { .. } => write!(f, "{}", Json::from_value(self)),
+            // The path as well as the fields: an event's identity is which event it
+            // is, and this is read where a fixture produced the wrong one.
+            Value::Event(event) => write!(f, "{} {}", event.path, Json::from_value(self)),
             // No currency code: an amount carries a scale and nothing else, so a
             // program that needs one declares an ordinary field beside it.
             Value::Money { units, scale } => scaled::write(f, *units, *scale),
@@ -501,7 +509,9 @@ pub fn zero(ty: &Type, defs: Defs<'_>) -> Option<Value> {
         Type::Uuid | Type::Timestamp | Type::Rounding | Type::Subject(_) => return None,
         // Never reachable from a declaration: there is no syntax that writes one of
         // these as an entity field type.
-        Type::Json | Type::Response | Type::Outcome | Type::Secret => return None,
+        Type::Json | Type::Response | Type::Outcome | Type::Secret | Type::Event(_) => {
+            return None;
+        }
     })
 }
 
@@ -1111,7 +1121,10 @@ impl Json {
             Value::Str(value) | Value::Uuid(value) => Json::Str(value.to_string()),
             Value::Timestamp(micros) => Json::int(*micros),
             Value::Enum { variant, .. } => Json::Str(variant.clone()),
-            Value::Record { fields, .. } => Json::Obj(
+            // The fields and not the path, for the reason the table is total at all:
+            // rule 2 keeps an event out of every position that serialises, so this is
+            // reached by an error path, and what it wants to show is the payload.
+            Value::Record { fields, .. } | Value::Event(Event { fields, .. }) => Json::Obj(
                 fields
                     .iter()
                     .map(|(name, value)| (name.clone(), Json::from_value(value)))

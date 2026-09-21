@@ -46,13 +46,41 @@ order written. **Every field must be given**, the same rule `emit` follows, and 
 `given` takes no bare-name shorthand: write `field: value` for every one. The values are ordinary
 expressions: literals, `const`s, enum variants, `fn` calls, interpolation, containers.
 
-A `fn` is how a suite gets a helper for near-identical events:
+A `fn` is how a suite gets a helper for near-identical events, for a field value:
 
 ```hek
 fn plan_sku(n: Int) -> String {
   return "STRESS-{n}"
 }
 ```
+
+and for the whole event, which is what stops twenty cases repeating a 26-field block. A `fn` may
+return an event, and a `given` or an `expect` takes the call with the fields that case is about
+written after it:
+
+```hek
+fn t_order(order_id: Int, total: Money(3)) -> @order.placed {
+  return @order.placed { order_id: order_id, total: total, status: Open, note: "" }
+}
+
+test "an edit keeps the rest of the order" {
+  given t_order(9001, 84.500)
+  given t_order(9002, 12.000) { note: "gift" }
+
+  run EditItem { order_id: 9002 }
+
+  expect t_order(9002, 12.000) { status: Edited }
+}
+```
+
+The fixture gives every field and the block replaces the ones it names, so an event is still written
+whole. The block may not be empty, may not name a field the event does not have, and may not name one
+twice. A fixture may return what another fixture made (`return t_order(id)`), which is how a second
+fixture is built on a first.
+
+**An event field's `@max` is enforced at the `given`**, on the merged event, so an override can
+correct a fixture that is past the bound or introduce one. A test that writes a value past it
+**errors** rather than fails: the case could not state its world.
 
 **Do not build a fixture by running a command.** There is no `given run PlaceOrder(...)`, on purpose:
 a fixture built by the thing under test means one broken command fails every test that used it as

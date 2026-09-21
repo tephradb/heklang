@@ -36,6 +36,10 @@ impl fmt::Display for Article<'_> {
         let name = self.0.to_string();
         let article = match name.as_bytes().first() {
             Some(b'A' | b'E' | b'I' | b'O') => "an",
+            // An event path is read out as itself, so "returning @order.placed" rather
+            // than "returning a @order.placed". It is the one type whose spelling is
+            // not a noun.
+            Some(b'@') => return f.write_str(&name),
             _ => "a",
         };
         write!(f, "{article} {name}")

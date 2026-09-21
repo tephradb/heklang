@@ -1916,7 +1916,7 @@ fn fitted_at(value: Value, ty: &Type, span: Span) -> Result<Value, Error> {
     fitted(value, ty).map_err(|kind| Error::at(kind, span))
 }
 
-fn check_field(
+pub(crate) fn check_field(
     program: &Program,
     ty: &Type,
     max_len: Option<usize>,
@@ -2251,6 +2251,28 @@ fn eval(
                 ty: ty.clone(),
                 fields: values,
             })
+        }
+        // The `emit` path one step earlier: the same coercion against the same
+        // declaration, and deliberately not `check_field`. An over-length value is a
+        // command's validation channel and an expression has no `Outcome` to hand back,
+        // so the bound is checked where the event lands, at the `given` that takes it.
+        Expr::Event { path, fields } => {
+            let def = program
+                .event(path)
+                .ok_or_else(|| at(ErrorKind::MalformedIr))?;
+            let mut values = BTreeMap::new();
+            for (name, written) in fields {
+                let value = eval(program, exprs, frame, *written, ctx.as_deref_mut())?;
+                let value = match def.field(name) {
+                    Some(declared) => fitted_at(value, &declared.ty, exprs.span(*written))?,
+                    None => return Err(at(ErrorKind::MalformedIr)),
+                };
+                values.insert(name.clone(), value);
+            }
+            Ok(Value::Event(Event {
+                path: path.clone(),
+                fields: values,
+            }))
         }
         // Rule 16's taint, built as the two renderings rather than recovered later.
         // Both strings are accumulated in one walk, so `"https://{host}/hooks/{PATH}"`

@@ -13,6 +13,27 @@ fn address(n: Int) -> Address {
   return Address { line1: "{n} Reykjavik St", city: "Reykjavík", postcode: "101" }
 }
 
+// The same device one level up: a `fn` may return an event, so the whole of
+// `@order.placed` is written once here and every `given` and `expect` below is a call
+// and the fields that case is about. A `run` still writes its arguments out, because a
+// command's arguments are its input rather than an event.
+fn placed(
+  order_id: Uuid,
+  customer_id: Customer,
+  email: String,
+  total: Money(2),
+) -> @order.placed {
+  return @order.placed {
+    order_id: order_id,
+    customer_id: customer_id,
+    email: email,
+    address: address(12),
+    total: total,
+    tax_rate: 0.2000,
+    notes: "",
+  }
+}
+
 test "a first order for a fresh customer is appended as written" {
   run PlaceOrder {
     order_id: ADA,
@@ -24,15 +45,7 @@ test "a first order for a fresh customer is appended as written" {
     notes: "leave at the door",
   }
 
-  expect @order.placed {
-    order_id: ADA,
-    customer_id: 1,
-    email: "ada@example.com",
-    address: address(12),
-    total: 25.99,
-    tax_rate: 0.2000,
-    notes: "leave at the door",
-  }
+  expect placed(ADA, 1, "ada@example.com", 25.99) { notes: "leave at the door" }
 }
 
 test "an absent note becomes the empty string rather than staying absent" {
@@ -45,15 +58,7 @@ test "an absent note becomes the empty string rather than staying absent" {
     tax_rate: 0.2000,
   }
 
-  expect @order.placed {
-    order_id: ADA,
-    customer_id: 1,
-    email: "ada@example.com",
-    address: address(12),
-    total: 25.99,
-    tax_rate: 0.2000,
-    notes: "",
-  }
+  expect placed(ADA, 1, "ada@example.com", 25.99)
 }
 
 test "a blank address is the caller's mistake" {
@@ -70,15 +75,7 @@ test "a blank address is the caller's mistake" {
 }
 
 test "an email that already placed an order is refused" {
-  given @order.placed {
-    order_id: ADA,
-    customer_id: 1,
-    email: "ada@example.com",
-    address: address(12),
-    total: 25.99,
-    tax_rate: 0.2000,
-    notes: "",
-  }
+  given placed(ADA, 1, "ada@example.com", 25.99)
 
   run PlaceOrder {
     order_id: GRACE,
@@ -108,15 +105,7 @@ test "a blocked customer is refused before anything else is checked" {
 }
 
 test "a customer past a thousand gets a tenth off" {
-  given @order.placed {
-    order_id: GRACE,
-    customer_id: 1,
-    email: "first@example.com",
-    address: address(12),
-    total: 1500.00,
-    tax_rate: 0.2000,
-    notes: "",
-  }
+  given placed(GRACE, 1, "first@example.com", 1500.00)
 
   run PlaceOrder {
     order_id: ADA,
@@ -127,27 +116,11 @@ test "a customer past a thousand gets a tenth off" {
     tax_rate: 0.2000,
   }
 
-  expect @order.placed {
-    order_id: ADA,
-    customer_id: 1,
-    email: "ada@example.com",
-    address: address(12),
-    total: 90.00,
-    tax_rate: 0.2000,
-    notes: "",
-  }
+  expect placed(ADA, 1, "ada@example.com", 90.00)
 }
 
 test "a placed order writes the row and counts the customer" {
-  given @order.placed {
-    order_id: ADA,
-    customer_id: 1,
-    email: "ada@example.com",
-    address: address(12),
-    total: 25.99,
-    tax_rate: 0.2000,
-    notes: "",
-  }
+  given placed(ADA, 1, "ada@example.com", 25.99)
 
   project Orders
 
@@ -156,15 +129,7 @@ test "a placed order writes the row and counts the customer" {
 }
 
 test "a purged order does not come back on a late shipment" {
-  given @order.placed {
-    order_id: ADA,
-    customer_id: 1,
-    email: "ada@example.com",
-    address: address(12),
-    total: 25.99,
-    tax_rate: 0.2000,
-    notes: "",
-  }
+  given placed(ADA, 1, "ada@example.com", 25.99)
   given @order.purged { order_id: ADA }
   given @order.shipped { order_id: ADA, tracking: "TRK-1" }
 
@@ -178,15 +143,7 @@ test "a purged order does not come back on a late shipment" {
 }
 
 test "confirming an order reveals the email and records the notification" {
-  given @order.placed {
-    order_id: ADA,
-    customer_id: 1,
-    email: "ada@example.com",
-    address: address(12),
-    total: 25.99,
-    tax_rate: 0.2000,
-    notes: "",
-  }
+  given placed(ADA, 1, "ada@example.com", 25.99)
 
   // The override, for when the value's shape matters. It sits beside the `respond` that
   // answers it, which is the reason it is a setup line rather than a `given`.
@@ -207,15 +164,7 @@ test "confirming an order reveals the email and records the notification" {
 }
 
 test "an absorbed retry never reaches the arm" {
-  given @order.placed {
-    order_id: ADA,
-    customer_id: 1,
-    email: "ada@example.com",
-    address: address(12),
-    total: 25.99,
-    tax_rate: 0.2000,
-    notes: "",
-  }
+  given placed(ADA, 1, "ada@example.com", 25.99)
 
   // No setup line: a declared secret answers `secret:NAME`, so a test that does not
   // care about the value names the stand-in and moves on.
@@ -233,15 +182,7 @@ test "an absorbed retry never reaches the arm" {
 }
 
 test "a 4xx is a decision the arm makes, and it fails terminally" {
-  given @order.placed {
-    order_id: ADA,
-    customer_id: 1,
-    email: "ada@example.com",
-    address: address(12),
-    total: 25.99,
-    tax_rate: 0.2000,
-    notes: "",
-  }
+  given placed(ADA, 1, "ada@example.com", 25.99)
 
   respond "secret:CONFIRM_URL" 422
 
@@ -252,15 +193,7 @@ test "a 4xx is a decision the arm makes, and it fails terminally" {
 }
 
 test "an erased customer skips rather than sending plaintext" {
-  given @order.placed {
-    order_id: ADA,
-    customer_id: 1,
-    email: "ada@example.com",
-    address: address(12),
-    total: 25.99,
-    tax_rate: 0.2000,
-    notes: "",
-  }
+  given placed(ADA, 1, "ada@example.com", 25.99)
 
   erased Customer "1"
 
@@ -273,15 +206,7 @@ test "an erased customer skips rather than sending plaintext" {
 // interpolation has no declaration to compare against. Without the `truncate` in
 // `Notes` this is a hard error rather than a row.
 test "a note past the column is kept to its first eight characters" {
-  given @order.placed {
-    order_id: ADA,
-    customer_id: 1,
-    email: "ada@example.com",
-    address: address(12),
-    total: 25.99,
-    tax_rate: 0.2000,
-    notes: "leave at the door",
-  }
+  given placed(ADA, 1, "ada@example.com", 25.99) { notes: "leave at the door" }
 
   project Notes
 

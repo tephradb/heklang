@@ -1417,3 +1417,123 @@ command Place(order_id: Uuid) {
     // than answering with nothing.
     assert!(entry(&made, "Place").field_names().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// An event a `fn` makes. The node it adds is written only when it is present, which
+// is what keeps every hash already stored valid: `docs/digest.md` section 11.
+
+const FIXTURE: &str = "\
+fn t_order(order_id: Uuid) -> @order.placed {
+  return @order.placed { order_id: order_id, customer_id: 1, total: 25.99 }
+}
+";
+
+/// The version line did not move for this, so a `given` that spells its event out has
+/// to render exactly as it did before fixtures existed. `@absent` is the precedent.
+#[test]
+fn a_given_without_a_fixture_renders_as_it_always_did() {
+    let longhand = with_events(
+        "test \"placed\" {
+           given @order.placed { order_id: \"0190d1a1-0000-7000-8000-000000000001\", customer_id: 1, total: 25.99 }
+           project P
+         }
+         projector P {
+           entity Row { order_id: Uuid @key }
+           on @order.placed { order_id } { put Row { order_id } }
+         }",
+    );
+    let form = longhand.packed_with_tests();
+    assert!(
+        form.contains("(given @order.placed (f customer_id"),
+        "got: {form}"
+    );
+    assert!(!form.contains("(from "), "got: {form}");
+}
+
+/// A fixture is an ordinary `fn` call in the form, so the two spellings are two
+/// programs. The digest is syntactic, which is the same answer it gives for `address(12)`
+/// against the record written out.
+#[test]
+fn a_fixture_and_a_longhand_given_are_different_forms() {
+    let body = "projector P {
+                  entity Row { order_id: Uuid @key }
+                  on @order.placed { order_id } { put Row { order_id } }
+                }";
+    let longhand = with_events(&format!(
+        "{FIXTURE}{body}
+         test \"placed\" {{
+           given @order.placed {{ order_id: \"0190d1a1-0000-7000-8000-000000000001\", customer_id: 1, total: 25.99 }}
+           project P
+         }}"
+    ));
+    let fixture = with_events(&format!(
+        "{FIXTURE}{body}
+         test \"placed\" {{
+           given t_order(\"0190d1a1-0000-7000-8000-000000000001\")
+           project P
+         }}"
+    ));
+    assert_ne!(
+        longhand.hash_with_tests(),
+        fixture.hash_with_tests(),
+        "a call and the fields it stands for are two spellings"
+    );
+    assert!(
+        fixture
+            .packed_with_tests()
+            .contains("(given @order.placed (from (fn t_order"),
+        "got: {}",
+        fixture.packed_with_tests()
+    );
+}
+
+/// The `fn` itself is a module declaration, so declaring one moves the program hash
+/// even though only tests call it. That is already true of any helper a test shares,
+/// and section 10's claim is about the `test` declarations rather than about everything
+/// a test reaches.
+#[test]
+fn a_fixture_fn_is_in_the_program_hash() {
+    let without = with_events("command Noop(order_id: Uuid) { return }");
+    let with = with_events(&format!(
+        "{FIXTURE}command Noop(order_id: Uuid) {{ return }}"
+    ));
+    assert_ne!(
+        without.hash(),
+        with.hash(),
+        "a `fn` is a declaration whatever calls it"
+    );
+    assert!(
+        entry(&with, "t_order")
+            .form
+            .packed()
+            .contains("(returns (Event @order.placed))"),
+        "got: {}",
+        entry(&with, "t_order").form.packed()
+    );
+}
+
+/// An override is the part of the form a case is about, so changing one is a change to
+/// that test and to nothing else.
+#[test]
+fn an_override_moves_only_the_tests_hash() {
+    let body = "projector P {
+                  entity Row { order_id: Uuid @key }
+                  on @order.placed { order_id } { put Row { order_id } }
+                }";
+    let one = with_events(&format!(
+        "{FIXTURE}{body}
+         test \"placed\" {{
+           given t_order(\"0190d1a1-0000-7000-8000-000000000001\") {{ total: 1.00 }}
+           project P
+         }}"
+    ));
+    let two = with_events(&format!(
+        "{FIXTURE}{body}
+         test \"placed\" {{
+           given t_order(\"0190d1a1-0000-7000-8000-000000000001\") {{ total: 2.00 }}
+           project P
+         }}"
+    ));
+    assert_eq!(one.hash(), two.hash(), "nothing in production moved");
+    assert_ne!(one.hash_with_tests(), two.hash_with_tests());
+}

@@ -324,7 +324,9 @@ fn shift_expr(expr: &mut Expr, expr_off: u32, slot_off: u32) {
         Expr::Object(fields) => fields.iter_mut().for_each(|(_, value)| one(value)),
         Expr::Interp(parts) => parts.iter_mut().for_each(one),
         Expr::List { items, inner: _ } => items.iter_mut().for_each(one),
-        Expr::Record { ty: _, fields } => fields.iter_mut().for_each(|(_, value)| one(value)),
+        Expr::Record { ty: _, fields } | Expr::Event { path: _, fields } => {
+            fields.iter_mut().for_each(|(_, value)| one(value));
+        }
         Expr::CallFn {
             function: _,
             scope: _,

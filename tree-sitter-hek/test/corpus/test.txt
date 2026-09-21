@@ -292,3 +292,64 @@ test "an alert goes to the configured hook" {
           (arguments
             (string
               (string_content))))))))
+
+================================================================================
+a fixture given, with and without an override
+================================================================================
+
+test "an edit keeps the rest of the order" {
+  given t_order(9001, 84.500)
+  given t_order(9002, 12.000) { has_discount: true }
+
+  run EditItem { order_id: 9002 }
+
+  expect t_order(9002, 12.000) { status: Edited }
+  expect t_order(9001, 84.500)
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (test_declaration
+    (string
+      (string_content))
+    (test_body
+      (given_clause
+        (call_expression
+          (identifier)
+          (arguments
+            (integer_literal)
+            (decimal_literal))))
+      (given_clause
+        (call_expression
+          (identifier)
+          (arguments
+            (integer_literal)
+            (decimal_literal)))
+        (field_initializer_list
+          (field_initializer
+            (identifier)
+            (boolean_literal))))
+      (run_clause
+        (identifier)
+        (field_initializer_list
+          (field_initializer
+            (identifier)
+            (integer_literal))))
+      (expect_clause
+        (fixture_expectation
+          (call_expression
+            (identifier)
+            (arguments
+              (integer_literal)
+              (decimal_literal)))
+          (field_initializer_list
+            (field_initializer
+              (identifier)
+              (identifier)))))
+      (expect_clause
+        (call_expression
+          (identifier)
+          (arguments
+            (integer_literal)
+            (decimal_literal)))))))

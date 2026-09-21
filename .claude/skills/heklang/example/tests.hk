@@ -12,6 +12,19 @@ fn seats_for(n: Int) -> Int {
   return n * 2
 }
 
+// The same device one level up: a `fn` may return an event, so the seat every case
+// below needs is written once. A `given` and an `expect` take the call, with the fields
+// that case is about written after it.
+fn a_seat(booking_id: Uuid, attendee_id: Attendee) -> @seat.booked {
+  return @seat.booked {
+    workshop_id: RUST,
+    booking_id: booking_id,
+    attendee_id: attendee_id,
+    email: "ada@example.com",
+    paid: 40.00,
+  }
+}
+
 test "a seat in an open workshop with room is booked as written" {
   given @workshop.opened {
     workshop_id: RUST,
@@ -63,13 +76,7 @@ test "a blank email is the caller's mistake, whatever the log says" {
 
 test "the last seat is the last seat" {
   given @workshop.opened { workshop_id: RUST, title: "Rust", seats: 1, price: 40.00 }
-  given @seat.booked {
-    workshop_id: RUST,
-    booking_id: BOOKING,
-    attendee_id: 7,
-    email: "ada@example.com",
-    paid: 40.00,
-  }
+  given a_seat(BOOKING, 7)
 
   run BookSeat {
     workshop_id: RUST,
@@ -92,13 +99,7 @@ test "releasing a seat nobody holds appends nothing" {
 
 test "a booking writes its row and counts against the workshop" {
   given @workshop.opened { workshop_id: RUST, title: "Rust", seats: 2, price: 40.00 }
-  given @seat.booked {
-    workshop_id: RUST,
-    booking_id: BOOKING,
-    attendee_id: 7,
-    email: "ada@example.com",
-    paid: 40.00,
-  }
+  given a_seat(BOOKING, 7)
 
   project Workshops
 
@@ -108,13 +109,7 @@ test "a booking writes its row and counts against the workshop" {
 }
 
 test "a booking for a workshop that is gone drops rather than manufacturing one" {
-  given @seat.booked {
-    workshop_id: RUST,
-    booking_id: BOOKING,
-    attendee_id: 7,
-    email: "ada@example.com",
-    paid: 40.00,
-  }
+  given a_seat(BOOKING, 7)
 
   project Workshops
 
@@ -124,13 +119,7 @@ test "a booking for a workshop that is gone drops rather than manufacturing one"
 
 test "a first booking is confirmed, logged and recorded" {
   given @workshop.opened { workshop_id: RUST, title: "Rust", seats: 2, price: 40.00 }
-  given @seat.booked {
-    workshop_id: RUST,
-    booking_id: BOOKING,
-    attendee_id: 7,
-    email: "ada@example.com",
-    paid: 40.00,
-  }
+  given a_seat(BOOKING, 7)
 
   respond CONFIRM_URL 200
 
@@ -148,13 +137,7 @@ test "a first booking is confirmed, logged and recorded" {
 
 test "a retryable status is absorbed by the runtime and never reaches the arm" {
   given @workshop.opened { workshop_id: RUST, title: "Rust", seats: 2, price: 40.00 }
-  given @seat.booked {
-    workshop_id: RUST,
-    booking_id: BOOKING,
-    attendee_id: 7,
-    email: "ada@example.com",
-    paid: 40.00,
-  }
+  given a_seat(BOOKING, 7)
 
   respond CONFIRM_URL 503
   respond CONFIRM_URL 200
@@ -171,13 +154,7 @@ test "a retryable status is absorbed by the runtime and never reaches the arm" {
 
 test "a 4xx is a decision the arm makes, and it fails terminally" {
   given @workshop.opened { workshop_id: RUST, title: "Rust", seats: 2, price: 40.00 }
-  given @seat.booked {
-    workshop_id: RUST,
-    booking_id: BOOKING,
-    attendee_id: 7,
-    email: "ada@example.com",
-    paid: 40.00,
-  }
+  given a_seat(BOOKING, 7)
 
   respond CONFIRM_URL 422
 
@@ -189,13 +166,7 @@ test "a 4xx is a decision the arm makes, and it fails terminally" {
 
 test "an erased attendee skips rather than sending plaintext" {
   given @workshop.opened { workshop_id: RUST, title: "Rust", seats: 2, price: 40.00 }
-  given @seat.booked {
-    workshop_id: RUST,
-    booking_id: BOOKING,
-    attendee_id: 7,
-    email: "ada@example.com",
-    paid: 40.00,
-  }
+  given a_seat(BOOKING, 7)
 
   erased Attendee "7"
 

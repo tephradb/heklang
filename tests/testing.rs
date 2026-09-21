@@ -113,6 +113,28 @@ effect Mail {
 }
 ";
 
+/// Rule 2's fixture: an event wide enough for an override to be about something, a
+/// bound on one field so the `@max` cases have somewhere to land, and a command that
+/// appends one so a `run` has an expectation to match.
+const FIXTURES: &str = "event @item.added { item_id: Int, note: String @max(8), tag: String }
+
+command AddItem(item_id: Int, tag: String) {
+  emit @item.added { item_id, note: \"\", tag }
+}
+
+fn t_item(item_id: Int) -> @item.added {
+  return @item.added { item_id: item_id, note: \"\", tag: \"plain\" }
+}
+
+fn t_long(item_id: Int) -> @item.added {
+  return @item.added { item_id: item_id, note: \"far too long\", tag: \"plain\" }
+}
+
+fn a_name(item_id: Int) -> String {
+  return \"item {item_id}\"
+}
+";
+
 /// Parses `PRELUDE` plus `body` and runs every test in it.
 fn verdicts(body: &str) -> Vec<TestResult> {
     let source = format!("{PRELUDE}\n{body}");
@@ -152,6 +174,27 @@ fn err(body: &str) -> String {
     parse(&source)
         .expect_err("expected this test declaration to be rejected")
         .text()
+}
+
+/// The same pair, against the fixture declarations.
+fn fixture_verdicts(body: &str) -> Vec<TestResult> {
+    let source = format!("{PRELUDE}\n{FIXTURES}\n{body}");
+    let program = parse(&source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+    run_tests(&program)
+}
+
+fn fixture_err(body: &str) -> String {
+    let source = format!("{PRELUDE}\n{FIXTURES}\n{body}");
+    parse(&source)
+        .expect_err("expected this test declaration to be rejected")
+        .text()
+}
+
+fn errored(result: &TestResult) -> String {
+    match &result.outcome {
+        TestOutcome::Errored(why) => why.clone(),
+        other => panic!("expected an error, got {other:?}"),
+    }
 }
 
 // Rule 1: shape.
@@ -260,6 +303,198 @@ fn a_test_cannot_emit() {
     assert_eq!(
         message,
         "a test writes its log with `given`, which appends the event directly"
+    );
+}
+
+// Rule 2, the other half: a `fn` may make the whole event.
+
+#[test]
+fn a_fixture_gives_the_whole_event() {
+    let results = fixture_verdicts(
+        "test \"a fixture is a log line\" {
+  given t_item(1)
+  run AddItem { item_id: 2, tag: \"plain\" }
+  expect @item.added { item_id: 2, note: \"\", tag: \"plain\" }
+}",
+    );
+    assert!(only(&results).passed(), "{}", only(&results));
+}
+
+#[test]
+fn one_fixture_called_twice_is_two_events() {
+    let results = fixture_verdicts(
+        "test \"two orders\" {
+  given t_item(1)
+  given t_item(2)
+  run AddItem { item_id: 3, tag: \"plain\" }
+  expect t_item(3)
+}",
+    );
+    assert!(only(&results).passed(), "{}", only(&results));
+}
+
+#[test]
+fn an_override_replaces_only_the_fields_it_names() {
+    let results = fixture_verdicts(
+        "test \"an override\" {
+  given t_item(1) { tag: \"gift\", note: \"short\" }
+  run AddItem { item_id: 1, tag: \"plain\" }
+  expect t_item(1)
+}",
+    );
+    assert!(only(&results).passed(), "{}", only(&results));
+}
+
+#[test]
+fn an_expectation_can_be_a_fixture_with_an_override() {
+    let results = fixture_verdicts(
+        "test \"an expectation\" {
+  run AddItem { item_id: 4, tag: \"gift\" }
+  expect t_item(4) { tag: \"gift\" }
+}",
+    );
+    assert!(only(&results).passed(), "{}", only(&results));
+}
+
+/// A fixture names every field, so what an expectation compares is still the whole
+/// event: the field the override did not correct is the one reported.
+#[test]
+fn a_fixture_expectation_reports_the_field_that_differed() {
+    let results = fixture_verdicts(
+        "test \"a mismatch\" {
+  run AddItem { item_id: 4, tag: \"gift\" }
+  expect t_item(4)
+}",
+    );
+    assert_eq!(
+        why(only(&results)),
+        "@item.added.tag: expected \"plain\", got \"gift\""
+    );
+}
+
+/// The shape the 26-field and 24-field pair in the port wants: one fixture standing on
+/// another. It is why the `return` dispatch keys on the token rather than on the
+/// declared type.
+#[test]
+fn a_fixture_can_be_built_from_another_fixture() {
+    let results = fixture_verdicts(
+        "fn t_gift(item_id: Int) -> @item.added {
+  return t_item(item_id)
+}
+
+test \"delegation\" {
+  given t_gift(1)
+  run AddItem { item_id: 1, tag: \"plain\" }
+  expect t_gift(1)
+}",
+    );
+    assert!(only(&results).passed(), "{}", only(&results));
+}
+
+#[test]
+fn an_override_names_at_least_one_field() {
+    let message = fixture_err(
+        "test \"empty\" {
+  given t_item(1) {}
+  project Plans
+}",
+    );
+    assert_eq!(
+        message,
+        "an override names at least one field; `{}` changes nothing, so write the call on its own"
+    );
+}
+
+#[test]
+fn an_override_is_checked_against_the_event() {
+    assert_eq!(
+        fixture_err("test \"unknown\" {\n  given t_item(1) { nope: 1 }\n  project Plans\n}"),
+        "@item.added has no field `nope`"
+    );
+    assert_eq!(
+        fixture_err(
+            "test \"twice\" {\n  given t_item(1) { tag: \"a\", tag: \"b\" }\n  project Plans\n}"
+        ),
+        "`tag` is given twice"
+    );
+}
+
+#[test]
+fn a_given_takes_an_event_and_not_any_other_answer() {
+    assert_eq!(
+        fixture_err("test \"a string\" {\n  given a_name(1)\n  project Plans\n}"),
+        "`a_name` returns a String, and `given` takes an event; a fixture declares `-> @some.event` and returns one"
+    );
+    assert_eq!(
+        fixture_err("test \"nothing declared\" {\n  given nope(1)\n  project Plans\n}"),
+        "`nope` is not a declared `fn`"
+    );
+}
+
+/// The action decides which expectations are legal, and neither of the other two ever
+/// reaches the event branch.
+#[test]
+fn a_fixture_expectation_belongs_to_a_run() {
+    assert!(
+        fixture_err("test \"projected\" {\n  project Plans\n  expect t_item(1) { tag: \"a\" }\n}")
+            .contains("projector `Plans` has no entity `t_item`"),
+    );
+    assert!(
+        fixture_err("test \"delivered\" {\n  deliver SyncShop\n  expect t_item(1)\n}")
+            .contains("effect `SyncShop` is not declared"),
+    );
+}
+
+/// A `given` used to skip the bound an `emit` enforces, so a test could state a world
+/// the runtime could not produce. It errors rather than fails: the case could not say
+/// what it was about, which is not the same as asserting the wrong thing.
+#[test]
+fn a_given_past_a_max_cannot_state_its_world() {
+    let results = fixture_verdicts(
+        "test \"too long\" {
+  given @item.added { item_id: 1, note: \"far too long\", tag: \"a\" }
+  project Plans
+}",
+    );
+    assert_eq!(
+        errored(only(&results)),
+        "`given @item.added`: note is 12 characters, the most allowed is 8"
+    );
+}
+
+/// The bound is asked of the event that is actually appended, which is the merged one.
+/// So an override can correct a fixture that is past it, and can introduce one.
+#[test]
+fn the_bound_is_checked_after_the_override() {
+    let fixed = fixture_verdicts(
+        "test \"corrected\" {
+  given t_long(1) { note: \"short\" }
+  run AddItem { item_id: 1, tag: \"plain\" }
+  expect t_item(1)
+}",
+    );
+    assert!(only(&fixed).passed(), "{}", only(&fixed));
+
+    let broken = fixture_verdicts(
+        "test \"introduced\" {
+  given t_item(1) { note: \"far too long\" }
+  project Plans
+}",
+    );
+    assert_eq!(
+        errored(only(&broken)),
+        "`given @item.added`: note is 12 characters, the most allowed is 8"
+    );
+
+    let from_fixture = fixture_verdicts(
+        "test \"from the fixture\" {
+  given t_long(1)
+  project Plans
+}",
+    );
+    assert_eq!(
+        errored(only(&from_fixture)),
+        "`given @item.added`: note is 12 characters, the most allowed is 8"
     );
 }
 

@@ -29,6 +29,12 @@ Two more are spellable **only** in a `fn` parameter or return type, and nowhere 
   `invalid` are statements rather than constructors, so there is no literal for one. A refusal is a
   decision, not data, so the same restriction applies.
 
+A third is spellable only in a **module** `fn`'s **return type**, and not even as a parameter:
+
+- an event, written as its path: `fn t_order(id: Int) -> @order.placed`. An event is a record, not a
+  value, so nothing else may name one and `List(@order.placed)` is an unknown type. It is made by
+  `return @order.placed { ... }` and taken by a `given` or an `expect`; see `testing.md`.
+
 A third, `Rounding`, is spellable **nowhere**: `Rounding` as a type name is `unknown type`, and its
 values reach `.mul` and `.div` as the bare words `HalfUp`, `HalfEven` and `Down`. So a rounding mode
 cannot be passed through a `fn` parameter.
@@ -363,7 +369,21 @@ because a container can be empty.
 
 A `fn` may take and return a `Response` or an `Outcome`, and an **effect-local** one may also take
 or return a `Secret`; nothing else may name any of the three, so `List(Response)` and `List(Secret)`
-are both rejected as unknown types. A
+are both rejected as unknown types. A **module** `fn` may also return an event, which is how a test
+names a whole one once:
+
+```hek
+fn t_order(order_id: Int, total: Money(3)) -> @order.placed {
+  return @order.placed { order_id: order_id, total: total, status: Open }
+}
+```
+
+`@order.placed { ... }` is written after a `return` and nowhere else, so there is no
+`let e = @order.placed { ... }`; every field is written out, with no bare-name shorthand. An event
+cannot be a parameter, cannot be optional, cannot be compared, interpolated, put in a list or a body,
+or bound with `let`, and an effect-local `fn` may not return one. A
+
+
 `fn` declared `-> Outcome?` is how two commands share one refusal ladder:
 
 ```hek

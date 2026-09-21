@@ -94,10 +94,62 @@ test "..." {
 }
 ```
 
+### A `fn` is also how a test gets the whole event
+
+The sentence above covers a *field value*, and one level up is where the repetition actually lives.
+A port's `domain/tests/item-edit.hk` is about 1,800 lines, and roughly 1,400 of them are the same
+26-field `given @order.placed` and 24-field `given @edit.window.opened` repeated twenty times; the
+author gave up and wrote a bash generator to emit the file. So a `fn` may return an event
+(`docs/functions.md`), and a `given` takes the call:
+
+```
+fn t_order(order_id: Int, total: Money(3)) -> @order.placed { ...26 fields... }
+
+given t_order(9001, 84.500)
+given t_order(9002, 12.000) { has_discount: true }
+```
+
+**"Every field must be given" survives intact.** The fixture gives them all and the block after the
+call replaces the ones it names, so what is appended is still a whole event. An `expect @path` takes
+the same pair, which is where the override earns most of its keep: *the same event, one field
+different after the command ran*.
+
+**The override is part of the directive, not an expression.** `docs/declarations.md` rejects record
+update and that rejection stands: there is no `Record { ..base, field: x }` anywhere. Composing a log
+line is a test-only thing, which is exactly what this section's vocabulary is for, and it is why the
+block is written after a call rather than being a second way to build a value.
+
+**An empty block is refused**, because a fixture with nothing changed is the fixture. So is an
+override naming a field the event does not have, or naming one twice, by the same two checks the
+longhand form makes.
+
+**A broken fixture fails twenty tests, and that is the ordinary cost of one.** It is not the flaw the
+rejection below names: what that one is about is *which* test a report blames, and a fixture is
+scenery that every test using it names on its own line.
+
 **Rejected: running a command to build the log.** `given run PlaceOrder(...)` reads well and is
 wrong: a fixture built by the thing under test means one broken command fails every test that used it
 as scenery, and the report names the wrong test. Raw events keep a failure local to the case that
 found it.
+
+**Rejected: a `background` block shared by a file's tests.** It attacks the same 1,400 lines and is
+cheaper still, and it cannot express the variation, so an override would be needed anyway. It also
+costs the property section 9 is built on: a test's log is visible in the test.
+
+### A `given` is checked against the declaration
+
+An event field's `@max` is enforced here, the same bound an `emit` enforces
+(`docs/declarations.md`). A test writing a value past it is stating a world the runtime could not
+produce, and it used to be appended silently.
+
+It is the test **erroring** rather than failing, which section 9's distinction already has a place
+for: the case could not say what it was about, which is not the same as asserting the wrong thing.
+An `emit` answers `Outcome::Invalid` instead, and that is a command's channel rather than a
+directive's.
+
+**The bound is asked of the event that is appended, which is the merged one.** So an override can
+correct a fixture whose field is past it, and can introduce one, and there is exactly one place doing
+the checking rather than one per spelling.
 
 **Rejected: reaching for state directly.** There is no `given total = 5`. A folded value is
 derived from the log, and a test that could set it would be asserting about a value the runtime never

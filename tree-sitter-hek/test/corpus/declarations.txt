@@ -385,3 +385,39 @@ event @order.placed {
         (annotation_name)
         (annotation_arguments
           (identifier))))))
+
+================================================================================
+a fn that returns an event
+================================================================================
+
+fn t_order(order_id: Int, total: Money(3)) -> @order.placed {
+  return @order.placed { order_id: order_id, total: total }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (type
+          (primitive_type)))
+      (parameter
+        (identifier)
+        (type
+          (scaled_type
+            (integer_literal)))))
+    (event_path)
+    (block
+      (return_statement
+        (event_literal
+          (event_path)
+          (field_initializer_list
+            (field_initializer
+              (identifier)
+              (identifier))
+            (field_initializer
+              (identifier)
+              (identifier))))))))

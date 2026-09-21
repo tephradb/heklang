@@ -429,8 +429,17 @@
                   "type": "FIELD",
                   "name": "return_type",
                   "content": {
-                    "type": "SYMBOL",
-                    "name": "type"
+                    "type": "CHOICE",
+                    "members": [
+                      {
+                        "type": "SYMBOL",
+                        "name": "type"
+                      },
+                      {
+                        "type": "SYMBOL",
+                        "name": "event_path"
+                      }
+                    ]
                   }
                 }
               ]
@@ -1350,16 +1359,51 @@
           "value": "given"
         },
         {
-          "type": "FIELD",
-          "name": "path",
-          "content": {
-            "type": "SYMBOL",
-            "name": "event_path"
-          }
-        },
-        {
-          "type": "SYMBOL",
-          "name": "field_initializer_list"
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "FIELD",
+                  "name": "path",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "event_path"
+                  }
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "field_initializer_list"
+                }
+              ]
+            },
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "FIELD",
+                  "name": "fixture",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "call_expression"
+                  }
+                },
+                {
+                  "type": "CHOICE",
+                  "members": [
+                    {
+                      "type": "SYMBOL",
+                      "name": "field_initializer_list"
+                    },
+                    {
+                      "type": "BLANK"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
         }
       ]
     },
@@ -1578,6 +1622,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "fixture_expectation"
+        },
+        {
+          "type": "SYMBOL",
           "name": "row_expectation"
         },
         {
@@ -1615,6 +1663,23 @@
           "content": {
             "type": "SYMBOL",
             "name": "event_path"
+          }
+        },
+        {
+          "type": "SYMBOL",
+          "name": "field_initializer_list"
+        }
+      ]
+    },
+    "fixture_expectation": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "fixture",
+          "content": {
+            "type": "SYMBOL",
+            "name": "call_expression"
           }
         },
         {
@@ -2207,6 +2272,10 @@
                   },
                   {
                     "type": "SYMBOL",
+                    "name": "event_literal"
+                  },
+                  {
+                    "type": "SYMBOL",
                     "name": "outcome_expression"
                   },
                   {
@@ -2336,6 +2405,23 @@
           "type": "STRING",
           "value": "emit"
         },
+        {
+          "type": "FIELD",
+          "name": "path",
+          "content": {
+            "type": "SYMBOL",
+            "name": "event_path"
+          }
+        },
+        {
+          "type": "SYMBOL",
+          "name": "field_initializer_list"
+        }
+      ]
+    },
+    "event_literal": {
+      "type": "SEQ",
+      "members": [
         {
           "type": "FIELD",
           "name": "path",

@@ -8,7 +8,9 @@ use std::fmt;
 
 use crate::harness::{Reply, Sandbox};
 use crate::host::{Host, Rows};
-use crate::interp::{Effectful, Error, ErrorKind, Interpreter, Outcome, Row, coerce, subject_id};
+use crate::interp::{
+    Effectful, Error, ErrorKind, Interpreter, Outcome, Row, check_field, coerce, subject_id,
+};
 use crate::ir::{
     Action, Expect, ExprId, Exprs, Ident, Program, ReplySpec, Setup, Span, Test, Type,
 };
@@ -230,12 +232,43 @@ fn check<W: World>(program: &Program, test: &Test, mut world: W) -> Result<Optio
         let def = program
             .event(&given.event)
             .ok_or_else(|| format!("event {} is not declared", given.event))?;
-        let mut fields = BTreeMap::new();
+        // The fixture first, then the fields this case is about written over it. A
+        // straight replace is what makes an override an override, and it is what lets
+        // the bound below be asked once, of the event that is actually appended.
+        let mut fields = match given.from {
+            Some(from) => match values.at(from, None)? {
+                Value::Event(made) => made.fields,
+                other => return Err(format!("a fixture for {} made {other}", given.event)),
+            },
+            None => BTreeMap::new(),
+        };
         for (name, value) in &given.fields {
             // A declared field coerces here as it does at every other declared
             // position, so a bare `T` fills a `T?` event field. See `docs/optionals.md`.
             let ty = def.field(name).map(|field| field.ty.clone());
             fields.insert(name.clone(), values.at(*value, ty.as_ref())?);
+        }
+        // The same check an `emit` makes, which this used to skip: a log cannot hold a
+        // value past its `@max`, so a test writing one was stating a world the runtime
+        // could not produce. An `emit` answers `Outcome::Invalid`, which is a command's
+        // channel and not a directive's, so here it is the test erroring: the case
+        // could not state its world rather than asserting the wrong thing.
+        for (name, value) in &fields {
+            let Some(declared) = def.field(name) else {
+                continue;
+            };
+            let fault = check_field(
+                program,
+                &declared.ty,
+                declared.max_len,
+                name,
+                value,
+                given.span,
+            )
+            .map_err(|err: Error| format!("`given {}`: {err}", given.event))?;
+            if let Some(fault) = fault {
+                return Err(format!("`given {}`: {fault}", given.event));
+            }
         }
         let event = Event {
             path: given.event.clone(),
@@ -376,7 +409,10 @@ fn check_run(
         )));
     }
     for (wanted, actual) in expect.iter().zip(events) {
-        let Expect::Event { path, fields, .. } = wanted else {
+        let Expect::Event {
+            path, from, fields, ..
+        } = wanted
+        else {
             return Ok(Some(format!(
                 "expected {}, got the event {}",
                 describe(wanted),
@@ -387,6 +423,16 @@ fn check_run(
             return Ok(Some(format!("expected {path}, got {}", actual.path)));
         }
         let def = values.program.event(path).map(|def| def.fields.clone());
+        // The fixture, then the fields this case is about over it, exactly as a `given`
+        // is built. A fixture names every field, so what an expectation compares is
+        // still the whole event.
+        let mut awaited = match from {
+            Some(from) => match values.at(*from, None)? {
+                Value::Event(made) => made.fields,
+                other => return Err(format!("a fixture for {path} made {other}")),
+            },
+            None => BTreeMap::new(),
+        };
         for (name, value) in fields {
             let ty = def.as_ref().and_then(|fields| {
                 fields
@@ -394,9 +440,11 @@ fn check_run(
                     .find(|field| &field.name == name)
                     .map(|field| field.ty.clone())
             });
-            let wanted = values.at(*value, ty.as_ref())?;
+            awaited.insert(name.clone(), values.at(*value, ty.as_ref())?);
+        }
+        for (name, wanted) in &awaited {
             match actual.fields.get(name) {
-                Some(found) if found.same(&wanted) => {}
+                Some(found) if found.same(wanted) => {}
                 Some(found) => {
                     // The stored content, not `<sealed under ...>`: the comparison above
                     // read through the seal, so a report that puts it back describes a

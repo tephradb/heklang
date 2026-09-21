@@ -281,6 +281,7 @@ impl Builder {
                 } => stack.extend([*cond, *then, *otherwise]),
                 Expr::Object(fields)
                 | Expr::Record { fields, .. }
+                | Expr::Event { fields, .. }
                 | Expr::Invoke { args: fields, .. } => {
                     stack.extend(fields.iter().map(|(_, id)| *id));
                 }

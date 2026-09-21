@@ -325,6 +325,77 @@ projector write cannot fail in a way the program observes.
 duplication that remains is the fold block, not the logic, and a check-and-do pair is better served
 by the host running the real command without appending than by a second command that copies it.
 
+## A `fn` may make an event
+
+The third instance of the same rule, and the sentence has the same shape: **an event is a record, not
+a value.** Making one is pure, so a helper may return one; storing one is not, so nothing else may
+name it.
+
+```
+fn t_order(order_id: Int, total: Money(3)) -> @order.placed {
+  return @order.placed { ...every field... }
+}
+
+test "an edit keeps the rest of the order" {
+  given t_order(9001, 84.500)
+  given t_order(9002, 12.000) { has_discount: true }
+
+  run EditItem { order_id: 9002, ... }
+
+  expect t_order(9002, 12.000) { status: Edited }
+}
+```
+
+**The evidence is the largest single number a port has produced.** `domain/tests/item-edit.hk` is
+about 1,800 lines, and roughly 1,400 of them are the same 26-field `given @order.placed` and 24-field
+`given @edit.window.opened` repeated twenty times. The author gave up and wrote a bash generator to
+emit the file, which is a fact about the language rather than about them.
+`docs/testing.md` rule 2 already answered it one level too low: "A `fn` is how a test gets a helper"
+covers a *field value*, and `hek/tests.hk` reaches for exactly that with `fn address(n)`. What was
+missing is the level above it.
+
+Concretely, `@some.event` is spellable in a **module** `fn`'s return type and nowhere else. A `fn`
+parameter is refused with its own message, and so are `List(@order.placed)`, `Map(String,
+@order.placed)`, `-> @order.placed?`, an event field, an entity column, a record field, a `fold` and a
+`const`, because the allowance sits above the general type parser rather than inside its recursion,
+exactly as `Response`'s does. An **effect-local** `fn` may not return one either: only a test consumes
+an event, and a test cannot reach a helper declared inside an effect, so the result would be one
+nothing could use. That is the `Secret` rule running the other way.
+
+**`@order.placed { .. }` is written after a `return` and nowhere else.** Not in `primary`, which is
+what makes `let e = @order.placed { .. }` unwritable rather than merely useless, and what lets the
+literal be checked against the whole event table: an expression has no `[EventDef]` in scope and a
+statement does. Every field is written, the same rule `emit` and `given` follow.
+
+**`return t_order(..)` still works, which is why the dispatch keys on the token.** A fixture built on
+a fixture is the shape the 26-field and 24-field pair wants, and a rule that read "an event-returning
+`fn` returns a literal" would have made it unwritable.
+
+**The positions that declare no type are closed by hand.** `fills` is exact, so every declared
+position rejects an event without being told. What is left is the six that take their type from the
+value: a list element, a comprehension's yield, a comparison operand, an interpolation hole, a JSON
+member and a `Json.encode` argument, plus a `let`. Without them `[t_order(1)]` infers a
+`List(@order.placed)` that no declaration could have named, which is the same hole rule 16 closes for
+a credential and with the same helper beside it.
+
+A comparison is the one that could have gone the other way, since two events compare purely and
+totally. It is refused with the rest: the rule reads better with no exceptions than with one nothing
+has asked for, and an event that could be compared would be a value.
+
+**Rejected: an `emit` that takes one.** `emit t_order(..)` reads well and is a different feature. An
+`emit` is the command's decision written out at the site that makes it, and moving 26 fields into a
+helper hides what the command decided; it is also where `@max` becomes `Outcome::Invalid`, which an
+expression has no channel for. The door is open and it needs its own evidence.
+
+**Rejected: a `fixture` declaration of its own.** It is honest, in that nothing in production could
+name one, but it is a seventh namespace and a seventh declaration kind that only tests can use, and
+it would reimplement parameters, arity checking, scoping and a digest kind that `fn` already has.
+`docs/testing.md` rule 1 rejected a `suite` block on the same ground.
+
+**Rejected: reading a field off one.** `e.order_id` is a natural thing to want and nothing needs it
+yet: a fixture is handed to a `given`, not taken apart. It is refused the way an `Outcome`'s insides
+are, and allowing it later is purely additive.
+
 ## What a `fn` makes possible, and is therefore not in the language
 
 **`Timestamp.add_months(n)` is deliberately deferred.** A real port carries 33 lines of calendar
