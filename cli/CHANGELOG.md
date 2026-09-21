@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4](https://git.tqwewe.com/tephra/heklang/compare/v0.5.3...v0.5.4) - 2026-09-21
+
+### Added
+
+- an event is a `fn`'s return type, and a `given` is checked against its declaration
+
+### Fixed
+
+- an empty comprehension takes its element type from its yield, not from Json
+
 ## [0.5.3](https://git.tqwewe.com/tephra/heklang/compare/v0.5.2...v0.5.3) - 2026-09-21
 
 ### Fixed

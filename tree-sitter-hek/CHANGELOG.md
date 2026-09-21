@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3](https://git.tqwewe.com/tephra/heklang/compare/tree-sitter-hek-v0.6.2...tree-sitter-hek-v0.6.3) - 2026-09-21
+
+### Added
+
+- an event's field block takes the bare-name shorthand every other block takes
+- an event is a `fn`'s return type, and a `given` is checked against its declaration
+
 ## [0.6.2](https://git.tqwewe.com/tephra/heklang/compare/tree-sitter-hek-v0.6.1...tree-sitter-hek-v0.6.2) - 2026-09-18
 
 ### Added

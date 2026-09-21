@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://git.tqwewe.com/tephra/heklang/compare/heklang-v0.10.0...heklang-v0.11.0) - 2026-09-21
+
+### Added
+
+- an event's field block takes the bare-name shorthand every other block takes
+- an event is a `fn`'s return type, and a `given` is checked against its declaration
+- `&&` narrows where it is true and `||` where it is false, operands included
+- `List.sum()` totals where `+` is defined, and `List.concat` joins two lists
+
+### Fixed
+
+- an empty comprehension takes its element type from its yield, not from Json
+- a loop body cannot accumulate into an outer `let`, and a branch is a scope
+
+### Other
+
+- update heklang skill around projectors
+
 ## [0.10.0](https://git.tqwewe.com/tephra/heklang/compare/heklang-v0.9.0...heklang-v0.10.0) - 2026-09-21
 
 ### Fixed
