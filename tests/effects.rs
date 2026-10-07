@@ -306,6 +306,100 @@ fn an_arm_fold_may_filter_on_the_trigger_binding() {
     );
 }
 
+/// A filter and a seed are evaluated once before the fold runs, so the trigger binding
+/// there is plainly the constant it is. An arm runs per record, where naming the trigger
+/// reads as though it advanced with them, so it is out of scope: `e.id` and a payload
+/// field reached through `e` carry the same misreading `e.at` does.
+#[test]
+fn a_fold_arm_cannot_read_the_trigger_binding() {
+    let message = err("effect E {
+  on @order.placed as e { @key order_id } {
+    fold mine: Int = 0
+      on @order.placed(customer_id: e.customer_id) => mine + e.position
+
+    log(\"x\")
+  }
+}");
+    assert!(
+        message.contains("a fold arm cannot read `e`, the triggering event"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("in a `let` above the fold"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn a_fold_seed_may_read_the_trigger_binding() {
+    program(
+        "effect E {
+  on @order.placed as e { @key order_id } {
+    fold first: Timestamp = e.at
+      on @order.placed(customer_id: e.customer_id) => first
+
+    log(\"first {first}\")
+  }
+}",
+    );
+}
+
+/// What the arm restriction costs, which is a `let`: the value an arm may not compute for
+/// itself is computed once above the fold and read per record.
+#[test]
+fn a_let_above_the_fold_carries_the_trigger_into_an_arm() {
+    let program = program(
+        "effect E {
+  on @order.placed as e { @key order_id } {
+    let mine = e.customer_id
+
+    fold seen: Int = 0
+      on @order.placed() { customer_id } =>
+        if customer_id == mine { seen + 1 } else { seen }
+
+    http.post(\"https://mail.example/confirm\", { \"seen\": seen })
+  }
+}",
+    );
+    let mut interpreter = Interpreter::with_log(
+        &program,
+        vec![placed(1, 7, 100), placed(2, 9, 100), placed(3, 7, 100)],
+    );
+    interpreter.script(URL, vec![Reply::Status(200)]);
+    let mut journal = Journal::default();
+    interpreter
+        .deliver("E", 2, &mut journal)
+        .expect("delivered");
+    // Positions 0 and 2 are customer 7's, and the fold stops at the trigger's own.
+    assert!(
+        posted(&journal).contains("\"seen\":2"),
+        "{}",
+        posted(&journal)
+    );
+}
+
+/// The envelope is not foldable in an effect either, and there the hint has a second
+/// answer to name: the trigger binding is in scope and is not the record being folded.
+#[test]
+fn a_fold_arm_destructure_reaches_no_envelope() {
+    let message = err("effect E {
+  on @order.placed as e { @key order_id } {
+    fold mine: Int = 0
+      on @order.placed(customer_id: e.customer_id) { position } => position
+
+    log(\"x\")
+  }
+}");
+    assert!(
+        message.contains("@order.placed has no field `position`"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("read `e` above the fold"),
+        "got: {message}"
+    );
+}
+
 #[test]
 fn a_fold_is_per_arm_not_per_effect() {
     let message = err("effect E {

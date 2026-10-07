@@ -371,9 +371,20 @@ The name has to be a field that event declares, so an envelope is not reachable 
 
 > @order.placed has no field `position`
 
-A command has no envelope to reach for. An effect's fold sits inside a handler, so that handler's
-`as` binding is in scope in a filter and in an arm, but it is the *triggering* event and does not
-move as the fold runs (`docs/effects.md`).
+A command has no envelope to reach for, and **no fold reaches one** in any declaration: an event's
+`at`, `id` and `position` are not foldable. So an event a fold has to time keeps its own `Timestamp`
+field. That is not a duplicate of the append timestamp even where the `emit` fills it with `now()`: a
+declared field is somewhere occurrence time can come from and the envelope never is, so changing that
+`emit` to an instant an upstream system reported leaves every fold over it deciding correctly.
+
+An effect's fold sits inside a handler, so that handler's `as` binding is in scope in the fold's
+filters and its seed and **not** in an arm. The table above is the reason: a filter is evaluated once,
+before the fold, so the trigger there is plainly the constant it is, while an arm is evaluated once
+per matching event, where the same constant reads as though it advanced with them. The whole binding
+goes rather than `e.at` alone, because `e.id` and a payload field reached through `e` carry the same
+misreading (`docs/effects.md`):
+
+> a fold arm cannot read `e`, the triggering event
 
 **The scope is one arm.** Folding two event types binds two sets of names that never meet, each
 checked against its own declaration:

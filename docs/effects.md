@@ -104,8 +104,28 @@ matching handler. See "The three kinds are deliberately not unified".
 
 ## 2. State lives inside the arm
 
-`as e` binds the trigger, and it is in scope for the arm's `fold` filters and its body. There is no
-effect-level trigger binding and no effect-level state.
+`as e` binds the trigger, and it is in scope for the arm's `fold` filters, its `fold` seeds and its
+body. There is no effect-level trigger binding and no effect-level state.
+
+**Not in a fold arm.** A filter and a seed are evaluated once before the fold runs, so the trigger
+there is plainly the constant it is; an arm is evaluated once per matching event, where the same
+constant reads as though it advanced with them. The whole binding goes rather than `e.at` alone,
+because `e.id` and a payload field reached through `e` carry the same misreading:
+
+> a fold arm cannot read `e`, the triggering event
+
+What an arm needs from the trigger is computed above the fold, which also says once what it is:
+
+```
+let cutoff = e.at.add_days(-7)
+
+fold recent: Int = 0
+  on @order.placed(customer_id: e.customer_id) { placed_at } =>
+    if placed_at > cutoff { recent + 1 } else { recent }
+```
+
+The window is over `placed_at`, a field the event declares, because the envelope is not foldable
+either (`docs/commands.md`, "Inside a fold").
 
 This is more expressive than hekla's single `query(event)`, which has to work for every subscribed
 type and so in practice restricts filters to fields common to all triggers. Per-arm state has no such

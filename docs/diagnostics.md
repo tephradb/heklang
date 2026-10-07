@@ -206,7 +206,7 @@ be the whole of it:
 | `no-zero-value` | a `patch` that would materialise a row it cannot fill |
 | `wrong-context` | a statement in a declaration kind, or an arm, that does not have it |
 | `impure-fn` | a `fn` doing something a pure function cannot |
-| `fold-restriction` | a `fold` calling out, decrypting, or reading a secret |
+| `fold-restriction` | a `fold` calling out, decrypting, reading a secret, or an arm naming the trigger |
 | `arm-only` | an effect-local `fn` doing what stays in the arm |
 | `return-shape` | a `return` that does not match the signature it is in, an answer written with a `return` or with parens, or an answer's message written as a value rather than a string |
 | `unreachable` | a statement after the declaration's answer |

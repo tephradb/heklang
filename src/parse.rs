@@ -111,6 +111,11 @@ struct Parser {
     /// `prologue`, which also covers a hoisted `let`: that runs once per request,
     /// before the fold, so it may read the pinned clock while a fold may not.
     folding: bool,
+    /// Set only while parsing a fold arm's value, the one position inside a `fold` that
+    /// runs per record. A filter and a seed are evaluated once before the fold, so the
+    /// trigger binding there is plainly the constant it is; in an arm it would read as
+    /// though it advanced with the records, which is what this rejects.
+    fold_arm: bool,
     command_end: usize,
     /// Which declaration kind is being parsed, so a statement in the wrong one can be
     /// rejected with a message about that kind rather than a generic one.
@@ -314,6 +319,7 @@ impl Parser {
             errors: RefCell::new(Vec::new()),
             prologue: false,
             folding: false,
+            fold_arm: false,
             command_end: 0,
             kind: Kind::Command,
             commands: Vec::new(),
@@ -951,6 +957,7 @@ impl Parser {
             // The declaration now being given up on. All of it goes.
             prologue,
             folding,
+            fold_arm,
             command_end,
             kind,
             local_fns,
@@ -973,6 +980,7 @@ impl Parser {
         } = self;
         *prologue = false;
         *folding = false;
+        *fold_arm = false;
         *command_end = 0;
         *kind = Kind::Command;
         *in_effect = None;
@@ -3315,6 +3323,21 @@ impl Parser {
         name: &str,
         span: Span,
     ) -> Result<ExprId, Diagnostic> {
+        // The trigger does not advance as the fold runs, so an arm naming it would read
+        // as though it did. Rejected whole rather than per field: `e.id` and a payload
+        // field reached through `e` carry the same misreading `e.at` does.
+        if self.fold_arm {
+            return Err(self
+                .err(
+                    Code::FoldRestriction,
+                    format!("a fold arm cannot read `{name}`, the triggering event"),
+                    span,
+                )
+                .with_hint(
+                    "a fold arm reads the record it folds; put what you need from the trigger in a `let` above the fold, or in the fold's filters or seed, which are evaluated once before it runs",
+                ));
+        }
+
         if !self.eat_sym(Sym::Dot) {
             return Err(self
                 .err(
@@ -4013,11 +4036,28 @@ impl Parser {
                     let bind = self.span_here();
                     let field = self.expect_ident()?;
                     let Some(declared) = def.field(&field) else {
-                        return Err(self.err(
-                            Code::UnknownMember,
-                            format!("{path} has no field `{field}`"),
-                            bind,
-                        ));
+                        // Two authors land here: one reaching for the envelope, which no
+                        // fold has, and one in an effect reaching for the trigger, which
+                        // is in scope but is not the record being folded. The hint names
+                        // the answer for whichever this is.
+                        let fix = match &self.envelope {
+                            Some(binding) => format!(
+                                "declare it on the event, or read `{binding}` above the fold if the trigger's own is what you meant"
+                            ),
+                            None => {
+                                "declare it on the event and fill it where the event is emitted"
+                                    .to_string()
+                            }
+                        };
+                        return Err(self
+                            .err(
+                                Code::UnknownMember,
+                                format!("{path} has no field `{field}`"),
+                                bind,
+                            )
+                            .with_hint(format!(
+                                "a fold arm binds the declared fields of the record it folds, and the envelope's `at`, `id` and `position` are not among them: {fix}"
+                            )));
                     };
                     binds.push(lower.b.bind(&field, Some(declared.ty.clone())));
                     if !self.eat_sym(Sym::Comma) {
@@ -4029,7 +4069,9 @@ impl Parser {
 
             self.expect_sym(Sym::Arrow)?;
             self.folding = true;
+            self.fold_arm = true;
             let value = self.expr(lower, Some(ty.clone()))?;
+            self.fold_arm = false;
             self.folding = false;
 
             // Rule 12: whether this arm folds sealed content is a property of the

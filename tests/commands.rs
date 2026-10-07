@@ -577,6 +577,12 @@ fn a_destructure_reaches_no_envelope() {
         message.contains("@order.placed has no field `position`"),
         "got: {message}"
     );
+    // A command has no trigger binding to offer as the other answer, so the hint names
+    // the one it has.
+    assert!(
+        message.contains("declare it on the event and fill it where the event is emitted"),
+        "got: {message}"
+    );
 }
 
 // ---------------------------------------------------------------------------------
