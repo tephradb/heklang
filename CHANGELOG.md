@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1](https://git.tqwewe.com/tephra/heklang/compare/heklang-v0.11.0...heklang-v0.11.1) - 2026-10-07
+
+### Added
+
+- a fold arm reads the record it folds, never the triggering event
+
+### Other
+
+- the envelope rule, and the field an event a fold must time keeps
+
 ## [0.11.0](https://git.tqwewe.com/tephra/heklang/compare/heklang-v0.10.0...heklang-v0.11.0) - 2026-09-21
 
 ### Added
