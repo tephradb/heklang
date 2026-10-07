@@ -61,8 +61,13 @@ in the trigger, they stay separate arms.
 
 ## 2. State lives inside the arm
 
-`as e` binds the trigger and is in scope for the arm's `fold` filters and its body. There is **no**
-effect-level trigger binding and no effect-level state.
+`as e` binds the trigger and is in scope for the arm's `fold` filters, its `fold` seeds and its body,
+and **not in a fold arm**: a filter and a seed are evaluated once before the fold runs, so the trigger
+there is plainly the constant it is, while an arm is evaluated once per matching event and would read
+as though it advanced. The whole binding goes rather than `e.at` alone. What an arm needs is computed
+above the fold (`let cutoff = e.at.add_days(-7)`), and a window is over a field the event declares,
+because the envelope is not foldable either. There is **no** effect-level trigger binding and no
+effect-level state.
 
 An arm stages exactly like a command body: a run of `fold` declarations is one read, a statement
 below one closes it, and a later run may filter on what an earlier one folded. There is **no

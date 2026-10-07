@@ -365,6 +365,17 @@ A comment is `//` to the end of the line. Put one on its own line, leading whate
     `fold` and an `if`, and so does every refusal below it.
 16. **A refusal's message may name its own fields and nothing else, and must name all of them.** The
     code is the name in snake_case, so the name must be capitalised and carry no `_`.
+17. **The envelope is the runtime's, not the author's.** Every append is stamped with an `event_id`,
+    a `correlation_id`, a `causation_id` and the append `timestamp`, and a program never declares or
+    sets them. A projector or effect arm reads three of them through its `as e` binding (`e.id`,
+    `e.at`, `e.position`); a command has no envelope to reach, and **no `fold` reaches one** in any
+    declaration. So an event declaring an `at` that only a read model displays restates what the log
+    already holds: use `e.at` in the reader. **An event a fold has to time keeps its own field**,
+    which is the one case the envelope cannot serve and is not a restatement: a declared field is
+    somewhere occurrence time can come from and the envelope never is. In an effect the trigger
+    binding is in scope for a fold's filters and seed, evaluated once before the fold, and not in an
+    arm, where it would read as though it advanced. `now()` is for time that is genuinely domain data
+    (`expires_at`, `due_date`, a `purchased_at` an upstream system reported).
 
 ## Reference
 

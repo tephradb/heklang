@@ -139,6 +139,16 @@ event is a fact, and a fact with a hole in it is a different fact. `{ order_id }
 An emitted event is **not** in the log a later stage folds: emits go to a buffer and the append
 happens once, at the end. A command cannot self-conflict.
 
+**The envelope is not an author's field.** Every append is stamped with an `event_id`, a
+`correlation_id`, a `causation_id` and the append `timestamp`. A projector or effect arm reads three
+of them through its `as e` binding (`e.id`, `e.at`, `e.position`), which is where a `created_at`-style
+column comes from; a command has no envelope to reach, and **no `fold` reaches one**, in a command or
+in an effect. An `at` that only a read model displays is a restatement and belongs in the reader; one
+a fold decides from is not, because a declared field is somewhere occurrence time can come from and
+the envelope never is, so **an event a fold has to time keeps its own `Timestamp` field**. `now()` in
+a command body is for time that is genuinely domain data (`expires_at`, `due_date`, a `purchased_at`
+an upstream system reported), pinned once per request.
+
 ## 5. The three outcomes
 
 | Outcome | Meaning |

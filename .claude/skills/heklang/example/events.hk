@@ -32,10 +32,12 @@ event @seat.released {
   attendee_id: Attendee,
 }
 
+// When a confirmation was appended is not a field here: the envelope carries that, and
+// the projector reads it as `e.at`. A `Timestamp` field is for time that is domain data
+// (a due date, an instant an upstream system reported), never for the append instant.
 event @booking.confirmed {
   booking_id: Uuid,
   notification_id: Uuid,
-  at: Timestamp,
   // Added once confirmations were already in the log, which is the one thing an
   // append-only log cannot go back and fill in. `@absent` says what those events read
   // as, so the field stays required for every new one and no handler has to deal with an
