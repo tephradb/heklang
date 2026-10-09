@@ -132,6 +132,16 @@ struct Parser {
     /// caller's local be typed in pass D before this body is parsed. See
     /// `docs/folds.md` rule 5.
     folds: Vec<Signature>,
+    /// Every **inline** fold, as the tokens it was written as, with the body that wrote
+    /// it. Rule 9's `duplicate-fold` compares these: two bodies folding the same slice
+    /// the same way is the duplication the named form exists to remove, and what drifts
+    /// when the copies fall out of step is the append condition, which no test can see.
+    ///
+    /// Tokens rather than IR, the way `guard_call`'s same-arguments check does it. "A
+    /// byte-identical fold cannot differ in meaning" is a claim about the source, and
+    /// comparing the lowered form would also equate two folds an author wrote differently
+    /// on purpose.
+    inline_folds: Vec<InlineFold>,
     /// Declared refusals, whole rather than as signatures: a use site needs the
     /// message as well as the fields, because it builds the string itself. See
     /// `docs/refusals.md`.
@@ -289,6 +299,17 @@ enum Kind {
 /// [`Given::fields`](crate::ir::Given::fields) carries into the IR.
 type EventHead = (EventPath, Option<ExprId>, Vec<(Ident, ExprId)>);
 
+/// One inline fold, for rule 9. Located by module and span rather than by the body that
+/// wrote it, which is both what a reader navigates to and what handles the worst case the
+/// rule was measured on: nineteen arms of *one* effect folding the same thing nineteen
+/// times. Keying on the declaration would have missed every one of those.
+#[derive(Debug, Clone)]
+struct InlineFold {
+    written: Vec<Token>,
+    module: Option<Ident>,
+    span: Span,
+}
+
 #[derive(Debug, Clone)]
 struct Signature {
     name: Ident,
@@ -330,6 +351,7 @@ impl Parser {
             folding: false,
             fold_arm: false,
             folds: Vec::new(),
+            inline_folds: Vec::new(),
             command_end: 0,
             kind: Kind::Command,
             commands: Vec::new(),
@@ -863,6 +885,7 @@ impl Parser {
         };
         self.check_recursion(&program)?;
         self.check_guards(&program)?;
+        self.check_duplicate_folds()?;
         self.check_cycles(&program)?;
         self.check_zeros(&program)?;
         self.check_max(&program)?;
@@ -956,6 +979,7 @@ impl Parser {
             commands: _,
             guards: _,
             folds: _,
+            inline_folds: _,
             refusals: _,
             functions: _,
             module_enums: _,
@@ -4306,6 +4330,7 @@ impl Parser {
 
     fn fold_decl(&mut self, lower: &mut Lower, events: &[EventDef]) -> Result<(), Diagnostic> {
         let decl = self.span_here();
+        let opened = self.pos;
         self.expect_word(Keyword::Fold)?;
         let name = self.expect_ident()?;
         // `fold x: T = seed` declares one here; `fold x = Name { .. }` reads one declared
@@ -4339,7 +4364,19 @@ impl Parser {
                 )));
         }
         let slot = lower.b.fold(&name, ty.clone(), init);
-        self.fold_arms(lower, events, &name, &ty, slot, decl, before_seed)
+        self.fold_arms(lower, events, &name, &ty, slot, decl, before_seed)?;
+        // Rule 9, recorded rather than decided here: whether this is a duplicate is a
+        // question about the whole program, and the second copy is often in another
+        // module that has not been read yet.
+        self.inline_folds.push(InlineFold {
+            written: self.tokens[opened..self.pos]
+                .iter()
+                .map(|spanned| spanned.token.clone())
+                .collect(),
+            module: self.module_at(opened).map(str::to_string),
+            span: decl,
+        });
+        Ok(())
     }
 
     /// The `on <event>(<filters>) [{ <binds> }] => <expr>` run beneath a fold, and the two
@@ -9841,6 +9878,64 @@ impl Parser {
             Some(module) => error.in_file(module),
             None => error,
         })
+    }
+
+    /// Rule 9: one inline fold written the same way in two places.
+    ///
+    /// **The whole point is the append condition.** A fold declares the slice its caller
+    /// conflicts on, so two copies that fall out of step give two commands two different
+    /// boundaries for one question, and `docs/testing.md` §8 keeps the condition out of a
+    /// test on purpose. A port measured 167 byte-identical copies among 425 folds, and the
+    /// failure mode is a command deciding on a stale value and appending anyway.
+    ///
+    /// An error rather than a warning, because a rule about the append condition that an
+    /// author may ignore is not a rule. There is no reverse check: a named fold with one
+    /// caller is not a diagnostic (rule 9).
+    ///
+    /// Compared **as written**, including the accumulator's own name. That is what makes
+    /// the trigger free of false positives rather than nearly so: normalising the name
+    /// would equate `fold a: Bool = false on @x(..) { a } => a` with the same shape over a
+    /// field called `b`, which folds a different field of the same event. The cost is a
+    /// pair that differs only in its local name going unreported, which is the safe half
+    /// of the trade.
+    fn check_duplicate_folds(&self) -> Result<(), Diagnostic> {
+        for (index, fold) in self.inline_folds.iter().enumerate() {
+            let Some(first) = self.inline_folds[..index]
+                .iter()
+                .find(|other| other.written == fold.written)
+            else {
+                continue;
+            };
+            let at = match &first.module {
+                Some(module) => format!("`{module}:{}`", first.span.start),
+                None => format!("{}", first.span.start),
+            };
+            let error = self
+                .err(
+                    Code::DuplicateFold,
+                    format!("this fold is also declared at {at}; name it, so the two cannot drift apart"),
+                    fold.span,
+                )
+                .with_hint(
+                    "a fold declares the slice its caller conflicts on, so two copies that fall out of step give two commands two different boundaries for one question, and no test can see it; declare it once with `fold <Name>(..) -> <T> = <seed> { .. }` and read it by name",
+                )
+                .with_related(Related::new("first declared here", first.span));
+            let error = match &first.module {
+                Some(module) => {
+                    let mut error = error;
+                    if let Some(related) = error.related.last_mut() {
+                        *related = Related::new("first declared here", first.span).in_file(module);
+                    }
+                    error
+                }
+                None => error,
+            };
+            return Err(match &fold.module {
+                Some(module) => error.in_file(module),
+                None => error,
+            });
+        }
+        Ok(())
     }
 
     fn check_cycles(&self, program: &Program) -> Result<(), Diagnostic> {

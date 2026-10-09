@@ -632,3 +632,69 @@ fn an_effect_arm_takes_its_arguments_from_the_trigger() {
         "each slice is narrowed to the one customer"
     );
 }
+
+// ---------------------------------------------------------------------------------
+// Rule 9's check: one inline fold written the same way in two bodies.
+
+#[test]
+fn the_same_inline_fold_in_two_bodies_is_refused() {
+    let source = format!(
+        "{EVENTS}command A(customer_id: Int) {{\n  fold n: Int = 0\n    on @order.placed(customer_id) => n + 1\n  if n > 1 {{ reject TooMany }}\n  return\n}}\n\ncommand B(customer_id: Int) {{\n  fold n: Int = 0\n    on @order.placed(customer_id) => n + 1\n  if n > 2 {{ reject TooMany }}\n  return\n}}\n"
+    );
+    assert!(
+        error(&source).starts_with("this fold is also declared at"),
+        "got {:?}",
+        error(&source)
+    );
+    assert!(
+        hint(&source).contains("no test can see it"),
+        "the hint says what drifting costs, got {:?}",
+        hint(&source)
+    );
+}
+
+/// Two arms of one effect count as two bodies. This is the case the rule was measured
+/// on: nineteen arms of one effect folded the same thing nineteen times, and keying on
+/// the declaration would have missed every one.
+#[test]
+fn two_arms_of_one_effect_are_two_bodies() {
+    let source = format!(
+        "{EVENTS}effect E {{\n  on @order.placed as e {{ @key customer_id }} {{\n    fold n: Int = 0\n      on @order.placed(customer_id: e.customer_id) => n + 1\n    log(\"{{n}}\")\n  }}\n  on @order.cancelled as e {{ @key customer_id }} {{\n    fold n: Int = 0\n      on @order.placed(customer_id: e.customer_id) => n + 1\n    log(\"{{n}}\")\n  }}\n}}\n"
+    );
+    assert!(
+        error(&source).starts_with("this fold is also declared at"),
+        "got {:?}",
+        error(&source)
+    );
+}
+
+/// The near-miss pairs the rule names. Same slice, same seed, **different bound field**:
+/// two folds over two fields of one event, which is why the accumulator's own name is
+/// part of the comparison rather than normalised away.
+#[test]
+fn a_different_bound_field_is_a_different_fold() {
+    let program = program(
+        "event @w.opened { id: Int, on_a: Bool, on_b: Bool }\ncommand C(id: Int) {\n  fold a: Bool = false\n    on @w.opened(id) { on_a } => on_a\n  fold b: Bool = false\n    on @w.opened(id) { on_b } => on_b\n  if a && b { return }\n  return\n}\n",
+    );
+    assert_eq!(program.command("C").expect("declared").stages.len(), 1);
+}
+
+#[test]
+fn a_different_seed_or_event_is_a_different_fold() {
+    // The FR-11 window snapshot against the live policy: alike on the page, opposite in
+    // meaning, and apart in both the event and the seed.
+    let program = program(
+        "event @w.opened { id: Int, on_a: Bool }\nevent @p.configured { id: Int, on_a: Bool }\ncommand C(id: Int) {\n  fold snap: Bool = false\n    on @w.opened(id) { on_a } => on_a\n  fold live: Bool = true\n    on @p.configured(id) { on_a } => on_a\n  if snap && live { return }\n  return\n}\n",
+    );
+    assert_eq!(program.command("C").expect("declared").stages.len(), 1);
+}
+
+/// There is no reverse check: reading one named fold from two bodies is the point of the
+/// construct, not a diagnostic.
+#[test]
+fn reading_one_named_fold_from_two_bodies_is_fine() {
+    let program = program(&format!(
+        "{EVENTS}{FOLDS}command D(customer_id: Int) {{\n  fold a = HasOrdered {{ customer_id }}\n  if a {{ return }}\n  return\n}}\n\ncommand E(customer_id: Int) {{\n  fold a = HasOrdered {{ customer_id }}\n  if a {{ return }}\n  return\n}}\n"
+    ));
+    assert!(program.command("D").is_some() && program.command("E").is_some());
+}

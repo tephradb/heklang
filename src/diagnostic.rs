@@ -70,6 +70,8 @@ pub enum Code {
     /// A named fold binding an accumulator name no arm reads. See `docs/folds.md`
     /// rule 3.
     UnusedAccumulator,
+    /// One inline fold written the same way in two bodies. See `docs/folds.md` rule 9.
+    DuplicateFold,
 
     // Where a statement may appear.
     WrongContext,
@@ -132,6 +134,7 @@ impl Code {
         Code::StageShape,
         Code::NoZeroValue,
         Code::UnusedAccumulator,
+        Code::DuplicateFold,
         Code::WrongContext,
         Code::ImpureFn,
         Code::FoldRestriction,
@@ -182,6 +185,7 @@ impl Code {
             Code::StageShape => "stage-shape",
             Code::NoZeroValue => "no-zero-value",
             Code::UnusedAccumulator => "unused-accumulator",
+            Code::DuplicateFold => "duplicate-fold",
             Code::WrongContext => "wrong-context",
             Code::ImpureFn => "impure-fn",
             Code::FoldRestriction => "fold-restriction",

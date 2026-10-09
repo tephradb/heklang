@@ -205,6 +205,7 @@ be the whole of it:
 | `stage-shape` | a `fold` or `guard` written where or how it does not go |
 | `no-zero-value` | a `patch` that would materialise a row it cannot fill |
 | `unused-accumulator` | a named fold binding an accumulator name no arm reads |
+| `duplicate-fold` | one inline fold written the same way in two bodies |
 | `wrong-context` | a statement in a declaration kind, or an arm, that does not have it |
 | `impure-fn` | a `fn` doing something a pure function cannot |
 | `fold-restriction` | a `fold` calling out, decrypting, reading a secret, or an arm naming the trigger |

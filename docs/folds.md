@@ -417,15 +417,28 @@ the binds, the seed and the arms:
 It is an **error** rather than a warning. A rule about the append condition that an author may
 ignore is not a rule, and `docs/testing.md` §8 means no test will catch what ignoring it costs.
 
-**Not implemented yet.** The construct landed without it, so nothing currently reports a duplicated
-inline fold. Everything else in this rule holds: inline folds are kept, naming is never forced, and
-promotion stays a header edit. Until the check exists, the 39% this section is about is found by
-reading rather than by `hek check`.
+**Two *bodies*, not two declarations.** An effect's arm counts as one, and that is not a detail: the
+worst case the rule was measured on is nineteen arms of **one** effect folding the same thing
+nineteen times, and keying on the declaration would have missed every one. The message names a file
+and a line rather than a body for the same reason, which is also what a reader navigates to.
 
 **The trigger has no false positives by construction.** Byte-identical folds cannot differ in
 meaning. It fires 167 times on the port, and the near-miss pairs that look alike all survive it:
 the FR-11 window snapshot (`@edit.window.opened`, seeded `false`) and the live policy
 (`@edit.policy.configured`, seeded `true`) differ in both event and seed.
+
+**Compared as written, including the accumulator's own name**, which is what makes that claim exact
+rather than nearly so. Normalising the name would equate
+`fold a: Bool = false / on @w.opened(id) { a } => a` with the same shape over a field called `b`,
+and those fold two different fields of one event. The cost is that a pair differing *only* in its
+local name goes unreported, which is the safe half of the trade: the check under-counts and never
+misfires. Comparing the lowered form instead would have the opposite problem, equating two folds an
+author wrote differently on purpose.
+
+**It found one the migration's own tooling missed.** The script that named 80 folds across the port
+keyed on the slice set and gave up on any fold binding more than one field, so a two-arm
+`captured_currency` stayed duplicated across two effects. `hek check` reported it on the first run
+after the check landed, which is the argument for the check in one sentence.
 
 **There is no reverse check**, and a named fold with one caller is not a diagnostic. Twelve of the
 port's eighty had one, and several were right: naming one of a family for symmetry with three

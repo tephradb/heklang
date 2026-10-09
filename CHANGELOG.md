@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Sealed(T, Subject)` is spellable in a fold's return type and nowhere else, so a fold can hand
   back content from behind the decrypt boundary for its caller to `reveal`. The four most
   duplicated folds in the port that measured the construct are sealed.
+- `duplicate-fold`: one inline fold written the same way in two bodies, which is `docs/folds.md`
+  rule 9. An error rather than a warning, because a fold declares the slice its caller conflicts on
+  and `docs/testing.md` §8 keeps the append condition out of a test, so nothing else reports two
+  copies drifting apart. An effect's arm counts as a body. Compared as written, including the
+  accumulator's name, so the check under-counts and never misfires. It fires 167 times on the
+  pre-migration port, and found one duplicate the migration's own tooling had missed.
 - `unused-accumulator`: a named fold that binds an accumulator name no arm reads. A fold's value
   is its declaration's name, so the name is written only where an arm reads the running value.
 - `hek check --boundaries` names what a command reads as well as what it guards, transitively
