@@ -8,9 +8,10 @@ use crate::inline;
 use crate::ir::{
     Absent, Action, Arm, BinOp, Bind, Builtin, Command, ConstDef, Delivery, Effect, EntityDef,
     EntityField, EnumDef, EnvField, EventDef, EventPath, Expect, Expr, ExprId, Exprs, FieldDef,
-    Filter, Function, Given, Guard, Handler, Ident, Index, Iter, Literal, MessagePart, Number,
-    Param, Pos, Program, Projector, RecordDef, RecordField, RefusalDef, RefusalParam, ReplySpec,
-    Return, SecretDef, Setup, Slot, Span, Stage, Stmt, SubjectDef, Test, Type, UnOp, Update,
+    Filter, Fold, Function, Given, Guard, Handler, Ident, Index, Iter, Literal, MessagePart,
+    Number, Param, Pos, Program, Projector, RecordDef, RecordField, RefusalDef, RefusalParam,
+    ReplySpec, Return, SecretDef, Setup, Slot, Span, Stage, Stmt, SubjectDef, Test, Type, UnOp,
+    Update,
 };
 use crate::lex::{Keyword, Spanned, Sym, Token, lex};
 use crate::scaled::{self, MAX_SCALE, Rounding};
@@ -41,6 +42,7 @@ pub fn parse_files<'a>(
 struct Bodies {
     commands: Vec<Command>,
     guards: Vec<Guard>,
+    folds: Vec<Fold>,
     effects: Vec<Effect>,
     functions: Vec<Function>,
     /// Where each `test` starts, for pass E to come back to.
@@ -126,6 +128,10 @@ struct Parser {
     /// The same, for a guard, so a command may name one declared below it or in
     /// another module. See `docs/guards.md`.
     guards: Vec<Signature>,
+    /// The same, for a named fold. Its `ret` is always `Some`, which is what lets a
+    /// caller's local be typed in pass D before this body is parsed. See
+    /// `docs/folds.md` rule 5.
+    folds: Vec<Signature>,
     /// Declared refusals, whole rather than as signatures: a use site needs the
     /// message as well as the fields, because it builds the string itself. See
     /// `docs/refusals.md`.
@@ -272,6 +278,9 @@ enum Kind {
     /// into a command, so everything a command may not do it may not do either.
     /// See `docs/guards.md`.
     Guard,
+    /// A named fold's body. A guard's body minus every way to refuse, so it holds to
+    /// everything a guard does and to rule 4 besides. See `docs/folds.md`.
+    Fold,
 }
 
 /// What a `given` or an event `expect` names: which event, the call that made it when a
@@ -320,6 +329,7 @@ impl Parser {
             prologue: false,
             folding: false,
             fold_arm: false,
+            folds: Vec::new(),
             command_end: 0,
             kind: Kind::Command,
             commands: Vec::new(),
@@ -836,6 +846,7 @@ impl Parser {
             events,
             commands: bodies.commands,
             guards: bodies.guards,
+            folds: bodies.folds,
             projectors,
             effects: bodies.effects,
             // Cloned rather than taken: pass E below resolves a test's values against the
@@ -944,6 +955,7 @@ impl Parser {
             errors: _,
             commands: _,
             guards: _,
+            folds: _,
             refusals: _,
             functions: _,
             module_enums: _,
@@ -1144,6 +1156,7 @@ impl Parser {
             }
             Token::Word(Keyword::Command) => self.command_signature()?,
             Token::Word(Keyword::Guard) => self.guard_signature()?,
+            Token::Word(Keyword::Fold) => self.fold_signature()?,
             Token::Word(Keyword::Refusal) => self.refusal_decl()?,
             Token::Word(Keyword::Fn) => self.fn_signature()?,
             Token::Word(Keyword::Effect) | Token::Word(Keyword::Test) => self.skip_item()?,
@@ -1175,6 +1188,10 @@ impl Parser {
             Token::Word(Keyword::Guard) => {
                 let guard = self.guard_item(events)?;
                 out.guards.push(guard);
+            }
+            Token::Word(Keyword::Fold) => {
+                let fold = self.fold_item(events)?;
+                out.folds.push(fold);
             }
             Token::Word(Keyword::Fn) => out.functions.push(self.fn_decl(events, Kind::Function)?),
             Token::Word(Keyword::Projector) => {
@@ -1261,6 +1278,97 @@ impl Parser {
             ret: None,
         });
         self.skip_braced()
+    }
+
+    /// The same, for a named fold. Unlike a guard it declares a result, which is the one
+    /// thing pass D cannot wait for: a caller's body is lowered before this body is
+    /// parsed, so the local it binds takes its type from here. See `docs/folds.md`
+    /// rule 5.
+    fn fold_signature(&mut self) -> Result<(), Diagnostic> {
+        self.expect_word(Keyword::Fold)?;
+        let named = self.pos;
+        let at = self.span_here();
+        let name = self.expect_ident()?;
+        if self.folds.iter().any(|other| other.name == name) {
+            return Err(self.declared_twice(
+                "fold",
+                &name,
+                format!("fold `{name}` is declared twice"),
+                at,
+            ));
+        }
+        self.declare("fold", &name, named);
+
+        let params = self.param_list(None)?;
+        let (_, ret) = self.fold_result()?;
+        self.folds.push(Signature {
+            name,
+            params,
+            ret: Some(ret),
+        });
+        // Not `skip_braced`, which stops at the first `{` it finds: a fold's seed is
+        // written *before* the body, so a record literal there would be mistaken for it
+        // and the body would be read as declarations. `skip_value` tracks depth and stops
+        // at the next item, which is what `const` already relies on.
+        self.skip_value();
+        Ok(())
+    }
+
+    /// `-> [acc:] Type`, the half of a fold's header that both passes read. The optional
+    /// name is the accumulator, written only when an arm reads the running value
+    /// (`docs/folds.md` rule 3); the seed after it belongs to whichever pass has a frame
+    /// to evaluate it in.
+    ///
+    /// `Sealed(T, Subject)` is spellable here and nowhere else. It sits above `type_ref`
+    /// for the reason `Secret` does in [`Parser::fn_type`]: `List(Sealed(..))` stays
+    /// rejected, so a seal never appears under a constructor. It creates no seal either,
+    /// since only `@subject` on an event field does that; this names one that came out of
+    /// the log. See `docs/folds.md` rule 7.
+    fn fold_result(&mut self) -> Result<(Option<Ident>, Type), Diagnostic> {
+        self.expect_sym(Sym::To)?;
+        // `acc: T` against a bare `T`, told apart by the colon. A type is never followed
+        // by one here, so a single token of lookahead settles it.
+        let next_is_colon = matches!(
+            self.tokens.get(self.pos + 1).map(|spanned| &spanned.token),
+            Some(Token::Sym(Sym::Colon))
+        );
+        let acc = if matches!(self.peek(), Token::Ident(_)) && next_is_colon {
+            let name = self.expect_ident()?;
+            self.expect_sym(Sym::Colon)?;
+            Some(name)
+        } else {
+            None
+        };
+        let ty = self.sealed_type()?;
+        Ok((acc, ty))
+    }
+
+    /// `Sealed(T, Subject)`, or anything [`Parser::type_ref`] takes. Only a fold's return
+    /// position reaches this.
+    fn sealed_type(&mut self) -> Result<Type, Diagnostic> {
+        if !matches!(self.peek(), Token::Ident(name) if name == "Sealed") {
+            return self.type_ref();
+        }
+        let at = self.span_here();
+        self.bump();
+        self.expect_sym(Sym::LParen)?;
+        let inner = self.type_ref()?;
+        self.expect_sym(Sym::Comma)?;
+        let subject = self.expect_ident()?;
+        if !self.subjects.iter().any(|def| def.name == subject) {
+            return Err(self.err(
+                Code::UnknownType,
+                format!("`{subject}` is not a declared subject"),
+                at,
+            ));
+        }
+        self.expect_sym(Sym::RParen)?;
+        let ty = Type::Sealed(Box::new(inner), subject);
+        // `Opt` stays outermost, the way it does everywhere a seal is built.
+        if self.eat_sym(Sym::Question) {
+            return Ok(Type::opt(ty));
+        }
+        Ok(ty)
     }
 
     /// Pass C. A refusal is a name, the fields its message needs, and the message.
@@ -1756,7 +1864,7 @@ impl Parser {
 
     fn expected_item(found: &Token) -> String {
         format!(
-            "expected `enum`, `record`, `const`, `secret`, `fn`, `event`, `refusal`, `command`, `guard`, `projector`, `effect` or `test`, found {found}"
+            "expected `enum`, `record`, `const`, `secret`, `fn`, `event`, `refusal`, `command`, `guard`, `fold`, `projector`, `effect` or `test`, found {found}"
         )
     }
 
@@ -2569,6 +2677,15 @@ impl Parser {
         }
         if self.at_word(Keyword::Refusal) {
             return self.skip_refusal();
+        }
+        // A named fold has a braced body *and* a value before it, so looking for a brace
+        // can stop inside a record-literal seed and leave the body to be read as
+        // declarations. Depth-tracking to the next item is right for the same reason it
+        // is right for a `const`.
+        if self.at_word(Keyword::Fold) {
+            self.bump();
+            self.skip_value();
+            return Ok(());
         }
         // A third: `secret NAME` has no body either, and it is two or three tokens.
         if self.at_secret_item() {
@@ -3720,6 +3837,113 @@ impl Parser {
         Ok(lower.b.finish_guard(at))
     }
 
+    /// A named fold declaration: a guard's shape with a declared result and no way to
+    /// refuse. See `docs/folds.md`.
+    fn fold_item(&mut self, events: &[EventDef]) -> Result<Fold, Diagnostic> {
+        let module = self.module_at(self.pos).map(str::to_string);
+        self.expect_word(Keyword::Fold)?;
+        let at = self.span_here();
+        let name = self.expect_ident()?;
+        let mut lower = Lower {
+            b: Builder::new(&name),
+            defaults: HashMap::new(),
+            subjects: HashMap::new(),
+        };
+        lower.b.in_module(module.as_deref());
+
+        // Params, then `-> [acc:] T`, then the seed, then the body's brace. A guard's
+        // `decl_params` stops at the brace, so this does its own tail.
+        self.expect_sym(Sym::LParen)?;
+        while !self.at_sym(Sym::RParen) {
+            let param = self.expect_ident()?;
+            self.expect_sym(Sym::Colon)?;
+            let ty = self.type_ref()?;
+            lower.b.param(&param, ty);
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RParen)?;
+        let (acc, ret) = self.fold_result()?;
+        self.expect_sym(Sym::Assign)?;
+        // What `decl_params` sets after its own brace. A fold's body holds no `let`, so
+        // its one consumer cannot fire in here, but leaving it at whatever the previous
+        // declaration left it at is a stale value rather than a decision.
+        self.command_end = self.command_end();
+
+        self.kind = Kind::Fold;
+        let parsed = self.fold_body(&mut lower, events, &name, &acc, &ret, at);
+        self.kind = Kind::Command;
+        let slot = parsed?;
+
+        // A fold that reads no log is a `fn`, for the reason a guard that folds nothing
+        // is one: the whole point of the declaration is that its slice joins its caller's
+        // conflict boundary.
+        if lower.b.folds_nothing() {
+            return Err(self
+                .err(
+                    Code::EmptyDeclaration,
+                    format!("fold `{name}` folds nothing"),
+                    at,
+                )
+                .with_hint(
+                    "a named fold declares a slice of the log, so it needs an arm; a value computed from arguments alone is a `fn`",
+                ));
+        }
+        Ok(lower.b.finish_fold(ret, slot, at))
+    }
+
+    /// The seed, the accumulator and the arms. Split out so [`Parser::fold_item`] can
+    /// restore `self.kind` before any `?` of its own runs, which is what keeps a failed
+    /// fold from reporting the next declaration as one.
+    fn fold_body(
+        &mut self,
+        lower: &mut Lower,
+        events: &[EventDef],
+        name: &str,
+        acc: &Option<Ident>,
+        ret: &Type,
+        at: Span,
+    ) -> Result<Slot, Diagnostic> {
+        let before_seed = self.errors.borrow().len();
+        self.folding = true;
+        let init = self.expr(lower, Some(ret.clone()))?;
+        self.folding = false;
+        self.expect_sym(Sym::LBrace)?;
+
+        // The accumulator is allocated under the name the author wrote, or under one no
+        // source token can spell when they wrote none. The second is what makes rule 3's
+        // check structural: with no name bound, an arm reading the running value is an
+        // ordinary "not in scope", and the shadowing an inline fold suffers from (a bind
+        // and an accumulator sharing a field's name) cannot arise at all.
+        let bound = match acc {
+            Some(acc) => acc.clone(),
+            None => format!("@acc:{name}"),
+        };
+        let slot = lower.b.fold(&bound, ret.clone(), init);
+
+        self.fold_arms(lower, events, name, ret, slot, at, before_seed)?;
+        self.expect_sym(Sym::RBrace)?;
+
+        // Rule 3: a name no arm reads is a synonym for the declaration's own, so there is
+        // one legal spelling and this is the half the parser has to say out loud. The
+        // other half an ordinary scope error already covers.
+        if let Some(acc) = acc
+            && !lower.b.reads_slot(slot)
+        {
+            return Err(self
+                .err(
+                    Code::UnusedAccumulator,
+                    format!("fold `{name}` names `{acc}` and no arm reads it"),
+                    at,
+                )
+                .with_hint(format!(
+                    "a fold's value is its declaration's name, so drop the `{acc}:` and leave the type; a name is for an arm that reads the running value, which none here does. If an arm looks like it reads `{acc}`, it is reading the event field of that name, which shadows the accumulator"
+                )));
+        }
+        Ok(slot)
+    }
+
     /// `(name: Type, ...)`, shared by a command and a guard because their inputs are
     /// the same thing: values the caller supplies before anything is read.
     fn decl_params(&mut self, lower: &mut Lower) -> Result<(), Diagnostic> {
@@ -3976,10 +4200,120 @@ impl Parser {
         Ok(())
     }
 
+    /// `fold <local> = <Name> { <args> }`. The arguments are checked exactly as a guard's
+    /// are, because they are the same thing: values the callee's filters and seed resolve
+    /// against, assigned above the declaration run they sit in. See `docs/folds.md`
+    /// rule 2.
+    fn fold_use(&mut self, lower: &mut Lower, local: &str, decl: Span) -> Result<(), Diagnostic> {
+        self.expect_sym(Sym::Assign)?;
+        let at = self.span_here();
+        let name = self.expect_ident()?;
+        let Some(signature) = self.folds.iter().find(|other| other.name == name).cloned() else {
+            // A guard here is the likely slip, since the two read alike at a call site
+            // and only one of them hands a value back.
+            let hint = match self.guards.iter().any(|other| other.name == name) {
+                true => Some(format!(
+                    "`{name}` is a guard, which decides rather than computing: write `guard {name} {{ .. }}` and drop the binding"
+                )),
+                false => None,
+            };
+            let error = self.err(
+                Code::NotDeclared,
+                format!("fold `{name}` is not declared"),
+                at,
+            );
+            return Err(match hint {
+                Some(hint) => error.with_hint(hint),
+                None => error,
+            });
+        };
+        // Always `Some`: `fold_signature` is the only thing that fills this table and it
+        // parses a return type unconditionally. Said here rather than re-reported as "not
+        // declared", which would be a wrong message for a fold that is.
+        let ret = signature
+            .ret
+            .clone()
+            .expect("a fold's signature always declares a result");
+
+        let mut args: Vec<(Ident, ExprId)> = Vec::new();
+        self.expect_sym(Sym::LBrace)?;
+        while !self.at_sym(Sym::RBrace) {
+            let at = self.span_here();
+            let field = self.expect_ident()?;
+            let Some((_, declared)) = signature.params.iter().find(|(param, _)| param == &field)
+            else {
+                return Err(self.err(
+                    Code::UnknownMember,
+                    format!("fold `{name}` has no parameter `{field}`"),
+                    at,
+                ));
+            };
+            if args.iter().any(|(seen, _)| seen == &field) {
+                return Err(self.err(
+                    Code::DuplicateField,
+                    format!("`{field}` is given twice"),
+                    at,
+                ));
+            }
+            let expected = declared.clone();
+            let value = if self.eat_sym(Sym::Colon) {
+                self.expr(lower, Some(expected))?
+            } else if lower.b.lookup(&field).is_none() {
+                return Err(self.not_in_scope(&field, at));
+            } else {
+                self.shorthand(lower, &field, &expected, at)
+            };
+            if let Some((read, at)) = lower.b.fold_read(value) {
+                return Err(self
+                    .err(
+                        Code::StageShape,
+                        format!("`{field}` is taken from `{read}`, which has not folded yet"),
+                        at,
+                    )
+                    .with_hint(format!(
+                        "a fold's arguments are evaluated before any fold runs, so this reads `{read}` before it has folded; pass a parameter, or a `let` above the declarations"
+                    )));
+            }
+            args.push((field, value));
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RBrace)?;
+        for (param, _) in &signature.params {
+            if !args.iter().any(|(field, _)| field == param) {
+                return Err(self.err(
+                    Code::MissingField,
+                    format!("fold `{name}` needs `{param}`"),
+                    at,
+                ));
+            }
+        }
+
+        // There is no twice-on-the-same-arguments check, and the asymmetry with a guard
+        // is the point. A second `guard G { x }` decides what the first decided and does
+        // nothing; a second read binds a second name, which is an ordinary two names for
+        // one value and the author's business. The slices it adds are already there, so
+        // it costs an accumulator, which is what `docs/guards.md` rule 4 says about
+        // guarding one proposition through two paths.
+        //
+        // The local is allocated *after* the arguments, so `fold x = F { n: x }` is a
+        // plain "not in scope" rather than a read of a slot that is about to be written.
+        let dest = lower.b.alloc(local, Some(ret));
+        lower.b.fold_call(&name, local, args, dest, decl);
+        Ok(())
+    }
+
     fn fold_decl(&mut self, lower: &mut Lower, events: &[EventDef]) -> Result<(), Diagnostic> {
         let decl = self.span_here();
         self.expect_word(Keyword::Fold)?;
         let name = self.expect_ident()?;
+        // `fold x: T = seed` declares one here; `fold x = Name { .. }` reads one declared
+        // at module scope. One token of lookahead, the same way `guard` tells its two
+        // shapes apart by the token after the keyword.
+        if self.at_sym(Sym::Assign) {
+            return self.fold_use(lower, &name, decl);
+        }
         self.expect_sym(Sym::Colon)?;
         let ty = self.type_ref()?;
         self.expect_sym(Sym::Assign)?;
@@ -4005,7 +4339,26 @@ impl Parser {
                 )));
         }
         let slot = lower.b.fold(&name, ty.clone(), init);
+        self.fold_arms(lower, events, &name, &ty, slot, decl, before_seed)
+    }
 
+    /// The `on <event>(<filters>) [{ <binds> }] => <expr>` run beneath a fold, and the two
+    /// checks that are properties of the whole run rather than of any one arm.
+    ///
+    /// Shared by the inline `fold` and the named one, which is the point: the arms are the
+    /// same syntax in both positions, so promoting an inline fold to a named one is a
+    /// header edit and the arms are untouched. See `docs/folds.md` rule 9.
+    #[allow(clippy::too_many_arguments)]
+    fn fold_arms(
+        &mut self,
+        lower: &mut Lower,
+        events: &[EventDef],
+        name: &str,
+        ty: &Type,
+        slot: Slot,
+        decl: Span,
+        before_seed: usize,
+    ) -> Result<(), Diagnostic> {
         // Rule 12: whether the variable is subject-bound is a property of every arm
         // agreeing, so it is settled across the declaration rather than at any one arm.
         // The seed is never subject-bound, which is allowed and is why `plain` records
@@ -4099,7 +4452,7 @@ impl Parser {
                     if let Some((first, at)) = &plain {
                         return Err(self.advised(
                             Code::StageShape,
-                            self.mixed_fold(&name, &field, first),
+                            self.mixed_fold(name, &field, first),
                             *at,
                         ));
                     }
@@ -4107,7 +4460,7 @@ impl Parser {
                 }
                 None => {
                     if let Some((have, _)) = &bound {
-                        let message = self.mixed_fold(&name, have, &path);
+                        let message = self.mixed_fold(name, have, &path);
                         return Err(self.advised(Code::StageShape, message, arm));
                     }
                     plain.get_or_insert((path.clone(), arm));
@@ -4133,6 +4486,10 @@ impl Parser {
             // edit that ends the error rather than trading it for the next one.
             let fix = match self.kind {
                 Kind::Guard => "give it an arm; a guard decides from what it folds, and one that folds nothing is a `fn`".to_string(),
+                // Same shape as a guard's, and for the same reason: a named fold exists to
+                // put a slice in its caller's boundary, so there is no `let` to fall back
+                // to. One that folds nothing is a `fn` too.
+                Kind::Fold => "give it an arm; a named fold exists to declare a slice, and one that declares none is a `fn`".to_string(),
                 _ => format!("write `let {name} = <seed>`"),
             };
             return Err(self
@@ -5450,6 +5807,13 @@ impl Parser {
                             Code::WrongContext,
                             "a guard decides whether a command may run, so it appends nothing",
                             "emit from the command that names this guard",
+                        );
+                    }
+                    Kind::Fold => {
+                        return self.fail_hint(
+                            Code::WrongContext,
+                            "a fold reads the log, so it appends nothing",
+                            "emit from the command that reads this fold",
                         );
                     }
                 }
@@ -7790,7 +8154,12 @@ impl Parser {
             Kind::Effect | Kind::EffectFn => Ok(()),
             // A guard is spliced into a command, so it inherits the command's answer.
             // Its own restriction is narrower and lives in `guard_only`.
-            Kind::Command | Kind::Guard => Err(self.advised(Code::WrongContext, command, span)),
+            // A fold is spliced into whatever reads it, and a command is the narrower of
+            // the two callers, so it answers as one. A fold readable from an effect arm
+            // but not from a command would be a signature nothing could place.
+            Kind::Command | Kind::Guard | Kind::Fold => {
+                Err(self.advised(Code::WrongContext, command, span))
+            }
             Kind::Projector => Err(self.advised(Code::WrongContext, projector, span)),
             Kind::Function => Err(self.purity_error(what, span)),
             Kind::Test => Err(self.err(
@@ -8718,6 +9087,11 @@ impl Parser {
         // terminal outcome is `fail`, so declaring one must not buy its way past that.
         match self.kind {
             Kind::Command | Kind::Guard => return None,
+            // Rule 4. The one capability that tells a fold and a guard apart, and the
+            // reason they do not overlap: a `fold` line at a call site is never an exit.
+            Kind::Fold => {
+                return Some("a fold computes a value, so it cannot refuse");
+            }
             Kind::Effect | Kind::EffectFn => {
                 return Some("an effect's terminal outcome is `fail`");
             }
@@ -9933,6 +10307,12 @@ fn refusal_code(name: &str) -> String {
 }
 
 /// The keywords a top-level declaration begins with.
+///
+/// `Keyword::Fold` is here and is also a statement keyword, which is safe for one reason:
+/// the two callers of [`Parser::at_item`] consult it only at brace depth 0, and an inline
+/// `fold` is always inside a declaration's braces. A declaration missing from this list is
+/// not an error at its own position, it goes missing from the program *silently*, which is
+/// what `a_const_above_a_fold_does_not_swallow_it` is for.
 fn starts_item(word: Keyword) -> bool {
     matches!(
         word,
@@ -9943,6 +10323,7 @@ fn starts_item(word: Keyword) -> bool {
             | Keyword::Event
             | Keyword::Command
             | Keyword::Guard
+            | Keyword::Fold
             | Keyword::Refusal
             | Keyword::Projector
             | Keyword::Effect

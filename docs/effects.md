@@ -92,9 +92,13 @@ them all in one invocation. Three things go wrong with that:
 The counter-example, for honesty about where this stops helping: an effect posting eight different
 alert shapes cannot use one multi-path arm, because its arms differ in the body and not only in the
 trigger. Those eight arms still repeat the same three folds between them, and that is the case that
-argues for effect-level `fold`, which this pass deliberately did not add. Per-arm state solved a
-real ordering problem, and multi-path arms plus records may shrink the duplication that motivates it,
-so the case is worth re-measuring before it is answered.
+argued for effect-level `fold`, which this pass deliberately did not add and which is now
+**answered and should not be built**: a named `fold` (`docs/folds.md`) factors an arm's folds out
+by name, with no scoping rule of its own, and 178 of the 425 inline folds in the port that measured
+the construct are in an arm.
+
+Per-arm state solved a real ordering problem and keeps it; what has changed is only that the
+duplication between arms no longer argues for a second place to put state.
 
 **Projectors legitimately want the opposite rule, and keep it.** Fanning one event out to several
 read models is a real pattern, and a projector has no journal, so nothing about ordering is

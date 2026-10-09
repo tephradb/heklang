@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Named `fold` declarations. A fold can now be declared once at module scope and read by name,
+  which is the value half of what `guard` does for a proposition: `fold spend = LifetimeSpend {
+  customer_id }` puts the same slices in the same append condition as writing the fold inline.
+  One keyword in two positions, parens to declare and braces to use, as `command`/`invoke` and
+  `guard`/`guard` already are. Inline folds are unchanged and still the default; `docs/folds.md`
+  rule 9 is the choice between them.
+- `Sealed(T, Subject)` is spellable in a fold's return type and nowhere else, so a fold can hand
+  back content from behind the decrypt boundary for its caller to `reveal`. The four most
+  duplicated folds in the port that measured the construct are sealed.
+- `unused-accumulator`: a named fold that binds an accumulator name no arm reads. A fold's value
+  is its declaration's name, so the name is written only where an arm reads the running value.
+- `hek check --boundaries` names what a command reads as well as what it guards, transitively
+  through its guards.
+
+### Fixed
+
+- `hek fmt` deleted a named fold's return type and seed, and a sealed return's subject, when a
+  comment appeared anywhere in the header, leaving source that no longer parsed. The three new
+  printers indexed positionally over a child list that includes comments; they use `parted` now,
+  and the `INTERLEAVED` fixture grew the cases that catch it.
+- A named read's destination slot was not marked pending, so `docs/folds.md` rule 2's "an argument
+  may not read a fold from its own stage" missed every named fold: a read's argument, a guard's
+  argument, a seed and a filter all passed `hek check` and then died at run time with "slot read
+  before it was set".
+- A guard or a fold spliced into a command's **second** stage landed past the statements already
+  there, so the caller could read a slot the splice assigned afterwards. The insert offsets are now
+  per stage rather than per caller. Reachable with guards alone, and rare only because
+  `docs/guards.md` rule 3 puts guards at the top.
+- A guard whose body only reads named folds is no longer reported as folding nothing.
+
 ## [0.11.0](https://git.tqwewe.com/tephra/heklang/compare/heklang-v0.10.0...heklang-v0.11.0) - 2026-09-21
 
 ### Added

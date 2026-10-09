@@ -145,7 +145,10 @@ What that buys, and what it costs:
   therefore changes every command that uses it, which is right: they all now decide differently.
   Extracting a `guard` is **not** free, though, because the splice materialises its parameters as
   assignments in the caller. What the rule buys here is that a guard is never counted twice.
-- An unused `const`, `refusal` or `guard` is invisible, so deleting one is not a change.
+- An unused `const`, `refusal`, `guard` or named `fold` is invisible, so deleting one is not a
+  change. All four are inlined, so a declaration of any of them runs nothing and its content is
+  already at every use site. A named fold earns no entry for that reason, and adding the construct
+  moved no hash: see `docs/folds.md` rule 11, which argued the opposite until it was built.
 
 **A `secret` is the fourth, for the first half of that reason and not the second.** It runs nothing,
 so it has no entry. It is not inlined either, because there is no value in the program to inline:

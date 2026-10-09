@@ -298,9 +298,16 @@ below its own `fold`, and everything after it is below that. Rule 3 gives the au
 the first case and cannot give it for this one.
 
 **A guard binds nothing into its caller.** Its folds are its own, so a `guard CourseHasSeats`
-gives the command no `seats`. A caller that wants a value folds it inline; the slice is already in
-the boundary, so the second fold costs an accumulator and nothing else. Handing values back would
-make a guard an object with fields, which is the aggregate rule 1 is about.
+gives the command no `seats`. Handing values back would make a guard an object with fields, which is
+the aggregate rule 1 is about.
+
+**A value that two commands both want is a named `fold`**, which is the other half of this rule and
+postdates it. The sentence above used to continue "a caller that wants a value folds it inline; the
+slice is already in the boundary, so the second fold costs an accumulator and nothing else", and
+that was true of the runtime and wrong about the source: a port measured 167 byte-identical copies
+of one fold across 425, and what drifts when they fall out of step is the append condition.
+`docs/folds.md` is the construct, and it keeps rule 1 intact by handing back **one** value named for
+the value rather than a bag named for an entity.
 
 ## 7. Naming a guard
 

@@ -193,6 +193,11 @@
 (refusal_declaration name: (type_identifier) @type)
 (command_declaration name: (type_identifier) @function)
 (guard_definition name: (type_identifier) @function)
+(fold_definition name: (type_identifier) @function)
+(fold_definition accumulator: (identifier) @variable)
+; `Sealed` is spellable in a fold return type and nowhere else, so it is highlighted
+; here rather than among the primitives.
+(fold_type "Sealed" @type.builtin)
 (function_declaration name: (identifier) @function)
 (const_declaration name: (identifier) @constant)
 
@@ -204,6 +209,7 @@
 (project_clause projector: (identifier) @type)
 (deliver_clause effect: (identifier) @type)
 (guard_declaration guard: (type_identifier) @function)
+(fold_declaration fold: (type_identifier) @function)
 
 ; ----------------------------------------------------------------- calls, builtins
 

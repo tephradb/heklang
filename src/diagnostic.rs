@@ -67,6 +67,9 @@ pub enum Code {
     RefusalShape,
     StageShape,
     NoZeroValue,
+    /// A named fold binding an accumulator name no arm reads. See `docs/folds.md`
+    /// rule 3.
+    UnusedAccumulator,
 
     // Where a statement may appear.
     WrongContext,
@@ -128,6 +131,7 @@ impl Code {
         Code::RefusalShape,
         Code::StageShape,
         Code::NoZeroValue,
+        Code::UnusedAccumulator,
         Code::WrongContext,
         Code::ImpureFn,
         Code::FoldRestriction,
@@ -177,6 +181,7 @@ impl Code {
             Code::RefusalShape => "refusal-shape",
             Code::StageShape => "stage-shape",
             Code::NoZeroValue => "no-zero-value",
+            Code::UnusedAccumulator => "unused-accumulator",
             Code::WrongContext => "wrong-context",
             Code::ImpureFn => "impure-fn",
             Code::FoldRestriction => "fold-restriction",

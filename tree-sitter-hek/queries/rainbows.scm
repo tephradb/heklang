@@ -1,5 +1,6 @@
 [
   (block)
+  (fold_body)
   (destructure)
   (field_initializer_list)
   (object_literal)

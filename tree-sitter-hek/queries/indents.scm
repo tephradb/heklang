@@ -20,6 +20,7 @@
   (annotation_arguments)
   (slice_reference)
   (parenthesized_expression)
+  (fold_body)
 ] @indent
 
 ; A fold is the one construct here that indents with no delimiter to do it: its arms sit two
@@ -31,6 +32,9 @@
 ; `@extend.prevent-once` on. The cost is that the *first* arm is still indented by hand,
 ; because until it exists the declaration ends at its seed; every arm after it follows from
 ; this, which is 98 of the 158 folds in the sources.
+;
+; A NAMED fold is not in this bind: it owns a brace, so it is in the delimited list above
+; and `fold_body` closes it like any other block.
 (fold_declaration) @indent
 
 [

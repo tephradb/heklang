@@ -10,6 +10,9 @@
 (guard_definition
   name: (type_identifier) @name) @definition.function
 
+(fold_definition
+  name: (type_identifier) @name) @definition.function
+
 (projector_declaration
   name: (type_identifier) @name) @definition.class
 

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The formatter prints `fold_definition`, `fold_body` and `fold_type`, and the `fold x = Name { .. }`
+  statement form.
+- `hek check` counts folds, and `--boundaries` names what each command reads as well as what it
+  guards, transitively through its guards.
+
 ## [0.5.4](https://git.tqwewe.com/tephra/heklang/compare/v0.5.3...v0.5.4) - 2026-09-21
 
 ### Added

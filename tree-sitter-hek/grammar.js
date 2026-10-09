@@ -66,6 +66,7 @@ module.exports = grammar({
         $.refusal_declaration,
         $.command_declaration,
         $.guard_definition,
+        $.fold_definition,
         $.projector_declaration,
         $.effect_declaration,
         $.test_declaration,
@@ -188,6 +189,40 @@ module.exports = grammar({
         field('parameters', $.parameters),
         field('body', $.block),
       ),
+
+    // A named fold. The accumulator name before the type is written only when an arm
+    // reads the running value, which is why it is optional here. See `docs/folds.md`.
+    fold_definition: ($) =>
+      seq(
+        'fold',
+        field('name', $._type_name),
+        field('parameters', $.parameters),
+        '->',
+        optional(seq(field('accumulator', $.identifier), ':')),
+        field('type', $.fold_type),
+        '=',
+        field('seed', $._expression),
+        field('body', $.fold_body),
+      ),
+
+    // `Sealed(T, Subject)` is spellable in this one position, so it is its own rule
+    // rather than an arm of `type`: that keeps `List(Sealed(..))` unparseable, which is
+    // the same device the checker uses. See `docs/folds.md` rule 7.
+    fold_type: ($) =>
+      choice(
+        $.type,
+        seq(
+          'Sealed',
+          '(',
+          field('content', $.type),
+          ',',
+          field('subject', $._type_name),
+          ')',
+          optional('?'),
+        ),
+      ),
+
+    fold_body: ($) => seq('{', repeat($.fold_arm), '}'),
 
     // A named refusal and the one message it carries. Parens declare and braces use,
     // the same split `guard` has; a refusal with no fields declares no parens and is
@@ -405,15 +440,26 @@ module.exports = grammar({
         seq('guard', field('guard', $._type_name), $.field_initializer_list),
       ),
 
+    // Two shapes, told apart by the token after the name: `:` declares a fold here and
+    // `=` reads one declared at module scope. See `docs/folds.md` rule 2.
     fold_declaration: ($) =>
-      seq(
-        'fold',
-        field('name', $.identifier),
-        ':',
-        field('type', $.type),
-        '=',
-        field('seed', $._expression),
-        repeat($.fold_arm),
+      choice(
+        seq(
+          'fold',
+          field('name', $.identifier),
+          ':',
+          field('type', $.type),
+          '=',
+          field('seed', $._expression),
+          repeat($.fold_arm),
+        ),
+        seq(
+          'fold',
+          field('name', $.identifier),
+          '=',
+          field('fold', $._type_name),
+          $.field_initializer_list,
+        ),
       ),
 
     fold_arm: ($) =>

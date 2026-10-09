@@ -312,6 +312,8 @@ pub struct Program {
     pub commands: Vec<Command>,
     /// Named propositions, in declaration order. See `docs/guards.md`.
     pub guards: Vec<Guard>,
+    /// Named folds, in declaration order. See `docs/folds.md`.
+    pub folds: Vec<Fold>,
     /// Named refusals, in declaration order. See `docs/refusals.md`.
     pub refusals: Vec<RefusalDef>,
     pub projectors: Vec<Projector>,
@@ -342,6 +344,10 @@ impl Program {
 
     pub fn guard(&self, name: &str) -> Option<&Guard> {
         self.guards.iter().find(|guard| guard.name == name)
+    }
+
+    pub fn fold(&self, name: &str) -> Option<&Fold> {
+        self.folds.iter().find(|fold| fold.name == name)
     }
 
     pub fn refusal(&self, name: &str) -> Option<&RefusalDef> {
@@ -864,6 +870,10 @@ pub struct Arm {
     /// position rather than to the head (`docs/effects.md` rule 3), so a second stage
     /// reads the same prefix the first did and there is no condition to build.
     pub stages: Vec<Stage>,
+    /// The named folds this arm reads. An arm has no `guard` (`docs/effects.md` rule 1)
+    /// so there is no call list beside this one, but it folds exactly as a command does
+    /// and 178 of the 425 folds in the port that motivated `docs/folds.md` are in one.
+    pub reads: Vec<FoldCall>,
     pub span: Span,
 }
 
@@ -884,6 +894,11 @@ pub struct Command {
     /// The guards this command names, in the order written. Kept after they are spliced
     /// in, so tooling can say what a command guards without re-deriving it.
     pub calls: Vec<GuardCall>,
+    /// The named folds this command reads, in the order written. Kept for the same
+    /// reason the guards are: `hek check --boundaries` is the only place a command's
+    /// whole read set is nameable, and after the splice the IR no longer says which
+    /// slices came from where.
+    pub reads: Vec<FoldCall>,
 }
 
 /// A named proposition about the log: folds, and one refusal when they do not hold.
@@ -902,8 +917,49 @@ pub struct Guard {
     pub stage: Stage,
     /// Its own guards, spliced into it before it is spliced anywhere.
     pub calls: Vec<GuardCall>,
+    /// The named folds it reads, spliced in the same way.
+    pub reads: Vec<FoldCall>,
     /// Where the guard is declared, so the cycle check can point at one. It runs after
     /// every pass, by which time the cursor is at the end of the last module.
+    pub span: Span,
+}
+
+/// A named fold: a slice of the log and the value it folds to. A guard's body with no
+/// refusal and one accumulator, which is what lets it hand a value back where a guard
+/// cannot. See `docs/folds.md`.
+#[derive(Debug, Clone)]
+pub struct Fold {
+    pub name: Ident,
+    pub module: Option<Ident>,
+    pub params: Vec<Param>,
+    /// The declared return type. Explicit because the splice runs after parsing, so a
+    /// caller's body is lowered before this body exists and the parser needs the type to
+    /// give the caller's local one. The same reason a `fn` declares its return type.
+    pub ret: Type,
+    /// The accumulator's slot, which is what a caller's local is assigned from. The
+    /// accumulator's *name* is not kept: it is written only when an arm reads it
+    /// (`docs/folds.md` rule 3) and is invisible outside this body either way.
+    pub slot: Slot,
+    pub frame: usize,
+    pub exprs: Exprs,
+    /// One stage, because a fold is one read, for the reason a guard is.
+    pub stage: Stage,
+    pub span: Span,
+}
+
+/// One `fold local = Name { args }`. The arguments are expressions in the *caller's*
+/// arena, for the reason a [`GuardCall`]'s are.
+#[derive(Debug, Clone)]
+pub struct FoldCall {
+    pub fold: Ident,
+    pub args: Vec<(Ident, ExprId)>,
+    /// The caller's local, assigned from the callee's accumulator once the splice has
+    /// shifted it. This one field is the whole difference from a [`GuardCall`]: a guard
+    /// discards what it folded, and a fold hands it back.
+    pub dest: Slot,
+    pub at_stage: usize,
+    pub at_slice: usize,
+    pub at_fold: usize,
     pub span: Span,
 }
 

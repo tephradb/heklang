@@ -10,6 +10,9 @@
 (guard_definition
   body: (block) @function.inside) @function.around
 
+(fold_definition
+  body: (fold_body) @function.inside) @function.around
+
 (event_handler
   body: (block) @function.inside) @function.around
 

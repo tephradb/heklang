@@ -34,7 +34,7 @@ hek [check|test|fmt|digest] [--boundaries] [--check]
 
 `path` is a directory or a single `.hk` file, and defaults to the current directory.
 
-`--boundaries` adds one line per command naming what it guards, transitively
+`--boundaries` adds one line per command naming what it guards and what it reads, transitively
 (`docs/guards.md`). It is asked for rather than printed, because `check` is a pass/fail
 gate and this is an enumeration rather than a summary: a 26-command program would pay 26
 lines on every run to restate what its own `guard` lines already say. What it adds is the
@@ -46,6 +46,7 @@ checked 9 files
   5 events, 6 commands, 9 guards, 12 refusals, 3 consts, 21 tests
 
   Subscribe guards CourseIsDefined, StudentIsRegistered, CourseHasSeats
+            reads CourseExists, StudentExists, CourseSubscriptionCount
   Unsubscribe guards SubscriptionIsActive
 ```
 

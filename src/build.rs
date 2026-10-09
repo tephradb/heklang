@@ -3,8 +3,8 @@ use std::mem;
 
 use crate::ir::{
     Arm, BinOp, Bind, Command, Delivery, EnvBind, EnvField, EventPath, Expr, ExprId, Exprs, Filter,
-    FoldVar, Function, Guard, GuardCall, Handler, Ident, Literal, Number, Param, Slice, SliceId,
-    Slot, Span, Stage, Stmt, Type, UnOp, Update,
+    Fold, FoldCall, FoldVar, Function, Guard, GuardCall, Handler, Ident, Literal, Number, Param,
+    Slice, SliceId, Slot, Span, Stage, Stmt, Type, UnOp, Update,
 };
 use crate::scaled::Rounding;
 
@@ -32,6 +32,20 @@ pub struct Builder {
     /// The slots a branch has proved present. A load of one lowers to an `Unwrap`.
     narrowed: HashSet<Slot>,
     calls: Vec<GuardCall>,
+    reads: Vec<FoldCall>,
+    /// The local each named read binds, by slot, so a diagnostic can name one. A read's
+    /// destination is pending like a `fold`'s accumulator but is not a [`FoldVar`], so
+    /// `fold_of` cannot find it and `fold_read` would otherwise report nothing.
+    read_names: Vec<(Slot, Ident)>,
+    /// Whether the open stage has read a named fold. A fold declares its slices at splice
+    /// time rather than here, so without this the stage looks empty and a statement below
+    /// the read would land in `pre`, above the fold, and then read a local the splice
+    /// assigns in `post`. That is a slot read before it was set.
+    ///
+    /// A guard call deliberately does **not** set it. A guard binds nothing, so no
+    /// statement below one can depend on it having run, and leaving it alone keeps every
+    /// existing program's lowering, and therefore its digest hash, exactly where it was.
+    read_here: bool,
 }
 
 impl Builder {
@@ -53,6 +67,9 @@ impl Builder {
             now: None,
             narrowed: HashSet::new(),
             calls: Vec::new(),
+            reads: Vec::new(),
+            read_names: Vec::new(),
+            read_here: false,
         }
     }
 
@@ -234,14 +251,35 @@ impl Builder {
         self.unset_read(value).is_some()
     }
 
+    /// Whether anything in this declaration loads `slot`. A named fold's accumulator asks
+    /// it, for rule 3: a name no arm reads is a second spelling of the declaration's own
+    /// name, so there is one legal form and this is what decides which it is.
+    ///
+    /// The whole arena rather than the arms alone, because `Expr::Load` is the only node
+    /// carrying a slot and a seed cannot load the accumulator it seeds: `fold_read`
+    /// already refuses that, and with a sharper message than this one would give.
+    pub fn reads_slot(&self, slot: Slot) -> bool {
+        self.exprs
+            .entries()
+            .any(|(expr, _)| matches!(expr, Expr::Load(found) if *found == slot))
+    }
+
     /// The unfolded `fold` an expression reads, with the span of the read. A seed asks
     /// this, because a seed is evaluated before its own stage folds and so sees another
     /// `fold`'s seed rather than what it folds to: an answer that is wrong rather than
     /// late. A `fold` an earlier stage folded is not one of these.
     pub fn fold_read(&self, value: ExprId) -> Option<(Ident, Span)> {
         let (slot, at) = self.unset_read(value)?;
-        let var = self.fold_of(slot)?;
-        Some((var.name.clone(), self.exprs.span(at)))
+        let name = match self.fold_of(slot) {
+            Some(var) => var.name.clone(),
+            // A named read's destination, which is pending but is no `FoldVar`.
+            None => self
+                .read_names
+                .iter()
+                .find(|(found, _)| *found == slot)
+                .map(|(_, name)| name.clone())?,
+        };
+        Some((name, self.exprs.span(at)))
     }
 
     /// The first read of a `fold` the open stage declares, as the slot and the load
@@ -424,7 +462,7 @@ impl Builder {
     /// has none, below them once it has. This is the whole of what makes a stage a
     /// stage, so nothing else may push onto `pre` or `post`.
     pub fn stmt(&mut self, stmt: Stmt) {
-        if self.open.slices.is_empty() && self.open.folds.is_empty() {
+        if self.open.slices.is_empty() && self.open.folds.is_empty() && !self.read_here {
             self.open.pre.push(stmt);
         } else {
             self.open.post.push(stmt);
@@ -446,6 +484,8 @@ impl Builder {
         }
         self.stages.push(mem::take(&mut self.open));
         self.pending.clear();
+        self.read_names.clear();
+        self.read_here = false;
     }
 
     /// Closes the open stage behind the others. Every finisher starts here, so a
@@ -471,6 +511,7 @@ impl Builder {
             now: self.now,
             stages: self.stages,
             calls: self.calls,
+            reads: self.reads,
         }
     }
 
@@ -488,6 +529,25 @@ impl Builder {
             exprs: self.exprs,
             stage: self.stages.pop().unwrap_or_default(),
             calls: self.calls,
+            reads: self.reads,
+            span,
+        }
+    }
+
+    /// A guard's shape plus the accumulator's slot and a return type, and minus any way
+    /// to refuse. One stage for the reason a guard has one. See `docs/folds.md`.
+    pub fn finish_fold(mut self, ret: Type, slot: Slot, span: Span) -> Fold {
+        self.seal();
+        debug_assert_eq!(self.stages.len(), 1, "a fold is one stage");
+        Fold {
+            name: self.name,
+            module: self.module,
+            params: self.params,
+            ret,
+            slot,
+            frame: self.frame as usize,
+            exprs: self.exprs,
+            stage: self.stages.pop().unwrap_or_default(),
             span,
         }
     }
@@ -505,13 +565,50 @@ impl Builder {
         });
     }
 
+    /// One `fold local = Name { args }`, recorded the same way. `dest` is the caller's
+    /// local, which the splice assigns the callee's accumulator into.
+    pub fn fold_call(
+        &mut self,
+        fold: &str,
+        local: &str,
+        args: Vec<(Ident, ExprId)>,
+        dest: Slot,
+        span: Span,
+    ) {
+        self.reads.push(FoldCall {
+            fold: fold.into(),
+            args,
+            dest,
+            at_stage: self.stages.len(),
+            at_slice: self.open.slices.len(),
+            at_fold: self.open.folds.len(),
+            span,
+        });
+        // Pending for exactly the reason an accumulator is: the splice assigns this in the
+        // stage's second half, so anything resolved in the first half -- another read's
+        // argument, a guard's argument, a seed, a filter -- would read it unset. Without
+        // this, all four passed `hek check` and died at run time with "slot read before it
+        // was set", which is the one thing a checker must not allow.
+        self.pending.insert(dest);
+        self.read_names.push((dest, local.into()));
+        self.read_here = true;
+    }
+
     /// Whether anything has been folded yet, in any stage. A guard that folds nothing
     /// is a `fn`.
+    ///
+    /// A named guard or a named fold counts, even though neither has contributed a slice
+    /// yet: both bring one at splice time, so a guard whose whole body is
+    /// `fold ok = SomeFold { .. }` and a refusal does read the log. Checking the slices
+    /// alone called that a `fn` and refused the shape `docs/folds.md` rule 4 recommends.
     pub fn folds_nothing(&self) -> bool {
-        self.stages
-            .iter()
-            .chain([&self.open])
-            .all(|stage| stage.slices.is_empty())
+        self.calls.is_empty()
+            && self.reads.is_empty()
+            && self
+                .stages
+                .iter()
+                .chain([&self.open])
+                .all(|stage| stage.slices.is_empty())
     }
 }
 
@@ -594,6 +691,7 @@ impl Builder {
             exprs: self.exprs,
             now: self.now,
             stages: self.stages,
+            reads: self.reads,
             span,
         }
     }

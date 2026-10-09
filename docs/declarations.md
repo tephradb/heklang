@@ -16,6 +16,7 @@ up in exactly one kind, or in none.**
 | --- | --- |
 | `invoke Name { .. }` | a command, and only a command |
 | `guard Name { .. }` | a guard, and only a guard |
+| `fold x = Name { .. }` | a named fold, and only one. See `docs/folds.md` |
 | `reject Name` | a refusal, and only a refusal |
 | an event path | an event, never a handler |
 | a projector's name | nothing in the language; it names a read model to a host |
@@ -37,6 +38,10 @@ a module `fn`, which is in scope inside every effect. See `docs/functions.md`.
 A `guard` is in a fifth, and it is the second one reachable from source. `guard Name { .. }` resolves
 to a guard and nothing else, so a command and a guard may share a name for the same reason a command
 and an effect may. See `docs/guards.md`.
+
+A named `fold` is in a seventh, and the fourth reachable from source. `fold x = Name { .. }`
+resolves to a fold and nothing else, so a command, a guard and a fold may share a name for the
+reason a command and an effect may. See `docs/folds.md`.
 
 A `refusal` is in a sixth, and the third reachable from source. `reject Name` resolves to a refusal
 and nothing else. It is also the only declared name whose spelling leaves the program, since the

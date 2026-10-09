@@ -73,6 +73,9 @@ impl<'a> Printer<'a> {
             "function_declaration" => self.function(node),
             "command_declaration" => self.callable("command", node),
             "guard_definition" => self.callable("guard", node),
+            "fold_definition" => self.fold_definition(node),
+            "fold_body" => self.fold_body(node),
+            "fold_type" => self.fold_type(node),
             "parameters" | "arguments" | "annotation_arguments" => {
                 self.list("(", ")", false, &self.kids(node))
             }
@@ -600,7 +603,108 @@ impl<'a> Printer<'a> {
     }
 
     /// `fold x: T = seed` with its arms indented under it.
+    /// A named fold declaration: `fold N(p) -> [acc:] T = seed { arms }`.
+    ///
+    /// `callable` cannot serve, for the reason `refusal` gives: it indexes exactly three
+    /// children and the accumulator name here is optional, so the count varies. The arms
+    /// go through `body`, which makes them a sequence that always breaks and keeps the
+    /// author's blank lines, as a `projector`'s handlers are.
+    fn fold_definition(&self, node: Node<'a>) -> Doc<'a> {
+        // `parted` and not `headed_by`, because every child of this node is positional:
+        // the accumulator is optional, so the type and the seed are found by counting.
+        // `headed_by` leaves comments past its head *in* the list, and a comment anywhere
+        // in the header then shifts that count and the printer emits a different child in
+        // each slot. That deleted the return type and the seed outright and produced
+        // source that no longer parses, which `hek fmt` then wrote over the original.
+        //
+        // An arm's comment is unaffected either way: the arms are children of `fold_body`,
+        // so a comment against one is that node's and never reaches here.
+        let (leading, kids) = self.parted(node);
+        let body = kids[kids.len() - 1];
+        let middle = &kids[2..kids.len() - 1];
+        // `-> acc: T = seed` against `-> T = seed`: three children or two.
+        let (acc, ty, seed) = match middle.len() {
+            3 => (Some(middle[0]), middle[1], middle[2]),
+            _ => (None, middle[0], middle[1]),
+        };
+        let mut parts = vec![
+            Doc::text("fold "),
+            self.node(kids[0]),
+            self.node(kids[1]),
+            Doc::text(" -> "),
+        ];
+        if let Some(acc) = acc {
+            parts.push(self.node(acc));
+            parts.push(Doc::text(": "));
+        }
+        parts.push(self.node(ty));
+        parts.push(Doc::text(" = "));
+        parts.push(self.node(seed));
+        parts.push(Doc::text(" "));
+        parts.push(self.node(body));
+        Self::led(leading, Doc::concat(parts))
+    }
+
+    /// The braced arm run. A sequence, so it always breaks: a fold with one arm on one
+    /// line would read as the inline form, which is a different construct.
+    fn fold_body(&self, node: Node<'a>) -> Doc<'a> {
+        self.body(&self.kids(node))
+    }
+
+    /// `Sealed(T, Subject)`, or an ordinary type.
+    ///
+    /// The children are positional here too, so the comments come out first for the same
+    /// reason they do in `fold_definition`: one inside the parens shifted the count and
+    /// the subject was printed as the content type and then dropped. A type sits mid-line,
+    /// so they trail rather than lead.
+    fn fold_type(&self, node: Node<'a>) -> Doc<'a> {
+        let (trailing, kids) = self.split(node);
+        if kids.len() == 1 {
+            return self.trailed(&trailing, self.node(kids[0]));
+        }
+        // The `?` is an anonymous token, so it is not among the named children. Read it
+        // off the last child rather than sniffing the node's text, which also counted a
+        // `?` written inside the content type.
+        let optional = node
+            .child(node.child_count().saturating_sub(1))
+            .is_some_and(|last| last.kind() == "?");
+        self.trailed(
+            &trailing,
+            Doc::concat([
+                Doc::text("Sealed("),
+                self.node(kids[0]),
+                Doc::text(", "),
+                self.node(kids[1]),
+                Doc::text(")"),
+                match optional {
+                    true => Doc::text("?"),
+                    false => Doc::nil(),
+                },
+            ]),
+        )
+    }
+
     fn fold(&self, node: Node<'a>) -> Doc<'a> {
+        // The use form binds a local to a declared fold and has no type, seed or arms.
+        // `parted` again: three positional children, so a comment between any two of them
+        // shifts the count. `headed_by(node, 1)` dropped one written after the local
+        // outright, because nothing below printed the children it left in the list.
+        if node.child_by_field_name("fold").is_some() {
+            let (leading, kids) = self.parted(node);
+            return Self::led(
+                leading,
+                Doc::concat([
+                    Doc::text("fold "),
+                    self.node(kids[0]),
+                    Doc::text(" = "),
+                    self.node(kids[1]),
+                    Doc::text(" "),
+                    // The initializer list is a node of its own and prints its own braces,
+                    // so wrapping it in `list` again gives `Name{ { a, b } }`.
+                    self.node(kids[2]),
+                ]),
+            );
+        }
         let (leading, kids) = self.headed_by(node, 3);
         let mut parts = vec![
             Doc::text("fold "),

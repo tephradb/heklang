@@ -392,34 +392,66 @@ fn boundaries(program: &Program) {
     let named: Vec<&heklang::Command> = program
         .commands
         .iter()
-        .filter(|command| !command.calls.is_empty())
+        .filter(|command| !command.calls.is_empty() || !command.reads.is_empty())
         .collect();
     if named.is_empty() {
         return;
     }
     println!();
     for command in named {
-        let mut reached: Vec<String> = Vec::new();
+        // Two lines rather than one list, because the two are different claims: a guard
+        // can refuse the command and a fold cannot, which is the one thing a reader of
+        // this listing wants to know that the names alone do not say.
+        let mut guarded: Vec<String> = Vec::new();
+        let mut read: Vec<String> = Vec::new();
         for call in &command.calls {
-            through(program, &call.guard, &mut reached);
+            through(program, &call.guard, &mut guarded, &mut read);
         }
-        println!("  {} guards {}", command.name, reached.join(", "));
+        for call in &command.reads {
+            push_once(&call.fold, &mut read);
+        }
+        if !guarded.is_empty() {
+            println!("  {} guards {}", command.name, guarded.join(", "));
+        }
+        if !read.is_empty() {
+            // Both lists start in the same column. `" guards "` is eight characters and
+            // `" reads "` is seven, so the continuation pads by one more than the name:
+            // counting them by eye put the second list one column left of the first.
+            let label = match guarded.is_empty() {
+                true => format!("  {} reads ", command.name),
+                false => format!("  {:width$}  reads ", "", width = command.name.len()),
+            };
+            println!("{label}{}", read.join(", "));
+        }
     }
 }
 
-/// A guard and everything it guards, first named first, each once however many paths
-/// reach it.
-fn through(program: &Program, name: &str, out: &mut Vec<String>) {
-    if out.iter().any(|seen| seen == name) {
+/// A guard and everything it reaches, first named first, each once however many paths
+/// reach it. A fold reached *through* a guard lands in `read`, because that is what it is:
+/// the guard is where the refusal lives and the fold is only a slice in the boundary.
+fn through(program: &Program, name: &str, guarded: &mut Vec<String>, read: &mut Vec<String>) {
+    if !push_once(name, guarded) {
         return;
     }
-    out.push(name.to_string());
     let Some(guard) = program.guard(name) else {
         return;
     };
     for call in &guard.calls {
-        through(program, &call.guard, out);
+        through(program, &call.guard, guarded, read);
     }
+    for call in &guard.reads {
+        push_once(&call.fold, read);
+    }
+}
+
+/// Whether it was new. A command guarding one proposition through two paths names it once,
+/// which is `docs/guards.md` rule 5's "each one shown once".
+fn push_once(name: &str, out: &mut Vec<String>) -> bool {
+    if out.iter().any(|seen| seen == name) {
+        return false;
+    }
+    out.push(name.to_string());
+    true
 }
 
 /// What the program declares, so a run says something even when there are no tests.
@@ -433,6 +465,7 @@ fn counts(program: &Program) -> String {
     count(program.events.len(), "event", "events");
     count(program.commands.len(), "command", "commands");
     count(program.guards.len(), "guard", "guards");
+    count(program.folds.len(), "fold", "folds");
     count(program.refusals.len(), "refusal", "refusals");
     count(program.projectors.len(), "projector", "projectors");
     count(program.effects.len(), "effect", "effects");

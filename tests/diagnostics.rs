@@ -432,6 +432,10 @@ fn cases() -> Vec<(Code, String)> {
             "event @a.b { id: Int }\nprojector P {\n  entity Row { id: Int @key, ref: Uuid }\n  on @a.b { id } { patch Row[id] { id: id } }\n}\n",
         ),
         (
+            Code::UnusedAccumulator,
+            "event @a.b { id: Int }\nfold Seen(id: Int) -> seen: Bool = false {\n  on @a.b(id) => true\n}\n",
+        ),
+        (
             Code::WrongContext,
             "event @a.b { id: Int }\ncommand C(id: Int) { put Row { id } }\n",
         ),

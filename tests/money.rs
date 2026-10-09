@@ -253,7 +253,7 @@ fn there_is_no_currency_item() {
     assert_eq!(
         message,
         "expected `enum`, `record`, `const`, `secret`, `fn`, `event`, `refusal`, `command`, \
-         `guard`, `projector`, `effect` or `test`, found `currency`"
+         `guard`, `fold`, `projector`, `effect` or `test`, found `currency`"
     );
 }
 

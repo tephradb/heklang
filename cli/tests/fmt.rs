@@ -481,6 +481,28 @@ projector P {
     put Row { id, n }
   }
 }
+subject Buyer(Int)
+event @a.d { id: Int, buyer: Buyer, note: String @subject(buyer) }
+fold Noted(id: Int) // after the parameters
+  -> // before the accumulator
+  seen // after it
+  : Int = 0
+{
+  on @a.b(id) => seen + 1
+}
+fold Sealed1(buyer: Buyer) -> Sealed( // inside a seal
+  String, Buyer)? = none {
+  on @a.d(buyer) { note } => note
+}
+command D(order_id: Int) {
+  fold a // in a read
+    = Noted { id: order_id }
+  fold b = Noted // after the fold's name
+    { id: order_id }
+  if a > b {
+    return
+  }
+}
 ";
 
 /// The safety property, met by the one input shape the corpus does not contain.
