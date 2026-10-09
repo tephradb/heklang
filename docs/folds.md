@@ -141,18 +141,15 @@ states for a guard's arguments and for the same reason: an argument is assigned 
 declarations it sits with, so it would read that fold's seed rather than what it folds to. A fold an
 earlier stage folded is fine, and a statement between the two runs is what closes the first.
 
-**A read closes the stage's prologue, and a `guard` does not.** This is the one place the two
-constructs behave differently at a call site, and it is deliberate. A statement written below a read
-goes into the stage's second half, so it runs after the fold and sees the value; a statement below a
-`guard` goes into the *first* half and runs before the guard decides, which is heklang's
-guard-prologue bug and is older than this construct. A fold could not be left that way, because a
-statement below a read is normally the one that uses it, and it would have read a slot the splice
-assigns later.
+**A read closes the stage's prologue**, so a statement written below one is in the stage's second
+half and runs after the fold. That is what lets the statement below a read be the one that uses it,
+which is the common case and the whole point.
 
-The asymmetry has a second reason to stay: making a `guard` close the prologue too would change the
-lowering of every existing guard-only command, and therefore its digest hash. Fixing the guard bug
-is a change to `guard`, with its own hash bump, and belongs with the rest of that rule rather than
-here.
+A `guard` closes it too, and for one release it did not: a statement below a `guard` landed in the
+prologue and ran before the guard decided, so a bare `return` under one skipped it silently. Writing
+this rule is what found that, because a fold could not be left that way without reading a slot the
+splice assigns afterwards. `docs/guards.md` rule 3 had always said the guards run "each before the
+statements below them"; the implementation now agrees, at the cost of `hek-digest 5`.
 
 ## 3. One accumulator, and its name is written only when it is read
 

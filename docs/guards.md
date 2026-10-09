@@ -101,6 +101,24 @@ place a reader looks for it.
 A run of guards and `fold`s is one **stage**: one read of the log, with every decision in the run
 made after it. `docs/commands.md` has the order.
 
+**"Each before the statements below them" is enforced, and for one release it was not.** A statement
+below a `guard` used to land in the stage's *prologue*, which runs before the stage folds, so it
+answered before the guard did:
+
+```
+command D(id: Int) {
+  guard G { id }
+  return          // used to run first, and `G` never decided
+}
+```
+
+An `emit` there was survivable, because a refusal replaces the outcome and discards the events. A
+bare `return`, an `invalid` or a conditional `reject` was not: the guard was skipped and nothing
+reported it. The cause was that a `guard` declares no slice *at parse time* (its slices arrive when
+it is spliced), so the stage looked empty and the statement was taken for one written above the
+declarations. `docs/folds.md` rule 2 found it, because a named fold could not be left that way.
+Fixed, at the cost of `hek-digest 5`.
+
 **A statement above a guard decides before it, and reads nothing to do so.** This is what makes the
 precedence the author's rather than the construct's:
 

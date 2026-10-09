@@ -23,8 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `hek check --boundaries` names what a command reads as well as what it guards, transitively
   through its guards.
 
+### Changed
+
+- The digest version is `hek-digest 5`. A statement written below a `guard` moves from the stage's
+  `(pre ..)` to its `(post ..)`, which is where `docs/guards.md` rule 3 always said it was, so the
+  packed form of a command with one changes. Measured on a 25,347-line application: one declaration
+  of 84 commands renders differently, and the `hek/` corpus does not change at all.
+
 ### Fixed
 
+- **A statement below a `guard` ran before the guard decided.** A bare `return`, an `invalid` or a
+  conditional `reject` under `guard G { .. }` answered first and `G` was skipped, with nothing
+  reported. A guard declares no slice at parse time, so the stage looked empty and the statement was
+  taken for one written *above* the declarations. An `emit` there was survivable, because a refusal
+  replaces the outcome; the others were not.
 - `hek fmt` deleted a named fold's return type and seed, and a sealed return's subject, when a
   comment appeared anywhere in the header, leaving source that no longer parsed. The three new
   printers indexed positionally over a child list that includes comments; they use `parted` now,

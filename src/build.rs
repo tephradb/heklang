@@ -37,15 +37,17 @@ pub struct Builder {
     /// destination is pending like a `fold`'s accumulator but is not a [`FoldVar`], so
     /// `fold_of` cannot find it and `fold_read` would otherwise report nothing.
     read_names: Vec<(Slot, Ident)>,
-    /// Whether the open stage has read a named fold. A fold declares its slices at splice
-    /// time rather than here, so without this the stage looks empty and a statement below
-    /// the read would land in `pre`, above the fold, and then read a local the splice
-    /// assigns in `post`. That is a slot read before it was set.
+    /// Whether the open stage has named a guard or a fold. Neither declares its slices
+    /// here: both arrive at splice time, so without this the stage looks empty and a
+    /// statement written *below* one lands in `pre`, which runs before the stage folds.
     ///
-    /// A guard call deliberately does **not** set it. A guard binds nothing, so no
-    /// statement below one can depend on it having run, and leaving it alone keeps every
-    /// existing program's lowering, and therefore its digest hash, exactly where it was.
-    read_here: bool,
+    /// That is `docs/guards.md` rule 3's first sentence, which says the guards run "each
+    /// before the statements below them". It was true of a guard that also declared a
+    /// slice inline and false of one that did not: a bare `return` under `guard G { .. }`
+    /// answered before `G` decided, and the guard was skipped with nothing reported. For a
+    /// fold the same gap was sharper still, because the statement below a read is usually
+    /// the one that uses it, and it read a slot the splice assigns afterwards.
+    named_here: bool,
 }
 
 impl Builder {
@@ -69,7 +71,7 @@ impl Builder {
             calls: Vec::new(),
             reads: Vec::new(),
             read_names: Vec::new(),
-            read_here: false,
+            named_here: false,
         }
     }
 
@@ -462,7 +464,7 @@ impl Builder {
     /// has none, below them once it has. This is the whole of what makes a stage a
     /// stage, so nothing else may push onto `pre` or `post`.
     pub fn stmt(&mut self, stmt: Stmt) {
-        if self.open.slices.is_empty() && self.open.folds.is_empty() && !self.read_here {
+        if self.open.slices.is_empty() && self.open.folds.is_empty() && !self.named_here {
             self.open.pre.push(stmt);
         } else {
             self.open.post.push(stmt);
@@ -485,7 +487,7 @@ impl Builder {
         self.stages.push(mem::take(&mut self.open));
         self.pending.clear();
         self.read_names.clear();
-        self.read_here = false;
+        self.named_here = false;
     }
 
     /// Closes the open stage behind the others. Every finisher starts here, so a
@@ -563,6 +565,7 @@ impl Builder {
             at_fold: self.open.folds.len(),
             span,
         });
+        self.named_here = true;
     }
 
     /// One `fold local = Name { args }`, recorded the same way. `dest` is the caller's
@@ -591,7 +594,7 @@ impl Builder {
         // was set", which is the one thing a checker must not allow.
         self.pending.insert(dest);
         self.read_names.push((dest, local.into()));
-        self.read_here = true;
+        self.named_here = true;
     }
 
     /// Whether anything has been folded yet, in any stage. A guard that folds nothing
