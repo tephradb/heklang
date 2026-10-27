@@ -249,7 +249,8 @@ Annotations, exhaustively: an **event field** takes `@subject(field)` (naming a 
 type is a declared subject; the annotated field may be **any declared type**, so a record, a list or
 a map seals whole and `reveal` hands the record back), `@max(n)`, `@absent(<literal>)` and
 `@no_index`; an **entity field** takes `@key`, `@index` and `@max(n)`, plus `= <literal>` for a
-default and an entity-level `index (a, b)`; a **record field** takes `@max(n)` and
+default and an entity-level `index (a, b)`. `@key` may be on **several** columns, and the order they
+are written in is the key's order; a **record field** takes `@max(n)` and
 `@absent(<literal>)`; an **enum variant** takes `@default`; an **effect arm's trigger destructure**
 takes `@key`. `@max` applies to `String` and `String?` and nothing else. **`@max` never truncates on
 its own**: `text.truncate(n)` is how a value from outside is made to satisfy one, written last in its
@@ -289,6 +290,7 @@ for key, value in map { .. }            // or index, item over a list
 return / return <expr> / reject Name / reject Name { field } / invalid "msg"
 emit @path { field, other: value }
 put Entity { .. } / patch Entity[key] { .. } / update Entity[key] { .. } / delete Entity[key]
+patch Entity[a, b] { .. }               // a compound key names every column, in key order
 log("...") / fail "..." / erase(value)          // the value's type names the subject
 invoke Command { field: value }
 helper(args)                            // a call to a void effect-local fn is a statement
@@ -434,3 +436,32 @@ Four rules carry their weight:
 sealed content for its caller to `reveal`.
 
 `docs/folds.md` is the contract.
+
+## Compound keys
+
+An entity's key may be several columns. `@key` goes on each, written order is the key's order, and
+every statement that names a row names all of it:
+
+```
+entity Period {
+  shop_id: Shop @key,
+  period: String @max(7) @key,
+  counted: Int,
+}
+
+patch Period[shop_id, period] { counted: .counted + 1 }
+delete Period[shop_id, period]
+expect Period[42, "2026-10"] { counted: 2 }
+```
+
+- **A one-column key is the same rule with one column**, so nothing about an existing entity
+  changes. There is no second spelling and no `key (a, b)` clause.
+- **A key column needs no zero**, because the subscript supplies it. That is the reason to reach for
+  this: a subject id beside a period is usually half the row's identity, and declaring it `Shop?`
+  only to satisfy a materializing `patch` is the workaround it replaces.
+- **A `patch` or an `update` may not write a key column.** The subscript already said which row it
+  is, and a row's key cannot change. `put` fills them like any other column.
+- **The test is "are both halves known at the lookup?"** If yes, it is a key read. If a question
+  knows only one half, that is an index (and an `@index` on a prefix of the key is redundant).
+
+`docs/projectors.md` rule 11 is the contract.

@@ -474,11 +474,24 @@ test \"a case\" {
   project P
   expect no // in an expectation
     Row[1]
+  expect Pair[1, // in a compound key
+    \"x\"] { n: 1 }
 }
 projector P {
   entity Row { id: Int @key, n: Int }
+  entity Pair {
+    a: Int @key,
+    b: String @key,
+    n: Int,
+  }
   on @a.b { id, n } {
     put Row { id, n }
+    patch Pair[id, // the first key
+      \"x\"] { n: .n + 1 }
+    update Pair[id, \"x\"] // after the subscript
+      { n: 1 }
+    delete Pair[ // before the first key
+      id, \"x\"]
   }
 }
 subject Buyer(Int)

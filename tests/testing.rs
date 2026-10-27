@@ -1187,12 +1187,12 @@ test \"a personal column is readable\" {
 /// projection that went through this from one that quietly went somewhere else.
 #[derive(Default)]
 struct Ledger {
-    rows: Vec<(String, Key, Row)>,
+    rows: Vec<(String, Vec<Key>, Row)>,
     writes: Rc<Cell<usize>>,
 }
 
 impl Rows for Ledger {
-    fn row(&self, entity: &str, key: &Key) -> Result<Option<Row>, Error> {
+    fn row(&self, entity: &str, key: &[Key]) -> Result<Option<Row>, Error> {
         Ok(self
             .rows
             .iter()
@@ -1200,7 +1200,7 @@ impl Rows for Ledger {
             .map(|(_, _, row)| row.clone()))
     }
 
-    fn put(&mut self, entity: &Ident, key: Key, row: Row) -> Result<(), Error> {
+    fn put(&mut self, entity: &Ident, key: Vec<Key>, row: Row) -> Result<(), Error> {
         self.writes.set(self.writes.get() + 1);
         self.rows
             .retain(|(name, at, _)| !(name == entity && at == &key));
@@ -1208,7 +1208,7 @@ impl Rows for Ledger {
         Ok(())
     }
 
-    fn delete(&mut self, entity: &Ident, key: &Key) -> Result<(), Error> {
+    fn delete(&mut self, entity: &Ident, key: &[Key]) -> Result<(), Error> {
         self.writes.set(self.writes.get() + 1);
         self.rows
             .retain(|(name, at, _)| !(name == entity && at == key));

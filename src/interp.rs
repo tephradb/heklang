@@ -441,7 +441,7 @@ enum Ret {
 /// recorded in the IR and ignored here.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Store {
-    entities: BTreeMap<Ident, BTreeMap<Key, Row>>,
+    entities: BTreeMap<Ident, BTreeMap<Vec<Key>, Row>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -454,12 +454,18 @@ impl Row {
 }
 
 impl Store {
-    pub fn get(&self, entity: &str, key: &Key) -> Option<&Row> {
+    /// One row by its whole key. A single-column key is a one-element slice:
+    /// `get("Order", &[Key::Int(7)])`.
+    pub fn get(&self, entity: &str, key: &[Key]) -> Option<&Row> {
         self.entities.get(entity)?.get(key)
     }
 
-    pub fn rows(&self, entity: &str) -> impl Iterator<Item = (&Key, &Row)> {
-        self.entities.get(entity).into_iter().flatten()
+    pub fn rows(&self, entity: &str) -> impl Iterator<Item = (&[Key], &Row)> {
+        self.entities
+            .get(entity)
+            .into_iter()
+            .flatten()
+            .map(|(key, row)| (key.as_slice(), row))
     }
 
     pub fn len(&self, entity: &str) -> usize {
@@ -474,11 +480,11 @@ impl Store {
 /// The in-memory read models are one implementation of the seam a persistent store also
 /// implements, rather than a shape a host has to mirror.
 impl Rows for Store {
-    fn row(&self, entity: &str, key: &Key) -> Result<Option<Row>, Error> {
+    fn row(&self, entity: &str, key: &[Key]) -> Result<Option<Row>, Error> {
         Ok(self.get(entity, key).cloned())
     }
 
-    fn put(&mut self, entity: &Ident, key: Key, row: Row) -> Result<(), Error> {
+    fn put(&mut self, entity: &Ident, key: Vec<Key>, row: Row) -> Result<(), Error> {
         self.entities
             .entry(entity.clone())
             .or_default()
@@ -486,7 +492,7 @@ impl Rows for Store {
         Ok(())
     }
 
-    fn delete(&mut self, entity: &Ident, key: &Key) -> Result<(), Error> {
+    fn delete(&mut self, entity: &Ident, key: &[Key]) -> Result<(), Error> {
         if let Some(rows) = self.entities.get_mut(entity) {
             rows.remove(key);
         }
@@ -515,16 +521,16 @@ pub(crate) struct Shredding<'a> {
 }
 
 impl Rows for Shredding<'_> {
-    fn row(&self, entity: &str, key: &Key) -> Result<Option<Row>, Error> {
+    fn row(&self, entity: &str, key: &[Key]) -> Result<Option<Row>, Error> {
         self.rows.row(entity, key)
     }
 
-    fn put(&mut self, entity: &Ident, key: Key, row: Row) -> Result<(), Error> {
+    fn put(&mut self, entity: &Ident, key: Vec<Key>, row: Row) -> Result<(), Error> {
         let row = shredded(self.keys, entity, row)?;
         self.rows.put(entity, key, row)
     }
 
-    fn delete(&mut self, entity: &Ident, key: &Key) -> Result<(), Error> {
+    fn delete(&mut self, entity: &Ident, key: &[Key]) -> Result<(), Error> {
         self.rows.delete(entity, key)
     }
 }
@@ -1660,16 +1666,15 @@ fn exec_stmt(
         }
         Stmt::Patch {
             entity,
-            key,
+            keys,
             absent,
             loads,
             fields,
             span,
         } => {
-            let key_value = eval(program, exprs, frame, *key, None)?;
+            let key = subscript(program, exprs, frame, keys)?;
             let (projector, rows) = write_sink(sink, *span)?;
             let def = entity_def(projector, entity, *span)?;
-            let key = key_of(&key_value, exprs.span(*key))?;
 
             // Rule 5: a `patch` materializes from zeros, so it always has a prior value
             // for `.field` to read. An `update` drops the write instead, which is why a
@@ -1702,12 +1707,11 @@ fn exec_stmt(
                 .map_err(|err| err.located(*span))?;
             Ok(Flow::Next)
         }
-        Stmt::Delete { entity, key } => {
-            let span = exprs.span(*key);
-            let key_value = eval(program, exprs, frame, *key, None)?;
+        Stmt::Delete { entity, keys } => {
+            let span = exprs.span(keys[0]);
+            let key = subscript(program, exprs, frame, keys)?;
             let (projector, rows) = write_sink(sink, span)?;
             entity_def(projector, entity, span)?;
-            let key = key_of(&key_value, span)?;
             rows.delete(entity, &key).map_err(|err| err.located(span))?;
             Ok(Flow::Next)
         }
@@ -1991,25 +1995,47 @@ fn key_of(value: &Value, span: Span) -> Result<Key, Error> {
     Key::from_value(value).ok_or_else(|| Error::at(ErrorKind::BadKey(value.ty()), span))
 }
 
-fn row_key(def: &EntityDef, row: &Row, span: Span) -> Result<Key, Error> {
-    let name = &def.key_field().name;
-    let value = row.0.get(name).ok_or_else(|| {
-        Error::at(
-            ErrorKind::MissingEntityField {
-                entity: def.name.clone(),
-                field: name.clone(),
-            },
-            span,
-        )
-    })?;
-    key_of(value, span)
+/// `Entity[a, b]`: one key per column, in key order. The parser has already checked the
+/// arity against the declaration, so this does not re-check it; what it cannot check is
+/// that each value is one a key can be made of, which is what `key_of` answers.
+fn subscript(
+    program: &Program,
+    exprs: &Exprs,
+    frame: &mut Frame,
+    keys: &[ExprId],
+) -> Result<Vec<Key>, Error> {
+    keys.iter()
+        .map(|&id| {
+            let value = eval(program, exprs, frame, id, None)?;
+            key_of(&value, exprs.span(id))
+        })
+        .collect()
+}
+
+/// A `put`'s key, read off the row it writes: the key columns are columns like any
+/// other there, which is why `put` takes no subscript.
+fn row_key(def: &EntityDef, row: &Row, span: Span) -> Result<Vec<Key>, Error> {
+    def.key_fields()
+        .map(|field| {
+            let value = row.0.get(&field.name).ok_or_else(|| {
+                Error::at(
+                    ErrorKind::MissingEntityField {
+                        entity: def.name.clone(),
+                        field: field.name.clone(),
+                    },
+                    span,
+                )
+            })?;
+            key_of(value, span)
+        })
+        .collect()
 }
 
 fn materialize(
     def: &EntityDef,
     projector: &Projector,
     program: &Program,
-    key: &Key,
+    key: &[Key],
     span: Span,
 ) -> Result<Row, Error> {
     let defs = value::Defs {
@@ -2018,9 +2044,10 @@ fn materialize(
         records: &program.records,
     };
     let mut row = Row::default();
-    for field in &def.fields {
-        let value = if field.name == def.key_field().name {
-            key_value(key)
+    for (position, field) in def.fields.iter().enumerate() {
+        // A key column's zero is never read, because the subscript holds its value.
+        let value = if let Some(at) = def.keys.iter().position(|&key| key == position) {
+            key_value(&key[at])
         } else {
             value::initial(field, defs).ok_or_else(|| {
                 Error::at(

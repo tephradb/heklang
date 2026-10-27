@@ -150,7 +150,8 @@ projector Plans {
       (block
         (patch_statement
           (identifier)
-          (identifier)
+          (subscript
+            (identifier))
           (field_initializer_list
             (field_initializer
               (identifier)
@@ -160,7 +161,8 @@ projector Plans {
                 (integer_literal)))))
         (patch_statement
           (identifier)
-          (identifier)
+          (subscript
+            (identifier))
           (field_initializer_list
             (field_initializer
               (identifier)
@@ -175,7 +177,8 @@ projector Plans {
       (block
         (delete_statement
           (identifier)
-          (identifier))))))
+          (subscript
+            (identifier)))))))
 
 ================================================================================
 a handler with no destructure
@@ -211,3 +214,72 @@ projector Notes {
             (field_initializer
               (identifier)
               (integer_literal))))))))
+
+================================================================================
+a compound key, declared and subscripted
+================================================================================
+
+projector Usage {
+  entity Period {
+    shop_id: Int @key,
+    period: String @max(7) @key,
+    counted: Int,
+  }
+
+  on @usage.recorded { shop_id, period } {
+    patch Period[shop_id, period] { counted: .counted + 1 }
+    delete Period[shop_id, "2026-01",]
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (projector_declaration
+    (type_identifier)
+    (entity_declaration
+      (type_identifier)
+      (entity_field
+        (identifier)
+        (type
+          (primitive_type))
+        (annotation
+          (annotation_name)))
+      (entity_field
+        (identifier)
+        (type
+          (primitive_type))
+        (annotation
+          (annotation_name)
+          (annotation_arguments
+            (integer_literal)))
+        (annotation
+          (annotation_name)))
+      (entity_field
+        (identifier)
+        (type
+          (primitive_type))))
+    (event_handler
+      (event_path)
+      (destructure
+        (identifier)
+        (identifier))
+      (block
+        (patch_statement
+          (identifier)
+          (subscript
+            (identifier)
+            (identifier))
+          (field_initializer_list
+            (field_initializer
+              (identifier)
+              (binary_expression
+                (stored_field
+                  (identifier))
+                (integer_literal)))))
+        (delete_statement
+          (identifier)
+          (subscript
+            (identifier)
+            (string
+              (string_content))))))))

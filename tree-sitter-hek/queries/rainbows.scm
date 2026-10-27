@@ -12,6 +12,7 @@
   (slice_reference)
   (parenthesized_expression)
   (interpolation)
+  (subscript)
 ] @rainbow.scope
 
 ["(" ")" "[" "]" "{" "}"] @rainbow.bracket

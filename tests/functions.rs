@@ -311,7 +311,7 @@ projector Plans {
         .expect("ran");
     let store = interpreter.project("Plans").expect("projected");
     let row = store
-        .get("Plan", &heklang::Key::Uuid(PLAN.into()))
+        .get("Plan", &[heklang::Key::Uuid(PLAN.into())])
         .expect("a row");
     assert_eq!(row.field("years"), Some(&Value::Int(3)));
 }

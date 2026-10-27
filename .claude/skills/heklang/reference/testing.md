@@ -164,6 +164,9 @@ stating, and writing no `expect` at all would say it by accident.
 | `expect Entity[key] { field: value, ... }` | the row exists and the listed columns match |
 | `expect no Entity[key]` | there is no such row |
 
+The subscript is the whole key, so a compound-keyed entity names every column in key order:
+`expect Period[42, "2026-10"] { counted: 2 }`.
+
 **A row is matched on the listed columns only**, because a row is wide and most of its columns are
 carried through untouched by the handler under test. That is the deliberate difference from an event,
 which is matched on all of its fields.

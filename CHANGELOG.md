@@ -28,16 +28,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is its declaration's name, so the name is written only where an arm reads the running value.
 - `hek check --boundaries` names what a command reads as well as what it guards, transitively
   through its guards.
+- **Compound `@key`.** An entity's key may be several columns: `@key` goes on each one, written
+  order is the key's order, and every statement that names a row names all of it
+  (`patch Period[shop_id, period] { .. }`, `delete`, `update`, and `expect` in a test). No new
+  syntax: it is the annotation an effect arm's partition key already spells the same way, and a
+  one-column key is the same rule with one column, so no existing entity changes shape. The arity
+  is checked against the declaration and each position is typed from the column it addresses.
+  `docs/projectors.md` rule 11 is the contract.
+
+  What it replaces is a derived key column. Measured on the same 25,347-line application: five of
+  eighteen entities carried one, which cost five fabricated key columns, four key-joining `fn`s,
+  four `@max` bounds nobody chose, six indexes the key now serves, and **three subject columns
+  declared optional** only so a materializing `patch` could find a zero for them. Migrating the
+  five deleted 98 lines across four files and left 265/265 tests passing.
 
 ### Changed
 
-- The digest version is `hek-digest 5`. A statement written below a `guard` moves from the stage's
-  `(pre ..)` to its `(post ..)`, which is where `docs/guards.md` rule 3 always said it was, so the
-  packed form of a command with one changes. Measured on a 25,347-line application: one declaration
-  of 84 commands renders differently, and the `hek/` corpus does not change at all.
+- A `patch` or an `update` may no longer write a key column. See Fixed: this closed a hole rather
+  than adding a restriction. `put` is unaffected, because it has no subscript and fills a key
+  column like any other.
+- The `Rows` host seam takes a row's key as a sequence (`&[Key]` reading, `Vec<Key>` writing), and
+  `Store::get` and `Store::rows` with it. A single-column key is a one-element slice rather than a
+  special case, and the sequence orders lexicographically, which is what keeps a prefix of a
+  compound key a range the read API can page on.
+- The digest version is `hek-digest 5`, carried by the guard fix below and by nothing since.
+  Neither of the two features moved a hash: compound keys write exactly the `(key x)` node a
+  one-column key wrote before, and a named fold is inlined like a `guard` and so earns no entry.
+  Both verified byte for byte against the `hek/` corpus.
+
+  A statement written below a `guard` moves from the stage's `(pre ..)` to its `(post ..)`, which is
+  where `docs/guards.md` rule 3 always said it was, so the packed form of a command with one
+  changes. Measured on a 25,347-line application: one declaration of 84 commands renders
+  differently, and the `hek/` corpus does not change for it.
 
 ### Fixed
 
+- **A row's key column could disagree with the row's own key.** `put` reads a key off the row's
+  columns and a `patch` takes it from its subscript, so `patch Order[order_id] { order_id: order_id
+  + 100 }` checked clean, ran, and filed a row under id 7 holding `order_id: 107`. The same row
+  disagreed with itself about which row it was, a later `put` of it would have been filed somewhere
+  else again, and nothing static or dynamic reported any of it. A key column is now written by the
+  subscript and by `put`, and by nothing else.
+- The `@max` invariant did not read a materializing `patch`'s **subscript**, only its body, so a
+  bounded key column fed from an unbounded event field was the same two declarations disagreeing
+  with nothing to catch it. An `update` is still left out, because it never materializes and so its
+  subscript stores nothing.
+- `hek fmt` lifted a comment written inside a row subscript out to above the whole statement. The
+  subscript is its own node now, so a comment stays with the key it was written against.
 - **A statement below a `guard` ran before the guard decided.** A bare `return`, an `invalid` or a
   conditional `reject` under `guard G { .. }` answered first and `G` was skipped, with nothing
   reported. A guard declares no slice at parse time, so the stage looked empty and the statement was

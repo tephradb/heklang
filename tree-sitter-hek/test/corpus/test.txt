@@ -119,7 +119,8 @@ test "a placed order writes the row" {
       (expect_clause
         (row_expectation
           (identifier)
-          (identifier)
+          (subscript
+            (identifier))
           (field_initializer_list
             (field_initializer
               (identifier)
@@ -133,11 +134,13 @@ test "a placed order writes the row" {
       (expect_clause
         (row_expectation
           (identifier)
-          (integer_literal)))
+          (subscript
+            (integer_literal))))
       (expect_clause
         (row_expectation
           (identifier)
-          (integer_literal))))))
+          (subscript
+            (integer_literal)))))))
 
 ================================================================================
 respond, erased, deliver and every trace expectation

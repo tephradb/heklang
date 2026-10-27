@@ -96,8 +96,8 @@ them is not a normalisation that needs defending.
 fields; an enum's variants; an entity's indexes; a projector's entities, enums and handlers; an
 effect's helpers and arms, and the event paths one arm lists.
 
-An entity's `@key` column and an enum's `@default` variant are carried **by name**, because both are
-stored as an index into a list this rule just sorted.
+An entity's `@key` columns and an enum's `@default` variant are carried **by name**, because both
+are stored as indexes into a list this rule just sorted.
 
 An entity's indexes are sorted for a second reason: `@index` on a column and an `index (a, b)`
 clause build the same index at different positions in the list, so without sorting the two spellings
@@ -105,12 +105,18 @@ of one index would not agree. Each index keeps its own field order, because a co
 ordered.
 
 **Not sorted:** parameters, statements, stages, slices, folds, array items, interpolation parts, an
-effect arm's partition key, and a test's `given`, `respond` and `expect` lines. Each is a sequence
-whose order is part of what it means. Slices are the one that could go either way, and they stay
+effect arm's partition key, an entity's own key columns and the values a subscript addresses them
+with, and a test's `given`, `respond` and `expect` lines. Each is a sequence whose order is part of
+what it means. Slices are the one that could go either way, and they stay
 written: sorting them would have to be settled against the slot numbering their binds hand out, and
 reordering fold arms is an edit rather than another way of writing the same thing. An arm's `@key`
 fields are the sharpest case: `docs/effects.md` rule 15 makes `{ @key a, @key b }` a different lane
-from `{ @key b, @key a }`, so sorting them would hash two different programs alike.
+from `{ @key b, @key a }`, so sorting them would hash two different programs alike. An entity's key
+columns are the same case for the same reason (`docs/projectors.md` rule 11): the sequence orders
+lexicographically, so its column order is what decides which prefixes the key can be paged on.
+
+A one-column key therefore writes exactly what it wrote before a key could be more than one column,
+which is why compound keys moved no existing hash and cost no `VERSION` bump.
 
 ## 6. A field list the target declares is sorted, unless a value calls out
 
@@ -205,7 +211,7 @@ body never has to be decoded to run a compatibility check.
 | `enum` | the declaration: variants and the default, by name |
 | `record` | the declaration: fields, types, `@max`, `@absent` |
 | `command` | name, parameters in order with their types, and the refusal codes it can answer with |
-| `projector` | name, and per entity: columns with types, `@max` and defaults, the key, the indexes |
+| `projector` | name, and per entity: columns with types, `@max` and defaults, the key columns in key order, the indexes |
 | `effect` | name, and per arm: the events it subscribes to, its delivery modifier and its partition key |
 | `fn`, `test` | none; nothing outside the program can name either |
 

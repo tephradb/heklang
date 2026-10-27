@@ -582,19 +582,19 @@ fn shift_stmt(stmt: &mut Stmt, expr_off: u32, slot_off: u32) {
         } => fields.iter_mut().for_each(|(_, value)| one(value)),
         Stmt::Patch {
             entity: _,
-            key,
+            keys,
             absent: _,
             loads,
             fields,
             span: _,
         } => {
-            one(key);
+            keys.iter_mut().for_each(one);
             for load in loads.iter_mut() {
                 *load = shift_bind(load, slot_off);
             }
             fields.iter_mut().for_each(|(_, value)| one(value));
         }
-        Stmt::Delete { entity: _, key } => one(key),
+        Stmt::Delete { entity: _, keys } => keys.iter_mut().for_each(one),
         Stmt::Fail { message, span: _ } | Stmt::Log { message } => one(message),
         Stmt::Erase {
             subject: _,

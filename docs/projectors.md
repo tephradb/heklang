@@ -78,12 +78,15 @@ envelope, by design: the envelope is available exactly when the author asked for
 | `update Entity[key] { ... }` | writes the listed fields, dropping the write if the row is absent |
 | `delete Entity[key]` | removes the row |
 
-**Only `put` takes no key**, because it writes the row whole and the key is a column it fills like
+**Only `put` takes no key**, because it writes the row whole and a key column is one it fills like
 any other. The other three address a row that may already be there, so they name it. Writing
 `put Entity[key]` is the commonest way to get this wrong, and it is worth a diagnostic of its own:
 the generic ``expected `{`, found `[` `` names the token in the way rather than the rule, which
 leaves an author suspecting their editor. Both directions are caught, and both name the statement
 that does what they were reaching for.
+
+The other side of that: **a `patch` or an `update` may not write a key column**, because its
+subscript has already said which row it is. Rule 11 has the argument.
 
 All four are unconditional write instructions from the language's point of view. They cannot fail in
 a way the program observes, so they return nothing and there is no error an author can catch.
@@ -228,7 +231,9 @@ Both are writable as a `= <literal>` default, which is a string in each case
 recently: the error below offered "give it a default" as one of three escapes, and for a `Timestamp`
 column it was the one that could not be taken.
 
-`@key` fields need no default, because the subscript supplies them.
+`@key` fields need no default, because the subscript supplies them. That is true of every column of
+a compound key, which is rule 11's main practical consequence: a column moved into the key stops
+needing a zero, and a subject id is the case where no honest zero exists.
 
 ### A zero is required only where a zero is read
 
@@ -504,6 +509,131 @@ The same prologue-free model as command bodies: destructured names, the `as` bin
 bindings are in scope in the body. Handlers do not share state with each other, which is structural
 rather than a rule: each handler has its own frame and its own expression arena.
 
+## 11. Compound keys
+
+**A key is a sequence of columns.** `@key` goes on each of them, and the order they are written in
+is the key's order:
+
+```
+entity Period {
+  shop_id: Shop @key,
+  period: String @max(7) @key,
+  counted: Int,
+}
+```
+
+Every statement that names a row names all of it, comma-separated, in that order:
+
+```
+patch Period[shop_id, period] { counted: .counted + 1 }
+update Period[shop_id, period] { notified: true }
+delete Period[shop_id, period]
+expect Period[1, "2026-10"] { counted: 2 }
+```
+
+A one-column key is the same rule with one column, so nothing about single-keyed entities changes:
+`Order[order_id]` is a sequence of one. There is no second spelling, no `key (a, b)` clause beside
+the annotation, and no arity a declaration is allowed to leave implicit. The annotation is the one
+already used for an effect arm's partition key (`docs/effects.md` rule 15), where written order is
+load-bearing for the same reason.
+
+**The columns need not be adjacent or first.** Where a column is declared says nothing about what it
+means, and forcing an order would take the key's own order out of the author's hands, which is the
+one thing about it that matters.
+
+### What the key order decides
+
+The sequence orders **lexicographically**, so a prefix of a compound key is a range. That is what
+makes `(shop_id, period)` answer "this shop's months, newest first" with no index at all, and what
+makes `(period, shop_id)` a different key rather than the same one written differently. It is the
+same argument a compound index's column order makes (rule 8), and the reason both are recorded in
+written order and never sorted.
+
+A consequence worth stating: an `@index` on a prefix of the key is redundant. It is not an error,
+because nothing here enforces index usefulness, but the only index worth declaring on a
+compound-keyed entity is one the key cannot serve.
+
+### A key column may not be written by `patch` or `update`
+
+```
+patch Period[shop_id, period] {
+  shop_id,                       // error: shop_id is a key column of Period
+  counted: .counted + 1,
+}
+```
+
+**This is a fix rather than a restriction.** Before it, a key column had two writers that could
+disagree. `put` reads a row's key off its columns, and `patch` takes the key from its subscript and
+then writes whatever columns it lists, so `patch Order[order_id] { order_id: order_id + 100 }`
+checked clean, ran, and filed a row under id 7 holding `order_id: 107`. The same row disagreed with
+itself about which row it was, and a later `put` of it would have filed it somewhere else again.
+Nothing static or dynamic reported it.
+
+`put` is unaffected: it has no subscript, so a key column is just a column there, and leaving one
+out is the ordinary missing-field error.
+
+### Why this is worth having
+
+A compound key is not new expressiveness. The alternative is a derived key column, which is what a
+real 25,000-line heklang application carried in five of its eighteen entities:
+
+```
+// before
+entity Period {
+  shop_period: String @max(40) @key,   // "{shop_id}:{period}", from a helper fn
+  shop_id: Shop? @index,
+  period: String @max(7),
+  counted: Int,
+}
+
+on @usage.recorded { shop_id, period } {
+  patch Period[shop_period_key(shop_id, period)] {
+    shop_id,
+    period,
+    counted: .counted + 1,
+  }
+}
+```
+
+Three places say two things, and the cost is not only the repetition:
+
+- **A fabricated column.** `shop_period` holds nothing the row does not already hold, carries a
+  `@max` nobody chose, and has to be joined by a `fn` every caller must remember to use.
+- **A column that had to lie.** `shop_id` is `Shop?` and is never absent. It is optional because a
+  materializing `patch` reads the zero table for every non-key column and a subject id has no zero
+  (rule 5). Moving it into the key removes the question.
+- **Two copies that can drift.** Every `patch` writes `shop_id` and `period` again beside a key
+  already built from them, and one handler that computes the key one way and the columns another is
+  a row filed under an identity it does not claim.
+- **An unreadable key.** One of the five derived a `Uuid` instead of joining a string
+  (`Uuid.derive(ns, "blocked|{order_id}|{code}")`), so the row's identity could not be read off the
+  row or typed into a query by hand.
+
+The port's own comments are the evidence: two of those entities carry a line saying the compound key
+*is* the row's genuine identity, written as an apology for the column standing in for it.
+
+**What a compound key is not.** It is not a filter. Both halves must be known at the lookup, which
+is what makes it a key read rather than a scan; a question that knows only one half is an index
+question (rule 8). That test is the one to apply when choosing, and it is why the five migrated and
+the other two entities did not: they invent identity the log does not carry, and no key shape helps
+them.
+
+### Arity
+
+A subscript takes exactly as many values as the key has columns, checked against the declaration:
+
+```
+patch Period[shop_id] { .. }
+   = `Period` has a 2-column key, so a subscript takes 2 values, found 1
+   = write `Period[shop_id, period]`
+```
+
+The hint lists the columns rather than the count, because a wrong count is almost always a compound
+key addressed as if it were one column, and the list is the fix.
+
+Each position is typed from the column it addresses, so a literal resolves there exactly as it does
+in a column write: `Period[1, "2026-10"]` reads `1` as a `Shop` id by rule 5's own literal rule.
+
 ---
 
 ## The `@max` invariant
@@ -627,6 +757,12 @@ enforces once beats a discipline every handler has to keep.
 after the passes, so the runtime error it argued about covers only what the invariant does not
 describe: an over-length value that no pair of declarations predicted.
 
+It reads a **materializing `patch`'s subscript** as well as its body, which it had to learn for
+rule 11 and which closed a hole that was always there: `materialize` writes each key value into its
+column, so a bounded key column fed from an unbounded event field is the same two declarations
+disagreeing, and with a single key nothing checked it. An `update` is left out on purpose, because
+it never materializes and so its subscript stores nothing.
+
 **Rule 9's subject checks came off this list before it.** Both landed with the seal moving into the
 type: one column holds one subject, and sealed content may not be written where the seal is
 discarded.
@@ -644,11 +780,14 @@ than being resolved from context.
 Key types are restricted to those that can order and hash: `Int`, `String`, `Uuid`, `Timestamp`,
 enums, and a subject whose ids are one of those, reading through to the scalar. `Bool`, `Money(n)`
 and `Decimal(n)` are rejected as keys, matching the runtime's requirement that a key be an orderable
-scalar, since it doubles as the read API's pagination cursor.
+scalar, since it doubles as the read API's pagination cursor. The rule is per column, so every
+column of a compound key answers it on its own.
 
-A subject-typed column that is **not** the key needs a default if any `patch` materialises its
-entity, because a subject id has no zero: customer 0 is a customer rather than an absence, which is
-the argument `Uuid` and `Timestamp` already make about nil and epoch-zero.
+A subject-typed column that is **not** part of the key needs a default if any `patch` materialises
+its entity, because a subject id has no zero: customer 0 is a customer rather than an absence, which
+is the argument `Uuid` and `Timestamp` already make about nil and epoch-zero. Rule 11 is often the
+better answer than the default: a subject id beside a period is usually half of the row's identity
+rather than a column that could be absent.
 
 Compound indexes are recorded in full, and the runtime filters on any prefix of one plus a range on
 the column after it. Nothing here depends on that, since indexes are not used by the interpreter,

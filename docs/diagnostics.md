@@ -192,14 +192,14 @@ be the whole of it:
 | `bad-literal` | a literal that cannot be the type its position declares |
 | `needs-target-type` | a value whose type nothing in the program decides |
 | `not-a-value` | a statement written where a value was wanted |
-| `arity` | a call with the wrong number of arguments, or a refusal's fields written with the wrong delimiter |
+| `arity` | a call with the wrong number of arguments, a subscript with the wrong number of key values, or a refusal's fields written with the wrong delimiter |
 | `missing-field` | a field, parameter or argument that has to be given and was not |
 | `duplicate-field` | one given twice |
 | `unknown-annotation` | `@nope` |
 | `bad-annotation` | a known annotation in a place or shape it does not take |
 | `empty-declaration` | a declaration whose body would be empty |
 | `arm-shape` | an effect arm with no `@key` |
-| `entity-shape` | an entity with no `@key`, or an index on a field it has not got |
+| `entity-shape` | an entity with no `@key`, a column that cannot be one, an index on a field it has not got, or a `patch` writing a key column |
 | `event-shape` | an arm over event types with nothing in common |
 | `refusal-shape` | a refusal named or written in a way its derived code could not survive |
 | `stage-shape` | a `fold` or `guard` written where or how it does not go |

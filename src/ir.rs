@@ -701,7 +701,14 @@ impl EnumDef {
 pub struct EntityDef {
     pub name: Ident,
     pub fields: Vec<EntityField>,
-    pub key: usize,
+    /// The columns marked `@key`, as positions into `fields`, **in written order**: a
+    /// compound key is a sequence, so `(shop_id, period)` and `(period, shop_id)` are
+    /// two different keys. Never empty, because an entity with no `@key` is rejected.
+    ///
+    /// Written order rather than declaration order, for the reason `Arm::keys` keeps it
+    /// (`docs/effects.md` rule 15): the order decides which prefixes the key can be
+    /// filtered and paged on, exactly as a compound index's column order does.
+    pub keys: Vec<usize>,
     pub indexes: Vec<Index>,
 }
 
@@ -710,8 +717,16 @@ impl EntityDef {
         self.fields.iter().find(|field| field.name == name)
     }
 
-    pub fn key_field(&self) -> &EntityField {
-        &self.fields[self.key]
+    /// The key columns, in key order.
+    pub fn key_fields(&self) -> impl Iterator<Item = &EntityField> {
+        self.keys.iter().map(|&at| &self.fields[at])
+    }
+
+    /// Whether this column is part of the key, which is what makes the subscript its
+    /// only writer: `put` fills it like any other column, and `patch`/`update` may
+    /// not, because the subscript has already said it.
+    pub fn is_key(&self, name: &str) -> bool {
+        self.key_fields().any(|field| field.name == name)
     }
 }
 
@@ -1494,7 +1509,9 @@ pub enum Stmt {
     /// loads, rule 9's subject propagation and the `@max` check, treats them alike.
     Patch {
         entity: Ident,
-        key: ExprId,
+        /// One expression per key column, in key order. Its length is the entity's key
+        /// arity, which the parser checks, so a reader may zip the two.
+        keys: Vec<ExprId>,
         absent: Absent,
         loads: Vec<Bind>,
         fields: Vec<(Ident, ExprId)>,
@@ -1502,7 +1519,7 @@ pub enum Stmt {
     },
     Delete {
         entity: Ident,
-        key: ExprId,
+        keys: Vec<ExprId>,
     },
     /// Rule 4: the author's terminal outcome, and the only one.
     Fail {
@@ -1739,13 +1756,13 @@ pub enum Expect {
     /// carried through untouched by the handler under test.
     Row {
         entity: Ident,
-        key: ExprId,
+        keys: Vec<ExprId>,
         fields: Vec<(Ident, ExprId)>,
         span: Span,
     },
     NoRow {
         entity: Ident,
-        key: ExprId,
+        keys: Vec<ExprId>,
         span: Span,
     },
     Http {

@@ -268,9 +268,9 @@ live.
 
 ```rust
 pub trait Rows {
-    fn row(&self, entity: &str, key: &Key) -> Result<Option<Row>, Error>;
-    fn put(&mut self, entity: &Ident, key: Key, row: Row) -> Result<(), Error>;
-    fn delete(&mut self, entity: &Ident, key: &Key) -> Result<(), Error>;
+    fn row(&self, entity: &str, key: &[Key]) -> Result<Option<Row>, Error>;
+    fn put(&mut self, entity: &Ident, key: Vec<Key>, row: Row) -> Result<(), Error>;
+    fn delete(&mut self, entity: &Ident, key: &[Key]) -> Result<(), Error>;
 }
 
 let projection = Projection::new(&program, "Orders")?;
@@ -282,6 +282,13 @@ projection.apply(&record, &mut my_rows)?;  // one record, handlers in declaratio
 invocation. `Store` is one implementation and a persistent read model is another, so
 `Interpreter::project` is `project_into` against an in-memory `Store` and there are not two write
 paths to keep in step.
+
+**A key is a sequence, not a scalar.** One `Key` per `@key` column, in the order the entity declared
+them (`docs/projectors.md` rule 11), and a single-column key is a one-element slice rather than a
+special case. A host stores them so that the sequence orders **lexicographically**, which is what
+makes a prefix of a compound key a range its read API can page on, the way a prefix of a compound
+index is. A host that joins them into one string of its own is free to, as long as that ordering
+survives the join.
 
 **It reads as well as writes**, which is the only surprising line in it. `docs/projectors.md` rule 3
 fills a `patch`'s stored loads from the row before evaluating any of the write's value expressions,

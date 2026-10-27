@@ -412,11 +412,11 @@ impl Models {
 }
 
 impl Rows for Models {
-    fn row(&self, entity: &str, key: &Key) -> Result<Option<Row>, Error> {
+    fn row(&self, entity: &str, key: &[Key]) -> Result<Option<Row>, Error> {
         self.store.row(entity, key)
     }
 
-    fn put(&mut self, entity: &Ident, key: Key, row: Row) -> Result<(), Error> {
+    fn put(&mut self, entity: &Ident, key: Vec<Key>, row: Row) -> Result<(), Error> {
         Shredding {
             keys: &self.keys,
             rows: &mut self.store,
@@ -424,7 +424,7 @@ impl Rows for Models {
         .put(entity, key, row)
     }
 
-    fn delete(&mut self, entity: &Ident, key: &Key) -> Result<(), Error> {
+    fn delete(&mut self, entity: &Ident, key: &[Key]) -> Result<(), Error> {
         self.store.delete(entity, key)
     }
 }

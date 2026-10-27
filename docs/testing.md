@@ -281,6 +281,12 @@ same thing by accident.
 | `expect Entity[key] { field: value, ... }` | the row exists and the listed columns match |
 | `expect no Entity[key]` | there is no such row |
 
+The subscript is the whole key, so an entity keyed on several columns names all of them in key
+order, exactly as a `patch` does (`docs/projectors.md` rule 11): `expect Period[42, "2026-10"]`. A
+key column may be listed in the block as well, and that is not a repeat worth refusing: what the
+subscript says is what the test asks for, and asserting the row carries it is how a materialized
+row's own key gets tested at all.
+
 **A row is matched on the listed columns only, and an event is matched on all of them.** The
 difference is not an inconsistency. An event is small and every field is part of what the command
 decided, so listing all of them is the assertion. A row is wide, most of its columns are carried

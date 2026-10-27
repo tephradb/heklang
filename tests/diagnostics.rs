@@ -429,7 +429,7 @@ fn cases() -> Vec<(Code, String)> {
         ),
         (
             Code::NoZeroValue,
-            "event @a.b { id: Int }\nprojector P {\n  entity Row { id: Int @key, ref: Uuid }\n  on @a.b { id } { patch Row[id] { id: id } }\n}\n",
+            "event @a.b { id: Int }\nprojector P {\n  entity Row { id: Int @key, ref: Uuid, n: Int }\n  on @a.b { id } { patch Row[id] { n: .n + 1 } }\n}\n",
         ),
         (
             Code::DuplicateFold,

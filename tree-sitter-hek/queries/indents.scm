@@ -21,6 +21,7 @@
   (slice_reference)
   (parenthesized_expression)
   (fold_body)
+  (subscript)
 ] @indent
 
 ; A fold is the one construct here that indents with no delimiter to do it: its arms sit two

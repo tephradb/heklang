@@ -927,7 +927,11 @@ const SELF_TRIGGER: &str = "effect Loop {
 }
 ";
 
-fn short(key: &Key) -> String {
+fn short(key: &[Key]) -> String {
+    key.iter().map(one_key).collect::<Vec<_>>().join(", ")
+}
+
+fn one_key(key: &Key) -> String {
     match key {
         Key::Uuid(value) => value.rsplit('-').next().unwrap_or(value).to_string(),
         Key::Int(value) => value.to_string(),

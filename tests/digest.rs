@@ -335,6 +335,50 @@ fn an_index_written_two_ways_is_one_index() {
     );
 }
 
+/// `docs/projectors.md` rule 11: a compound key is a sequence, so its column order is
+/// part of the entity rather than a presentation detail. The columns are written in key
+/// order and never sorted, which is what the `(key ..)` node has to carry.
+#[test]
+fn swapping_two_key_columns_is_a_change() {
+    // Only the declaration differs: the columns are the same two, of the same type, and
+    // the subscript is the same text. So the `(col ..)` entries, which are sorted by
+    // name, are identical and the `(key ..)` node is the only thing left to carry it.
+    // Sorting that node makes these two programs one, which is the mutation this test
+    // exists to catch.
+    differs(
+        "projector P {
+           entity E { a: Int @key, b: Int @key, seen: Int }
+           on @order.placed { order_id } { patch E[1, 2] { seen: .seen + 1 } }
+         }",
+        "projector P {
+           entity E { b: Int @key, a: Int @key, seen: Int }
+           on @order.placed { order_id } { patch E[1, 2] { seen: .seen + 1 } }
+         }",
+        "a compound key's column order decides what a prefix of it can be read on",
+    );
+}
+
+/// And the subscript is ordered for the same reason: the same two values in the other
+/// order address a different row.
+#[test]
+fn swapping_two_key_values_is_a_change() {
+    differs(
+        "projector P {
+           entity E { a: Int @key, b: Int @key, seen: Int }
+           on @order.placed { order_id } {
+             patch E[1, 2] { seen: .seen + 1 }
+           }
+         }",
+        "projector P {
+           entity E { a: Int @key, b: Int @key, seen: Int }
+           on @order.placed { order_id } {
+             patch E[2, 1] { seen: .seen + 1 }
+           }
+         }",
+        "a subscript names one row, and these name two",
+    );
+}
+
 #[test]
 fn swapping_two_statements_is_a_change() {
     differs(

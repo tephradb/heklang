@@ -708,13 +708,13 @@ const TWICE: &str = "projector Twice {
 /// the interpreter's own map.
 #[derive(Default)]
 struct Shelf {
-    rows: Vec<(String, Key, Row)>,
+    rows: Vec<(String, Vec<Key>, Row)>,
     /// Fails every write, so a host's own failure can be watched arriving.
     broken: bool,
 }
 
 impl Rows for Shelf {
-    fn row(&self, entity: &str, key: &Key) -> Result<Option<Row>, Error> {
+    fn row(&self, entity: &str, key: &[Key]) -> Result<Option<Row>, Error> {
         Ok(self
             .rows
             .iter()
@@ -722,7 +722,7 @@ impl Rows for Shelf {
             .map(|(_, _, row)| row.clone()))
     }
 
-    fn put(&mut self, entity: &Ident, key: Key, row: Row) -> Result<(), Error> {
+    fn put(&mut self, entity: &Ident, key: Vec<Key>, row: Row) -> Result<(), Error> {
         if self.broken {
             return Err(Error::new(ErrorKind::Host(
                 "the shelf fell over".to_string(),
@@ -734,7 +734,7 @@ impl Rows for Shelf {
         Ok(())
     }
 
-    fn delete(&mut self, entity: &Ident, key: &Key) -> Result<(), Error> {
+    fn delete(&mut self, entity: &Ident, key: &[Key]) -> Result<(), Error> {
         self.rows
             .retain(|(name, at, _)| !(name == entity && at == key));
         Ok(())
@@ -774,7 +774,7 @@ fn a_projection_writes_into_read_models_the_crate_does_not_ship() {
 
     assert_eq!(shelf.rows.len(), 2, "one row per customer");
     let seven = shelf
-        .row("Tally", &Key::Int(7))
+        .row("Tally", &[Key::Int(7)])
         .expect("read")
         .expect("row");
     assert_eq!(seven.field("orders"), Some(&Value::Int(2)));
@@ -831,7 +831,7 @@ fn two_handlers_on_one_record_read_each_others_writes() {
         .expect("projected");
 
     let row = shelf
-        .row("Count", &Key::Int(7))
+        .row("Count", &[Key::Int(7)])
         .expect("read")
         .expect("row");
     assert_eq!(

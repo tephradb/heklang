@@ -203,7 +203,7 @@ projector Plans {{
         .expect("ran");
     let store: Store = interpreter.project("Plans").expect("projected");
     let row = store
-        .get("Plan", &Key::Uuid(PLAN.into()))
+        .get("Plan", &[Key::Uuid(PLAN.into())])
         .expect("the patch materialized a row");
     assert_eq!(row.field("covers"), Some(&coverage("AllProducts", vec![])));
     // A record column materializes from its fields' zeros, which is how every other
@@ -471,7 +471,7 @@ projector P {
         .project("P")
         .unwrap_or_else(|err| panic!("{err}"));
     let row = store
-        .get("Row", &Key::Int(7))
+        .get("Row", &[Key::Int(7)])
         .expect("the patch materialized");
     assert_eq!(row.field("limit"), Some(&Value::Int(2)));
     assert_eq!(row.field("seen"), Some(&Value::Int(1)));

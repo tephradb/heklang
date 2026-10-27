@@ -473,11 +473,11 @@ fn check_project(
         match wanted {
             Expect::Row {
                 entity,
-                key,
+                keys,
                 fields,
                 ..
             } => {
-                let key = key_of(values.eval(*key)?)?;
+                let key = subscript(values, keys)?;
                 let found = rows
                     .row(entity, &key)
                     .map_err(|err: Error| err.to_string())?;
@@ -488,8 +488,8 @@ fn check_project(
                     return Ok(Some(why));
                 }
             }
-            Expect::NoRow { entity, key, .. } => {
-                let key = key_of(values.eval(*key)?)?;
+            Expect::NoRow { entity, keys, .. } => {
+                let key = subscript(values, keys)?;
                 let found = rows
                     .row(entity, &key)
                     .map_err(|err: Error| err.to_string())?;
@@ -512,7 +512,7 @@ fn mismatch(
     values: &mut Values<'_>,
     projector: &str,
     entity: &str,
-    key: &Key,
+    key: &[Key],
     row: &Row,
     fields: &[(Ident, ExprId)],
 ) -> Result<Option<String>, String> {
@@ -762,8 +762,20 @@ fn key_of(value: Value) -> Result<Key, String> {
     Key::from_value(&value).ok_or_else(|| format!("`{value}` cannot be an entity key"))
 }
 
-fn show(key: &Key) -> String {
-    crate::value::text(&crate::interp::key_as_value(key))
+/// A whole key as a message shows it: `7` for one column, `1, "2026-10"` for two, which
+/// is what the author wrote inside the brackets.
+fn show(key: &[Key]) -> String {
+    key.iter()
+        .map(|one| crate::value::text(&crate::interp::key_as_value(one)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One key per `@key` column, from the expressions the subscript holds.
+fn subscript(values: &mut Values<'_>, keys: &[ExprId]) -> Result<Vec<Key>, String> {
+    keys.iter()
+        .map(|&id| key_of(values.eval(id)?))
+        .collect::<Result<Vec<_>, _>>()
 }
 
 /// What a mismatch shows for a value that may be sealed.

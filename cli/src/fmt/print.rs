@@ -100,6 +100,9 @@ impl<'a> Printer<'a> {
             "expect_clause" => self.expect(node),
             "event_expectation" | "fixture_expectation" => self.spaced(node),
             "row_expectation" => self.row(node),
+            // `[a, b]`, which breaks like every other comma list and keeps a comment
+            // among the keys where it was written.
+            "subscript" => self.list("[", "]", false, &self.kids(node)),
 
             // -------------------------------------------------------- statements
             "block" => self.body(&self.kids(node)),
@@ -558,9 +561,10 @@ impl<'a> Printer<'a> {
             parts.push(Doc::text("no "));
         }
         parts.push(self.node(kids[0]));
-        parts.push(Doc::text("["));
+        // The subscript prints its own brackets and sits against the name with no space,
+        // so it goes through `node` like any other child rather than being assembled
+        // here. That is also what keeps a comment written among the keys inside them.
         parts.push(self.node(kids[1]));
-        parts.push(Doc::text("]"));
         for &kid in &kids[2..] {
             parts.push(Doc::text(" "));
             parts.push(self.node(kid));
@@ -804,9 +808,7 @@ impl<'a> Printer<'a> {
             Doc::text(keyword),
             Doc::text(" "),
             self.node(kids[0]),
-            Doc::text("["),
             self.node(kids[1]),
-            Doc::text("]"),
         ];
         for &kid in &kids[2..] {
             parts.push(Doc::text(" "));

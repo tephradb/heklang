@@ -1,0 +1,138 @@
+// A key that is several columns, which is the shape a per-period counter has: a usage
+// meter is one row per shop per month, and "shop 1 in October" is one identity made of
+// two facts rather than one fact made of two.
+//
+// What this file is really about is what the alternative costs. Before a key could be
+// more than one column, `Period` was written with a `shop_period: String @key`
+// holding `"{shop_id}:{period}"` and then `shop_id` and `period` again beside it as
+// ordinary columns, which is three places to say two things. And the second of those
+// copies could not even be honest: `shop_id` had to be declared `Shop?`, because a
+// materializing `patch` reads the zero table for every non-key column and a subject id
+// has no zero (rule 5). A column that is never absent was optional so that the key
+// could be a string.
+//
+// `Shop` is declared in `shop.hk`: `hek/` is one program across files, so a subject
+// declared anywhere in it is in scope everywhere (docs/modules.md).
+
+projector Usage {
+  // Both halves are always known at a lookup, so this is a key read rather than a scan.
+  // That is the test for a compound key, and it is a different thing from a composite
+  // column faking a filter: `(shop_id, period)` can be read, and a prefix of it ranged,
+  // without any column holding the pair.
+  entity Period {
+    shop_id: Shop @key,
+    period: String @max(7) @key,
+    counted: Int,
+    // The meter is read a month at a time, and the key's own order already answers
+    // "this shop's months", so the only index worth declaring is the one the key
+    // cannot serve.
+    index (period),
+  }
+
+  // A value, so the currency is part of the identity: a shop that has taken two
+  // currencies in one month has two rows, because adding them is the mixed-currency
+  // arithmetic `Money` exists to refuse. Three columns, and the order is the one a
+  // reader asks in.
+  entity Charged {
+    shop_id: Shop @key,
+    period: String @max(7) @key,
+    currency: String @max(3) @key,
+    charged: Money(2),
+  }
+
+  // An identity rather than a counter, and keyed by the pair for the same reason: an
+  // invoice number is only unique within a shop. Written whole, so every column
+  // including both key columns is filled here like any other.
+  entity Invoice {
+    shop_id: Shop @key,
+    number: Int @key,
+    period: String @max(7),
+    total: Money(2),
+  }
+
+  // A counter, so `patch`: materializing from zeros the first time is the feature. The
+  // body writes neither key column, and cannot: the subscript has already said which
+  // row this is.
+  on @usage.recorded { shop_id, period } {
+    patch Period[shop_id, period] { counted: .counted + 1 }
+  }
+
+  on @usage.charged { shop_id, period, currency, amount } {
+    patch Charged[shop_id, period, currency] { charged: .charged + amount }
+  }
+
+  on @invoice.issued { shop_id, number, period, total } {
+    put Invoice { shop_id, number, period, total }
+  }
+
+  on @invoice.voided { shop_id, number } {
+    delete Invoice[shop_id, number]
+  }
+}
+
+event @usage.recorded {
+  shop_id: Shop,
+  period: String @max(7),
+}
+
+event @usage.charged {
+  shop_id: Shop,
+  period: String @max(7),
+  currency: String @max(3),
+  amount: Money(2),
+}
+
+event @invoice.issued {
+  shop_id: Shop,
+  number: Int,
+  period: String @max(7),
+  total: Money(2),
+}
+
+event @invoice.voided {
+  shop_id: Shop,
+  number: Int,
+}
+
+// One shop's two months are two rows, and two shops' same month are two more. Written
+// out rather than counted, because the thing under test is that the second column is
+// part of the identity and not a column beside it.
+test "a month is part of the row's identity" {
+  given @usage.recorded { shop_id: 1, period: "2026-09" }
+  given @usage.recorded { shop_id: 1, period: "2026-10" }
+  given @usage.recorded { shop_id: 1, period: "2026-10" }
+  given @usage.recorded { shop_id: 2, period: "2026-10" }
+  project Usage
+  expect Period[1, "2026-09"] { counted: 1 }
+  expect Period[1, "2026-10"] { counted: 2 }
+  expect Period[2, "2026-10"] { counted: 1 }
+  expect no Period[2, "2026-09"]
+}
+
+// The key columns a `patch` never wrote are on the row anyway, filled from the
+// subscript by the same step that filled `counted` from the zero table.
+test "a materialized row carries its own key" {
+  given @usage.recorded { shop_id: 7, period: "2026-10" }
+  project Usage
+  expect Period[7, "2026-10"] { shop_id: 7, period: "2026-10", counted: 1 }
+}
+
+test "two currencies in one month are two rows" {
+  given @usage.charged { shop_id: 1, period: "2026-10", currency: "GBP", amount: 10.00 }
+  given @usage.charged { shop_id: 1, period: "2026-10", currency: "EUR", amount: 4.50 }
+  given @usage.charged { shop_id: 1, period: "2026-10", currency: "GBP", amount: 2.50 }
+  project Usage
+  expect Charged[1, "2026-10", "GBP"] { charged: 12.50 }
+  expect Charged[1, "2026-10", "EUR"] { charged: 4.50 }
+}
+
+// An invoice number is unique per shop, so the same number under two shops is two rows,
+// and deleting one leaves the other.
+test "a number is only unique within a shop" {
+  given @invoice.issued { shop_id: 1, number: 1, period: "2026-10", total: 20.00 }
+  given @invoice.issued { shop_id: 2, number: 1, period: "2026-10", total: 30.00 }
+  given @invoice.voided { shop_id: 1, number: 1 }
+  project Usage
+  expect no Invoice[1, 1]
+  expect Invoice[2, 1] { total: 30.00 }
+}

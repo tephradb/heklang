@@ -702,7 +702,7 @@ fn projector(def: &Projector) -> Sexp {
 }
 
 fn entity(def: &EntityDef) -> Sexp {
-    let key = def.key_field().name.clone();
+    let keys: Vec<Sexp> = def.key_fields().map(|f| atom(f.name.clone())).collect();
     let mut parts = vec![atom(def.name.clone())];
 
     let mut fields: Vec<&EntityField> = def.fields.iter().collect();
@@ -717,9 +717,12 @@ fn entity(def: &EntityDef) -> Sexp {
         }
         parts.push(node("col", part));
     }
-    // By name, for the reason an enum's default is: `EntityDef::key` is an index into the
-    // list that was just sorted.
-    parts.push(node("key", [atom(key)]));
+    // By name, for the reason an enum's default is: `EntityDef::keys` holds indexes into
+    // the list that was just sorted. **Unsorted among themselves**, because a compound
+    // key is a sequence and its column order decides what it can be paged on, which is
+    // the same argument an index's own order makes two blocks below. A one-column key
+    // therefore writes exactly what it wrote before this was a list.
+    parts.push(node("key", keys));
 
     // `@index` on a column and an `index (a, b)` clause build the same `Index` at
     // different positions in this list, so sorting is what makes the two spellings agree.
@@ -986,7 +989,7 @@ impl<'a> Frame<'a> {
             }
             Stmt::Patch {
                 entity,
-                key,
+                keys,
                 absent,
                 loads,
                 fields,
@@ -996,8 +999,8 @@ impl<'a> Frame<'a> {
                     Absent::Materialize => "patch",
                     Absent::Skip => "update",
                 };
-                let key = self.expr(*key);
-                let mut parts = vec![atom(entity.clone()), node("key", [key])];
+                let keys = self.exprs(keys);
+                let mut parts = vec![atom(entity.clone()), node("key", keys)];
                 // Sorted for the same reason the fields below are: which columns rule 3
                 // loads follows from which the fields read, so leaving these in written
                 // order would leak the field order back into the slot numbering.
@@ -1008,9 +1011,9 @@ impl<'a> Frame<'a> {
                 parts.extend(self.keyed(fields));
                 node(head, parts)
             }
-            Stmt::Delete { entity, key } => {
-                let key = self.expr(*key);
-                node("delete", [atom(entity.clone()), node("key", [key])])
+            Stmt::Delete { entity, keys } => {
+                let keys = self.exprs(keys);
+                node("delete", [atom(entity.clone()), node("key", keys)])
             }
             Stmt::Fail { message, .. } => {
                 let message = self.expr(*message);
@@ -1089,18 +1092,18 @@ impl<'a> Frame<'a> {
             }
             Expect::Row {
                 entity,
-                key,
+                keys,
                 fields,
                 ..
             } => {
-                let key = self.expr(*key);
-                let mut parts = vec![atom(entity.clone()), node("key", [key])];
+                let keys = self.exprs(keys);
+                let mut parts = vec![atom(entity.clone()), node("key", keys)];
                 parts.extend(self.keyed(fields));
                 node("row", parts)
             }
-            Expect::NoRow { entity, key, .. } => {
-                let key = self.expr(*key);
-                node("norow", [atom(entity.clone()), node("key", [key])])
+            Expect::NoRow { entity, keys, .. } => {
+                let keys = self.exprs(keys);
+                node("norow", [atom(entity.clone()), node("key", keys)])
             }
             Expect::Http {
                 verb, url, body, ..
@@ -1308,6 +1311,12 @@ impl<'a> Frame<'a> {
         let item = self.slot(iter.item);
         parts.push(node("item", [item]));
         parts
+    }
+
+    /// A subscript's key expressions, in written order: a compound key is a sequence,
+    /// and reordering it addresses a different row.
+    fn exprs(&mut self, ids: &[ExprId]) -> Vec<Sexp> {
+        ids.iter().map(|&id| self.expr(id)).collect()
     }
 
     /// A field list whose keys the target already declares, so which order they were

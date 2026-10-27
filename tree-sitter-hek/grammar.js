@@ -403,9 +403,7 @@ module.exports = grammar({
       seq(
         optional('no'),
         field('entity', $.identifier),
-        '[',
-        field('key', $._expression),
-        ']',
+        $.subscript,
         optional($.field_initializer_list),
       ),
 
@@ -594,20 +592,12 @@ module.exports = grammar({
       seq(
         choice('patch', 'update'),
         field('entity', $.identifier),
-        '[',
-        field('key', $._expression),
-        ']',
+        $.subscript,
         $.field_initializer_list,
       ),
 
     delete_statement: ($) =>
-      seq(
-        'delete',
-        field('entity', $.identifier),
-        '[',
-        field('key', $._expression),
-        ']',
-      ),
+      seq('delete', field('entity', $.identifier), $.subscript),
 
     // `log(...)`, `erase(...)` and a discarded `http.*` call. `fail` is no longer one of
     // them: it takes no parens, so it is not a call.
@@ -770,6 +760,17 @@ module.exports = grammar({
       ),
 
     list: ($) => seq('[', commaSep($._expression), ']'),
+
+    // `[a, b]`: one `key` per `@key` column, in key order, because a compound key is a
+    // sequence (docs/projectors.md rule 11). The arity against the declaration is the
+    // checker's, not the grammar's.
+    //
+    // A node of its own rather than brackets inlined into the three statements that take
+    // one, so that it **owns its delimiters**: that is what `indents.scm` keys on, and it
+    // is what lets the formatter place a comment written among the keys instead of
+    // lifting it above the whole statement. Structurally identical to `list`, and no
+    // conflict with it, because only one of the two is reachable at any position.
+    subscript: ($) => seq('[', commaSep1(field('key', $._expression)), ']'),
 
     comprehension: ($) =>
       seq(

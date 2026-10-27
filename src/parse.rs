@@ -2860,7 +2860,7 @@ impl Parser {
         let mut fields: Vec<EntityField> = Vec::new();
         let mut field_at: Vec<Span> = Vec::new();
         let mut indexes: Vec<Index> = Vec::new();
-        let mut key: Option<usize> = None;
+        let mut keys: Vec<usize> = Vec::new();
 
         while !self.at_sym(Sym::RBrace) {
             if self.at_index_clause() {
@@ -2937,13 +2937,6 @@ impl Parser {
             }
 
             if is_key {
-                if key.is_some() {
-                    return Err(self.err(
-                        Code::BadAnnotation,
-                        format!("entity `{name}` has more than one `@key`"),
-                        at,
-                    ));
-                }
                 if !value::can_key(&ty) {
                     return Err(self.err(
                         Code::EntityShape,
@@ -2954,7 +2947,11 @@ impl Parser {
                         at,
                     ));
                 }
-                key = Some(fields.len());
+                // Rule 11: written order, so the columns are the key in the order they
+                // are declared in. No check that they are adjacent or first: where a
+                // column is declared says nothing about what it means, and forcing an
+                // order would move the key's own order out of the author's hands.
+                keys.push(fields.len());
             }
 
             fields.push(field);
@@ -2964,12 +2961,12 @@ impl Parser {
         }
         self.expect_sym(Sym::RBrace)?;
 
-        let Some(key) = key else {
+        if keys.is_empty() {
             return self.fail(
                 Code::EntityShape,
                 format!("entity `{name}` has no `@key` field"),
             );
-        };
+        }
 
         for index in &indexes {
             for column in &index.fields {
@@ -2985,7 +2982,7 @@ impl Parser {
         Ok(EntityDef {
             name,
             fields,
-            key,
+            keys,
             indexes,
         })
     }
@@ -5435,12 +5432,10 @@ impl Parser {
                 at,
             ));
         };
-        self.expect_sym(Sym::LBracket)?;
-        let key = self.expr(lower, Some(def.key_field().ty.clone()))?;
-        self.expect_sym(Sym::RBracket)?;
+        let keys = self.subscript(lower, &def)?;
 
         if absent {
-            return Ok(Expect::NoRow { entity, key, span });
+            return Ok(Expect::NoRow { entity, keys, span });
         }
         self.expect_sym(Sym::LBrace)?;
         let mut fields: Vec<(Ident, ExprId)> = Vec::new();
@@ -5467,7 +5462,7 @@ impl Parser {
         self.expect_sym(Sym::RBrace)?;
         Ok(Expect::Row {
             entity,
-            key,
+            keys,
             fields,
             span,
         })
@@ -5583,10 +5578,60 @@ impl Parser {
     /// the block itself, since both callers do the same thing after.
     /// `whole` is where the block began, for a `put`, which writes every column. A
     /// `patch` and an `update` pass `None`: writing some of a row is what they are for.
+    /// `[a, b]`: one expression per `@key` column, in key order, each typed from the
+    /// column it addresses. Rule 11, and the only place a row is named.
+    ///
+    /// The arity is checked after the loop rather than during it, because the expected
+    /// type comes from the arity: a value written at a position the key does not have
+    /// has no column to resolve a literal against, so it is parsed untyped and the
+    /// count is what gets reported.
+    fn subscript(&mut self, lower: &mut Lower, def: &EntityDef) -> Result<Vec<ExprId>, Diagnostic> {
+        let bracket = self.span_here();
+        self.expect_sym(Sym::LBracket)?;
+        let mut keys: Vec<ExprId> = Vec::new();
+        while !self.at_sym(Sym::RBracket) {
+            let expected = def
+                .keys
+                .get(keys.len())
+                .map(|&column| def.fields[column].ty.clone());
+            keys.push(self.expr(lower, expected)?);
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RBracket)?;
+        if keys.len() != def.keys.len() {
+            let columns: Vec<&str> = def.key_fields().map(|field| field.name.as_str()).collect();
+            let wanted = columns.len();
+            let found = keys.len();
+            // The same shape `call_args` uses for a wrong argument count, including its
+            // plural, because it is the same mistake about the same kind of list.
+            let plural = if wanted == 1 { "" } else { "s" };
+            return Err(self
+                .err(
+                    Code::Arity,
+                    format!(
+                        "`{}` has a {wanted}-column key, so a subscript takes {wanted} \
+                         value{plural}, found {found}",
+                        def.name
+                    ),
+                    bracket,
+                )
+                // A wrong count is almost always a compound key addressed as if it were
+                // one column, so the fix is the columns in order rather than the number.
+                .with_hint(format!("write `{}[{}]`", def.name, columns.join(", "))));
+        }
+        Ok(keys)
+    }
+
+    /// `whole` is the opening brace of a `put`, and `None` for a `patch` or an
+    /// `update`: the two differ in whether a column may be left out and in whether a
+    /// key column may be written at all. `writer` is the keyword, for the messages.
     fn write_fields(
         &mut self,
         lower: &mut Lower,
         def: &EntityDef,
+        writer: &str,
         whole: Option<Pos>,
     ) -> Result<Vec<(Ident, ExprId)>, Diagnostic> {
         let mut fields: Vec<(Ident, ExprId)> = Vec::new();
@@ -5610,6 +5655,27 @@ impl Parser {
             let twice = fields.iter().any(|(seen, _)| seen == &name);
             if twice {
                 self.note(self.err(Code::DuplicateField, format!("`{name}` is given twice"), at));
+            }
+            // Rule 11: the subscript is a key column's only writer here. Without this a
+            // `patch Order[order_id] { order_id: order_id + 1 }` checked clean and filed
+            // a row under one id holding another, which is the same row disagreeing with
+            // itself about which row it is. A `put` has no subscript and writes them
+            // like any other column.
+            if whole.is_none() && def.is_key(&name) {
+                self.note(
+                    self.err(
+                        Code::EntityShape,
+                        format!(
+                            "`{name}` is a key column of `{}`, so `{writer}` may not write it",
+                            def.name
+                        ),
+                        at,
+                    )
+                    .with_hint(
+                        "the subscript already says which row this is, and a row's key \
+                         cannot change; take it out of the body",
+                    ),
+                );
             }
             let expected = declared.ty.clone();
             let outer = mem::replace(&mut self.propagating, true);
@@ -5966,14 +6032,14 @@ impl Parser {
                             self.through_brackets(),
                         )
                         .with_hint(
-                            "the key is the column marked `@key`, which a `put` fills like \
-                             any other field; `patch` and `update` are the statements that \
-                             address a row already there",
+                            "a `put` fills every `@key` column like any other field; `patch` \
+                             and `update` are the statements that address a row already \
+                             there",
                         ));
                 }
                 let brace = self.here();
                 self.expect_sym(Sym::LBrace)?;
-                let fields = self.write_fields(lower, &def, Some(brace))?;
+                let fields = self.write_fields(lower, &def, "put", Some(brace))?;
                 Ok(Stmt::Put {
                     entity: name,
                     fields,
@@ -6016,9 +6082,7 @@ impl Parser {
                              whole row and takes no key"
                         )));
                 }
-                self.expect_sym(Sym::LBracket)?;
-                let key = self.expr(lower, Some(def.key_field().ty.clone()))?;
-                self.expect_sym(Sym::RBracket)?;
+                let keys = self.subscript(lower, &def)?;
 
                 self.expect_sym(Sym::LBrace)?;
                 self.stored = Some(Stored {
@@ -6026,12 +6090,12 @@ impl Parser {
                     loads: Vec::new(),
                     slots: HashMap::new(),
                 });
-                let fields = self.write_fields(lower, &def, None)?;
+                let fields = self.write_fields(lower, &def, text, None)?;
                 let stored = self.stored.take().expect("set just above");
 
                 Ok(Stmt::Patch {
                     entity: name,
-                    key,
+                    keys,
                     absent,
                     loads: stored.loads,
                     fields,
@@ -6048,10 +6112,8 @@ impl Parser {
                 }
                 self.bump();
                 let (name, def) = self.entity_ref()?;
-                self.expect_sym(Sym::LBracket)?;
-                let key = self.expr(lower, Some(def.key_field().ty.clone()))?;
-                self.expect_sym(Sym::RBracket)?;
-                Ok(Stmt::Delete { entity: name, key })
+                let keys = self.subscript(lower, &def)?;
+                Ok(Stmt::Delete { entity: name, keys })
             }
             Token::Word(Keyword::Let) => {
                 self.bump();
@@ -9633,9 +9695,9 @@ impl Parser {
                     continue;
                 };
                 for (position, field) in def.fields.iter().enumerate() {
-                    // The subscript supplies the key, and a default is the zero the
-                    // author chose.
-                    if position == def.key || field.default.is_some() {
+                    // The subscript supplies every key column, and a default is the zero
+                    // the author chose.
+                    if def.keys.contains(&position) || field.default.is_some() {
                         continue;
                     }
                     if value::zero(&field.ty, defs).is_some() {
@@ -9685,26 +9747,52 @@ impl Parser {
                 let Some(event) = program.event(&handler.event) else {
                     continue;
                 };
-                let mut writes: Vec<(&Ident, &[(Ident, ExprId)])> = Vec::new();
+                // `keys` is empty for everything but a materializing `patch`, which
+                // fills each key column from the subscript: those are writes with a
+                // column of their own and the same two declarations behind them. An
+                // `update` never materializes, so its subscript stores nothing and only
+                // addresses a row that is already there.
+                //
+                // Borrowed rather than collected: this runs over every write statement
+                // of every handler on every `hek check`, whether or not any column has
+                // a bound.
+                let mut writes: Vec<Write<'_>> = Vec::new();
                 walk_stmts(&handler.body, &mut |stmt| match stmt {
-                    Stmt::Put { entity, fields, .. } | Stmt::Patch { entity, fields, .. } => {
-                        writes.push((entity, fields))
-                    }
+                    Stmt::Put { entity, fields, .. } => writes.push((entity, fields, &[])),
+                    Stmt::Patch {
+                        entity,
+                        keys,
+                        absent,
+                        fields,
+                        ..
+                    } => writes.push((
+                        entity,
+                        fields,
+                        match absent {
+                            Absent::Materialize => keys,
+                            Absent::Skip => &[],
+                        },
+                    )),
                     _ => {}
                 });
 
-                for (entity, fields) in writes {
+                for (entity, fields, keys) in writes {
                     let Some(def) = projector.entity(entity) else {
                         continue;
                     };
-                    for (column, value) in fields {
+                    let columns = fields.iter().map(|(column, value)| (column, *value)).chain(
+                        def.key_fields()
+                            .map(|field| &field.name)
+                            .zip(keys.iter().copied()),
+                    );
+                    for (column, value) in columns {
                         let Some(bound) = def.field(column).and_then(|field| field.max_len) else {
                             continue;
                         };
                         // Only a plain read of an event field. Anything computed is not
                         // two declarations disagreeing, and the runtime backstop keeps
                         // covering it.
-                        let Some(from) = loaded_field(handler, *value) else {
+                        let Some(from) = loaded_field(handler, value) else {
                             continue;
                         };
                         let Some(source) = event.field(from) else {
@@ -9731,7 +9819,7 @@ impl Parser {
                                 "this write narrows `{from}`: {} declares {declared} and `{entity}.{column}` is `@max({bound})`",
                                 event.path
                             ),
-                            handler.exprs.span(*value),
+                            handler.exprs.span(value),
                         )
                         .with_hint(format!(
                             "an over-length value is `invalid` at `emit`, so a projector meets one only when these two disagree, and it has no channel to report it; {fix}"
@@ -10295,6 +10383,11 @@ fn collect<T>(
     }
 }
 
+/// One write statement as the `@max` invariant reads it: the entity, the columns the
+/// body names, and the key columns a materializing `patch` fills from its subscript.
+/// Empty for everything else, since nothing else stores a key.
+type Write<'a> = (&'a Ident, &'a [(Ident, ExprId)], &'a [ExprId]);
+
 /// The expressions one statement owns, not counting the bodies of a nested `if`, whose
 /// statements the caller walks separately.
 fn roots(stmt: &Stmt) -> Vec<ExprId> {
@@ -10305,12 +10398,12 @@ fn roots(stmt: &Stmt) -> Vec<ExprId> {
         Stmt::Emit { fields, .. } | Stmt::Put { fields, .. } => {
             fields.iter().map(|(_, id)| *id).collect()
         }
-        Stmt::Patch { key, fields, .. } => {
-            let mut ids = vec![*key];
+        Stmt::Patch { keys, fields, .. } => {
+            let mut ids = keys.clone();
             ids.extend(fields.iter().map(|(_, id)| *id));
             ids
         }
-        Stmt::Delete { key, .. } => vec![*key],
+        Stmt::Delete { keys, .. } => keys.clone(),
         Stmt::Fail { message, .. } | Stmt::Log { message } => vec![*message],
         Stmt::Erase { value, .. } | Stmt::Discard(value) => vec![*value],
         Stmt::Call { args, .. } => args.clone(),

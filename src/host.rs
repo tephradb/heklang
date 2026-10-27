@@ -275,11 +275,16 @@ pub trait Calls {
 /// is not lost, since `Stmt::Patch` still holds it, but it is deliberately not what
 /// crosses: a host taking a delta while [`Store`](crate::Store) took a whole row would
 /// be two write paths with nothing comparing them against each other.
+///
+/// **A row's address is a sequence**: one [`Key`] per `@key` column, in the order the entity declared
+/// them. A single-column key is a one-element slice rather than a special case, and the
+/// sequence orders lexicographically, which is what keeps a prefix of a compound key a
+/// range the read API can page on. See `docs/projectors.md` rule 11.
 pub trait Rows {
     /// The current row, including writes this projector has already made.
-    fn row(&self, entity: &str, key: &Key) -> Result<Option<Row>, Error>;
-    fn put(&mut self, entity: &Ident, key: Key, row: Row) -> Result<(), Error>;
-    fn delete(&mut self, entity: &Ident, key: &Key) -> Result<(), Error>;
+    fn row(&self, entity: &str, key: &[Key]) -> Result<Option<Row>, Error>;
+    fn put(&mut self, entity: &Ident, key: Vec<Key>, row: Row) -> Result<(), Error>;
+    fn delete(&mut self, entity: &Ident, key: &[Key]) -> Result<(), Error>;
 }
 
 /// Everything the interpreter needs from the world outside it, apart from the journal:
