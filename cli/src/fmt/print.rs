@@ -666,12 +666,13 @@ impl<'a> Printer<'a> {
         if kids.len() == 1 {
             return self.trailed(&trailing, self.node(kids[0]));
         }
-        // The `?` is an anonymous token, so it is not among the named children. Read it
-        // off the last child rather than sniffing the node's text, which also counted a
-        // `?` written inside the content type.
-        let optional = node
-            .child(node.child_count().saturating_sub(1))
-            .is_some_and(|last| last.kind() == "?");
+        // The `?` is an anonymous token, so it is not among the named children, and
+        // `has_token` is the question to ask: it looks at this node's own anonymous
+        // children only, so a `?` written *inside* the content type belongs to that
+        // `type` node and is not counted. Reading it off the last child was equally
+        // correct about that and wrong the moment a comment is the final child, which
+        // would silently drop a declared `?`.
+        let optional = self.has_token(node, "?");
         self.trailed(
             &trailing,
             Doc::concat([

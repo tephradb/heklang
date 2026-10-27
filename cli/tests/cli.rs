@@ -545,6 +545,56 @@ command ArchivePlan(plan_id: Int, shop_id: Int) {
     );
 }
 
+/// The `reads` list is in the order the declarations were written, which is the only
+/// order a reader can check against the page. Walking the guards and then the command's
+/// own reads put every fold reached *through* a guard first, however the two were
+/// written: here `Direct` is above the guard and `Nested` is inside it.
+#[test]
+fn boundaries_name_reads_in_the_order_they_were_written() {
+    let source = "\
+event @shop.connected { shop_id: Int }
+event @plan.created { plan_id: Int, shop_id: Int }
+event @plan.archived { plan_id: Int, shop_id: Int }
+refusal ShopNotFound \"shop does not exist\"
+
+fold Nested(shop_id: Int) -> Bool = false {
+  on @shop.connected(shop_id) => true
+}
+
+fold Direct(plan_id: Int) -> n: Int = 0 {
+  on @plan.created(plan_id) => n + 1
+}
+
+guard ShopIsConnected(shop_id: Int) {
+  fold connected = Nested { shop_id }
+  if !connected {
+    reject ShopNotFound
+  }
+}
+
+command ArchivePlan(plan_id: Int, shop_id: Int) {
+  fold plans = Direct { plan_id }
+  guard ShopIsConnected { shop_id }
+  if plans > 0 {
+    emit @plan.archived { plan_id, shop_id }
+  }
+}
+";
+    let root = project("ordered", &[("app.hk", source)]);
+    let output = hek(&[
+        "check",
+        "--boundaries",
+        root.to_str().expect("a utf-8 path"),
+    ]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.contains("reads Direct, Nested"),
+        "the read written above the guard comes first: {text}"
+    );
+}
+
 /// `check` is a pass/fail gate, so the listing is asked for. Without the flag it prints
 /// the counts and nothing per command, however many guards the program has.
 #[test]

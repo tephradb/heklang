@@ -8,6 +8,37 @@ use crate::ir::{
 };
 use crate::scaled::Rounding;
 
+/// What a too-early read of a fold turned out to be reading, because the two have
+/// different fixes and only one of them has a seed.
+///
+/// An **accumulator** is a `fold n: T = seed` in the same stage, and a read of it before
+/// it folds answers with that seed. A **named** read is a `fold x = F { .. }`, whose
+/// destination the splice assigns *after* the stage: nothing seeds it, so a message about
+/// "its own seed" sent the author looking for one that does not exist.
+#[derive(Debug, Clone)]
+pub enum Read {
+    Accumulator(Ident),
+    Named(Ident),
+}
+
+impl Read {
+    pub fn name(&self) -> &str {
+        match self {
+            Read::Accumulator(name) | Read::Named(name) => name,
+        }
+    }
+
+    /// What reading it too early actually answers with.
+    pub fn answers(&self) -> String {
+        match self {
+            Read::Accumulator(name) => {
+                format!("this reads `{name}`'s own seed rather than what it folds to")
+            }
+            Read::Named(name) => format!("this reads `{name}` before it has folded"),
+        }
+    }
+}
+
 pub struct Builder {
     name: Ident,
     module: Option<Ident>,
@@ -270,18 +301,19 @@ impl Builder {
     /// this, because a seed is evaluated before its own stage folds and so sees another
     /// `fold`'s seed rather than what it folds to: an answer that is wrong rather than
     /// late. A `fold` an earlier stage folded is not one of these.
-    pub fn fold_read(&self, value: ExprId) -> Option<(Ident, Span)> {
+    pub fn fold_read(&self, value: ExprId) -> Option<(Read, Span)> {
         let (slot, at) = self.unset_read(value)?;
-        let name = match self.fold_of(slot) {
-            Some(var) => var.name.clone(),
+        let read = match self.fold_of(slot) {
+            Some(var) => Read::Accumulator(var.name.clone()),
             // A named read's destination, which is pending but is no `FoldVar`.
-            None => self
-                .read_names
-                .iter()
-                .find(|(found, _)| *found == slot)
-                .map(|(_, name)| name.clone())?,
+            None => Read::Named(
+                self.read_names
+                    .iter()
+                    .find(|(found, _)| *found == slot)
+                    .map(|(_, name)| name.clone())?,
+            ),
         };
-        Some((name, self.exprs.span(at)))
+        Some((read, self.exprs.span(at)))
     }
 
     /// The first read of a `fold` the open stage declares, as the slot and the load

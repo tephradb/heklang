@@ -23,7 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `docs/testing.md` §8 keeps the append condition out of a test, so nothing else reports two
   copies drifting apart. An effect's arm counts as a body. Compared as written, including the
   accumulator's name, so the check under-counts and never misfires. It fires 167 times on the
-  pre-migration port, and found one duplicate the migration's own tooling had missed.
+  pre-migration port, and found one duplicate the migration's own tooling had missed. The first
+  copy's location is a related line and not part of the message, as it is for every other
+  two-place diagnostic in the crate.
 - `unused-accumulator`: a named fold that binds an accumulator name no arm reads. A fold's value
   is its declaration's name, so the name is written only where an arm reads the running value.
 - `hek check --boundaries` names what a command reads as well as what it guards, transitively
@@ -51,9 +53,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Store::get` and `Store::rows` with it. A single-column key is a one-element slice rather than a
   special case, and the sequence orders lexicographically, which is what keeps a prefix of a
   compound key a range the read API can page on.
-- The digest version is `hek-digest 5`, carried by the guard fix below and by nothing since.
-  Neither of the two features moved a hash: compound keys write exactly the `(key x)` node a
-  one-column key wrote before, and a named fold is inlined like a `guard` and so earns no entry.
+- The digest version is `hek-digest 5`, and two fixes on this branch share it. Neither of the two
+  features does: compound keys moved no hash at all, because a one-column key writes exactly the
+  `(key x)` node it wrote before, and a named fold is inlined like a `guard` and so earns no entry.
   Both verified byte for byte against the `hek/` corpus.
 
   A statement written below a `guard` moves from the stage's `(pre ..)` to its `(post ..)`, which is
@@ -61,8 +63,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changes. Measured on a 25,347-line application: one declaration of 84 commands renders
   differently, and the `hek/` corpus does not change for it.
 
+  A named fold whose return type already spells `Sealed(T, S)` is no longer sealed a second time, so
+  its accumulator's type changes from `Opt(Sealed(Sealed(T, S), S))` to what the author wrote. One
+  entry of the `hek/` corpus moves (`effect AnnounceTier`, the one declaration that reads a sealed
+  named fold); in the port it is 5 sealed folds across 37 call sites in 13 declarations.
+
 ### Fixed
 
+- **A named fold's arm filters were never checked against its own stage.** A command's body closes
+  each stage through `decl_body`, which runs the check; a fold's body is arms only, so nothing was
+  calling it. `fold F(..) -> acc: Int = 0 { on @a.b(id: acc) => acc + 1 }` reported `checked 1 file`
+  and then died at run time with "slot read before it was set", which is the one shape
+  `Builder::fold_call`'s own comment calls the thing a checker must not allow. The inline form was
+  always checked; only the named one escaped.
+- **A fold arm could silently discard the running value.** Where one arm reads the accumulator and
+  another binds an event field of the accumulator's name, the bind wins for that arm, so
+  `on @order.adjusted(..) { spend } => spend + 1.00` folded the event's `spend` and reset the
+  lifetime total. `unused-accumulator` could not see it, because the *other* arm satisfies that
+  check. Now `declared-twice` at the bind, for the inline form as well, and only when some arm does
+  read the accumulator: a fold whose every arm replaces the value has nothing to shadow, and
+  `fold token: String? = none / on @shop.connected { token } => token` stays the ordinary spelling
+  of that.
+- **A fold's declared seal was applied twice, and its declared subject was never checked.**
+  `-> Sealed(String, Customer)?` lowered to `Opt(Sealed(Sealed(String, Customer), Customer))`:
+  unwritable in source, disagreeing with the `Update::ty` of its own arms, and hashed in that shape.
+  The double seal is also why nothing noticed that `-> Sealed(String, Shop)?` over an arm folding
+  content sealed under `Customer` checked clean; the two have to name the same subject, because
+  `reveal` names the key by it.
+- `reveal` and a `secret` read inside a fold's arm reported `wrong-context` with a message about
+  what a command may do, rather than the `fold-restriction` `docs/folds.md` rule 10 promises. The
+  context gate answers for a fold as though it were the command it is spliced into, so it has to run
+  after the fold check, not before. The old message was wrong on its face for a fold read from an
+  effect arm.
+- The hint for a seed or an argument that reads a fold too early said it reads "its own seed", which
+  is true of an accumulator and false of a named read: a read's destination is assigned by the
+  splice after the stage, so nothing seeds it and the author was sent looking for one that does not
+  exist.
 - **A row's key column could disagree with the row's own key.** `put` reads a key off the row's
   columns and a `patch` takes it from its subscript, so `patch Order[order_id] { order_id: order_id
   + 100 }` checked clean, ran, and filed a row under id 7 holding `order_id: 107`. The same row

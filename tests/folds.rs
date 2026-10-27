@@ -269,15 +269,50 @@ fn an_accumulator_no_arm_reads_is_refused() {
     );
 }
 
-/// The shadowing hazard the rule removes. `dry_run` is both the accumulator and the bound
-/// field, and `=> dry_run` is the bind; with no name bound there is one `dry_run` in scope
-/// and the question cannot be asked.
+/// One arm, binding a field named like the accumulator and replacing the value with it.
+/// Nothing reads the running value, so the *name* is what is wrong rather than the bind:
+/// `-> Bool = false` says the same thing and leaves one `dry_run` in scope.
+///
+/// Reported as `unused-accumulator` and not as shadowing, because a fold whose every arm
+/// replaces the value has nothing to shadow. That is the latest-value-wins fold, and
+/// `fold token: String? = none / on @shop.connected { token } => token` is the common
+/// spelling of it; refusing the bind there would force a rename for no gain.
 #[test]
 fn a_bind_of_the_same_name_does_not_count_as_a_read() {
     let message = error(
         "event @w.opened { id: Int, dry_run: Bool }\nfold F(id: Int) -> dry_run: Bool = false {\n  on @w.opened(id) { dry_run } => dry_run\n}\n",
     );
     assert_eq!(message, "fold `F` names `dry_run` and no arm reads it");
+}
+
+/// The hazard is one name with two meanings: an arm that reads the running value beside
+/// an arm that binds a field of the same name. The second arm's `=> n + 1` folds the
+/// event's `n` and discards the total, and this checked clean and ran before.
+///
+/// `unused-accumulator` cannot stand in for it, which is the point: it asks whether
+/// *any* arm reads the slot, so the first arm here satisfies it.
+#[test]
+fn an_arm_reading_the_accumulator_forbids_another_binding_its_name() {
+    let message = error(
+        "event @w.opened { id: Int, n: Int }\nevent @w.closed { id: Int, n: Int }\nfold F(id: Int) -> n: Int = 0 {\n  on @w.opened(id) => n + 1\n  on @w.closed(id) { n } => n + 1\n}\n",
+    );
+    assert_eq!(
+        message,
+        "`n` is `F`'s accumulator and another arm reads it, so this arm cannot bind a field of that name"
+    );
+}
+
+/// The inline form shares `fold_arms`, so it shares the rule. Its declaration name *is*
+/// its accumulator's, so the message cannot name the fold without reading "`n` is `n`'s".
+#[test]
+fn an_inline_fold_has_the_same_rule() {
+    let message = error(
+        "event @w.opened { id: Int, n: Int }\nevent @w.closed { id: Int, n: Int }\ncommand C(id: Int) {\n  fold n: Int = 0\n    on @w.opened(id) => n + 1\n    on @w.closed(id) { n } => n + 1\n  return\n}\n",
+    );
+    assert_eq!(
+        message,
+        "`n` is this fold's accumulator and another arm reads it, so this arm cannot bind a field of that name"
+    );
 }
 
 #[test]
@@ -301,16 +336,15 @@ fn an_accumulator_an_arm_reads_is_kept() {
 
 #[test]
 fn a_fold_cannot_refuse() {
-    // Structural rather than a message: a fold's body is arms only, so there is nowhere
-    // in one to write a `reject` at all. That is the stronger form of rule 4, and it is
-    // why a `fold` line at a call site is never an exit.
+    // Structural rather than a message, and the asserted text says so: a fold's body is
+    // arms only, so there is nowhere in one to write a `reject` at all. That is the
+    // stronger form of rule 4, and it is why a `fold` line at a call site is never an
+    // exit. Asserted exactly, so a fixture that stops parsing for some *other* reason
+    // cannot keep the test passing.
     let message = error(&format!(
         "{EVENTS}fold F(customer_id: Int) -> Bool = false {{\n  on @order.placed(customer_id) => true\n  reject TooMany\n}}\n"
     ));
-    assert!(
-        !message.is_empty(),
-        "a reject inside a fold body is refused"
-    );
+    assert_eq!(message, "expected `}`, found `reject`");
 }
 
 #[test]
@@ -318,7 +352,7 @@ fn a_fold_appends_nothing() {
     let message = error(&format!(
         "{EVENTS}fold G(customer_id: Int) -> Bool = false {{\n  on @order.placed(customer_id) => true\n  emit @order.placed {{ order_id: 1, customer_id, total: 1 }}\n}}\n"
     ));
-    assert!(!message.is_empty(), "an emit inside a fold body is refused");
+    assert_eq!(message, "expected `}`, found `emit`");
 }
 
 /// A guard may still hold accumulators, and may also read a named fold. Both shapes are
@@ -459,9 +493,9 @@ fn a_sealed_return_is_still_behind_the_decrypt_boundary() {
     let message = error(&format!(
         "{sealed}command C(customer_id: Customer) {{\n  fold mail = Email {{ customer_id }}\n  emit @copy.made {{ customer_id, email: mail.unwrap_or(\"\") }}\n}}\n"
     ));
-    assert!(
-        !message.is_empty(),
-        "sealed content cannot be written out plain through a fold's return type"
+    assert_eq!(
+        message,
+        "`unwrap_or` would put a plaintext default and content sealed under `Customer` in one slot, with nothing static to say which is in it"
     );
 }
 
@@ -470,9 +504,44 @@ fn sealed_is_not_spellable_under_a_constructor() {
     let message = error(
         "subject Customer(Int)\nevent @order.placed { order_id: Int, customer_id: Customer }\nfold F(customer_id: Customer) -> List(Sealed(String, Customer)) = [] {\n  on @order.placed(customer_id) => []\n}\n",
     );
-    assert!(
-        !message.is_empty(),
-        "`List(Sealed(..))` stays rejected, as `List(Secret)` does"
+    // `Sealed` is reachable only from the top of a fold's return type, so under a
+    // constructor the word is an ordinary unknown type rather than a rule being broken.
+    assert_eq!(message, "unknown type `Sealed`");
+}
+
+/// The declared subject is checked against what the arms carry. It was not, and the
+/// double seal below is why nothing noticed: the type the arms produced and the type the
+/// signature declared never had to agree.
+#[test]
+fn a_sealed_return_names_the_subject_its_arms_fold() {
+    let message = error(
+        "subject Customer(Int)\nsubject Shop(Int)\nevent @order.placed { order_id: Int, customer_id: Customer, email: String @subject(customer_id) }\nfold F(customer_id: Customer) -> Sealed(String, Shop)? = none {\n  on @order.placed(customer_id) { email } => email\n}\n",
+    );
+    assert_eq!(
+        message,
+        "`F` declares content sealed under `Shop` and the arm on @order.placed folds content sealed under `Customer`"
+    );
+}
+
+/// And the seal is applied once. `build::seal` is not idempotent, so a return type that
+/// already spells the seal used to be sealed again, giving
+/// `Opt(Sealed(Sealed(String, Customer), Customer))`: unwritable in source, disagreeing
+/// with the `Update::ty` of its own arms, and hashed into the digest.
+#[test]
+fn a_declared_seal_is_not_applied_twice() {
+    let program = program(
+        "subject Customer(Int)\nevent @order.placed { order_id: Int, customer_id: Customer, email: String @subject(customer_id) }\nfold Email(customer_id: Customer) -> Sealed(String, Customer)? = none {\n  on @order.placed(customer_id) { email } => email\n}\n",
+    );
+    let fold = program.fold("Email").expect("declared");
+    assert_eq!(
+        fold.ret.to_string(),
+        "String @subject(Customer)?",
+        "the declared type is what the author wrote, as `Display` renders a seal"
+    );
+    let var = fold.stage.folds.first().expect("one accumulator");
+    assert_eq!(
+        var.ty, fold.ret,
+        "and the accumulator holds it, rather than a seal around a seal"
     );
 }
 
@@ -532,9 +601,39 @@ fn a_fold_has_no_clock() {
     let message = error(&format!(
         "{EVENTS}fold F(customer_id: Int) -> Bool = false {{\n  on @order.placed(customer_id) => now() > 0\n}}\n"
     ));
-    assert!(
-        !message.is_empty(),
-        "a fold decides from the log; the moment is a parameter"
+    assert_eq!(message, "a `fold` reads the log, so it cannot read a clock");
+}
+
+/// Rule 10's table says `fold-restriction`, and it has to be that rather than
+/// `wrong-context`: `gate` answers for a fold as though it were the command it is spliced
+/// into, so gating first told an author in an *effect* about a rule for commands.
+#[test]
+fn a_fold_may_not_decrypt() {
+    let message = error(
+        "subject Customer(Int)\nevent @order.placed { order_id: Int, customer_id: Customer, email: String @subject(customer_id) }\nfold F(customer_id: Customer) -> String? = none {\n  on @order.placed(customer_id) { email } => reveal(email)\n}\n",
+    );
+    assert_eq!(message, "a `fold` reads the log, so it cannot decrypt");
+}
+
+#[test]
+fn a_fold_may_not_read_a_secret() {
+    let message = error(&format!(
+        "{EVENTS}secret TOKEN\nfold F(customer_id: Int) -> Int = 0 {{\n  on @order.placed(customer_id) => TOKEN.length\n}}\n"
+    ));
+    assert_eq!(message, "a `fold` cannot read `TOKEN`");
+}
+
+/// A fold's arm filters are checked against what its own stage declares, which a
+/// command's body gets from `decl_body` and a fold's body does not go through. Without
+/// it this passed `hek check` and died at run time reading a slot before it was set.
+#[test]
+fn an_arm_filter_may_not_read_the_accumulator() {
+    let message = error(&format!(
+        "{EVENTS}fold F(customer_id: Int) -> acc: Int = 0 {{\n  on @order.placed(customer_id: acc) => acc + 1\n}}\n"
+    ));
+    assert_eq!(
+        message,
+        "this filter on `customer_id` reads a `fold` beside it"
     );
 }
 
@@ -545,7 +644,7 @@ fn a_fold_is_one_read_of_the_log() {
     let message = error(&format!(
         "{EVENTS}fold F(customer_id: Int) -> Int = 0 {{\n  on @order.placed(customer_id) => 1\n  fold other: Int = 0\n    on @order.cancelled(customer_id) => 1\n}}\n"
     ));
-    assert!(!message.is_empty(), "a fold reads the log once");
+    assert_eq!(message, "expected `}`, found `fold`");
 }
 
 // ---------------------------------------------------------------------------------
@@ -642,7 +741,8 @@ fn the_same_inline_fold_in_two_bodies_is_refused() {
         "{EVENTS}command A(customer_id: Int) {{\n  fold n: Int = 0\n    on @order.placed(customer_id) => n + 1\n  if n > 1 {{ reject TooMany }}\n  return\n}}\n\ncommand B(customer_id: Int) {{\n  fold n: Int = 0\n    on @order.placed(customer_id) => n + 1\n  if n > 2 {{ reject TooMany }}\n  return\n}}\n"
     );
     assert!(
-        error(&source).starts_with("this fold is also declared at"),
+        error(&source)
+            == "this fold is written the same way in two places; name it, so the two cannot drift apart",
         "got {:?}",
         error(&source)
     );
@@ -662,7 +762,8 @@ fn two_arms_of_one_effect_are_two_bodies() {
         "{EVENTS}effect E {{\n  on @order.placed as e {{ @key customer_id }} {{\n    fold n: Int = 0\n      on @order.placed(customer_id: e.customer_id) => n + 1\n    log(\"{{n}}\")\n  }}\n  on @order.cancelled as e {{ @key customer_id }} {{\n    fold n: Int = 0\n      on @order.placed(customer_id: e.customer_id) => n + 1\n    log(\"{{n}}\")\n  }}\n}}\n"
     );
     assert!(
-        error(&source).starts_with("this fold is also declared at"),
+        error(&source)
+            == "this fold is written the same way in two places; name it, so the two cannot drift apart",
         "got {:?}",
         error(&source)
     );

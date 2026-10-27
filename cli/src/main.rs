@@ -404,11 +404,30 @@ fn boundaries(program: &Program) {
         // this listing wants to know that the names alone do not say.
         let mut guarded: Vec<String> = Vec::new();
         let mut read: Vec<String> = Vec::new();
-        for call in &command.calls {
-            through(program, &call.guard, &mut guarded, &mut read);
-        }
-        for call in &command.reads {
-            push_once(&call.fold, &mut read);
+        // In the order they were written, which is what "first named first" below means
+        // and what the page a reader has open says. Walking the guards and then the reads
+        // put every fold reached *through* a guard ahead of one the command names itself,
+        // however the two were written. `inline::source_order` merges the same two lists
+        // the same way, and for the same reason.
+        let mut named: Vec<(_, Option<&str>, &str)> = command
+            .calls
+            .iter()
+            .map(|call| (call.span.start, Some(call.guard.as_str()), ""))
+            .chain(
+                command
+                    .reads
+                    .iter()
+                    .map(|call| (call.span.start, None, call.fold.as_str())),
+            )
+            .collect();
+        named.sort_by_key(|(at, _, _)| *at);
+        for (_, guard, fold) in named {
+            match guard {
+                Some(guard) => through(program, guard, &mut guarded, &mut read),
+                None => {
+                    push_once(fold, &mut read);
+                }
+            }
         }
         if !guarded.is_empty() {
             println!("  {} guards {}", command.name, guarded.join(", "));

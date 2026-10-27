@@ -194,8 +194,31 @@ Both spellings mean the same thing *in that arm*, which is what makes it hard to
 
 That example is refused, and by this rule rather than by a second one. No arm reads the accumulator,
 so the name is `unused-accumulator` and the fold is written `-> Bool = false`, which leaves one
-`dry_run` in scope and the question cannot be asked at all. The inline form keeps the same wart,
-because there the name is load-bearing and cannot be dropped.
+`dry_run` in scope and the question cannot be asked at all.
+
+**The two-arm case needs its own rule, and has one.** Where one arm reads the running value and
+another binds a field of the accumulator's name, `unused-accumulator` is satisfied by the first arm
+and says nothing about the second:
+
+```
+fold Spend(customer_id: Customer) -> spend: Money(2) = 0 {
+  on @order.placed(customer_id) { total } => spend + total
+  on @order.adjusted(customer_id) { spend } => spend + 1.00   // the event's spend, not the total
+}
+```
+
+The second arm resets the lifetime total to one event's field plus one. That checked clean and ran,
+and the digest showed it plainly: the arm's update read the bind's slot rather than the
+accumulator's. It is now `declared-twice` at the bind:
+
+> `spend` is `Spend`'s accumulator and another arm reads it, so this arm cannot bind a field of
+> that name
+
+**Only when some arm reads the accumulator**, which is the whole condition. A fold whose every arm
+*replaces* the value has nothing to shadow, and
+`fold token: String? = none / on @shop.connected { token } => token` is the common spelling of
+exactly that: refusing the bind there would force a rename for no gain. The inline form shares the
+arm loop, so it shares the rule; it cannot drop the name, but it can rename it.
 
 **The check belongs to `check` and not to `fmt`.** Telling the accumulator from an identically-named
 bind needs name resolution, and `docs/fmt.md` reads the grammar. A token scan gets this wrong, which
@@ -516,12 +539,27 @@ reaching for one wants to know whether to look for a message.
 | read the log twice | one declaration run, as a guard has | unwritable |
 | `now()` | a fold decides from the log; take the moment as a parameter | `fold-restriction`, in an arm |
 | `reveal` | the fold hands back the seal and the caller reveals it (rule 7) | `fold-restriction`, in an arm |
+| read a `secret` | a secret is not in the log, so rotating one would change a replay | `fold-restriction`, in an arm |
+| read a `fold` in a filter | a stage's filters resolve before it folds | `stage-shape`, in an arm |
 | fold nothing | a value computed from arguments alone is a `fn` | `empty-declaration` |
 
 **An arm is the one place a message is needed**, because an arm is an ordinary expression and
 `now()` and `reveal` are ordinary calls in it. Both are already refused there for the inline fold,
 by the same `fold-restriction` check and for the same reason, so a named fold inherits them rather
 than adding anything.
+
+**`fold-restriction` has to beat `wrong-context`, and did not.** A fold is spliced into whatever
+reads it, so the context gate answers for one as though it were the command it lands in. Asking the
+gate first meant `reveal` in a fold's arm reported *"only an effect crosses the decrypt boundary / a
+command decides from state without reaching personal data"* — a rule about a declaration the author
+is not in, under a code this table does not list, and wrong on its face for a fold read from an
+effect arm. The fold check runs first now, in both `reveal` and a `secret` read.
+
+**The filter row is a fold's own stage, checked where a command's is not.** A command's body closes
+each stage through `decl_body`, which calls `stage_check`; a fold's body is arms only, so there is
+no statement to close anything and nothing was calling it. `on @a.b(id: acc)` therefore passed
+`hek check` and died at run time with *"slot read before it was set"*, which is the one shape
+`Builder::fold_call` calls the thing a checker must not allow.
 
 `empty-declaration` has two spellings and the sharper one wins. A body with no arms is
 "fold `F` has no arms, so it is only its seed", which is about the declaration; `folds_nothing` is
@@ -534,11 +572,20 @@ that `src/inline.rs` splices out before `Program` is finished, so a host, the in
 `docs/host.md`'s traits see a command with its folds written out. There is no named fold in the
 append condition, in the journal or in a trace.
 
-**The digest gains nothing, and the hash does not move.** `src/digest.rs` gives the rule: `const`,
-`refusal` and `guard` are absent from the digest form *because the parser inlines all three, so a
-declaration of any of them runs nothing and its content is already at every use site*. A named fold
-is spliced identically, so it is the fourth. `docs/digest.md` rule 7 gains one word and nothing
-else, `VERSION` stays where it is, and a program with no named folds hashes exactly as it did.
+**The digest gains nothing, and the construct itself moved no hash.** `src/digest.rs` gives the
+rule: `const`, `refusal` and `guard` are absent from the digest form *because the parser inlines
+all three, so a declaration of any of them runs nothing and its content is already at every use
+site*. A named fold is spliced identically, so it is the fourth. `docs/digest.md` rule 7 gains one
+word and nothing else, and a program with no named folds hashes exactly as it did.
+
+Two **bug fixes** on the same branch did move hashes, which is what `hek-digest 5` is for: a
+statement below a guard moved from a stage's `(pre ..)` to its `(post ..)`, and a fold whose return
+type already spells its seal stopped being sealed a second time. The second is the sharper one: a
+declared `Sealed(T, S)?` was lowered to `Opt(Sealed(Sealed(T, S), S))`, a type no source can write,
+disagreeing with the `Update::ty` of its own arms, and hashed in that shape. It also meant the
+declared subject was never checked against the one the arms carry, so
+`-> Sealed(String, Shop)? ` over an arm folding content sealed under `Customer` checked clean. Both
+are now right and both are in one unreleased version.
 
 That is the opposite of what this document said while it was still a design, and the correction is
 worth keeping rather than quietly fixing: "a fold is a declaration now, so it earns an entry" is an

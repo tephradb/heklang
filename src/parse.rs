@@ -306,6 +306,10 @@ type EventHead = (EventPath, Option<ExprId>, Vec<(Ident, ExprId)>);
 #[derive(Debug, Clone)]
 struct InlineFold {
     written: Vec<Token>,
+    /// Where the declaration began, as a token index. `Parser::elsewhere` turns that
+    /// into a module-aware `Related`, which is what every other two-place diagnostic
+    /// in the crate uses; keeping the module here instead meant rebuilding one by hand.
+    pos: usize,
     module: Option<Ident>,
     span: Span,
 }
@@ -3874,17 +3878,13 @@ impl Parser {
 
         // Params, then `-> [acc:] T`, then the seed, then the body's brace. A guard's
         // `decl_params` stops at the brace, so this does its own tail.
-        self.expect_sym(Sym::LParen)?;
-        while !self.at_sym(Sym::RParen) {
-            let param = self.expect_ident()?;
-            self.expect_sym(Sym::Colon)?;
-            let ty = self.type_ref()?;
+        //
+        // Through `param_list`, which is what `fold_signature` reads the *same* header
+        // with in pass C. Two loops would have to agree or a caller would be checked
+        // against one parameter list while the splice copied another.
+        for (param, ty) in self.param_list(None)? {
             lower.b.param(&param, ty);
-            if !self.eat_sym(Sym::Comma) {
-                break;
-            }
         }
-        self.expect_sym(Sym::RParen)?;
         let (acc, ret) = self.fold_result()?;
         self.expect_sym(Sym::Assign)?;
         // What `decl_params` sets after its own brace. A fold's body holds no `let`, so
@@ -3943,7 +3943,14 @@ impl Parser {
         };
         let slot = lower.b.fold(&bound, ret.clone(), init);
 
-        self.fold_arms(lower, events, name, ret, slot, at, before_seed)?;
+        self.fold_arms(lower, events, name, &bound, ret, slot, at, before_seed)?;
+        // The filters of the one stage a fold is, checked against what it declares. A
+        // command gets this from `decl_body`, which a fold's body does not go through:
+        // its body is arms only, so there is no statement to close a stage and nothing
+        // was calling it. Without it `on @a.b(id: acc)` passed `hek check` and died at
+        // run time with "slot read before it was set", which is the one shape
+        // `Builder::fold_call` calls the thing a checker must not allow.
+        self.stage_check(lower)?;
         self.expect_sym(Sym::RBrace)?;
 
         // Rule 3: a name no arm reads is a synonym for the declaration's own, so there is
@@ -4169,11 +4176,15 @@ impl Parser {
                 return Err(self
                     .err(
                         Code::StageShape,
-                        format!("`{field}` is taken from `{read}`, which has not folded yet"),
+                        format!(
+                            "`{field}` is taken from `{}`, which has not folded yet",
+                            read.name()
+                        ),
                         at,
                     )
                     .with_hint(format!(
-                        "a guard's arguments are evaluated before any fold runs, so this reads `{read}`'s own seed; pass a parameter, or a `let` above the declarations"
+                        "a guard's arguments are evaluated before any fold runs, so {}; pass a parameter, or a `let` above the declarations",
+                        read.answers()
                     )));
             }
             args.push((field, value));
@@ -4288,11 +4299,15 @@ impl Parser {
                 return Err(self
                     .err(
                         Code::StageShape,
-                        format!("`{field}` is taken from `{read}`, which has not folded yet"),
+                        format!(
+                            "`{field}` is taken from `{}`, which has not folded yet",
+                            read.name()
+                        ),
                         at,
                     )
                     .with_hint(format!(
-                        "a fold's arguments are evaluated before any fold runs, so this reads `{read}` before it has folded; pass a parameter, or a `let` above the declarations"
+                        "a fold's arguments are evaluated before any fold runs, so {}; pass a parameter, or a `let` above the declarations",
+                        read.answers()
                     )));
             }
             args.push((field, value));
@@ -4314,9 +4329,14 @@ impl Parser {
         // There is no twice-on-the-same-arguments check, and the asymmetry with a guard
         // is the point. A second `guard G { x }` decides what the first decided and does
         // nothing; a second read binds a second name, which is an ordinary two names for
-        // one value and the author's business. The slices it adds are already there, so
-        // it costs an accumulator, which is what `docs/guards.md` rule 4 says about
-        // guarding one proposition through two paths.
+        // one value and the author's business.
+        //
+        // What it costs is an accumulator **and a duplicate slice**: `at()` inserts the
+        // callee's whole slice list once per read with no dedup, so two reads of one fold
+        // put the same predicate in the append condition twice. That is waste rather than
+        // a change of meaning, since the predicate is the same one, and it is the same
+        // trade `docs/guards.md` rule 4 describes for guarding one proposition through
+        // two paths.
         //
         // The local is allocated *after* the arguments, so `fold x = F { n: x }` is a
         // plain "not in scope" rather than a read of a slot that is about to be written.
@@ -4353,15 +4373,19 @@ impl Parser {
             return Err(self
                 .err(
                     Code::StageShape,
-                    format!("`{name}` is seeded from `{read}`, which has not folded yet"),
+                    format!(
+                        "`{name}` is seeded from `{}`, which has not folded yet",
+                        read.name()
+                    ),
                     at,
                 )
                 .with_hint(format!(
-                    "every seed is evaluated before any fold runs, so this reads `{read}`'s own seed rather than what it folds to; to compute from a folded value, write a `let` below the declarations"
+                    "every seed is evaluated before any fold runs, so {}; to compute from a folded value, write a `let` below the declarations",
+                    read.answers()
                 )));
         }
         let slot = lower.b.fold(&name, ty.clone(), init);
-        self.fold_arms(lower, events, &name, &ty, slot, decl, before_seed)?;
+        self.fold_arms(lower, events, &name, &name, &ty, slot, decl, before_seed)?;
         // Rule 9, recorded rather than decided here: whether this is a duplicate is a
         // question about the whole program, and the second copy is often in another
         // module that has not been read yet.
@@ -4370,6 +4394,7 @@ impl Parser {
                 .iter()
                 .map(|spanned| spanned.token.clone())
                 .collect(),
+            pos: opened,
             module: self.module_at(opened).map(str::to_string),
             span: decl,
         });
@@ -4383,11 +4408,18 @@ impl Parser {
     /// same syntax in both positions, so promoting an inline fold to a named one is a
     /// header edit and the arms are untouched. See `docs/folds.md` rule 9.
     #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "every one is a different half of the \
+             declaration this parses, and grouping them into a struct would be a struct \
+             with one use"
+    )]
     fn fold_arms(
         &mut self,
         lower: &mut Lower,
         events: &[EventDef],
         name: &str,
+        acc: &str,
         ty: &Type,
         slot: Slot,
         decl: Span,
@@ -4400,6 +4432,8 @@ impl Parser {
         let mut bound: Option<(Ident, EventPath)> = None;
         let mut plain: Option<(EventPath, Span)> = None;
         let mut any_arm = false;
+        // Where an arm binds a field named like the accumulator, if one does.
+        let mut shadow: Option<Span> = None;
 
         while self.at_word(Keyword::On) {
             any_arm = true;
@@ -4446,6 +4480,12 @@ impl Parser {
                                 "a fold arm binds the declared fields of the record it folds, and the envelope's `at`, `id` and `position` are not among them: {fix}"
                             )));
                     };
+                    // A bind of the accumulator's own name hides it for this arm. Only
+                    // recorded here: whether that is a defect is a property of the whole
+                    // declaration, settled below for the reason rule 12's subject is.
+                    if field == acc && shadow.is_none() {
+                        shadow = Some(bind);
+                    }
                     binds.push(lower.b.bind(&field, Some(declared.ty.clone())));
                     if !self.eat_sym(Sym::Comma) {
                         break;
@@ -4537,10 +4577,66 @@ impl Parser {
                 )));
         }
 
-        // The declared type is what the author wrote; the seal propagates onto it, the
-        // same way it propagates onto an entity column. That is what `reveal` reads.
-        if let Some((field, _)) = bound {
-            lower.b.seal_fold(slot, field);
+        // One name cannot mean the running value in one arm and an event field in
+        // another. A bind hides the accumulator for its own arm, which is *harmless* when
+        // no arm reads the running value: every arm then replaces it, and
+        // `on @shop.connected { token } => token` is the ordinary latest-value-wins fold.
+        // It is a defect exactly when some arm does read it, because then one spelling has
+        // two meanings and the arm that gets the field silently discards the total.
+        //
+        // Rule 3's `unused-accumulator` cannot stand in for this: it asks whether *any*
+        // arm reads the slot, so the arm that reads it is what satisfies the check while
+        // the arm beside it drops the total. A `let` is refused the same way
+        // (`reused_name`), and for the same reason.
+        if let Some(at) = shadow
+            && lower.b.reads_slot(slot)
+        {
+            // An inline fold's declaration name *is* its accumulator's, so naming the
+            // fold there would read "`spend` is `spend`'s".
+            let whose = match name == acc {
+                true => "this fold's".to_string(),
+                false => format!("`{name}`'s"),
+            };
+            return Err(self
+                .err(
+                    Code::DeclaredTwice,
+                    format!(
+                        "`{acc}` is {whose} accumulator and another arm reads it, so this arm cannot bind a field of that name"
+                    ),
+                    at,
+                )
+                .with_hint(format!(
+                    "the bind hides the running value for this arm only, so `=> {acc} + ..` here folds the event's `{acc}` rather than the total; rename the accumulator, which is a name the author chooses, or bind nothing and let every arm replace the value"
+                )));
+        }
+
+        // The seal propagates onto the declared type, the same way it propagates onto an
+        // entity column. That is what `reveal` reads.
+        //
+        // **Unless the type already carries one**, which only a named fold's return
+        // position can spell (rule 7). `build::seal` is not idempotent, so sealing twice
+        // built `Opt(Sealed(Sealed(String, Customer), Customer))`: a type no source can
+        // write, disagreeing with the `Update::ty` of its own arms, and hashed into the
+        // digest. There the declaration has already said it and this has nothing to add,
+        // so what is left is to check the two agree.
+        if let Some((field, path)) = bound {
+            match ty.subject() {
+                Some(declared) if declared != &field => {
+                    return Err(self
+                        .err(
+                            Code::SealBoundary,
+                            format!(
+                                "`{name}` declares content sealed under `{declared}` and the arm on {path} folds content sealed under `{field}`"
+                            ),
+                            decl,
+                        )
+                        .with_hint(
+                            "one variable holds one subject, because `reveal` names the key by it; the return type and the field the arm folds have to name the same one",
+                        ));
+                }
+                Some(_) => {}
+                None => lower.b.seal_fold(slot, field),
+            }
         }
 
         Ok(())
@@ -8467,6 +8563,22 @@ impl Parser {
         optional: bool,
         span: Span,
     ) -> Result<ExprId, Diagnostic> {
+        // Before the gate, because a fold is the narrower answer and `gate` reads a fold
+        // as a command (it is spliced into one). Gating first meant a fold arm inside an
+        // *effect* was told "a command decides from state without reaching personal
+        // data", which is a rule about a declaration the author is not in, under a code
+        // `docs/folds.md` rule 10 does not list for it.
+        if self.folding {
+            return Err(self
+                .err(
+                    Code::FoldRestriction,
+                    format!("a `fold` cannot read `{name}`"),
+                    span,
+                )
+                .with_hint(
+                    "a fold is a pure function of the log prefix, and a secret is not in the log, so rotating one would make this fold answer differently on a replay",
+                ));
+        }
         self.gate(
             (
                 "only an effect reads a deployment secret",
@@ -8479,22 +8591,15 @@ impl Parser {
             "read a secret",
             span,
         )?;
-        if self.folding {
-            return Err(self
-                .err(
-                    Code::FoldRestriction,
-                    format!("a `fold` cannot read `{name}`"),
-                    span,
-                )
-                .with_hint(
-                    "a fold is a pure function of the log prefix, and a secret is not in the log, so rotating one would make this fold answer differently on a replay",
-                ));
-        }
         lower.b.at(span);
         Ok(lower.b.expr(Expr::Secret { name, optional }))
     }
 
     fn reveal_call(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, Diagnostic> {
+        // Before the gate, for the reason `secret_read` gives: a fold is the narrower
+        // answer, and `gate` answers for a fold as though it were the command it is
+        // spliced into.
+        self.not_in_fold("decrypt", span)?;
         self.gate(
             (
                 "only an effect crosses the decrypt boundary",
@@ -8508,7 +8613,6 @@ impl Parser {
             span,
         )?;
         self.arm_only("decrypt", "pass the revealed value in as a parameter", span)?;
-        self.not_in_fold("decrypt", span)?;
         self.expect_sym(Sym::LParen)?;
         let at = self.span_here();
         let value = self.expr(lower, None)?;
@@ -9994,30 +10098,20 @@ impl Parser {
             else {
                 continue;
             };
-            let at = match &first.module {
-                Some(module) => format!("`{module}:{}`", first.span.start),
-                None => format!("{}", first.span.start),
-            };
+            // The location of the first copy goes in the related line and not in the
+            // message, the way `declared_twice` and every other two-place diagnostic
+            // here does it: a message that carries one prints it twice in `hek check`
+            // and is the only one in the crate that does.
             let error = self
                 .err(
                     Code::DuplicateFold,
-                    format!("this fold is also declared at {at}; name it, so the two cannot drift apart"),
+                    "this fold is written the same way in two places; name it, so the two cannot drift apart",
                     fold.span,
                 )
                 .with_hint(
                     "a fold declares the slice its caller conflicts on, so two copies that fall out of step give two commands two different boundaries for one question, and no test can see it; declare it once with `fold <Name>(..) -> <T> = <seed> { .. }` and read it by name",
                 )
-                .with_related(Related::new("first declared here", first.span));
-            let error = match &first.module {
-                Some(module) => {
-                    let mut error = error;
-                    if let Some(related) = error.related.last_mut() {
-                        *related = Related::new("first declared here", first.span).in_file(module);
-                    }
-                    error
-                }
-                None => error,
-            };
+                .with_related(self.elsewhere("first declared here", first.span, first.pos));
             return Err(match &fold.module {
                 Some(module) => error.in_file(module),
                 None => error,
