@@ -118,6 +118,17 @@ struct Parser {
     /// trigger binding there is plainly the constant it is; in an arm it would read as
     /// though it advanced with the records, which is what this rejects.
     fold_arm: bool,
+    /// Set alongside `fold_arm` when the arm bound its own envelope with `as`. That is
+    /// the one case where reading the binding inside an arm is right, because it is the
+    /// record being folded rather than a trigger standing still outside the fold.
+    arm_envelope: bool,
+    /// Whether the arm went on to read that binding. A binding nothing reads is a word
+    /// with no meaning, and worse here than elsewhere: it is what decides whether the
+    /// whole fold is query-only.
+    envelope_read: bool,
+    /// The envelope binding a fold arm has written but not yet brought into scope, held
+    /// only while its filters parse so that naming it there says why rather than just no.
+    pending_envelope: Option<Ident>,
     command_end: usize,
     /// Which declaration kind is being parsed, so a statement in the wrong one can be
     /// rejected with a message about that kind rather than a generic one.
@@ -354,6 +365,9 @@ impl Parser {
             prologue: false,
             folding: false,
             fold_arm: false,
+            arm_envelope: false,
+            envelope_read: false,
+            pending_envelope: None,
             folds: Vec::new(),
             inline_folds: Vec::new(),
             command_end: 0,
@@ -602,6 +616,20 @@ impl Parser {
     }
 
     fn not_in_scope(&self, name: &str, span: Span) -> Diagnostic {
+        // The envelope binding an arm just wrote, read from the one place in that arm it
+        // does not reach. Worth its own message: the name is two tokens up the line, so
+        // "not in scope" reads as a bug in the checker rather than as the rule it is.
+        if self.pending_envelope.as_deref() == Some(name) {
+            return self
+                .err(
+                    Code::NotInScope,
+                    format!("`{name}` is not in scope in a filter"),
+                    span,
+                )
+                .with_hint(
+                    "a filter resolves once, before the fold runs, and the envelope belongs to each event the fold reads; narrow on a field the event declares and read the envelope in the arm's value",
+                );
+        }
         let later = self.later_let(name);
         let (message, hint) = match (later, self.prologue) {
             (Some(_), true) => (
@@ -890,6 +918,7 @@ impl Parser {
         self.check_recursion(&program)?;
         self.check_guards(&program)?;
         self.check_duplicate_folds()?;
+        self.check_query_only(&program)?;
         self.check_cycles(&program)?;
         self.check_zeros(&program)?;
         self.check_max(&program)?;
@@ -998,6 +1027,9 @@ impl Parser {
             prologue,
             folding,
             fold_arm,
+            arm_envelope,
+            envelope_read,
+            pending_envelope,
             command_end,
             kind,
             local_fns,
@@ -1021,6 +1053,9 @@ impl Parser {
         *prologue = false;
         *folding = false;
         *fold_arm = false;
+        *arm_envelope = false;
+        *envelope_read = false;
+        *pending_envelope = None;
         *command_end = 0;
         *kind = Kind::Command;
         *in_effect = None;
@@ -3468,7 +3503,10 @@ impl Parser {
         // The trigger does not advance as the fold runs, so an arm naming it would read
         // as though it did. Rejected whole rather than per field: `e.id` and a payload
         // field reached through `e` carry the same misreading `e.at` does.
-        if self.fold_arm {
+        if self.arm_envelope {
+            self.envelope_read = true;
+        }
+        if self.fold_arm && !self.arm_envelope {
             return Err(self
                 .err(
                     Code::FoldRestriction,
@@ -3943,7 +3981,17 @@ impl Parser {
         };
         let slot = lower.b.fold(&bound, ret.clone(), init);
 
-        self.fold_arms(lower, events, name, &bound, ret, slot, at, before_seed)?;
+        self.fold_arms(
+            lower,
+            events,
+            name,
+            &bound,
+            ret,
+            slot,
+            at,
+            before_seed,
+            true,
+        )?;
         // The filters of the one stage a fold is, checked against what it declares. A
         // command gets this from `decl_body`, which a fold's body does not go through:
         // its body is arms only, so there is no statement to close a stage and nothing
@@ -4385,7 +4433,17 @@ impl Parser {
                 )));
         }
         let slot = lower.b.fold(&name, ty.clone(), init);
-        self.fold_arms(lower, events, &name, &name, &ty, slot, decl, before_seed)?;
+        self.fold_arms(
+            lower,
+            events,
+            &name,
+            &name,
+            &ty,
+            slot,
+            decl,
+            before_seed,
+            false,
+        )?;
         // Rule 9, recorded rather than decided here: whether this is a duplicate is a
         // question about the whole program, and the second copy is often in another
         // module that has not been read yet.
@@ -4407,7 +4465,6 @@ impl Parser {
     /// Shared by the inline `fold` and the named one, which is the point: the arms are the
     /// same syntax in both positions, so promoting an inline fold to a named one is a
     /// header edit and the arms are untouched. See `docs/folds.md` rule 9.
-    #[allow(clippy::too_many_arguments)]
     #[expect(
         clippy::too_many_arguments,
         reason = "every one is a different half of the \
@@ -4424,6 +4481,10 @@ impl Parser {
         slot: Slot,
         decl: Span,
         before_seed: usize,
+        // Whether this is a module-scope declaration, which is the only place an arm may
+        // bind the envelope: doing so makes the fold query-only, and an inline fold is
+        // already inside the command that could not then read it.
+        named: bool,
     ) -> Result<(), Diagnostic> {
         // Rule 12: whether the variable is subject-bound is a property of every arm
         // agreeing, so it is settled across the declaration rather than at any one arm.
@@ -4444,8 +4505,27 @@ impl Parser {
                 "a fold arm reads the log rather than being delivered",
             )?;
             let at = self.span_here();
-            let (path, filters) = self.slice_ref(lower, events)?;
-            let def = self.event_def(events, &path, at)?;
+            let path = self.expect_path()?;
+            let def = self.event_def(events, &path, at)?.clone();
+            // `docs/folds.md` rule 12, written here rather than after the filters because that is
+            // where a projector handler writes it and the two should read alike.
+            let binding = self.fold_envelope(lower, named, slot)?;
+            self.pending_envelope = binding.clone();
+            let filters = self.slice_filters(lower, &path, &def)?;
+            self.pending_envelope = None;
+            // Only now, so a filter naming the binding is "not in scope" rather than a
+            // read of a slot nothing has filled: a filter resolves once for the whole
+            // slice and the envelope belongs to each event in it.
+            //
+            // Set only when this arm bound one. An inline fold inside an effect arm must
+            // keep the trigger's binding in scope, so that reading it there stays the
+            // sharp refusal in `envelope_access` rather than a bare "not in scope".
+            let outer = self.envelope.clone();
+            if binding.is_some() {
+                self.envelope = binding.clone();
+                self.arm_envelope = true;
+                self.envelope_read = false;
+            }
 
             lower.b.push_scope();
             let mut binds = Vec::new();
@@ -4500,6 +4580,24 @@ impl Parser {
             let value = self.expr(lower, Some(ty.clone()))?;
             self.fold_arm = false;
             self.folding = false;
+            self.envelope = outer;
+            self.arm_envelope = false;
+            // Rule 3's rule for the accumulator, applied to the other name an arm can
+            // bind: a binding no arm reads is a word with no meaning, and here it would
+            // silently decide that the whole fold is query-only.
+            if let Some(binding) = &binding
+                && !mem::take(&mut self.envelope_read)
+            {
+                return Err(self
+                    .err(
+                        Code::UnusedAccumulator,
+                        format!("this arm binds `{binding}` and does not read it"),
+                        arm,
+                    )
+                    .with_hint(
+                        "an envelope binding is written where the arm reads the event's `at`, `id` or `position`; drop the `as` and the fold stays readable by a command",
+                    ));
+            }
 
             // Rule 12: whether this arm folds sealed content is a property of the
             // value's type, so a transformed arm drops the seal by construction rather
@@ -4669,6 +4767,73 @@ impl Parser {
         let at = self.span_here();
         let path = self.expect_path()?;
         let def = self.event_def(events, &path, at)?;
+        let filters = self.slice_filters(lower, &path, def)?;
+        Ok((path, filters))
+    }
+
+    /// The `as e` of `docs/folds.md` rule 12, or `None` where the arm did not write one.
+    ///
+    /// Refused on an inline fold rather than quietly ignored. An inline fold lives in the
+    /// command, guard or effect arm that reads it, and binding the envelope makes a fold
+    /// query-only, so the two together are a contradiction rather than a restriction: the
+    /// author has to move the fold out before the envelope can mean anything.
+    fn fold_envelope(
+        &mut self,
+        lower: &Lower,
+        named: bool,
+        accumulator: Slot,
+    ) -> Result<Option<Ident>, Diagnostic> {
+        let at = self.span_here();
+        if !self.eat_word(Keyword::As) {
+            return Ok(None);
+        }
+        let binding = self.expect_ident()?;
+        // The same rule a `let` is held to, and here for a sharper reason: resolution
+        // checks the envelope binding before the scopes, so a name that is both wins as
+        // the envelope and the thing it hid is simply unreachable for that arm. An
+        // accumulator called `last` beside `as last` read as the running value in one arm
+        // and the record being folded in the next, and checked clean.
+        if let Some(slot) = lower.b.lookup(&binding) {
+            let what = match slot == accumulator {
+                true => "the accumulator",
+                false => "already in scope",
+            };
+            return Err(self
+                .err(
+                    Code::DeclaredTwice,
+                    format!("`{binding}` is {what}"),
+                    at,
+                )
+                .with_hint(
+                    "an envelope binding is the event being folded, and a name cannot mean that and something else in one arm; give the binding a name of its own",
+                ));
+        }
+        if !named {
+            return Err(self
+                .err(
+                    Code::FoldRestriction,
+                    "an inline fold cannot bind the envelope",
+                    at,
+                )
+                .with_hint(
+                    "binding it makes a fold query-only, and this one is read by the declaration it is written in; declare it at module scope and store it, or fold a `Timestamp` the event declares",
+                ));
+        }
+        Ok(Some(binding))
+    }
+
+    /// The `(field, field: value)` list a slice narrows by.
+    ///
+    /// Split out of [`Parser::slice_ref`] because a fold arm writes `as e` between the
+    /// path and this, and the envelope binding has to be in scope for what follows it and
+    /// not for this: a filter resolves once per invocation and the envelope is a property
+    /// of each event folded, so the two cannot be the same value.
+    fn slice_filters(
+        &mut self,
+        lower: &mut Lower,
+        path: &EventPath,
+        def: &EventDef,
+    ) -> Result<Vec<Filter>, Diagnostic> {
         self.expect_sym(Sym::LParen)?;
 
         let mut filters = Vec::new();
@@ -4703,7 +4868,7 @@ impl Parser {
         }
 
         self.expect_sym(Sym::RParen)?;
-        Ok((path, filters))
+        Ok(filters)
     }
 
     /// The span is the caller's, because every caller has just consumed the path and
@@ -10070,6 +10235,66 @@ impl Parser {
             Some(module) => error.in_file(module),
             None => error,
         })
+    }
+
+    /// `docs/folds.md` rule 12: a fold that binds the envelope is query-only, so nothing
+    /// may fold it.
+    ///
+    /// Checked here rather than at the call site because a fold's signature carries no
+    /// body: pass C reads `fold Name(..) -> T` and the `as` is in an arm, so the answer
+    /// does not exist until every body is parsed. Before the splice, so the error is
+    /// about the read the author wrote rather than about a slot nothing filled.
+    fn check_query_only(&self, program: &Program) -> Result<(), Diagnostic> {
+        // Every place a named fold can be read: `docs/effects.md` rule 1 gives an arm no
+        // guard, so an arm's reads are its own and a guard's are reached through whatever
+        // names the guard.
+        let commands = program
+            .commands
+            .iter()
+            .map(|at| (&at.reads, &at.module, "a command"));
+        let guards = program
+            .guards
+            .iter()
+            .map(|at| (&at.reads, &at.module, "a guard"));
+        let arms = program.effects.iter().flat_map(|effect| {
+            effect
+                .arms
+                .iter()
+                .map(move |arm| (&arm.reads, &effect.module, "an effect"))
+        });
+
+        for (reads, module, holder) in commands.chain(guards).chain(arms) {
+            for call in reads {
+                let Some(fold) = program.fold(&call.fold) else {
+                    continue;
+                };
+                if !fold.query_only() {
+                    continue;
+                }
+                let related = Related::new(format!("`{}` binds it here", fold.name), fold.span);
+                let error = self
+                    .err(
+                        Code::FoldRestriction,
+                        format!(
+                            "`{}` binds the envelope (`as`), so it can be queried but not folded by {holder}",
+                            fold.name
+                        ),
+                        call.span,
+                    )
+                    .with_hint(
+                        "an event's append time is not a decision's to read: a test cannot pin it, and a backfilled event's is when it was imported rather than when it happened; fold a `Timestamp` the event declares, or read this one as a stored value",
+                    )
+                    .with_related(match &fold.module {
+                        Some(module) => related.in_file(module),
+                        None => related,
+                    });
+                return Err(match module {
+                    Some(module) => error.in_file(module),
+                    None => error,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Rule 9: one inline fold written the same way in two places.

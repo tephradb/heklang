@@ -471,8 +471,20 @@ module.exports = grammar({
 
     // A slice always carries its parentheses, which is what tells a fold arm from a
     // handler when both begin `on @path` (parse.rs `slice_ref`).
+    //
+    // `as e` is accepted here and refused by the parser anywhere but a module-scope
+    // fold arm, where it makes the fold query-only (parse.rs `fold_envelope`, and
+    // `docs/folds.md` rule 12). Written on the shared rule rather than on `fold_arm` so
+    // the binding keeps the position a projector handler puts it in, which is what makes
+    // the two read alike.
     slice_reference: ($) =>
-      seq(field('path', $.event_path), '(', commaSep($.filter), ')'),
+      seq(
+        field('path', $.event_path),
+        optional(seq('as', field('binding', $.identifier))),
+        '(',
+        commaSep($.filter),
+        ')',
+      ),
 
     filter: ($) =>
       seq(

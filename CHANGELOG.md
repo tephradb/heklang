@@ -52,6 +52,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anyway. Checked against the 219-fold application the design was measured on, where it derives the
   same 26 tables the measurement's own script does.
 
+- A fold arm may bind the envelope with `as`, and a fold that does is **query-only**: stored and
+  queried, never folded by a command. The envelope stays out of every decision for the two reasons
+  it always did, that a test cannot pin an append time and a backfilled event's is when it was
+  imported, and neither is about a read model. Refused five ways: a command or guard folding one,
+  an inline fold binding one, the binding inside a filter (which resolves once, where the envelope
+  belongs to each event), a binding no arm reads, and a binding that would hide the accumulator or
+  a parameter. Converting the twelve projectors of the ported application found
+  this to be the largest single gap: they stamp or bucket by append time in 97 places across 20
+  columns, and 13 of the 19 event types involved declare no timestamp at all. `docs/folds.md`
+  rule 12. No digest entry and no hash moved, because a fold earns neither.
+- `hek check --tables` gives two key signatures that derive one table name a name each, by taking
+  the part types into both. `(day: String)` and `(day: Int)` were two tables both called `day`,
+  which a runtime keying on the name would have served as one. No program has done it.
+
 ### Changed
 
 - A `patch` or an `update` may no longer write a key column. See Fixed: this closed a hole rather

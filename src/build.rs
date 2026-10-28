@@ -582,6 +582,7 @@ impl Builder {
             frame: self.frame as usize,
             exprs: self.exprs,
             stage: self.stages.pop().unwrap_or_default(),
+            envelope: self.envelope,
             span,
         }
     }

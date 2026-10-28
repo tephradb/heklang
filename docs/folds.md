@@ -608,6 +608,70 @@ concept that already has one. A named fold folds, the accumulator and arms are t
 inline or named, and `docs/guards.md` rule 2's argument against a second keyword for one idea
 applies here word for word. The construct adds one position, not one word.
 
+## 12. An arm may bind the envelope, and that makes the fold query-only
+
+`docs/commands.md` keeps the envelope out of a fold: an event's `at`, `id` and `position` are not
+foldable, so an event a decision has to time carries its own `Timestamp` field. **That rule stays
+for decisions**, for two reasons that have nothing to do with taste. A test writes payload fields
+and the append time is the runtime's, so a decision over `e.at` cannot be pinned in one. And an
+imported or backfilled event's append time is when it was imported, so every decision over it is
+silently wrong about when the thing happened.
+
+Neither objection is about storage. So an arm may bind the envelope with the same `as` a projector
+handler uses, and a fold that does is **query-only**: stored and queried, never folded by a command.
+
+```hek
+fold UsageLastRecordedAt(shop_id: Shop, period: String) -> Timestamp? = none {
+  on @usage.recorded as e (shop_id, period) => e.at
+}
+```
+
+`docs/projectors.md` defines what the binding reaches, and it is the same here: `.at`, `.id` and
+`.position`. The slots are filled from the event being folded, so two arms naming one field share
+one slot and an arm that names none is unaffected.
+
+Five things are refused, each because it would otherwise mean something the construct cannot do.
+
+**A command or a guard that folds one.** This is the whole rule, and the message says which:
+
+```
+`UsageLastRecordedAt` binds the envelope (`as`), so it can be queried but not folded by a command
+```
+
+Checked across the whole program rather than at the call site: a fold's signature is read in an
+earlier pass than its body, so whether an arm binds anything is not known until every body is in.
+
+**An inline fold that binds one.** An inline fold lives in the declaration that reads it, so the
+two together are a contradiction rather than a restriction; the fold has to move to module scope
+before the envelope can mean anything.
+
+**The binding inside a filter.** A filter resolves once, before the fold runs, and the envelope
+belongs to each event the fold reads, so the two cannot be one value. This is where a computed key
+would go and there is no such thing yet, so the message says why rather than just no.
+
+**A binding no arm reads.** Rule 3's rule for the accumulator, and sharper here: an unread binding
+would decide on its own that the whole fold is query-only, so a word with no meaning would cost a
+command its read. Four arms of a converted application wrote `as e` and then used a declared time
+instead, which is the right thing to write and the wrong thing to announce.
+
+**A binding that hides a name already in scope.** The accumulator, or a parameter. Resolution
+consults the envelope binding before the scopes, so a name that is both wins as the envelope and
+whatever it hid becomes unreachable for that arm: an accumulator called `last` beside `as last`
+read as the running value in one arm and as the record being folded in the next, and checked
+clean. Everywhere else in the language a name cannot hide an enclosing one, and this is no
+exception.
+
+**Two classes of fold is a real cost**, and it is the cheaper side by a wide margin. The alternative
+is a declared `Timestamp` to fold instead, and in the application that measured this, the read
+models stamp or bucket by append time in 97 places across 20 columns while **13 of the 19 event
+types involved declare no timestamp at all**. Taking the alternative means adding one to thirteen
+event types no decision reads, which inverts the rule that an event declares a timestamp when a
+decision has to time it. Keeping the exception narrow matters more than removing it.
+
+**Only the envelope makes a fold query-only.** Nothing else about a fold does, and nothing else
+should: the restriction exists for the two objections above, and neither applies to anything else
+a fold can write.
+
 ## Seen from the read side
 
 Not a rule, because it constrains nothing about writing a fold: `hek check --tables`

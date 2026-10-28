@@ -959,7 +959,27 @@ pub struct Fold {
     pub exprs: Exprs,
     /// One stage, because a fold is one read, for the reason a guard is.
     pub stage: Stage,
+    /// The envelope fields the arms bind with `as`, deduplicated, or empty for a fold
+    /// that binds none. One list for the whole fold rather than one per arm: the slots
+    /// are filled from the event being folded, so every arm sees the same ones and the
+    /// arms that do not read them do not care.
+    ///
+    /// **Non-empty makes the fold query-only**, which is what [`Fold::query_only`] is
+    /// for. See `docs/folds.md` rule 12.
+    pub envelope: Vec<EnvBind>,
     pub span: Span,
+}
+
+impl Fold {
+    /// Whether this fold may be stored and queried but not folded by a command.
+    ///
+    /// An event's append time is not a thing a decision may read: a test writes payload
+    /// fields and cannot pin it, and a backfilled event's is when it was imported rather
+    /// than when it happened. A read model has neither problem, so the envelope is open
+    /// to a fold that only ever feeds one.
+    pub fn query_only(&self) -> bool {
+        !self.envelope.is_empty()
+    }
 }
 
 /// One `fold local = Name { args }`. The arguments are expressions in the *caller's*

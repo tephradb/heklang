@@ -94,6 +94,17 @@ event @invoice.voided {
   number: Int,
 }
 
+// Rule 12. The meter's own last-touched stamp, which no event declares and nothing
+// should: `@usage.recorded` is appended when usage happens, so the envelope's append
+// time is the right clock and a declared `Timestamp` would be a second copy of it that
+// a backfill could disagree with.
+//
+// Binding it makes this **query-only**: it is stored and queried, and a command naming
+// it is refused. That is the whole of the trade, and it is why the rule is narrow.
+fold UsageLastRecordedAt(shop_id: Shop, period: String) -> Timestamp? = none {
+  on @usage.recorded as e (shop_id, period) => e.at
+}
+
 // One shop's two months are two rows, and two shops' same month are two more. Written
 // out rather than counted, because the thing under test is that the second column is
 // part of the identity and not a column beside it.

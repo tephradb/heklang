@@ -752,9 +752,54 @@ impl<'a> Printer<'a> {
     /// comment written against one filter up to the slice.
     fn slice(&self, node: Node<'a>) -> Doc<'a> {
         let (leading, kids) = self.headed_by(node, 1);
+        // `on @path as e (..)`: the binding is a named child exactly as the filters are,
+        // so what separates the two is where the `(` falls and not how many children came
+        // first. Counting them put the binding inside the parentheses as a filter of its
+        // own the moment a comment sat between the path and the `as`, and dropped the
+        // comment: `hek fmt` wrote out a slice that no longer parsed.
+        let mut cursor = node.walk();
+        let paren = node
+            .children(&mut cursor)
+            .find(|kid| !kid.is_named() && kid.kind() == "(")
+            .map_or(usize::MAX, |kid| kid.start_byte());
+        let (before, filters): (Vec<Node<'a>>, Vec<Node<'a>>) =
+            kids[1..].iter().partition(|kid| kid.start_byte() < paren);
+
+        // A line of its own for a comment and a space for the binding, which is what an
+        // `event_handler` does with the same two things in the same position.
+        let mut bound = Vec::new();
+        let mut fresh = false;
+        for kid in before {
+            match kid.kind() {
+                "comment" => {
+                    bound.push(Doc::Hardline);
+                    bound.push(Doc::text(self.text(kid)));
+                    fresh = true;
+                }
+                _ => {
+                    bound.push(match fresh {
+                        true => Doc::Hardline,
+                        false => Doc::text(" "),
+                    });
+                    bound.push(Doc::concat([
+                        Doc::text("as "),
+                        self.node(kid),
+                        Doc::text(" "),
+                    ]));
+                    fresh = false;
+                }
+            }
+        }
+        if fresh {
+            bound.push(Doc::Hardline);
+        }
         Self::led(
             leading,
-            Doc::concat([self.node(kids[0]), self.list("(", ")", false, &kids[1..])]),
+            Doc::concat([
+                self.node(kids[0]),
+                Doc::indent(Doc::concat(bound)),
+                self.list("(", ")", false, &filters),
+            ]),
         )
     }
 

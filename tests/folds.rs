@@ -799,3 +799,208 @@ fn reading_one_named_fold_from_two_bodies_is_fine() {
     ));
     assert!(program.command("D").is_some() && program.command("E").is_some());
 }
+
+// ---------------------------------------------------------------------------------
+// Rule 12: an arm may bind the envelope, and doing so makes the fold query-only.
+
+/// The events the port's read models bucket and stamp by append time. Neither declares a
+/// `Timestamp`, which is the whole reason the envelope has to be reachable: of the
+/// nineteen event types the port's `stats` projector buckets, thirteen carry none.
+const STAMPED: &str = "\
+event @usage.threshold.reached { shop_id: Int, period: String, threshold: Int }
+event @edit.attempt.blocked { shop_id: Int, order_id: Int, code: String }
+";
+
+#[test]
+fn an_arm_may_bind_the_envelope() {
+    let program = program(&format!(
+        "{STAMPED}
+fold BlockedAt(shop_id: Int, order_id: Int, code: String) -> Timestamp? = none {{
+  on @edit.attempt.blocked as e (shop_id, order_id, code) => e.at
+}}
+"
+    ));
+    let fold = program.fold("BlockedAt").expect("declared");
+    assert!(fold.query_only(), "binding the envelope is what decides it");
+    assert_eq!(fold.envelope.len(), 1);
+}
+
+/// All three, because `docs/projectors.md` defines the envelope as all three and a fold
+/// reaches the same one.
+#[test]
+fn an_arm_reaches_at_and_id_and_position() {
+    let program = program(&format!(
+        "{STAMPED}
+fold A(shop_id: Int, order_id: Int, code: String) -> Timestamp? = none {{
+  on @edit.attempt.blocked as e (shop_id, order_id, code) => e.at
+}}
+
+fold B(shop_id: Int, order_id: Int, code: String) -> Uuid? = none {{
+  on @edit.attempt.blocked as e (shop_id, order_id, code) => e.id
+}}
+
+fold C(shop_id: Int, order_id: Int, code: String) -> Int = 0 {{
+  on @edit.attempt.blocked as e (shop_id, order_id, code) => e.position
+}}
+"
+    ));
+    for name in ["A", "B", "C"] {
+        assert!(program.fold(name).expect("declared").query_only(), "{name}");
+    }
+}
+
+/// Deduplicated across the arms, because the slots are filled from the event being
+/// folded and every arm sees the same ones.
+#[test]
+fn two_arms_reading_the_same_envelope_field_share_one_slot() {
+    let program = program(&format!(
+        "{STAMPED}
+fold Stamped(shop_id: Int, period: String) -> Timestamp? = none {{
+  on @usage.threshold.reached as e (shop_id, period) => e.at
+  on @usage.threshold.reached as e (shop_id, period) => e.at
+}}
+"
+    ));
+    assert_eq!(program.fold("Stamped").expect("declared").envelope.len(), 1);
+}
+
+/// The whole point of the rule. A decision may not read an append time: a test writes
+/// payload fields and cannot pin it, and a backfilled event's is when it was imported.
+#[test]
+fn a_command_cannot_fold_a_query_only_fold() {
+    let source = format!(
+        "{STAMPED}event @order.noted {{ shop_id: Int, order_id: Int }}
+fold BlockedAt(shop_id: Int, order_id: Int, code: String) -> Timestamp? = none {{
+  on @edit.attempt.blocked as e (shop_id, order_id, code) => e.at
+}}
+
+command Note(shop_id: Int, order_id: Int, code: String) {{
+  fold at = BlockedAt {{ shop_id, order_id, code }}
+  if at.is_some() {{
+    emit @order.noted {{ shop_id, order_id }}
+  }}
+}}
+"
+    );
+    assert_eq!(
+        error(&source),
+        "`BlockedAt` binds the envelope (`as`), so it can be queried but not folded by a command"
+    );
+}
+
+#[test]
+fn a_guard_cannot_fold_one_either() {
+    let source = format!(
+        "{STAMPED}refusal NotBlocked \"not blocked\"
+fold BlockedAt(shop_id: Int, order_id: Int, code: String) -> Timestamp? = none {{
+  on @edit.attempt.blocked as e (shop_id, order_id, code) => e.at
+}}
+
+guard HasBeenBlocked(shop_id: Int, order_id: Int, code: String) {{
+  fold at = BlockedAt {{ shop_id, order_id, code }}
+  if at.is_none() {{
+    reject NotBlocked
+  }}
+}}
+"
+    );
+    assert!(
+        error(&source).contains("but not folded by a guard"),
+        "{}",
+        error(&source)
+    );
+}
+
+/// An inline fold lives in the declaration that reads it, so binding the envelope there
+/// is a contradiction rather than a restriction.
+#[test]
+fn an_inline_fold_cannot_bind_the_envelope() {
+    let source = format!(
+        "{STAMPED}event @order.noted {{ shop_id: Int, order_id: Int }}
+command Note(shop_id: Int, order_id: Int, code: String) {{
+  fold seen: Int = 0
+    on @edit.attempt.blocked as e (shop_id, order_id, code) => e.position
+  if seen > 0 {{
+    emit @order.noted {{ shop_id, order_id }}
+  }}
+}}
+"
+    );
+    assert_eq!(error(&source), "an inline fold cannot bind the envelope");
+    assert!(
+        hint(&source).contains("declare it at module scope and store it"),
+        "{}",
+        hint(&source)
+    );
+}
+
+/// A filter resolves once per invocation and the envelope belongs to each event folded,
+/// so the binding deliberately does not reach one. This is where section 8's computed
+/// keys will land, and until they do the message has to say why rather than just no.
+#[test]
+fn the_envelope_does_not_reach_a_filter() {
+    let source = format!(
+        "{STAMPED}fn bucket(at: Timestamp) -> String {{
+  return \"2020-01\"
+}}
+
+fold SeenOn(shop_id: Int, period: String) -> Int = 0 {{
+  on @usage.threshold.reached as e (shop_id, period: bucket(e.at)) => 1
+}}
+"
+    );
+    assert_eq!(error(&source), "`e` is not in scope in a filter");
+}
+
+/// The rule is narrow: a fold that binds nothing is foldable by a command as before.
+#[test]
+fn a_fold_that_binds_no_envelope_is_not_query_only() {
+    let program = program(&format!("{EVENTS}{FOLDS}"));
+    let fold = program.fold("HasOrdered").expect("declared");
+    assert!(!fold.query_only());
+    assert!(fold.envelope.is_empty());
+}
+
+/// A binding no arm reads is rule 3's rule for the accumulator, applied to the other
+/// name an arm can bind. Sharper here, because an unread one would silently decide that
+/// the whole fold is query-only. Found four of these in a converted application.
+#[test]
+fn an_arm_that_binds_the_envelope_must_read_it() {
+    let source = format!(
+        "{STAMPED}
+fold Counted(shop_id: Int, period: String) -> Int = 0 {{
+  on @usage.threshold.reached as e (shop_id, period) => 1
+}}
+"
+    );
+    assert_eq!(error(&source), "this arm binds `e` and does not read it");
+    assert!(hint(&source).contains("drop the `as`"), "{}", hint(&source));
+}
+
+/// Resolution consults the envelope binding before the scopes, so a name that is both
+/// wins as the envelope and whatever it hid is simply unreachable for that arm. The
+/// accumulator read as the running value in one arm and the record in the next.
+#[test]
+fn an_envelope_binding_cannot_hide_the_accumulator() {
+    let source = format!(
+        "{STAMPED}
+fold LastSeen(shop_id: Int, period: String) -> last: Timestamp? = none {{
+  on @usage.threshold.reached(shop_id, period) {{ threshold }} => last
+  on @usage.threshold.reached as last (shop_id, period) => last.at
+}}
+"
+    );
+    assert_eq!(error(&source), "`last` is the accumulator");
+}
+
+#[test]
+fn an_envelope_binding_cannot_hide_a_parameter() {
+    let source = format!(
+        "{STAMPED}
+fold F(shop_id: Int, e: String) -> Timestamp? = none {{
+  on @usage.threshold.reached as e (shop_id, period: e) => e.at
+}}
+"
+    );
+    assert_eq!(error(&source), "`e` is already in scope");
+}

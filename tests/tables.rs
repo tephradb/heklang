@@ -384,3 +384,27 @@ fold OrderCancelled(shop_id: Shop, order_id: Int) -> Bool = false {
         ]
     );
 }
+
+/// Two key signatures can derive one name, because a part is told apart by name and type
+/// and a name is only the names joined. No program has done it, and a runtime keying on
+/// the name would serve one table for both, so each takes the type into its name.
+#[test]
+fn two_keys_that_differ_only_by_type_do_not_share_a_name() {
+    let source = app("
+fold Early(day: String) -> Bool = false {
+  on @usage.seen(on_day: day) => true
+}
+
+fold Late(day: Int) -> Bool = false {
+  on @order.placed(order_id: day) => true
+}
+");
+
+    let layout = read(&source);
+    let names: Vec<&str> = layout
+        .tables
+        .iter()
+        .map(|table| table.name.as_str())
+        .collect();
+    assert_eq!(names, ["day_int", "day_string"]);
+}

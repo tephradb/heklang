@@ -151,7 +151,37 @@ pub fn layout(program: &Program) -> Layout {
         }
     }
 
-    tables.sort_by(|a, b| parts(a).cmp(&parts(b)));
+    // Two key signatures can derive one name, because a part is told apart by name and
+    // type and a name is only the names joined: `(day: String)` and `(day: Int)` are two
+    // tables both called `day`. Rare enough that no program has done it, and a runtime
+    // keying on the name would silently serve one table for both, so the type goes into
+    // the name of each rather than into a diagnostic nothing could act on.
+    let clashes: Vec<String> = tables
+        .iter()
+        .filter(|table| {
+            tables
+                .iter()
+                .filter(|other| other.name == table.name)
+                .count()
+                > 1
+        })
+        .map(|table| table.name.clone())
+        .collect();
+    for table in &mut tables {
+        if clashes.contains(&table.name) {
+            table.name = table
+                .key
+                .iter()
+                .map(|part| format!("{}_{}", part.name, snake_case(&part.ty.to_string())))
+                .collect::<Vec<_>>()
+                .join("__");
+        }
+    }
+
+    // The name breaks a tie, so that two keys alike in their part names but not their
+    // types still have one order. Without it the two fall back on declaration order,
+    // which is the one thing a layout is not allowed to depend on.
+    tables.sort_by(|a, b| parts(a).cmp(&parts(b)).then_with(|| a.name.cmp(&b.name)));
     for table in &mut tables {
         table.columns.sort_by(|a, b| a.name.cmp(&b.name));
     }
