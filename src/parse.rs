@@ -10578,6 +10578,12 @@ fn upper_first(name: &str) -> String {
 /// a second spelling is a second thing to keep in step; every code in the two
 /// applications ported so far is already exactly this.
 fn refusal_code(name: &str) -> String {
+    snake_case(name)
+}
+
+/// A declared name in snake_case, which is how every name heklang derives rather than
+/// reads comes out: a refusal's code, and a stored fold's column (`src/tables.rs`).
+pub(crate) fn snake_case(name: &str) -> String {
     let mut code = String::with_capacity(name.len() + 4);
     for (index, ch) in name.char_indices() {
         if index > 0 && ch.is_ascii_uppercase() {

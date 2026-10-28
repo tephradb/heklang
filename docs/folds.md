@@ -607,3 +607,13 @@ that section rules out stays ruled out; a named fold is simply no longer in it.
 concept that already has one. A named fold folds, the accumulator and arms are the same syntax
 inline or named, and `docs/guards.md` rule 2's argument against a second keyword for one idea
 applies here word for word. The construct adds one position, not one word.
+
+## Seen from the read side
+
+Not a rule, because it constrains nothing about writing a fold: `hek check --tables`
+derives a read model from the declarations in which every named fold is a column, its
+parameters are the key, and the folds that share a key share a table. A parameter no arm
+supplies is not a key anything could be written under, so a fold with one is listed as not
+stored. That is a listing and not a diagnostic; the language does not require a fold to be
+storable, and a fold a command reads is doing its job either way. `docs/cli.md` has the
+listing and what orders a key.

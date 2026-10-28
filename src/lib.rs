@@ -9,6 +9,7 @@ pub mod ir;
 pub mod lex;
 pub mod parse;
 pub mod scaled;
+pub mod tables;
 pub mod testing;
 pub mod types;
 pub mod value;
@@ -34,6 +35,7 @@ pub use ir::{
     Stmt, Type, UnOp, Update,
 };
 pub use parse::{check_files, parse, parse_files};
+pub use tables::{Column, ColumnArm, KeyPart, Layout, Table, Unstored, layout};
 pub use testing::{TestOutcome, TestResult, World, run_tests, run_tests_in};
 pub use value::{Defs, Event, Invoked, Json, Key, Mismatch, Record, Value};
 

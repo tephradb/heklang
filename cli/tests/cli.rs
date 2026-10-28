@@ -626,6 +626,93 @@ command RenameShop(shop_id: Int) {
     assert!(!text.contains("RenameShop guards"), "{text}");
 }
 
+/// The read model a program's folds imply, which nothing in the source declares: one
+/// table per key, one column per fold, each column saying what feeds it.
+const TABLES: &str = "\
+subject Shop(Int)
+
+event @shop.installed { shop_id: Shop }
+event @shop.uninstalled { shop_id: Shop }
+event @order.placed { shop_id: Shop, order_id: Int, total: Money(2) }
+
+fold ShopInstalled(shop_id: Shop) -> Bool = false {
+  on @shop.installed(shop_id) => true
+  on @shop.uninstalled(shop_id) => false
+}
+
+fold OrderTotal(shop_id: Shop, order_id: Int) -> sum: Money(2) = 0.00 {
+  on @order.placed(shop_id, order_id) { total } => sum + total
+}
+";
+
+#[test]
+fn check_prints_the_table_layout_when_asked() {
+    let root = project("tables", &[("app.hk", TABLES)]);
+    let output = hek(&["check", "--tables", root.to_str().expect("a utf-8 path")]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.contains("TABLE shop  (shop: Shop)  1 column"),
+        "the key renders with its types and the count is singular: {text}"
+    );
+    assert!(
+        text.contains("shop_installed: Bool"),
+        "a column is the fold's name in snake_case: {text}"
+    );
+    assert!(
+        text.contains("<- @shop.installed, @shop.uninstalled"),
+        "and what feeds it, first written first: {text}"
+    );
+    assert!(
+        text.contains("TABLE shop__order  (shop: Shop, order: Int)  1 column"),
+        "a key sorts below the key it extends: {text}"
+    );
+    assert!(
+        text.find("TABLE shop ").expect("the shop table")
+            < text.find("TABLE shop__order").expect("the order table"),
+        "{text}"
+    );
+}
+
+/// `check` is a pass/fail gate, so this listing is asked for too.
+#[test]
+fn check_says_nothing_about_tables_unless_asked() {
+    let root = project("quiet-tables", &[("app.hk", TABLES)]);
+    let output = hek(&["check", root.to_str().expect("a utf-8 path")]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("2 folds"), "{text}");
+    assert!(!text.contains("TABLE"), "{text}");
+}
+
+/// **A listing, not a diagnostic.** A fold no event supplies a key for is a perfectly
+/// good fold that a command can read; nothing says every fold has to be storable. And
+/// heklang has no warning channel to say it in (`docs/diagnostics.md` §11), so it is a
+/// line here and the run still passes. This is the test that fails if someone later
+/// makes it an error.
+#[test]
+fn a_fold_that_cannot_be_stored_is_a_line_and_not_an_error() {
+    let source = "\
+subject Shop(Int)
+
+event @order.placed { shop_id: Shop, order_id: Int }
+
+fold OrdersSince(at: Int, shop_id: Shop) -> count: Int = at {
+  on @order.placed(shop_id) => count + 1
+}
+";
+    let root = project("unstored", &[("app.hk", source)]);
+    let output = hek(&["check", "--tables", root.to_str().expect("a utf-8 path")]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("not stored"), "{text}");
+    assert!(text.contains("OrdersSince  (at)"), "{text}");
+    assert!(!text.contains("TABLE"), "{text}");
+}
+
 /// `hek fmt` writes the file back, and says which ones it touched.
 #[test]
 fn fmt_rewrites_a_file_and_names_it() {

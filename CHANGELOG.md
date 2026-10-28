@@ -43,6 +43,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   four `@max` bounds nobody chose, six indexes the key now serves, and **three subject columns
   declared optional** only so a materializing `patch` could find a zero for them. Migrating the
   five deleted 98 lines across four files and left 265/265 tests passing.
+- `hek check --tables`: the read model a program's named folds imply. Nothing declares it, because
+  a fold already says what a value is, which events change it and what it is keyed by, so a fold is
+  a column, its parameters are the key, and a table is the folds that share one. The rules live in
+  `heklang::tables` rather than in the CLI, because a runtime creating the real tables has to use
+  the same ones. A parameter no arm supplies is listed as not stored rather than reported: the
+  language does not require a fold to be storable, and there is no warning channel to say it in
+  anyway. Checked against the 219-fold application the design was measured on, where it derives the
+  same 26 tables the measurement's own script does.
 
 ### Changed
 

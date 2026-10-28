@@ -16,7 +16,9 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use heklang::{Diagnostic, Digest, Program, Severity, Span, TestOutcome, check_files, run_tests};
+use heklang::{
+    Diagnostic, Digest, EventPath, Program, Severity, Span, TestOutcome, check_files, run_tests,
+};
 
 /// Where a `= ` line wraps. Wide enough for a long sentence to stay one or two lines,
 /// narrow enough to read beside the source it is about.
@@ -26,7 +28,7 @@ const USAGE: &str = "\
 hek: check heklang sources, run their tests, format them and digest them
 
 usage:
-  hek [check|test|fmt|digest] [--boundaries] [--check]
+  hek [check|test|fmt|digest] [--boundaries] [--tables] [--check]
       [--packed|--hash|--json] [--tests] [path|-]
 
   check   parse every `.hk` file under `path` as one program
@@ -35,6 +37,7 @@ usage:
   digest  print what that program does, with everything else taken away
 
   --boundaries  print what each command guards, transitively
+  --tables      print the read model the named folds imply
   --check       with `fmt`, name what would change and write nothing
   --packed      with `digest`, print the canonical form the hash covers
   --hash        with `digest`, print only the hash
@@ -70,6 +73,7 @@ fn run() -> Result<bool, String> {
     let mut command = Command::Both;
     let mut root: Option<PathBuf> = None;
     let mut asked_for_boundaries = false;
+    let mut asked_for_tables = false;
     let mut checking = false;
     let mut reading_stdin = false;
     let mut view = View::Expanded;
@@ -83,6 +87,7 @@ fn run() -> Result<bool, String> {
                 return Ok(true);
             }
             "--boundaries" => asked_for_boundaries = true,
+            "--tables" => asked_for_tables = true,
             "--check" => checking = true,
             "--json" => {
                 view = View::Json;
@@ -198,6 +203,9 @@ fn run() -> Result<bool, String> {
     println!("  {}", counts(&program));
     if asked_for_boundaries {
         boundaries(&program);
+    }
+    if asked_for_tables {
+        tables(&program);
     }
 
     if command == Command::Check {
@@ -471,6 +479,57 @@ fn push_once(name: &str, out: &mut Vec<String>) -> bool {
     }
     out.push(name.to_string());
     true
+}
+
+/// The read model the named folds imply: one table per distinct key, one column per fold
+/// kept for it, and the folds that cannot be kept at all.
+///
+/// A fold says what a value is, which events change it and what it is keyed by, so the
+/// tables are derived rather than declared and this is the only place to read them off.
+/// `src/tables.rs` works them out; this prints them.
+///
+/// **Asked for, not printed by default**, for the reason [`boundaries`] is. And a listing
+/// rather than a diagnostic: a fold that cannot be kept is a perfectly good fold, since
+/// nothing yet says every fold has to be storable.
+fn tables(program: &Program) {
+    let layout = heklang::layout(program);
+    if layout.tables.is_empty() && layout.unstored.is_empty() {
+        return;
+    }
+    for table in &layout.tables {
+        let key = match table.key.is_empty() {
+            true => "no key".to_string(),
+            false => table
+                .key
+                .iter()
+                .map(|part| format!("{}: {}", part.name, part.ty))
+                .collect::<Vec<_>>()
+                .join(", "),
+        };
+        let n = table.columns.len();
+        let s = if n == 1 { "" } else { "s" };
+        println!("\n  TABLE {}  ({key})  {n} column{s}", table.name);
+        // One column, so the event lists start together however long the names are. The
+        // events are what a reader scans for, and a ragged left edge on them is the one
+        // thing that made the same listing hard to read before.
+        let width = table
+            .columns
+            .iter()
+            .map(|column| column.name.len() + column.ty.to_string().len() + 2)
+            .max()
+            .unwrap_or(0);
+        for column in &table.columns {
+            let named = format!("{}: {}", column.name, column.ty);
+            let events: Vec<String> = column.events.iter().map(EventPath::to_string).collect();
+            println!("    {named:width$}  <- {}", events.join(", "));
+        }
+    }
+    if !layout.unstored.is_empty() {
+        println!("\n  not stored, because no event supplies the key:");
+        for fold in &layout.unstored {
+            println!("    {}  ({})", fold.fold, fold.unmatched.join(", "));
+        }
+    }
 }
 
 /// What the program declares, so a run says something even when there are no tests.

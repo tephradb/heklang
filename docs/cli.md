@@ -20,7 +20,7 @@ pass   an email that already placed an order is refused
 ## Usage
 
 ```
-hek [check|test|fmt|digest] [--boundaries] [--check]
+hek [check|test|fmt|digest] [--boundaries] [--tables] [--check]
     [--packed|--hash|--json] [--tests] [path|-]
 ```
 
@@ -49,6 +49,43 @@ checked 9 files
             reads CourseExists, StudentExists, CourseSubscriptionCount
   Unsubscribe guards SubscriptionIsActive
 ```
+
+`--tables` prints the read model the program's named folds imply. Nothing declares it: a
+fold already says what a value is, which events change it and what it is keyed by, so a
+fold is a column, its parameters are the key, and a table is the folds that share one.
+Asked for rather than printed, for the reason `--boundaries` is.
+
+```
+$ hek check --tables
+checked 9 files
+  5 events, 2 commands, 4 folds, 1 subject, 7 tests
+
+  TABLE shop  (shop: Shop)  1 column
+    shop_installed: Bool       <- @shop.installed, @shop.uninstalled
+
+  TABLE shop__order  (shop: Shop, order: Int)  2 columns
+    order_cancelled: Bool      <- @order.cancelled
+    order_total: Money(2)      <- @order.placed
+```
+
+A key part is named by its subject when it has one and by its parameter otherwise, with
+one trailing `_id` taken off. Subject parts lead, ordered so a parent sits above the
+children whose keys wrap under it; plain parts follow alphabetically. A table sorts below
+every table it narrows, which is what puts a one-column table next to the forty-column one
+it should probably have been part of.
+
+A fold whose key no event supplies cannot be kept, and is listed at the end instead:
+
+```
+  not stored, because no event supplies the key:
+    OrdersSince  (at)
+```
+
+**That is a line and not an error.** Such a fold is perfectly good and a command can read
+it; nothing says every fold has to be storable. heklang has no warning channel to say it
+in either (`docs/diagnostics.md` §11), so the listing says it and the run still passes.
+Only *some* arm has to supply a given part, not every arm: an arm matching part of the key
+is a range update over the rest.
 
 **`hek fmt -` formats one module from stdin onto stdout**, which is the shape an editor's
 format-on-save wants: helix and the editors that copied it replace the buffer with whatever
