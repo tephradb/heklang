@@ -1694,6 +1694,10 @@
         {
           "type": "SYMBOL",
           "name": "fold_clause"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "fill_clause"
         }
       ]
     },
@@ -1772,6 +1776,10 @@
           "name": "field_initializer_list"
         }
       ]
+    },
+    "fill_clause": {
+      "type": "STRING",
+      "value": "fill"
     },
     "expect_clause": {
       "type": "SEQ",

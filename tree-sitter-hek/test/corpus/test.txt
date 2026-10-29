@@ -356,3 +356,54 @@ test "an edit keeps the rest of the order" {
           (arguments
             (integer_literal)
             (decimal_literal)))))))
+
+================================================================================
+a fill action, and a row of the derived read model
+================================================================================
+
+
+test "an order carries its total" {
+  given @order.placed { shop_id: 1, order_id: 9001, total: 42.50 }
+
+  fill
+
+  expect shop__order[1, 9001] { order_total: 42.50 }
+  expect no shop__order[1, 9002]
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (test_declaration
+    name: (string
+      (string_content))
+    body: (test_body
+      (given_clause
+        path: (event_path)
+        (field_initializer_list
+          (field_initializer
+            name: (identifier)
+            value: (integer_literal))
+          (field_initializer
+            name: (identifier)
+            value: (integer_literal))
+          (field_initializer
+            name: (identifier)
+            value: (decimal_literal))))
+      (fill_clause)
+      (expect_clause
+        (row_expectation
+          entity: (identifier)
+          (subscript
+            key: (integer_literal)
+            key: (integer_literal))
+          (field_initializer_list
+            (field_initializer
+              name: (identifier)
+              value: (decimal_literal)))))
+      (expect_clause
+        (row_expectation
+          entity: (identifier)
+          (subscript
+            key: (integer_literal)
+            key: (integer_literal)))))))

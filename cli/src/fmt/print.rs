@@ -96,6 +96,8 @@ impl<'a> Printer<'a> {
             "project_clause" => self.keyed("project", node),
             "deliver_clause" => self.keyed("deliver", node),
             "fold_clause" => self.keyed("fold", node),
+            // One word and no children: the action with nothing to name.
+            "fill_clause" => Doc::text("fill"),
             "erased_clause" => self.keyed("erased", node),
             "respond_clause" => self.respond(node),
             "expect_clause" => self.expect(node),

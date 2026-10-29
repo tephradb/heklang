@@ -241,6 +241,7 @@ Exactly one, and it decides which expectations are legal:
 | `project Projector` | the projector over the whole given log |
 | `deliver Effect` | the effect over the whole given log, following it as an `invoke` lengthens it |
 | `fold Fold { name: value, ... }` | the named fold over the whole given log, for that key |
+| `fill` | the whole given log into the derived read model, so rows of it can be asserted |
 
 **`deliver` drives, so there is no position to write.** A test says which effect, not which event: an
 effect that fires on three of the given events makes three invocations, and the expectations are the
@@ -260,9 +261,14 @@ untestable. What a test can say is what the arm does when it runs, which is what
 real case for boundary testing turns up, the additive move is an `activate <Effect>` statement usable
 between `given`s, splitting the log into history and live.
 
-**`fold` runs no handler, and it is the only action that does not.** The other three name something
-that decides, projects or calls out; a named fold is a value and a key, so the action is the read
-itself. Section 8 is what it expects.
+**`fold` and `fill` run no handler, and they are the only actions that do not.** The other three
+name something that decides, projects or calls out; a named fold is a value and a key, and the
+derived read model is every named fold at every key, so each action is the read itself. Sections 8
+and 9 are what they expect.
+
+**`fill` is also the only action with nothing to name**, because nothing declares what it fills. A
+program has one derived read model and `tables::layout` derives all of it from the folds, where
+`project` picks one projector out of several.
 
 ## 5. What `run` expects
 
@@ -422,7 +428,67 @@ asserts goes through the same public API an embedder has, and `fold` is no excep
 `Interpreter::fold`, which is what a host will call to fill a stored column for one key. A test is
 the first caller rather than a private path into the fold.
 
-## 9. What a test cannot assert
+## 9. What `fill` expects
+
+| Expectation | Matches |
+| --- | --- |
+| `expect <table>[key] { column: value, ... }` | the row exists and the listed columns match |
+| `expect no <table>[key]` | no key like that was ever written |
+
+`fill` follows the whole given log into the derived read model: a read model is a named fold kept
+for every key, so `tables::layout` derives the table set from the program's folds and there is one
+of them. That is why the action takes **no name** where `project` takes one.
+
+```hek
+test "a cancellation nets off the order's total" {
+  given @order.placed    { shop_id: 1, order_id: 9001, total: 42.50 }
+  given @order.cancelled { shop_id: 1, order_id: 9001, refund: 2.50 }
+
+  fill
+
+  expect shop__order[1, 9001] { order_total: 40.00, order_cancelled: true }
+  expect no shop__order[1, 9002]
+}
+```
+
+The table and the column are the names `hek check --tables` prints: a key part is named for its
+subject or for its parameter with one trailing `_id` taken off, and a column is the `snake_case` of
+its fold's name (`docs/cli.md`). Both are checked when the test is parsed, so a typo is a `hek
+check` error naming the tables that do exist rather than a test that fails at run time.
+
+**This is section 6 over a derived table, and that is the point.** Retiring a ported application's
+projectors turned 27 row tests into 78 `fold` tests, because a row of N columns is N fold reads;
+this turns them back. The subscript is the whole key in key order, the listed columns only, and the
+comparison is `Value::same`, all exactly as section 6 has them.
+
+**One thing reads differently from a projector's row, and it is the fold's own rule.** An entity has
+no field it was never given, and a fold over no matching events folds to **its seed**, so a column
+no arm has written still has a value and a test may assert it:
+
+```hek
+expect plan[7] { plan_revenue: 0, plan_last_sold_at: none }
+```
+
+That is section 8's "a key no event touched folds to the seed rather than to nothing" seen from a
+row. `expect nothing` is therefore refused here, as it is under `project` and `fold`: the question
+it would be asking is whether a key exists, and `expect no` asks it.
+
+**A fold with no parameters has no row to name.** It folds to one value, `fold Name {}` with
+`expect <value>` says it exactly, and a row of the single-row `global` table would be a subscript
+with nothing in it. Refused rather than spelled `global[]`, and the grammar agrees: a bare name
+followed by a block is a record literal, so an optional subscript would make one input derivable two
+ways.
+
+**A query-only fold is readable here**, for the reason section 8 gives: a test is not a decision,
+and the harness's envelope is one minute per event from 2020-01-01T00:00:00Z.
+
+**What this runs is the sink, not a refold.** `Tables::apply` applies each record to whatever
+columns its arms name, carrying the accumulator in the store, which is what a host follows a log
+with (`docs/folds.md` section 11). The records arrive through `Tables::query`, so a test exercises
+the subscription too: a query that selects nothing would otherwise look exactly like a read model
+with nothing to do.
+
+## 10. What a test cannot assert
 
 - **An intermediate.** There is no `expect token == "x"` for a `fold` written inside a decision. The
   reason to have one is what the handler did with it, which is already in the appended events or the
@@ -451,7 +517,7 @@ trace come from the interpreter, and the one thing left that a world supplies is
 against a real log and real read models without anything on the list above becoming visible, and
 without a second definition of what `expect` means.
 
-## 10. Running
+## 11. Running
 
 `run_tests(&program)` returns one result per test, in declaration order, each carrying the test's
 name, its module and its outcome. A result is one of:

@@ -390,7 +390,7 @@ fn suite(program: &Program) -> bool {
 /// names it, so once guards compose the append condition is a closure rather than
 /// something a reader can take off the page. This is how to see it: two commands meant to
 /// conflict on the same events can be compared here, which is the one question
-/// `docs/testing.md` §9 deliberately keeps out of a test.
+/// `docs/testing.md` §10 deliberately keeps out of a test.
 ///
 /// **Asked for, not printed by default.** `check` is a pass/fail gate, and this is one
 /// line per command rather than a summary, so a 26-command program pays 26 lines on every

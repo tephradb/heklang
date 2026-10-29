@@ -368,6 +368,7 @@ module.exports = grammar({
         $.project_clause,
         $.deliver_clause,
         $.fold_clause,
+        $.fill_clause,
       ),
 
     run_clause: ($) =>
@@ -383,6 +384,11 @@ module.exports = grammar({
     // this one does not: `=` against `{` is a one-token decision.
     fold_clause: ($) =>
       seq('fold', field('fold', $._type_name), $.field_initializer_list),
+
+    // The fifth action, and the one with nothing to name: a program has one derived
+    // read model, so `fill` says which log to follow into it and the rows say the rest
+    // (docs/testing.md section 9). Soft, like `project` and `deliver`.
+    fill_clause: ($) => 'fill',
 
     expect_clause: ($) => seq('expect', optional($._expectation)),
 

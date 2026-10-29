@@ -324,6 +324,51 @@ reader.
 does. Rule 8 of `docs/projectors.md` still holds, and a host reads `Projection::projector()` for the
 entities and enums it needs to build a schema from.
 
+## 7a. The derived read model is the same seam, one level narrower
+
+```rust
+pub trait Columns {
+    fn value(&self, table: &str, key: &[Key], column: &str) -> Result<Option<Value>, Error>;
+    fn set(&mut self, table: &str, key: Vec<Key>, column: &str, value: Value) -> Result<(), Error>;
+    fn keys(&self, table: &str, pinned: &[(usize, Key)]) -> Result<Vec<Vec<Key>>, Error>;
+}
+
+let tables = Tables::new(&program);
+let query = tables.query();                 // every event any column folds, each once
+tables.apply(&record, &mut my_columns)?;    // one record, pinned arms then ranges
+```
+
+`Columns` is to `Tables` what `Rows` is to `Projection`, and the shapes rhyme on purpose: not part
+of `Host`, a key is a sequence that must order lexicographically, it reads as well as writes, and
+`Tables` holds no host so a deployment drives it off a thread that never touches the log reader.
+`Cells` is the in-memory implementation, as `Store` is for rows.
+
+**Per program rather than per projector.** Nothing declares a derived table: a read model is a named
+fold kept for every key, so `tables::layout` derives the whole set from the program's folds and
+there is one of them. `table` and `column` are that layout's own names, which is what keeps `hek
+check --tables` and the real tables from disagreeing about what an author is looking at.
+
+**It reads for a sharper reason than `Rows` does.** A `patch` reads the row to fill its stored
+loads; a fold's accumulator **is** the stored column, so without `value` there is nothing to fold
+onto and every record would restart from the seed.
+
+**An absent value and an absent key are one thing, deliberately.** `value` answering `None` means
+the column is at its seed, which is what a fold over no matching events folds to, so a store holds
+only the keys something has written and a key nothing minted needs no row. `keys` has the same
+boundary: a range update covers the keys the table holds. `docs/folds.md` section 11 states what
+that costs and why it is safe.
+
+**`keys` is held to `read`'s cut, not to `row`'s.** Over-delivering is a cost and under-delivering is
+a bug: a key handed back that the arm does not write is re-checked and skipped, while one withheld is
+a column that silently stops following its log.
+
+**A sealed column is nullable whatever its declared type says.** Rule 9 of `docs/projectors.md`
+makes an erase empty the column and only an optional has an empty value, so a store deciding
+nullability from the declared type alone writes a null into a `NOT NULL` column the first time a
+subject is erased. It also keeps the field name beside the ciphertext, because one column can hold
+content sealed under two different field names and `decrypt` is asked for the one it was sealed
+with. `docs/folds.md` section 11 has both.
+
 ## 8. What stays the language's
 
 A host is not asked for these, and offering to supply them would break a rule the language is

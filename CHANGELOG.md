@@ -142,6 +142,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   position like any other, so a store filling a column before its first event would have folded that
   event into a row recorded as holding none of it. `fold_stored(.., 0)` is a column at its seed and
   `fold_stored(.., 1)` is the first event alone.
+- **A per-record sink for the derived read model**: `Tables` and the `Columns` seam, which are to
+  `fold_stored` what `Projection` and `Rows` are to a projector rebuild. `Tables::apply(record,
+  columns)` applies one record to whatever columns its arms name, carrying the accumulator in the
+  store, and `Tables::query` is the subscription a host follows the log with. `Cells` is the
+  in-memory implementation, as `Store` is for rows, and `Tables` holds no host so a deployment
+  drives it from a thread that never touches the log reader.
+
+  **This is what a column should cost.** Both existing reads fold the whole log for one key, which
+  is right for a backfill and wrong for following a log: on the ported application's order table the
+  median write is two columns of 87 across 46 event types, so a store refolding per record paid two
+  whole-log scans forever.
+
+  It is **more correct** as well as cheaper. A host choosing which columns a record could have
+  changed has only `ColumnArm`, which carries the key parts an arm pins and not the field filters it
+  also wrote, so it has to over-approximate and refold columns the record never touched; `apply` has
+  the filters and re-checks them per record, exactly as a projection re-checks a handler's path.
+
+  Two obligations are the sink's own. **Fully pinned arms run before ranged ones**, within one
+  record, because a range over a key this same record minted has to see it and nothing afterwards
+  corrects a column already written; one record is the whole obligation, since a key an earlier
+  record minted is already stored. And **the subscription is derived here rather than by each host**:
+  one predicate per event any column folds, with no filters, because two columns on one event filter
+  it differently. A store that built its own from `EventPath`'s `Display` kept the `@` that an event
+  type does not have, matched nothing, and advanced its checkpoint over every batch while its status
+  endpoint reported nothing behind.
+- **`fill` is a fifth test action**, and `expect <table>[key] { column: value }` a row expectation
+  over the derived read model. It takes no name, because nothing declares what it fills: a program
+  has one read model and `layout` derives all of it from the folds. This is `docs/testing.md`
+  section 6 over a derived table, which is what those assertions were before the read side became
+  folds: retiring a ported application's projectors turned 27 row tests into 78 `fold` tests, and
+  this turns them back. The table and column names are checked when the test is parsed, so a typo
+  names the tables that do exist. One thing reads differently from a projector's row and it is the
+  fold's own rule: a column no arm wrote is at **its seed**, so `expect plan[7] { plan_revenue: 0 }`
+  is an assertion rather than a missing field. A fold with no parameters has no row to name and says
+  so, pointing at the `fold` action.
+- `tables::Column` carries `args`, the parameter each key part came from in the table's key order,
+  which is what `fold_stored` and `Tables::apply` take. A part is named for its subject or for its
+  parameter with one trailing `_id` off, so the part's name is usually not callable, and a reader
+  deriving it was reimplementing `part_names` to do it.
+- `tables::part_names(params)` is public: the name each key part takes, which the parser now reads
+  too (see the third naming rule above).
 - `tables::fixed(program, fold, part, at)` reads the value an arm pins a key part to, which is
   rule 13's `param == value` seen from the store. The `ExprId` in `ArmMatch::Fixed` indexes the
   fold's own arena, so it cannot be evaluated without the fold; the conjunct resolves against an

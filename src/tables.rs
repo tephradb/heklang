@@ -54,6 +54,19 @@ pub struct Column {
     pub name: String,
     pub fold: Ident,
     pub ty: Type,
+    /// The **parameter** each part of the table's key came from, in the table's key
+    /// order: what [`crate::Interpreter::fold_stored`] has to be called with.
+    ///
+    /// Not the part names, and that is the whole reason this is recorded rather than
+    /// re-derived. A part is named for its subject, or for its parameter with one
+    /// trailing `_id` taken off, so `(shop_id: Shop, request_id: Int)` keys a table on
+    /// `(shop, request)` and neither name is callable. A reader matching part names back
+    /// onto parameters reimplements [`part_names`] to do it, and gets `missing argument`
+    /// for every fold the first time it is slightly wrong.
+    ///
+    /// Per column and not per table, because one key signature is reached by parameters
+    /// of different names: `(shop_id: Shop)` and `(shop: Shop)` are one key.
+    pub args: Vec<Ident>,
     /// The events this column folds, first written first, each once.
     pub events: Vec<EventPath>,
     /// One per `on`, in source order.
@@ -172,11 +185,18 @@ pub fn layout(program: &Program) -> Layout {
             continue;
         }
 
+        // The parameter per key position, taken here while the pairing still exists:
+        // `key` is about to lose the indexes that say which parameter each part was.
+        let args: Vec<Ident> = key
+            .iter()
+            .map(|(at, _)| fold.params[*at].name.clone())
+            .collect();
         let key: Vec<KeyPart> = key.into_iter().map(|(_, part)| part).collect();
         let column = Column {
             name: snake_case(&fold.name),
             fold: fold.name.clone(),
             ty: fold.ret.clone(),
+            args,
             events: events_of(&arms),
             arms,
         };

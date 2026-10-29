@@ -1782,3 +1782,215 @@ fn secret_is_soft_in_a_test_body() {
         only(&results).outcome
     );
 }
+
+// ------------------------------------------------- section 9: the `fill` action
+
+/// A row of the derived read model, which is what a projector's row expectation was
+/// before the read side became folds. The three folds of `FOLDS` share one key, so they
+/// are three columns of one table, and `--tables` calls it `plan`.
+#[test]
+fn a_fill_asserts_a_row_of_the_derived_read_model() {
+    let results = fold_verdicts(
+        "test \"a sold plan carries its title and its takings\" {
+  given @plan.created { plan_id: 7, title: \"Pro\", price: 10.00 }
+  given @plan.sold { plan_id: 7, price: 10.00 }
+  given @plan.sold { plan_id: 7, price: 10.00 }
+
+  fill
+
+  expect plan[7] { plan_revenue: 20.00, plan_title: \"Pro\" }
+}",
+    );
+    assert!(
+        matches!(only(&results).outcome, TestOutcome::Passed),
+        "{:?}",
+        only(&results).outcome
+    );
+}
+
+/// **A column nothing wrote still has a value.** An entity has no field it was never
+/// given, and a fold over no matching events folds to its seed, so this is the one place
+/// a derived row reads differently from a projector's and it reads the way section 8
+/// already says a fold does.
+#[test]
+fn a_column_no_arm_wrote_reads_as_its_seed() {
+    let results = fold_verdicts(
+        "test \"a plan nobody bought has taken nothing\" {
+  given @plan.created { plan_id: 7, title: \"Pro\", price: 10.00 }
+
+  fill
+
+  expect plan[7] { plan_revenue: 0, plan_last_sold_at: none }
+}",
+    );
+    assert!(
+        matches!(only(&results).outcome, TestOutcome::Passed),
+        "{:?}",
+        only(&results).outcome
+    );
+}
+
+/// A query-only fold is readable here for the reason it is readable under `fold`: a test
+/// is not a decision, and the harness's envelope is one minute per event from
+/// 2020-01-01T00:00:00Z.
+#[test]
+fn a_fill_reads_a_query_only_column_too() {
+    let results = fold_verdicts(
+        "test \"the last sale is stamped\" {
+  given @plan.created { plan_id: 7, title: \"Pro\", price: 10.00 }
+  given @plan.sold { plan_id: 7, price: 10.00 }
+
+  fill
+
+  expect plan[7] { plan_last_sold_at: \"2020-01-01T00:01:00Z\" }
+}",
+    );
+    assert!(
+        matches!(only(&results).outcome, TestOutcome::Passed),
+        "{:?}",
+        only(&results).outcome
+    );
+}
+
+#[test]
+fn expect_no_row_is_a_key_nothing_minted() {
+    let results = fold_verdicts(
+        "test \"no plan 9 was ever touched\" {
+  given @plan.created { plan_id: 7, title: \"Pro\", price: 10.00 }
+
+  fill
+
+  expect no plan[9]
+}",
+    );
+    assert!(
+        matches!(only(&results).outcome, TestOutcome::Passed),
+        "{:?}",
+        only(&results).outcome
+    );
+
+    let present = fold_verdicts(
+        "test \"but plan 7 was\" {
+  given @plan.created { plan_id: 7, title: \"Pro\", price: 10.00 }
+
+  fill
+
+  expect no plan[7]
+}",
+    );
+    assert_eq!(why(only(&present)), "plan[7] is present");
+}
+
+#[test]
+fn a_mismatch_names_the_table_the_key_and_the_column() {
+    let results = fold_verdicts(
+        "test \"the takings are wrong\" {
+  given @plan.sold { plan_id: 7, price: 10.00 }
+
+  fill
+
+  expect plan[7] { plan_revenue: 99.00 }
+}",
+    );
+    assert_eq!(
+        why(only(&results)),
+        "plan[7].plan_revenue: expected 99.00, got 10.00"
+    );
+}
+
+#[test]
+fn a_table_the_read_model_does_not_hold_is_refused_with_the_ones_it_does() {
+    let message = fold_err(
+        "test \"a typo\" {
+  given @plan.sold { plan_id: 7, price: 10.00 }
+  fill
+  expect plans[7] { plan_revenue: 10.00 }
+}",
+    );
+    assert!(
+        message.contains("no derived table is called `plans`"),
+        "{message}"
+    );
+    assert!(
+        message.contains("it holds plan"),
+        "the hint lists the read model: {message}"
+    );
+}
+
+#[test]
+fn a_column_the_table_does_not_hold_is_refused() {
+    let message = fold_err(
+        "test \"a typo\" {
+  given @plan.sold { plan_id: 7, price: 10.00 }
+  fill
+  expect plan[7] { plan_takings: 10.00 }
+}",
+    );
+    assert!(
+        message.contains("table `plan` has no column `plan_takings`"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_fill_takes_the_whole_key_and_says_so() {
+    let message = fold_err(
+        "test \"a key and a half\" {
+  given @plan.sold { plan_id: 7, price: 10.00 }
+  fill
+  expect plan[7, 9] { plan_revenue: 10.00 }
+}",
+    );
+    assert!(
+        message.contains("`plan` has a 1-part key, so a subscript takes 1 value, found 2"),
+        "{message}"
+    );
+}
+
+/// `expect nothing` is about a sequence that is empty, and a fill produces rows. The
+/// question it would be asking is whether a key exists, which `expect no` asks.
+#[test]
+fn expect_nothing_is_refused_under_a_fill() {
+    let message = fold_err(
+        "test \"nothing\" {
+  given @plan.sold { plan_id: 7, price: 10.00 }
+  fill
+  expect nothing
+}",
+    );
+    assert!(
+        message.contains("`expect nothing` is not something `fill` produces"),
+        "{message}"
+    );
+}
+
+/// **The single-row table is a value, so it is asserted as one.** A fold with no
+/// parameters folds to one thing and the `fold` action says it exactly; a row of it would
+/// be a subscript with nothing in it. The grammar agrees, since a bare name followed by a
+/// block is a record literal.
+#[test]
+fn the_keyless_table_has_no_row_to_name() {
+    let source = format!(
+        "{PRELUDE}
+fold PlansSold() -> n: Int = 0 {{
+  on @plan.sold() => n + 1
+}}
+
+test \"two sales\" {{
+  given @plan.sold {{ plan_id: 7, price: 10.00 }}
+  fill
+  expect global {{ plans_sold: 2 }}
+}}"
+    );
+    let message = parse(&source)
+        .expect_err("a row of the single-row table is refused")
+        .text();
+    assert!(
+        message.contains("`global` holds one row, so there is no row to name"),
+        "{message}"
+    );
+    assert!(
+        message.contains("`fold Name {}` and `expect <value>`"),
+        "the hint points at the action that does say it: {message}"
+    );
+}

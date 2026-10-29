@@ -7,9 +7,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::harness::{Reply, Sandbox};
-use crate::host::{Host, Rows};
+use crate::host::{Host, Log, Rows};
 use crate::interp::{
-    Effectful, Error, ErrorKind, Interpreter, Outcome, Row, check_field, coerce, subject_id,
+    Cells, Effectful, Error, ErrorKind, Interpreter, Outcome, Row, Tables, check_field, coerce,
+    subject_id,
 };
 use crate::ir::{
     Action, Expect, ExprId, Exprs, Ident, Program, ReplySpec, Setup, Span, Test, Type,
@@ -110,7 +111,7 @@ pub fn run_tests(program: &Program) -> Vec<TestResult> {
 
 /// The same run, against a world the crate does not own.
 ///
-/// A fresh world per test rather than one reused, because rule 9's "only its own `given`
+/// A fresh world per test rather than one reused, because rule 10's "only its own `given`
 /// log" is a property of the world and not of the interpreter.
 pub fn run_tests_in<W: World>(
     program: &Program,
@@ -360,6 +361,19 @@ fn check<W: World>(program: &Program, test: &Test, mut world: W) -> Result<Optio
                 .map_err(|err: Error| err.to_string())?;
             check_fold(&mut values, fold, &test.expect, &folded)
         }
+        Action::Fill { .. } => {
+            let tables = Tables::new(program);
+            let mut cells = Cells::default();
+            // Through the subscription rather than off the log directly, so a test
+            // exercises the query a host would follow with and not only the arms.
+            interpreter
+                .host()
+                .read(&tables.query(), &mut |record| {
+                    tables.apply(record, &mut cells)
+                })
+                .map_err(|err: Error| err.to_string())?;
+            check_fill(&mut values, &tables, &interpreter, &cells, &test.expect)
+        }
     }
 }
 
@@ -511,6 +525,86 @@ fn check_project(
                 return Ok(Some(format!(
                     "a projector produces rows, not {}",
                     describe(other)
+                )));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The listed columns of each named row of the derived read model, or its absence.
+///
+/// The same assertions `check_project` makes and against the same `Value::same`, because
+/// a derived table's row is the thing a projector's row was. What differs is the absent
+/// column: an entity has no field it was never given, while a **fold** over no matching
+/// events folds to its seed, so a column nothing wrote still has a value and a test may
+/// assert it. `fold_stored` at a head of zero is that seed, which keeps the answer the
+/// fold's own rather than a second reading of the declaration.
+fn check_fill<H: Host>(
+    values: &mut Values<'_>,
+    tables: &Tables<'_>,
+    interpreter: &Interpreter<'_, H>,
+    cells: &Cells,
+    expect: &[Expect],
+) -> Result<Option<String>, String> {
+    for wanted in expect {
+        let (entity, keys) = match wanted {
+            Expect::Row { entity, keys, .. } | Expect::NoRow { entity, keys, .. } => (entity, keys),
+            other => {
+                return Ok(Some(format!(
+                    "a fill produces rows of the derived read model, not {}",
+                    describe(other)
+                )));
+            }
+        };
+        let key = subscript(values, keys)?;
+        // Always found: the parser resolved the name against the same layout.
+        let table = tables
+            .layout()
+            .tables
+            .iter()
+            .find(|table| &table.name == entity)
+            .ok_or_else(|| format!("no derived table `{entity}`"))?;
+        let present = cells.rows(entity).any(|held| held == key.as_slice());
+
+        if let Expect::NoRow { .. } = wanted {
+            if present {
+                return Ok(Some(format!("{entity}[{}] is present", show(&key))));
+            }
+            continue;
+        }
+        if !present {
+            return Ok(Some(format!("{entity}[{}] is absent", show(&key))));
+        }
+        let Expect::Row { fields, .. } = wanted else {
+            continue;
+        };
+        for (name, value) in fields {
+            let column = table
+                .columns
+                .iter()
+                .find(|column| &column.name == name)
+                .ok_or_else(|| format!("table `{entity}` has no column `{name}`"))?;
+            let wanted = values.at(*value, Some(&column.ty))?;
+            let held = match cells.get(entity, &key, name) {
+                Some(held) => held.clone(),
+                None => {
+                    let args: Vec<(Ident, Value)> = column
+                        .args
+                        .iter()
+                        .cloned()
+                        .zip(key.iter().map(crate::interp::key_as_value))
+                        .collect();
+                    interpreter
+                        .fold_stored(&column.fold, args, 0)
+                        .map_err(|err: Error| err.to_string())?
+                }
+            };
+            if !held.same(&wanted) {
+                let held = shown(&held);
+                return Ok(Some(format!(
+                    "{entity}[{}].{name}: expected {wanted}, got {held}",
+                    show(&key)
                 )));
             }
         }

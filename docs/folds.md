@@ -65,7 +65,7 @@ The worst single case repeated `fold shop_domain: String = "" / on @shop.install
 `fold token` and `fold order_gid` fourteen times each beside it. One module, `effects/email.hk`,
 carried 57 folds that were 11 distinct ones.
 
-What drifts when those fall out of step is the append condition, and `docs/testing.md` §9 keeps that
+What drifts when those fall out of step is the append condition, and `docs/testing.md` §10 keeps that
 out of a test on purpose:
 
 > Slice counts, **the append condition**, and how many times the fold ran are not outputs.
@@ -480,7 +480,7 @@ the binds, the seed and the arms:
 > this fold is also declared at `quote-outcome.hk:68`; name it, so the two cannot drift apart
 
 It is an **error** rather than a warning. A rule about the append condition that an author may
-ignore is not a rule, and `docs/testing.md` §9 means no test will catch what ignoring it costs.
+ignore is not a rule, and `docs/testing.md` §10 means no test will catch what ignoring it costs.
 
 **Two *bodies*, not two declarations.** An effect's arm counts as one, and that is not a detail: the
 worst case the rule was measured on is nineteen arms of **one** effect folding the same thing
@@ -630,7 +630,45 @@ holds the ciphertext and shreds on its own read. That second half is what `proje
 `project` does not, for the same reason, and without it filling a non-optional sealed column whose
 subject was already erased would fail where the same column through a projector does not.
 
-**Its bound is a head and not a position**, which is the one number a store has: `Log::head` answers
+`Tables` is the third door and the one a deployment spends its life in. `Interpreter::fold` and
+`fold_stored` both read the whole log for one key, which is the right shape for a backfill and the
+wrong one for following a log: on the ported application's order table the median write is **two
+columns of 87** across 46 event types, so a host refolding per record pays two whole-log scans
+forever. `Tables::apply(record, columns)` applies one record to whatever columns its arms name,
+carrying the accumulator in the store through the `Columns` seam, and is to `fold_stored` what
+`Projection::apply` is to a projector rebuild. Like a projection it holds no host, so a host drives
+it from a thread that never touches the log reader.
+
+It is also **more correct** than refolding, not only cheaper. A host choosing which columns a record
+could have changed has only `ColumnArm`, which carries the key parts an arm pins and not the field
+filters it also wrote, so it must over-approximate and refold columns the record never touched. That
+is harmless when the answer is re-derived and it is not harmless here, so `apply` re-checks each
+arm's predicate per record, exactly as a projection re-checks a handler's path.
+
+Two obligations are the sink's own, and both were learned from a store that got them wrong:
+
+- **Fully pinned arms before ranged ones, within one record.** An arm leaving a key part open is a
+  range update over every key carrying the parts it did pin, and a key this same record mints is one
+  of them. Reading the range first leaves the new key out and nothing afterwards corrects it. One
+  record is the whole obligation, since a key minted by an earlier record is already stored.
+- **The subscription is derived here, not by each host.** `Tables::query` is one predicate per event
+  any column folds, with no filters, because two columns on one event filter it differently and a
+  subscription is their union. The first store to build its own used `EventPath`'s `Display`, which
+  keeps the `@` that an event type does not have: the query matched nothing, the thread followed the
+  log and folded none of it, and the checkpoint advanced over every batch while the status endpoint
+  reported nothing behind. A silently empty subscription is indistinguishable from being caught up.
+
+**A stored column is defined over the keys the table holds**, and that is a real boundary rather
+than an implementation detail. A fold is a total function of a key and a log, so `OrderClosed(shop,
+order)` with an arm on `@shop.uninstalled(shop_id)` is `true` under `Interpreter::fold` for *any*
+order id, including one no event ever mentioned. The store has no row there and reads the seed, so
+the two disagree. The key space is unbounded and the alternative is not implementable; what makes it
+safe is that every key part is pinned by some arm (`hek check --tables` does not keep a fold whose
+key no event supplies), so the keys a range arm can need are exactly the keys the pinning arms mint.
+A read at a key nothing minted is a question about a row that does not exist.
+
+`Interpreter::fold_stored`'s bound **is a head and not a position**, which is the one number a store
+has: `Log::head` answers
 where the next append lands, a command pins its read to one, and a checkpoint records one. It first
 took the inclusive last position `Query::upto` carries, and that was wrong twice over. It put a
 `head() - 1` at every call site, and an empty log had nothing to pass at all, since `0` is a
@@ -638,6 +676,31 @@ position like any other: a store with a head of zero, filling a column before it
 have folded the first event into a row recorded as holding none of it, and nothing downstream could
 tell. `fold_stored(.., 0)` is now a column at its seed, `fold_stored(.., 1)` is the first event
 alone, and a caller holding a real position asks for `position + 1`.
+
+**A stored sealed column has to carry the field name with its ciphertext**, and that is forced
+rather than chosen. `Keys::decrypt` is asked `(subject, id, field, content)` because a host binds
+its ciphertext to the name the content was sealed under and sealed content may be moved
+(`docs/host.md` section 7), and a `Value::Sealed` carries that name for exactly this reason. **One
+column can hold two different ones.** `Builder::seal_fold` takes the *subject* and not the field, so
+a single `-> Sealed(String, Customer)` covers an arm binding `email` and an arm binding `contact`:
+
+```hek
+fold LatestEmail(customer_id: Customer) -> Sealed(String, Customer) = "" {
+  on @a.one(customer_id) { email } => email
+  on @a.two(customer_id) { contact } => contact
+}
+```
+
+One column, `<- @a.one, @a.two`, two field names in it. So the field varies per value and not per
+column, and a store that kept the content alone would hold a column it could not read. Storing the
+log's own ciphertext verbatim is right, and it is right **with** the name.
+
+**A sealed column is nullable in storage whatever its declared type says.** Rule 9 of
+`docs/projectors.md` makes an erase empty the column, and only an optional has an empty value, so
+the emptying has to land somewhere for a non-optional one too. Reading it back afterwards raises,
+which is `shred`'s loud arm and the honest answer: there is no value that says "this is gone" at a
+non-optional position. A store deciding nullability from the declared type alone would therefore
+write a null into a `NOT NULL` column the first time a subject was erased.
 
 The two are not in tension. A fold a decision reads is inlined and never executes as itself; a fold
 a read model is runs by name and never touches a decision. One declaration, two use sites, and the
@@ -679,7 +742,7 @@ exactly what a splice leaves behind and it earns one anyway, so the contrast was
 splice. It is about whether a declaration still does anything once its callers have been served, and
 a fold does.
 
-**It also makes a fold testable, and it now is.** `docs/testing.md` §9 refuses to assert state on
+**It also makes a fold testable, and it now is.** `docs/testing.md` §10 refuses to assert state on
 the grounds that "a folded value is an intermediate", which stops being true of a declaration with a
 signature. A `fold` action asserts one, and section 8 of that document is what it expects. What §9
 rules out stays ruled out; a named fold is simply no longer in it.

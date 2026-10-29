@@ -499,7 +499,7 @@ fn a_long_hint_wraps_under_itself() {
 /// A guard's slices join the boundary of whatever names it, transitively, so the append
 /// condition stops being something a reader can take off the page. `check` prints the
 /// closure, which is what makes two commands' boundaries comparable at all: a test
-/// cannot ask (`docs/testing.md` §9).
+/// cannot ask (`docs/testing.md` §10).
 #[test]
 fn check_names_what_a_command_guards() {
     let source = "\

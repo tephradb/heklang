@@ -899,6 +899,8 @@ fn test(def: &Test) -> Sexp {
             part.extend(frame.keyed(args));
             node("fold", part)
         }
+        // Nothing to name: one program has one derived read model.
+        Action::Fill { .. } => node("fill", []),
     });
     for expect in &def.expect {
         parts.push(node("expect", [frame.expect(expect)]));

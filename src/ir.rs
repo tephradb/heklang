@@ -1808,6 +1808,16 @@ pub enum Action {
         args: Vec<(Ident, ExprId)>,
         span: Span,
     },
+    /// `fill`: follow the whole given log into the derived read model, and assert rows of
+    /// it.
+    ///
+    /// Takes no name because nothing declares what it fills. A read model is a named fold
+    /// kept for every key, so [`crate::tables::layout`] derives the whole of it from the
+    /// program's folds and there is one of them. That is the difference from `project`,
+    /// which names one projector out of several.
+    Fill {
+        span: Span,
+    },
 }
 
 /// Rules 5 to 7. Which variants may appear is decided by the action, at parse time.

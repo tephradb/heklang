@@ -179,6 +179,11 @@ struct Parser {
     /// The enclosing projector's declarations; empty outside one.
     enums: Vec<EnumDef>,
     entities: Vec<EntityDef>,
+    /// The derived read model, for a `fill` test's row expectations. Filled on demand,
+    /// because only a test that writes one needs it and `layout` walks every fold's every
+    /// arm; cached, because pass E's program is finished and a test body may hold
+    /// twenty-seven of those expectations.
+    derived: Option<tables::Layout>,
     /// Module scope, collected before anything that could name one. A projector's own
     /// enum shadows one of these, which is why they are two lists rather than one.
     module_enums: Vec<EnumDef>,
@@ -418,6 +423,7 @@ impl Parser {
             propagating: false,
             enums: Vec::new(),
             entities: Vec::new(),
+            derived: None,
             module_enums: Vec::new(),
             records: Vec::new(),
             subjects: Vec::new(),
@@ -1058,6 +1064,8 @@ impl Parser {
             pending_absent: _,
             secrets: _,
             declared: _,
+            // A cache of the finished program's read model, which no declaration owns.
+            derived: _,
             // The declaration now being given up on. All of it goes.
             prologue,
             folding,
@@ -5837,6 +5845,11 @@ impl Parser {
             let args = self.named_args(lower, &params, &fold)?;
             return Ok(Action::Fold { fold, args, span });
         }
+        // No name, because nothing declares what it fills: there is one derived read
+        // model and `layout` derives all of it from the folds.
+        if self.eat_soft("fill") {
+            return Ok(Action::Fill { span });
+        }
         if self.at_word(Keyword::Emit) {
             return self.fail(
                 Code::TestShape,
@@ -5846,10 +5859,16 @@ impl Parser {
         self.fail(
             Code::TestShape,
             format!(
-                "a test does one thing: `run`, `project`, `deliver` or `fold`, found {}",
+                "a test does one thing: `run`, `project`, `deliver`, `fold` or `fill`, found {}",
                 self.peek()
             ),
         )
+    }
+
+    /// The derived read model, computed once per program rather than once per
+    /// expectation.
+    fn derived(&mut self, program: &Program) -> &tables::Layout {
+        self.derived.get_or_insert_with(|| tables::layout(program))
     }
 
     /// `{ name: value, ... }` against a command's declared parameters, the same braces
@@ -5927,8 +5946,10 @@ impl Parser {
         if self.eat_soft("nothing") {
             return match action {
                 // A fold always folded to something: `expect nothing` would be asking
-                // whether the seed is absent, which `expect none` already says.
-                Action::Project { .. } | Action::Fold { .. } => {
+                // whether the seed is absent, which `expect none` already says. A fill
+                // always filled something too, and `expect no <table>[key]` is how a
+                // test says a key was never minted.
+                Action::Project { .. } | Action::Fold { .. } | Action::Fill { .. } => {
                     self.wrong_expectation(action, "`expect nothing`")
                 }
                 _ => Ok(Expect::Nothing { span }),
@@ -5950,6 +5971,7 @@ impl Parser {
                 let value = self.expr(lower, Some(ret))?;
                 Ok(Expect::Folded { value, span })
             }
+            Action::Fill { .. } => self.table_expectation(lower, program, span),
         }
     }
 
@@ -5959,10 +5981,13 @@ impl Parser {
             Action::Project { projector, .. } => ("project", projector.as_str()),
             Action::Deliver { effect, .. } => ("deliver", effect.as_str()),
             Action::Fold { fold, .. } => ("fold", fold.as_str()),
+            // The one action with nothing to name, so the action is the whole of it.
+            Action::Fill { .. } => ("fill", ""),
         };
+        let action = format!("{word} {name}").trim_end().to_string();
         self.fail_hint(
             Code::TestShape,
-            format!("{what} is not something `{word} {name}` produces"),
+            format!("{what} is not something `{action}` produces"),
             "the action decides which expectations a test can write",
         )
     }
@@ -6075,6 +6100,155 @@ impl Parser {
             fields,
             span,
         })
+    }
+
+    /// A row of the derived read model: `expect shop__order[42, 9001] { total: 10.00 }`.
+    ///
+    /// The same shape a projector's row expectation takes and deliberately so, because
+    /// these are the same assertions: retiring a projector turned a row of N columns into
+    /// N `fold` tests, and this turns them back. The listed columns only, for the reason
+    /// section 6 gives, which a derived table makes sharper rather than weaker: one of
+    /// them is 97 columns wide.
+    ///
+    /// The table is named by `layout`, which is where `hek check --tables` prints it, and
+    /// a column is the `snake_case` of its fold's name. Both are checked here, so a typo
+    /// is a `hek check` error rather than a test that fails at run time.
+    fn table_expectation(
+        &mut self,
+        lower: &mut Lower,
+        program: &Program,
+        span: Span,
+    ) -> Result<Expect, Diagnostic> {
+        let absent = self.eat_soft("no");
+        let at = self.span_here();
+        let name = self.expect_ident()?;
+        let Some(table) = self
+            .derived(program)
+            .tables
+            .iter()
+            .find(|table| table.name == name)
+            .cloned()
+        else {
+            let mut err = self.err(
+                Code::UnknownMember,
+                format!("no derived table is called `{name}`"),
+                at,
+            );
+            // A fold whose key no event supplies is not kept, and naming its table is the
+            // likeliest way to get here, so the listing says which tables there are.
+            let known: Vec<&str> = self
+                .derived(program)
+                .tables
+                .iter()
+                .map(|table| table.name.as_str())
+                .collect();
+            if !known.is_empty() {
+                err = err.with_hint(format!(
+                    "`hek check --tables` prints the read model; it holds {}",
+                    known.join(", ")
+                ));
+            }
+            return Err(err);
+        };
+
+        // **The single-row table is a value, so it is asserted as one.** A fold with no
+        // parameters folds to one thing, and `fold Name {}` with `expect <value>` already
+        // says it exactly; a row expectation over it would be a subscript with nothing in
+        // it. Refused rather than spelled `global[]`, and the grammar agrees: a bare name
+        // followed by a block is a record literal, so an optional subscript would make
+        // one input derivable two ways.
+        if table.key.is_empty() {
+            return Err(self
+                .err(
+                    Code::TestShape,
+                    format!("`{name}` holds one row, so there is no row to name"),
+                    at,
+                )
+                .with_hint(
+                    "a fold with no parameters is a value rather than a table: assert it with the \
+                     `fold` action, as `fold Name {}` and `expect <value>`",
+                ));
+        }
+
+        let keys = self.table_subscript(lower, &table)?;
+        if absent {
+            return Ok(Expect::NoRow {
+                entity: name,
+                keys,
+                span,
+            });
+        }
+        self.expect_sym(Sym::LBrace)?;
+        let mut fields: Vec<(Ident, ExprId)> = Vec::new();
+        while !self.at_sym(Sym::RBrace) {
+            let at = self.span_here();
+            let column = self.expect_ident()?;
+            let Some(declared) = table.columns.iter().find(|held| held.name == column) else {
+                return Err(self.err(
+                    Code::UnknownMember,
+                    format!("table `{name}` has no column `{column}`"),
+                    at,
+                ));
+            };
+            if fields.iter().any(|(seen, _)| seen == &column) {
+                return Err(self.err(
+                    Code::DuplicateField,
+                    format!("`{column}` is given twice"),
+                    at,
+                ));
+            }
+            self.expect_sym(Sym::Colon)?;
+            let value = self.expr(lower, Some(declared.ty.clone()))?;
+            fields.push((column, value));
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RBrace)?;
+        Ok(Expect::Row {
+            entity: name,
+            keys,
+            fields,
+            span,
+        })
+    }
+
+    /// The whole key in the table's key order, which is what `--tables` prints beside the
+    /// name. `subscript` is the same thing over an entity's `@key` columns.
+    fn table_subscript(
+        &mut self,
+        lower: &mut Lower,
+        table: &tables::Table,
+    ) -> Result<Vec<ExprId>, Diagnostic> {
+        let bracket = self.span_here();
+        let mut keys: Vec<ExprId> = Vec::new();
+        self.expect_sym(Sym::LBracket)?;
+        while !self.at_sym(Sym::RBracket) {
+            let expected = table.key.get(keys.len()).map(|part| part.ty.clone());
+            keys.push(self.expr(lower, expected)?);
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RBracket)?;
+        if keys.len() != table.key.len() {
+            let parts: Vec<&str> = table.key.iter().map(|part| part.name.as_str()).collect();
+            let wanted = parts.len();
+            let found = keys.len();
+            let plural = if wanted == 1 { "" } else { "s" };
+            return Err(self
+                .err(
+                    Code::Arity,
+                    format!(
+                        "`{}` has a {wanted}-part key, so a subscript takes {wanted} \
+                         value{plural}, found {found}",
+                        table.name
+                    ),
+                    bracket,
+                )
+                .with_hint(format!("write `{}[{}]`", table.name, parts.join(", "))));
+        }
+        Ok(keys)
     }
 
     /// Rule 7: one entry of the effect's trace.
@@ -10705,7 +10879,7 @@ impl Parser {
     ///
     /// **The whole point is the append condition.** A fold declares the slice its caller
     /// conflicts on, so two copies that fall out of step give two commands two different
-    /// boundaries for one question, and `docs/testing.md` §9 keeps the condition out of a
+    /// boundaries for one question, and `docs/testing.md` §10 keeps the condition out of a
     /// test on purpose. A port measured 167 byte-identical copies among 425 folds, and the
     /// failure mode is a command deciding on a stale value and appending anyway.
     ///
