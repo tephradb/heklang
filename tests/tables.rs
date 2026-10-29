@@ -162,11 +162,17 @@ fold Blocked(code: String, shop_id: Shop, order_id: Int) -> Bool = false {
     assert_eq!(tables(&source), ["shop__code__order  blocked"]);
 }
 
-/// Two parts of one key can land on one name. Neither spelling is a mistake, so they are
-/// told apart by position, counted in the order the fold declares them. No fold in the
-/// ported application does this, so this is the only thing holding the rule up.
+/// Two parts of one key can land on one name, by repeating a subject or by spelling it
+/// two ways, and neither is a mistake. **They are told apart by the parameter, never by
+/// position.**
+///
+/// Position was the first answer and `/code-review` found it wrong twice. A suffix
+/// counting declaration order made two folds declaring the same pair in opposite orders
+/// into one table whose key columns meant different parameters in each, so a writer would
+/// store one row's two columns at each other's addresses; and a suffix is spellable, so a
+/// parameter actually called `region_1` collided with another part's suffix.
 #[test]
-fn two_parts_of_one_name_become_positional() {
+fn two_parts_of_one_name_are_told_apart_by_the_parameter() {
     let source = app("
 fold TransferSeen(to_id: Region, from_id: Region) -> Bool = false {
   on @transfer.recorded(from_id, to_id) => true
@@ -179,8 +185,62 @@ fold TransferSeen(to_id: Region, from_id: Region) -> Bool = false {
         .iter()
         .map(|part| part.name.as_str())
         .collect();
-    assert_eq!(parts, ["region_1", "region_2"]);
-    assert_eq!(layout.tables[0].name, "region_1__region_2");
+    assert_eq!(parts, ["from", "to"]);
+    assert_eq!(layout.tables[0].name, "from__to");
+}
+
+/// **The bug position caused.** Two folds declaring one pair in opposite orders are one
+/// table, and the column each key part is filled from has to agree between them. Under
+/// the positional suffix both derived `(region_1, region_2)` and `same` merged them, with
+/// `region_1` filled from `to_id` in one fold and `from_id` in the other.
+#[test]
+fn transposed_parameters_of_one_pair_are_one_table_the_same_way_round() {
+    let source = app("
+fold TransferSeen(to_id: Region, from_id: Region) -> Bool = false {
+  on @transfer.recorded(from_id, to_id) => true
+}
+
+fold TransferCount(from_id: Region, to_id: Region) -> n: Int = 0 {
+  on @transfer.recorded(from_id, to_id) => n + 1
+}
+");
+
+    assert_eq!(tables(&source), ["from__to  transfer_count, transfer_seen"]);
+
+    // And both columns fill `from` from the event's `from_id`, which is the half the
+    // merge got wrong: the names agreed and the parameters behind them did not.
+    let layout = read(&source);
+    for column in &layout.tables[0].columns {
+        assert_eq!(
+            column.arms[0].fields,
+            [
+                ArmMatch::Field("from_id".into()),
+                ArmMatch::Field("to_id".into())
+            ],
+            "{} fills the key from the wrong fields",
+            column.name
+        );
+    }
+}
+
+/// A part whose parameter name is what another part's suffix used to be. `region_1` is a
+/// legal parameter, so a generated `region_1` could never have been safe.
+#[test]
+fn a_generated_name_cannot_collide_with_a_parameter() {
+    let source = app("
+fold Dup(from_id: Region, to_id: Region, region_1: Int) -> Bool = false {
+  on @transfer.recorded(from_id, to_id) => true
+  on @order.placed(order_id: region_1) => true
+}
+");
+
+    let layout = read(&source);
+    let parts: Vec<&str> = layout.tables[0]
+        .key
+        .iter()
+        .map(|part| part.name.as_str())
+        .collect();
+    assert_eq!(parts, ["from", "to", "region_1"]);
 }
 
 /// A plain part loses one trailing `_id`: the column holds an order, and `order_id` in a

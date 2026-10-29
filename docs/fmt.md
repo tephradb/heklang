@@ -209,12 +209,20 @@ three tokens.
   layout is a property of one file, but it does mean `fmt` cannot use anything the checker
   knows.
 - **A comment inside a construct whose line ends in `{` settles on the second run.** An `if`
-  condition and a command parameter are the two shapes: the comment is emitted at the end of
-  the header line, which puts it after the `{`, so a re-parse finds it inside the block,
-  where it takes a line of its own and stays. No token moves at any point and the run after
-  the first is stable, so rule 1 holds and idempotence is what gives: the test asserts
-  convergence rather than a one-pass fixed point. Nothing in the corpus writes a comment in
-  either position.
+  condition, a command parameter and a fold's return type are the three shapes: the comment
+  is emitted at the end of the header line, which puts it after the `{`, so a re-parse finds
+  it inside the block, where it takes a line of its own and stays. No token moves at any
+  point and the run after the first is stable, so rule 1 holds and idempotence is what
+  gives: the test asserts convergence rather than a one-pass fixed point. Nothing in the
+  corpus writes a comment in any of the three.
+
+  The third was found by a review of the stored-folds branch and is the same defect rather
+  than a new one: `fold F(..) -> List( // c` and `fn f(..) -> List( // c` both reproduce it,
+  so it is `trailed` and `split` rather than anything a fold added. Closing it properly
+  means a header comment leading the declaration, which is where `parted` already puts
+  `fold_definition`'s own and where a re-parse finds one emitted before `fold`; the type is
+  a nested node and handles its own comments today, so the caller cannot see them to hoist.
+  That is a change to two printers and worth doing on its own rather than in passing.
 
 ## Related
 

@@ -1493,10 +1493,15 @@ impl Parser {
             ));
         }
         self.expect_sym(Sym::RParen)?;
-        let ty = Type::Sealed(Box::new(inner), subject);
-        // `Opt` stays outermost, the way it does everywhere a seal is built.
-        if self.eat_sym(Sym::Question) {
-            return Ok(Type::opt(ty));
+        // **`Opt` stays outermost, whichever side of the parenthesis it was written on.**
+        // Building `Type::Sealed` directly honoured a trailing `?` and inverted an inner
+        // one, so `Sealed(String?, Shop)` became `Sealed(Opt(String), Shop)`: a type no
+        // other position can write, which then made its own diagnostics contradict
+        // themselves. `types::seal` is the one place that nesting is decided, and the
+        // three spellings mean one thing.
+        let mut ty = types::seal(inner, subject);
+        if self.eat_sym(Sym::Question) && !matches!(ty, Type::Opt(_)) {
+            ty = Type::opt(ty);
         }
         Ok(ty)
     }
@@ -4846,6 +4851,36 @@ impl Parser {
                         ));
                 }
                 Some(_) => {}
+                // **A named fold's declared type is the contract, so silence here is a
+                // leak rather than something to patch up.** Sealing the slot is right for
+                // an inline fold, whose value lives in that slot in the declaration that
+                // reads it, so the seal is what every check downstream then sees. A named
+                // fold publishes `ret` instead: the caller's local, the IR and the
+                // signature all come from the declared type, and `crate::tables` types
+                // the stored column from it too. Sealing the slot and leaving `ret` plain
+                // therefore handed the plaintext to a plain position with nothing static
+                // to say so, and typed the column as plaintext so nothing would ever
+                // shred it. Rule 7 exists to be written.
+                None if named => {
+                    // Spelled the way rule 7 is written rather than rendered through
+                    // `Display`, which gives an event field's `String @subject(Shop)?`
+                    // and is not what an author can type in a return position.
+                    let sealed = match ty {
+                        Type::Opt(inner) => format!("Sealed({inner}, {field})?"),
+                        plain => format!("Sealed({plain}, {field})"),
+                    };
+                    return Err(self
+                        .err(
+                            Code::SealBoundary,
+                            format!(
+                                "`{name}` folds content sealed under `{field}` on {path}, and its return type does not say so"
+                            ),
+                            decl,
+                        )
+                        .with_hint(format!(
+                            "a named fold's return type is what its caller and the stored column are typed from, so declare it: `-> {sealed}`. The caller `reveal`s it (rule 7)"
+                        )));
+                }
                 None => lower.b.seal_fold(slot, field),
             }
         }
@@ -7255,12 +7290,27 @@ impl Parser {
             Token::Word(Keyword::If) => {
                 let cond = self.header_expr(lower, Some(Type::Bool))?;
                 self.expect_sym(Sym::LBrace)?;
+                let then_at = self.span_here();
                 let then = self.expr(lower, expect.clone())?;
                 self.expect_sym(Sym::RBrace)?;
                 self.expect_word(Keyword::Else)?;
                 self.expect_sym(Sym::LBrace)?;
-                let otherwise = self.expr(lower, expect)?;
+                let else_at = self.span_here();
+                let otherwise = self.expr(lower, expect.clone())?;
                 self.expect_sym(Sym::RBrace)?;
+                // **Each arm is its own declared position**, which is what the comment
+                // below already says, so each is lifted on its own where the target is an
+                // optional and the arm wrote the bare value. Without it an `if` is the one
+                // position `docs/optionals.md`'s rule does not reach: both arms pass their
+                // own check, and then disagree with each other only because neither was
+                // wrapped.
+                let (then, otherwise) = match &expect {
+                    Some(want) => (
+                        self.lifted(lower, then, want, then_at),
+                        self.lifted(lower, otherwise, want, else_at),
+                    ),
+                    None => (then, otherwise),
+                };
                 // Both arms are the value, so two known types that disagree is a value
                 // with no type at all. Where a target declared one this has already
                 // been said twice, once per arm; where nothing did, this is the only
@@ -7702,11 +7752,22 @@ impl Parser {
             } => method_sig(&self.type_of(lower, *receiver)?, method).map(|sig| sig.ret),
             // Both arms, because both are the value. Reading only the `then` arm
             // reported a type the `else` arm may not produce.
+            //
+            // `fills` either way rather than equality, for the same reason the arm in
+            // `primary_inner` lifts: two arms differing only by an optional agree, and
+            // the wider one is the type. Equality here would answer `None` for a nested
+            // `if`, which would make the enclosing lift silently skip and the fix half
+            // work.
             Expr::If {
                 then, otherwise, ..
             } => {
                 let then = self.type_of(lower, *then)?;
-                (self.type_of(lower, *otherwise)? == then).then_some(then)
+                let otherwise = self.type_of(lower, *otherwise)?;
+                match (fills(&then, &otherwise), fills(&otherwise, &then)) {
+                    (true, _) => Some(otherwise),
+                    (_, true) => Some(then),
+                    _ => None,
+                }
             }
             Expr::Field { receiver, name } => match self.type_of(lower, *receiver)? {
                 Type::Record(ty) => self.record_def(&ty)?.field(name).map(|f| f.ty.clone()),
@@ -11127,10 +11188,17 @@ fn refusal_code(name: &str) -> String {
 
 /// A declared name in snake_case, which is how every name heklang derives rather than
 /// reads comes out: a refusal's code, and a stored fold's column (`src/tables.rs`).
+/// The derivation a refusal's code and a stored fold's column name both take.
+///
+/// **It breaks on any uppercase, not only ASCII**, because it lowercases any uppercase.
+/// Splitting on `is_ascii_uppercase` while lowercasing with Unicode made the derivation
+/// lossy exactly where the two disagree: `FÄb` and `Fäb` both gave `fäb`, so two folds
+/// derived one column and two refusals one code, which is the collision the naming rules
+/// on both are written to make impossible.
 pub(crate) fn snake_case(name: &str) -> String {
     let mut code = String::with_capacity(name.len() + 4);
     for (index, ch) in name.char_indices() {
-        if index > 0 && ch.is_ascii_uppercase() {
+        if index > 0 && ch.is_uppercase() {
             code.push('_');
         }
         code.extend(ch.to_lowercase());

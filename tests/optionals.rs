@@ -550,3 +550,38 @@ fold FailedFor(fulfillment_order_id: Int) -> n: Int = 0 {
         "the present one matches and the absent one does not"
     );
 }
+
+/// The shape the gap was found on, twice: a fold arm carrying the accumulator forward or
+/// replacing it with the envelope's append time. Both arms are the value, and until the
+/// `if` lifted each of them this had to be split across two `return`s in a `fn`.
+#[test]
+fn a_fold_arm_may_choose_between_the_bare_value_and_the_optional() {
+    let source = "subject Shop(Int)
+const FULL: Int = 100
+
+event @usage.threshold.reached { shop_id: Shop, threshold: Int }
+
+fold CapReachedAt(shop_id: Shop) -> at: Timestamp? = none {
+  on @usage.threshold.reached as e (shop_id) { threshold } =>
+    if at.is_some() || threshold < FULL { at } else { e.at }
+}
+";
+    let program = parse(source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+    let mut interpreter = Interpreter::new(&program);
+    for threshold in [80, 100, 100] {
+        interpreter.append(Event::new(
+            EventPath::new(["usage", "threshold", "reached"]),
+            [
+                ("shop_id".to_string(), Value::Int(1)),
+                ("threshold".to_string(), Value::Int(threshold)),
+            ],
+        ));
+    }
+
+    let folded = interpreter
+        .fold("CapReachedAt", [("shop_id".to_string(), Value::Int(1))])
+        .expect("folded");
+    // The second event, which is the first at or past the cap: one minute per event from
+    // the harness's epoch, and the accumulator holds against the third.
+    assert_eq!(folded, Value::some(Value::Timestamp(1_577_836_860_000_000)));
+}

@@ -211,7 +211,7 @@ pub fn layout(program: &Program) -> Layout {
             table.name = table
                 .key
                 .iter()
-                .map(|part| format!("{}_{}", part.name, snake_case(&part.ty.to_string())))
+                .map(|part| format!("{}_{}", part.name, type_tag(&part.ty)))
                 .collect::<Vec<_>>()
                 .join("__");
         }
@@ -251,24 +251,79 @@ fn pins(fold: &Fold, value: ExprId, param: &Param) -> bool {
 /// A fold's key: its parameters, named and ordered for a table rather than for a call,
 /// each paired with the position it came from in `fold.params`.
 fn key_of(program: &Program, fold: &Fold) -> Vec<(usize, KeyPart)> {
+    // The name each part would take if nothing shared it: a subject part is named for the
+    // subject, which is what makes `(shop_id: Shop)` and `(shop: Shop)` one key.
+    let wanted: Vec<String> = fold
+        .params
+        .iter()
+        .map(|param| match subject_of(&param.ty) {
+            Some(subject) => snake_case(subject),
+            None => plain_name(&param.name),
+        })
+        .collect();
+
+    // **Two parts of one key can want one name**, by repeating a subject or by spelling it
+    // two ways, and neither is a mistake. They are told apart by the **parameter**, never
+    // by position.
+    //
+    // Position was the first answer and it was wrong twice. `_1`/`_2` counted declaration
+    // order, so `(to_id: Region, from_id: Region)` and `(from_id: Region, to_id: Region)`
+    // produced the same two names over the same two types, which `same` reads as one
+    // table, with `region_1` meaning a different parameter in each: a writer would store
+    // one row's two columns at each other's addresses. And a suffix is spellable, so a
+    // parameter actually called `region_1` collided with the suffix of another part.
+    //
+    // The parameter is the one thing that is unique within a fold, so falling back to it
+    // cannot collide and does not depend on order. `plain_name` first, because `from` and
+    // `to` read better than `from_id` and `to_id`; the raw name after it, for the pair
+    // that `_id`-stripping maps together.
+    let names: Vec<String> = fold
+        .params
+        .iter()
+        .enumerate()
+        .map(|(at, param)| {
+            if wanted.iter().filter(|other| *other == &wanted[at]).count() == 1 {
+                return wanted[at].clone();
+            }
+            let plain = plain_name(&param.name);
+            match fold
+                .params
+                .iter()
+                .filter(|other| plain_name(&other.name) == plain)
+                .count()
+            {
+                1 => plain,
+                _ => param.name.clone(),
+            }
+        })
+        .collect();
+
     let mut sorted: Vec<(u8, Vec<String>, usize, KeyPart)> = fold
         .params
         .iter()
         .enumerate()
-        .map(|(at, param)| match subject_of(&param.ty) {
-            Some(subject) => (
-                0,
-                path(program, subject),
-                at,
-                KeyPart {
-                    name: snake_case(subject),
-                    ty: param.ty.clone(),
-                    subject: Some(subject.clone()),
-                },
-            ),
-            None => {
-                let name = plain_name(&param.name);
-                (
+        .map(|(at, param)| {
+            let name = names[at].clone();
+            match subject_of(&param.ty) {
+                // The sort path is the subject's line from the root, with this part's own
+                // name as the leaf: containment orders the ancestors, and the name is what
+                // separates two parts of one subject.
+                Some(subject) => {
+                    let mut line = path(program, subject);
+                    line.pop();
+                    line.push(name.clone());
+                    (
+                        0,
+                        line,
+                        at,
+                        KeyPart {
+                            name,
+                            ty: param.ty.clone(),
+                            subject: Some(subject.clone()),
+                        },
+                    )
+                }
+                None => (
                     1,
                     vec![name.clone()],
                     at,
@@ -277,32 +332,18 @@ fn key_of(program: &Program, fold: &Fold) -> Vec<(usize, KeyPart)> {
                         ty: param.ty.clone(),
                         subject: None,
                     },
-                )
+                ),
             }
         })
         .collect();
-    // Stable, so two parts that sort the same keep the order the fold declared them in,
-    // which is the order the `_1`/`_2` suffixes below count.
+    // Every name is distinct now, so this is a total order and the `sort_by` needs no
+    // stability to lean on.
     sorted.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
 
-    let mut key: Vec<(usize, KeyPart)> = sorted
+    sorted
         .into_iter()
         .map(|(_, _, at, part)| (at, part))
-        .collect();
-    // Two parts of one key can land on one name, either by repeating a subject or by
-    // spelling it two ways. Neither is a mistake, so they are told apart by position.
-    let bases: Vec<String> = key.iter().map(|(_, part)| part.name.clone()).collect();
-    for (at, (_, part)) in key.iter_mut().enumerate() {
-        if bases.iter().filter(|base| *base == &bases[at]).count() > 1 {
-            let nth = bases[..at]
-                .iter()
-                .filter(|base| *base == &bases[at])
-                .count()
-                + 1;
-            part.name = format!("{}_{nth}", part.name);
-        }
-    }
-    key
+        .collect()
 }
 
 /// A subject's line from the root down, which is what orders subject parts.
@@ -343,6 +384,32 @@ fn plain_name(param: &str) -> String {
         .filter(|rest| !rest.is_empty())
         .unwrap_or(param)
         .to_string()
+}
+
+/// A type as an **identifier**, for the clash-breaking table name above.
+///
+/// `Type`'s own rendering is for a reader: `Money(2)`, `String?`, `String @subject(Shop)`.
+/// Putting that through `snake_case` left `(`, `)`, `?` and `, ` in a name the module doc
+/// promises a runtime will create a table from, so the shape is spelled out here instead.
+/// Injective where `Display` is, because the disambiguation it feeds exists precisely to
+/// tell two types apart.
+fn type_tag(ty: &Type) -> String {
+    match ty {
+        Type::Opt(inner) => format!("{}_opt", type_tag(inner)),
+        Type::Money(scale) => format!("money_{scale}"),
+        Type::Decimal(scale) => format!("decimal_{scale}"),
+        Type::List(inner) => format!("list_{}", type_tag(inner)),
+        Type::Map(key, value) => format!("map_{}_{}", type_tag(key), type_tag(value)),
+        Type::Sealed(inner, subject) => {
+            format!("sealed_{}_{}", type_tag(inner), snake_case(subject))
+        }
+        Type::Subject(sub) => snake_case(&sub.name),
+        Type::Enum(name) | Type::Record(name) => snake_case(name),
+        Type::Event(path) => snake_case(&path.to_string().replace(['@', '.'], "_")),
+        // Bool, Int, String, Uuid, Timestamp, Rounding, Json, Response, Outcome: each
+        // renders as one capitalised word, which is already an identifier.
+        plain => snake_case(&plain.to_string()),
+    }
 }
 
 fn table_name(key: &[KeyPart]) -> String {

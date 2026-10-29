@@ -245,11 +245,40 @@ There is no `base with { field: value }`.
 The evidence is from a real port, and it is the interesting kind: **not having it forced a better
 design.** Where the original folded a dict of mutable per-plan fields, the port folds one map per
 aspect (`plans`, `plan_status`, `archived`, `variants`). Each event writes only the aspect it
-carries, so nothing read-modify-writes a record it did not build, which is the exact hazard hekla's
-`deep-boundaries` test exists to catch. Four folds read better than one and are structurally safer.
+carries, so nothing read-modify-writes a record it did not build. Four folds read better than one
+and are structurally safer.
+
+The hazard underneath that is the boundary, not the style: merging aspects into one record widens
+the append condition of every command that reads the fold, so two commands touching different
+fields conflict. `docs/folds.md` rule 8 states it directly, and rule 1's naming rule plus
+`--boundaries` are what guard it.
 
 If record update existed, the first version of that fold would have been the read-modify-write one,
 and it would have looked fine.
+
+**Reconsidered 2026-10-29, and still rejected.** Converting the ported application's projectors to
+stored folds produced a case the evidence above could not see: `stats` holds twenty counters that
+all consult one membership set, and the counted events do not carry the flag the set is built from,
+so the set has to live in the same fold. `docs/folds.md` rule 6 makes a fold a leaf, so a record
+accumulator is the only shape that expresses it, and a 21-field accumulator across 19 arms is 400
+initialisers without a spread. The original evidence was measured over **folds**, at a time when
+the read side was projectors and a projector has no folds in it, which is the standing trap
+`stored-folds-evidence/MEASUREMENTS.md` section 5 names.
+
+It stays rejected for two reasons that are about this case rather than about the feature:
+
+- **It unblocks nothing on its own.** That fold also needs a key computed per record from the
+  envelope and the runtime flattening a record-typed fold into one column per field. One of three
+  is not a reason to overturn a decision.
+- **Rule 8 already calls that accumulator the aggregate**, because its fields come from nineteen
+  slices. The shape the new evidence wants is the shape the existing rule warns about.
+
+What would license revisiting it: the whole chain costed together, and a line that separates the
+safe use from the hazard. There is one available, and it is worth writing down so it is not
+re-derived. A **query-only** fold (`docs/folds.md` rule 12) is readable by no command, so it has no
+append condition and no boundary to widen, and a many-slice record accumulator in one cannot cause
+the hazard this section exists to prevent. The cheaper answer is a schema change: if the counted
+events carried the flag, the twenty counters are twenty ordinary folds and no record is needed.
 
 ## Module-scope `enum`
 

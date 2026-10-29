@@ -373,6 +373,15 @@ fn at(site: &mut Site<'_>, callee: &Copied<'_>, call: &Placed<'_>, grown: &mut G
     // of `pre`, which is where the author wrote the `guard`: a declaration run closes
     // `pre` before it opens, so nothing of the caller's can follow them.
     for param in callee.params {
+        // **Every parameter has an argument, or the slot is never written.** The parser
+        // requires one at every call site a splice can reach (`guard_call` and `fold_use`
+        // both report `needs {param}`), so skipping is unreachable rather than a default.
+        //
+        // It is worth saying because the other door onto this contract disagrees:
+        // `bind_params`, which a command and `Interpreter::fold` go through, fills an
+        // omitted `T?` with `none`. Nothing reconciles the two, so the day a call site is
+        // allowed to omit an optional argument, this is where it silently leaves an unset
+        // slot instead.
         let Some((_, value)) = call.args.iter().find(|(name, _)| name == &param.name) else {
             continue;
         };

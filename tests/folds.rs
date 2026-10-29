@@ -523,6 +523,67 @@ fn a_sealed_return_names_the_subject_its_arms_fold() {
     );
 }
 
+/// **A declared type that says nothing is a leak, not something to patch up.** Sealing
+/// the local slot is right for an *inline* fold, whose value lives in that slot in the
+/// declaration that reads it, so every check downstream sees the seal. A named fold
+/// publishes `ret` instead: the caller's local, the IR and the column `crate::tables`
+/// types are all taken from the declared type. Sealing the slot and leaving `ret` plain
+/// therefore handed the plaintext to a plain position with nothing static to say so, and
+/// typed the stored column as plaintext, so nothing would ever have shredded it for an
+/// erased subject.
+///
+/// Found by `/code-review` on the whole branch. The byte-identical inline fold was
+/// correctly refused the whole time, which is what made the asymmetry invisible: the
+/// shape looked covered.
+#[test]
+fn a_named_folds_return_type_cannot_stay_silent_about_a_seal() {
+    const SEALED: &str = "subject Shop(Int)
+event @shop.connected { shop_id: Shop, email: String @subject(shop_id) }
+";
+    let source = format!(
+        "{SEALED}fold MerchantEmail(shop_id: Shop) -> String? = none {{
+  on @shop.connected(shop_id) {{ email }} => email
+}}
+"
+    );
+    assert_eq!(
+        error(&source),
+        "`MerchantEmail` folds content sealed under `Shop` on @shop.connected, and its return type does not say so"
+    );
+    // The hint spells what rule 7 lets an author write, not what `Display` renders for an
+    // event field, which is `String @subject(Shop)?` and is unwritable here.
+    assert!(
+        hint(&source).contains("`-> Sealed(String, Shop)?`"),
+        "{}",
+        hint(&source)
+    );
+
+    // Declaring it is accepted, and is the one position `Sealed` is spellable in.
+    program(&format!(
+        "{SEALED}fold MerchantEmail(shop_id: Shop) -> Sealed(String, Shop)? = none {{
+  on @shop.connected(shop_id) {{ email }} => email
+}}
+"
+    ));
+
+    // An inline fold is unchanged: it has no signature to disagree with, so the seal
+    // rides on the slot and the misuse is caught where the plaintext would escape.
+    let inline = format!(
+        "{SEALED}event @leaked {{ text: String }}
+command C(shop_id: Shop) {{
+  fold plain: String? = none
+    on @shop.connected(shop_id) {{ email }} => email
+  emit @leaked {{ text: plain.unwrap_or(\"none\") }}
+}}
+"
+    );
+    assert!(
+        error(&inline).contains("would put a plaintext default and content sealed under `Shop`"),
+        "{}",
+        error(&inline)
+    );
+}
+
 /// And the seal is applied once. `build::seal` is not idempotent, so a return type that
 /// already spells the seal used to be sealed again, giving
 /// `Opt(Sealed(Sealed(String, Customer), Customer))`: unwritable in source, disagreeing

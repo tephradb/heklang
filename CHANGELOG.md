@@ -66,7 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a parameter. Converting the twelve projectors of the ported application found
   this to be the largest single gap: they stamp or bucket by append time in 97 places across 20
   columns, and 13 of the 19 event types involved declare no timestamp at all. `docs/folds.md`
-  rule 12. No digest entry and no hash moved, because a fold earns neither.
+  rule 12.
 - `hek check --tables` gives two key signatures that derive one table name a name each, by taking
   the part types into both. `(day: String)` and `(day: Int)` were two tables both called `day`,
   which a runtime keying on the name would have served as one. No program has done it.
@@ -168,6 +168,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A named fold laundered a `@subject` seal out through a plain declared return type.** A fold
+  declared `-> String?` folding a `String @subject(shop_id)` field handed back the **plaintext**,
+  and it reached a plain event field with no `reveal` on a clean `hek check`. An arm that folds
+  sealed content sealed the *local slot*, which is right for an inline fold, whose value lives in
+  that slot in the declaration that reads it; a named fold publishes its declared `ret` instead, so
+  the caller's local, the IR and the column `hek check --tables` derives were all typed plaintext
+  while the value was ciphertext, and nothing would ever have shredded that column for an erased
+  subject. It is now `seal-boundary`, with the spelling rule 7 licenses in the hint. The
+  byte-identical **inline** fold was refused the whole time, which is what made the asymmetry
+  invisible: the shape looked covered. It caught a live instance in the converted application on
+  the first run, a `Customer`-sealed address typed as a plaintext column.
+- **Two key parts of one name were told apart by position, and a stored column could be written at
+  the wrong address.** `_1`/`_2` counted declaration order, so `fold A(to_id: Region, from_id:
+  Region)` and `fold B(from_id: Region, to_id: Region)` derived the same two names over the same
+  two types, which is one table by `hek check --tables`' own grouping, with `region_1` meaning a
+  different parameter in each. A writer following it would store one row's two columns at each
+  other's addresses. They are told apart by the **parameter** now, which is the one thing unique
+  within a fold and does not depend on order, so that pair is `(from, to)` either way round. It
+  also closes a second hole: a suffix is spellable, so a parameter actually called `region_1`
+  collided with another part's suffix and produced two key columns of one name.
+- **A clash-broken table name was not an identifier.** The name that tells two key signatures apart
+  by part type put `Type`'s own rendering through `snake_case`, which only lowercases, leaving
+  `shop_shop__amount_money(2)` and `shop_shop__tag_string?`; a sealed part added a comma and a
+  space. The module promises a runtime creates the real tables from these names.
+- **`snake_case` broke on ASCII uppercase while lowercasing with Unicode**, so `FÄb` and `Fäb`
+  derived one column and one refusal code. It breaks on any uppercase now, which is the relation it
+  already used to lowercase, and is what the naming rules on a fold and a refusal are written to
+  rely on.
+- **`Sealed(T?, S)` built the nesting inside out.** A trailing `?` was handled and an inner one was
+  not, so `Sealed(String?, Shop)` became `Sealed(Opt(String), Shop)`: a type no other position can
+  write, whose own diagnostics then contradicted each other. All three spellings go through
+  `types::seal` now and mean one type.
+- `Stmt::Delete` read its span by indexing the key list without a guard, which is the one unguarded
+  index the compound-key change added. Unreachable from a valid program, so an empty list is
+  `MalformedIr` rather than a panic.
+- **An `if` expression's arms could not differ by an optional, even at a position declaring one.**
+  `if c { e.at } else { held }` into a `Timestamp?` was refused both ways round with "these
+  branches give a Timestamp and a Timestamp?, so this `if` has no one type". Each arm is its own
+  declared position and each already accepted the bare value; what refused the program was the
+  comparison *between* the arms, which used equality where everything around it uses the coercion
+  rule. Each arm is now lifted on its own, and `type_of` reads the pair the same way so a nested
+  `if` still reports a type. Where nothing declares one the arms are still compared and still have
+  to agree, because then the `if` is the only place the disagreement can be said. An `if`
+  *statement* was never affected: it produces no value. `docs/optionals.md`'s table gains the
+  position, and the list of times that table has been short goes from five to six.
+
+  Found twice in two days converting a ported application, and both times the author split the
+  expression across two `return`s in a `fn` purely to get the two declared positions the `if` would
+  not give.
 - **A spliced call's argument was not coerced into an optional parameter.** `fold s = Sum { bias: 5 }`
   where `bias` is `Int?` put a bare `Int` in the slot, and the callee's `bias.is_none()` died at run
   time on a clean `hek check`; the same hole was on the `guard` path. Every other declared position

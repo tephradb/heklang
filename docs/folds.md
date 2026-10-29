@@ -421,6 +421,18 @@ holds unchanged. `Opt` stays outermost, as everywhere else.
 folds in the port are all sealed: `MerchantEmail` nineteen times, `ShopAccessToken` fourteen,
 `OrderCustomerEmail` six, and `OrderShipTo`.
 
+**A named fold must say so, and silence used to be a leak.** `-> String?` over an arm folding a
+`@subject` field is refused: a named fold publishes its *declared* type, so the caller's local, the
+IR and the stored column were all typed plaintext while the value was ciphertext, and nothing
+downstream would ever have shredded that column for an erased subject. The same shape **inline** was
+refused the whole time, because an inline fold's value lives in a slot in the declaration that reads
+it and the seal rides on the slot; there is no signature for it to disagree with. That asymmetry is
+why it went unnoticed, and it is the reason this rule is checked at the declaration rather than left
+to the use site.
+
+Three spellings mean one type, because `Opt` stays outermost whichever side of the parenthesis it is
+written on: `Sealed(String, Shop)?`, `Sealed(String?, Shop)` and `Sealed(String?, Shop)?`.
+
 **Rejected: `-> String? @subject(shop_id)`, reusing the authored form.** It was the first attempt
 and it works for a value sealed under a parameter. It cannot express the commoner case: `@subject`
 names a sibling field holding the subject **id**, and a customer-sealed fold takes its id from the

@@ -266,6 +266,56 @@ fn an_if_expression_takes_both_arms() {
     );
 }
 
+/// **Each arm is its own declared position**, so two that differ only by an optional
+/// agree, and the bare one is lifted where it is written.
+///
+/// This was the one position `docs/optionals.md`'s rule did not reach, and it reached it
+/// in the worst way: both arms passed their own check, because a bare `T` fills a `T?`,
+/// and then the comparison *between* them was stricter than either. Found twice in two
+/// days converting a real application, and both times the author split the expression
+/// across two `return`s in a `fn` to get the two declared positions the `if` would not
+/// give.
+#[test]
+fn an_if_expressions_arms_each_fill_an_optional() {
+    // The bare arm is the `then`.
+    let value = fired(
+        ", flag: Bool",
+        "maybe",
+        "if flag { \"yes\" } else { none }",
+        vec![("flag", Value::Bool(true))],
+    );
+    assert_eq!(value, Value::some(Value::str("yes")));
+
+    // And the `else`, which used to be refused with the two types the other way round.
+    let value = fired(
+        ", flag: Bool",
+        "maybe",
+        "if flag { none } else { \"no\" }",
+        vec![("flag", Value::Bool(false))],
+    );
+    assert_eq!(value, Value::some(Value::str("no")));
+
+    // A three-way is a nested `if`, so the inner one has to report a type for the outer
+    // lift to see. Reading the arms with equality rather than the coercion rule answered
+    // `None` here and the fix half worked.
+    let value = fired(
+        ", flag: Bool, other: Bool",
+        "maybe",
+        "if flag { \"yes\" } else { if other { \"no\" } else { none } }",
+        vec![("flag", Value::Bool(false)), ("other", Value::Bool(true))],
+    );
+    assert_eq!(value, Value::some(Value::str("no")));
+
+    // The relaxation is scoped to a declared position: two arms that do not agree under
+    // the coercion rule are still a value with no type.
+    let message = err(&emitting(
+        ", flag: Bool, n: Int",
+        "maybe",
+        "if flag { n } else { none }",
+    ));
+    assert_eq!(message, "expected String?, found Int");
+}
+
 // ---------------------------------------------------------------------------------
 // Rule 2: the operator table.
 

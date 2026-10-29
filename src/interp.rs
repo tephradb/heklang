@@ -1954,7 +1954,14 @@ fn exec_stmt(
             Ok(Flow::Next)
         }
         Stmt::Delete { entity, keys } => {
-            let span = exprs.span(keys[0]);
+            // The first key's span, or nothing to point at. A valid program always has one
+            // (`subscript` checks the arity against a key that is never empty), so an
+            // empty list is malformed IR rather than a program error, and indexing it is
+            // the one place the compound-key change could have panicked on one.
+            let span = match keys.first() {
+                Some(first) => exprs.span(*first),
+                None => return Err(ErrorKind::MalformedIr.into()),
+            };
             let key = subscript(program, exprs, frame, keys)?;
             let (projector, rows) = write_sink(sink, span)?;
             entity_def(projector, entity, span)?;

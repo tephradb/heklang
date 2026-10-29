@@ -74,6 +74,17 @@ children whose keys wrap under it; plain parts follow alphabetically. A table so
 every table it narrows, which is what puts a one-column table next to the forty-column one
 it should probably have been part of.
 
+**Where two parts would take one name**, by repeating a subject or by spelling it two ways,
+each is named by its **parameter** instead: `(to_id: Region, from_id: Region)` is `(from,
+to)`. Never by position. A counter over declaration order made two folds declaring one
+pair in opposite orders into one table whose key columns meant different parameters in
+each, and a suffix is spellable, so `_1` collided with a parameter already called that.
+A parameter is the one name unique within a fold, so it cannot do either.
+
+**Two key signatures can still want one table name**, because a name is only its parts'
+names joined and a part is told apart by name *and* type. `(day: String)` and `(day: Int)`
+are two tables, so each takes the part types into its name: `day_string` and `day_int`.
+
 A fold whose key no event supplies cannot be kept, and is listed at the end instead:
 
 ```
