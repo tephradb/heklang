@@ -85,6 +85,13 @@ A parameter is the one name unique within a fold, so it cannot do either.
 names joined and a part is told apart by name *and* type. `(day: String)` and `(day: Int)`
 are two tables, so each takes the part types into its name: `day_string` and `day_int`.
 
+**A key part and a column may not take one name**, and that one is refused rather than
+disambiguated. `fold Shop(shop_id: Shop)` wants a table whose key column and whose only
+value column are both `shop`, which nothing can create, and unlike the two cases above the
+author has somewhere to go: a fold is named for the value and not for the entity
+(`docs/folds.md` rule 1), so `ShopInstalled` is the name and `shop_installed` the column.
+The refusal is the parser's, and it reads the same derivation this listing does.
+
 A fold whose key no event supplies cannot be kept, and is listed at the end instead:
 
 ```

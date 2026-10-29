@@ -248,17 +248,23 @@ fn pins(fold: &Fold, value: ExprId, param: &Param) -> bool {
     matches!(fold.exprs.get(id), Some(Expr::Load(slot)) if *slot == param.slot)
 }
 
-/// A fold's key: its parameters, named and ordered for a table rather than for a call,
-/// each paired with the position it came from in `fold.params`.
-fn key_of(program: &Program, fold: &Fold) -> Vec<(usize, KeyPart)> {
+/// The name each key part takes, in **parameter** order rather than key order: what
+/// [`KeyPart::name`] will hold.
+///
+/// Public and separate from `key_of` because the parser asks the same question of a
+/// signature it has not lowered yet, to refuse a fold whose own column name is one of
+/// these (`docs/folds.md` rule 1). One derivation and two readers, so the refusal cannot
+/// drift from the names it is about.
+pub fn part_names<'a>(params: impl IntoIterator<Item = (&'a Ident, &'a Type)>) -> Vec<String> {
+    let params: Vec<(&Ident, &Type)> = params.into_iter().collect();
+
     // The name each part would take if nothing shared it: a subject part is named for the
     // subject, which is what makes `(shop_id: Shop)` and `(shop: Shop)` one key.
-    let wanted: Vec<String> = fold
-        .params
+    let wanted: Vec<String> = params
         .iter()
-        .map(|param| match subject_of(&param.ty) {
+        .map(|(name, ty)| match subject_of(ty) {
             Some(subject) => snake_case(subject),
-            None => plain_name(&param.name),
+            None => plain_name(name),
         })
         .collect();
 
@@ -277,26 +283,30 @@ fn key_of(program: &Program, fold: &Fold) -> Vec<(usize, KeyPart)> {
     // cannot collide and does not depend on order. `plain_name` first, because `from` and
     // `to` read better than `from_id` and `to_id`; the raw name after it, for the pair
     // that `_id`-stripping maps together.
-    let names: Vec<String> = fold
-        .params
+    params
         .iter()
         .enumerate()
-        .map(|(at, param)| {
+        .map(|(at, (name, _))| {
             if wanted.iter().filter(|other| *other == &wanted[at]).count() == 1 {
                 return wanted[at].clone();
             }
-            let plain = plain_name(&param.name);
-            match fold
-                .params
+            let plain = plain_name(name);
+            match params
                 .iter()
-                .filter(|other| plain_name(&other.name) == plain)
+                .filter(|(other, _)| plain_name(other) == plain)
                 .count()
             {
                 1 => plain,
-                _ => param.name.clone(),
+                _ => name.to_string(),
             }
         })
-        .collect();
+        .collect()
+}
+
+/// A fold's key: its parameters, named and ordered for a table rather than for a call,
+/// each paired with the position it came from in `fold.params`.
+fn key_of(program: &Program, fold: &Fold) -> Vec<(usize, KeyPart)> {
+    let names = part_names(fold.params.iter().map(|param| (&param.name, &param.ty)));
 
     let mut sorted: Vec<(u8, Vec<String>, usize, KeyPart)> = fold
         .params

@@ -33,6 +33,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same reason: a named fold is a stored column and the column's name is `snake_case` of this
   one, so the rules keep that derivation reversible and `fold Sum` beside `fold sum` can no longer
   derive one column twice. An inline fold's accumulator is a local and is unaffected.
+
+  **A third rule joins them: the derived column may not be named after a part of its own key.**
+  `fold Shop(shop_id: Shop)` asked for a table whose key column and whose only value column were
+  both `shop`, which nothing can create, and `hek check --tables` printed it without complaint. Both
+  names now come out of one function, `tables::part_names`, so the refusal reads the same derivation
+  the layout does, and it names the parameter the colliding part came from. It is a refusal rather
+  than a disambiguation because the author has somewhere to go, which is where `docs/folds.md`
+  rule 1 already pointed: a fold is named for the value and not for the entity, so `ShopInstalled`
+  is the name and `shop_installed` the column. A fold with no parameters has no part to collide
+  with.
 - `hek check --boundaries` names what a command reads as well as what it guards, transitively
   through its guards.
 - **Compound `@key`.** An entity's key may be several columns: `@key` goes on each one, written
@@ -116,13 +126,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   four bugs in the first 78 cases: two in the converted folds (a seven-day overage clock started at
   the wrong threshold, and an order withheld before its contact event had no customer), and the two
   under Fixed below.
-- `Interpreter::fold_stored(name, args, upto)` is the read a store **fills** a column from, where
+- `Interpreter::fold_stored(name, args, head)` is the read a store **fills** a column from, where
   `Interpreter::fold` is the one it is served by. Two differences, and a store needs both: the fold
-  stops at the position the store gives it, so every column of a row is at one and a query reads
+  stops at the log length the store gives it, so every column of a row is at one and a query reads
   one, and a `Value::Sealed` is handed back rather than shredded, so the store holds the ciphertext
   and shreds on its own read. The second is what `project_into` does and `project` does not, and
   without it filling a non-optional sealed column whose subject was erased before the fill would
   fail, where the same column through a projector stores its ciphertext and raises at the query.
+
+  **The bound is a head and not a position**, which is a correction to the first form of this call
+  rather than a choice between two spellings. `Log::head` answers where the *next* append lands, and
+  that is the only number a store has: it is what the seam hands out, what a command pins its read
+  to, and what a checkpoint records. Taking the inclusive position `Query::upto` carries put a
+  `head() - 1` at every call site and left an empty log with nothing to pass, since `0` is a
+  position like any other, so a store filling a column before its first event would have folded that
+  event into a row recorded as holding none of it. `fold_stored(.., 0)` is a column at its seed and
+  `fold_stored(.., 1)` is the first event alone.
 - `tables::fixed(program, fold, part, at)` reads the value an arm pins a key part to, which is
   rule 13's `param == value` seen from the store. The `ExprId` in `ArmMatch::Fixed` indexes the
   fold's own arena, so it cannot be evaluated without the fold; the conjunct resolves against an

@@ -105,6 +105,19 @@ arrive as one column. Without them `fold Sum` beside `fold sum` derives `sum` tw
 building the real table keys both to it. An inline fold's accumulator is a local and keeps the local
 spelling, which is why the rule is on the signature rather than on the keyword.
 
+**And a third rule from the same derivation gives the first one teeth: the column may not be named
+after a part of its own key.** `fold Shop(shop_id: Shop)` derives a column `shop` in a table whose
+key column is already `shop`, which is one table with two columns of one name and nothing can
+create it. `--tables` printed it without complaint, which is how it was found. Both names come out
+of `tables::part_names`, so the refusal reads the same derivation the layout does rather than a
+second account of the rules, and it names the parameter the part came from:
+
+> fold `Shop` derives a column called `shop`, and its key already has a part of that name
+
+The fix is the one the paragraph above already asks for, which is why this is the rule rather than a
+renaming scheme: a key part is what the row is, and a column is what is true of it. A fold with no
+parameters has no part to collide with, so `fold Shop()` over the single-row `global` table is fine.
+
 This is `docs/guards.md` rule 1 read for values instead of propositions, and it is the whole of what
 keeps the construct from growing aggregates. One value out means there is nothing to put fields on,
 so a command wanting two facts about an order names two folds and conflicts on exactly those two
@@ -611,11 +624,20 @@ back. That is the read a stored column is **served** by, and it is what a test's
 rule 12 no command may read one.
 
 `Interpreter::fold_stored` is the read a column is **filled** by, and it differs in the two ways a
-store needs: it stops at a log position the store gives it, so every column of a row is at one and a
+store needs: it stops at a log length the store gives it, so every column of a row is at one and a
 query reads one position, and it hands a `Value::Sealed` back rather than shredding it, so the store
 holds the ciphertext and shreds on its own read. That second half is what `project_into` does and
 `project` does not, for the same reason, and without it filling a non-optional sealed column whose
 subject was already erased would fail where the same column through a projector does not.
+
+**Its bound is a head and not a position**, which is the one number a store has: `Log::head` answers
+where the next append lands, a command pins its read to one, and a checkpoint records one. It first
+took the inclusive last position `Query::upto` carries, and that was wrong twice over. It put a
+`head() - 1` at every call site, and an empty log had nothing to pass at all, since `0` is a
+position like any other: a store with a head of zero, filling a column before its first event, would
+have folded the first event into a row recorded as holding none of it, and nothing downstream could
+tell. `fold_stored(.., 0)` is now a column at its seed, `fold_stored(.., 1)` is the first event
+alone, and a caller holding a real position asks for `position + 1`.
 
 The two are not in tension. A fold a decision reads is inlined and never executes as itself; a fold
 a read model is runs by name and never touches a decision. One declaration, two use sites, and the

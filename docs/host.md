@@ -164,8 +164,16 @@ is wrong, and nothing will catch it.
 record handed to a resumed fold that already folded it is counted twice. Both bounds are inclusive.
 
 `upto` is what distinguishes the readers: `None` for a projector, `Some(after - 1)` for a command,
-which folds to the head it took `after` from and no further, and `Some(position)` for an effect arm,
-which folds to and including its own trigger (`docs/effects.md` rule 3).
+which folds to the head it took `after` from and no further, `Some(head - 1)` for a store filling a
+stored column, which is the same conversion over the head its checkpoint records, and
+`Some(position)` for an effect arm, which folds to and including its own trigger (`docs/effects.md`
+rule 3).
+
+**Two of the four hold a head and subtract, which is why no caller outside this file does.** A head
+is what this seam hands out and an inclusive position is what it takes, and the one place that
+conversion is interesting is an empty log, where there is no position below the head to name:
+`Interpreter::fold_stored` therefore takes the head and reads nothing at zero, rather than asking a
+store for a position it does not have (`docs/folds.md` section 11).
 
 `from` is `0` for everything except a command's retry, where it is the position the previous attempt
 folded through. **A host answers it by seeking, not by filtering**, or the field buys nothing: the

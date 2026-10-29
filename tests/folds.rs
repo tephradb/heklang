@@ -1219,6 +1219,79 @@ fn a_named_folds_name_is_spelled_like_a_type() {
     ));
 }
 
+/// The third rule from the same derivation. A column sits in the table its key is kept
+/// for and a key part is named for a parameter, so a fold named after what it is keyed by
+/// asks for one table with two columns of one name, and `--tables` printed exactly that.
+#[test]
+fn a_folds_column_cannot_be_named_after_a_part_of_its_own_key() {
+    let subject = "\
+subject Shop(Int)
+
+event @a.one { shop_id: Shop }
+
+fold Shop(shop_id: Shop) -> Bool = false {
+  on @a.one(shop_id) => true
+}
+";
+    assert_eq!(
+        error(subject),
+        "fold `Shop` derives a column called `shop`, and its key already has a part of that name"
+    );
+    assert!(
+        hint(subject).contains("named for `shop_id`"),
+        "the hint names the parameter the part came from, got {:?}",
+        hint(subject)
+    );
+
+    // A plain part, where the name is the parameter with one `_id` taken off rather than
+    // the subject's.
+    let plain = "\
+event @a.one { day: String }
+
+fold Day(day: String) -> Bool = false {
+  on @a.one(day) => true
+}
+";
+    assert_eq!(
+        error(plain),
+        "fold `Day` derives a column called `day`, and its key already has a part of that name"
+    );
+
+    // And through the fallback two parts of one name take, which is the case that makes
+    // this one derivation shared with `tables` rather than a second reading of the rules.
+    let shared = "\
+subject Region(Int)
+
+event @a.one { from_id: Region, to_id: Region }
+
+fold From(from_id: Region, to_id: Region) -> Bool = false {
+  on @a.one(from_id, to_id) => true
+}
+";
+    assert_eq!(
+        error(shared),
+        "fold `From` derives a column called `from`, and its key already has a part of that name"
+    );
+
+    // The author's fix, which is the one the other two rules already ask for: name the
+    // fold for what the value is. A fold with no key has no part to collide with.
+    program(
+        "\
+subject Shop(Int)
+
+event @a.one { shop_id: Shop }
+
+fold ShopInstalled(shop_id: Shop) -> Bool = false {
+  on @a.one(shop_id) => true
+}
+
+fold Shop() -> Int = 0 {
+  on @a.one() => 1
+}
+",
+    );
+}
+
 /// **One declaration has to answer one way through both drivers.** A spliced call assigns
 /// its argument into the callee's parameter slot with no declared type to coerce against,
 /// so a bare value in an optional parameter stayed bare; `Interpreter::fold` reads the
@@ -1617,20 +1690,38 @@ fn a_stored_fold_stops_at_the_position_it_is_given() {
         Value::money(3_000, 2),
         "`fold` reads the log as it now stands"
     );
-    // Inclusive, and positions count from zero, so this is the first event alone. A store
-    // records one position with the table, and this is how every column reaches it.
-    assert_eq!(
-        interpreter
-            .fold_stored("LifetimeSpend", key(), 0)
-            .expect("folded"),
-        Value::money(1_000, 2),
-        "bounded at position 0, which is one event"
-    );
+    // A head and not a position: the number a store records is the one `Log::head` hands
+    // it, so `1` is the first event alone and the arithmetic is not the caller's.
     assert_eq!(
         interpreter
             .fold_stored("LifetimeSpend", key(), 1)
             .expect("folded"),
+        Value::money(1_000, 2),
+        "a head of 1 is one event"
+    );
+    assert_eq!(
+        interpreter
+            .fold_stored("LifetimeSpend", key(), 2)
+            .expect("folded"),
         Value::money(2_000, 2),
+    );
+    // The whole reason the bound is a head. An empty log has no position to pass, so an
+    // inclusive bound left a store with nothing to fill a column from, and the only number
+    // it had would have folded the first event into a column recorded as holding none of
+    // it.
+    assert_eq!(
+        interpreter
+            .fold_stored("LifetimeSpend", key(), 0)
+            .expect("folded"),
+        Value::money(0, 2),
+        "a head of 0 is the seed"
+    );
+    assert_eq!(
+        interpreter
+            .fold_stored("LifetimeSpend", key(), 3)
+            .expect("folded"),
+        interpreter.fold("LifetimeSpend", key()).expect("folded"),
+        "the head of a log this long is what `fold` reads to"
     );
 }
 
@@ -1657,7 +1748,7 @@ fn a_stored_fold_hands_sealed_content_through_rather_than_shredding_it() {
     // The store holds the ciphertext and shreds on its own read, which is what makes an
     // erasure after the fill observable without refolding the column.
     let stored = interpreter
-        .fold_stored("LatestEmail", key(), 0)
+        .fold_stored("LatestEmail", key(), 1)
         .expect("folded");
     assert!(
         matches!(
@@ -1699,7 +1790,7 @@ fn filling_a_non_optional_sealed_column_survives_an_erasure_that_precedes_it() {
     // ciphertext and raises at the query, and a stored column does the same.
     assert!(
         matches!(
-            interpreter.fold_stored("LatestEmail", key(), 0),
+            interpreter.fold_stored("LatestEmail", key(), 1),
             Ok(Value::Sealed { .. })
         ),
         "a column filled after its subject was erased holds what is on disk"

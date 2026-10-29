@@ -1137,17 +1137,26 @@ impl<'a, H: Host> Interpreter<'a, H> {
         Ok(folded)
     }
 
-    /// The same fold, bounded at a log position and with a sealed value handed through.
+    /// The same fold, bounded at a log length and with a sealed value handed through.
     ///
     /// **This is the read a store fills a column from**, and it is to [`fold`](Self::fold)
     /// what [`project_into`](Self::project_into) is to [`project`](Self::project). Two
     /// differences, and a store needs both:
     ///
-    /// - **`upto` is where the fold stops**, inclusive. A store records one position with
-    ///   the whole table so that every column of a row is at the same one and a query
-    ///   reads one position, and `docs/host.md` says `head` and `read` are not atomic
-    ///   together, so the bound has to be the store's rather than whatever the log has
-    ///   reached by the time each column is folded.
+    /// - **`head` is how long the log was**, which is the number [`Log::head`] answers and
+    ///   therefore the position the next append lands at, not the last one folded. A store
+    ///   records one of those with the whole table so that every column of a row is at the
+    ///   same one and a query reads one position, and `docs/host.md` says `head` and `read`
+    ///   are not atomic together, so the bound has to be the store's rather than whatever
+    ///   the log has reached by the time each column is folded.
+    ///
+    ///   It takes a head rather than the inclusive last position `Query::upto` carries
+    ///   because a head is the only number a store has: it is what the seam hands out,
+    ///   what a command pins its own read to, and what a checkpoint records. Asking for
+    ///   `head - 1` instead put the subtraction at every call site and left an empty log
+    ///   with nothing to pass, since `0` is a position like any other and would have
+    ///   folded the first event into a column recorded as holding none of it. A caller
+    ///   that really does hold a position asks for `position + 1`.
     /// - **A `Value::Sealed` is handed back rather than shredded**, for the reason
     ///   `project_into` hands one to `Rows::put`: the store holds the ciphertext and
     ///   shreds on its own read, which is what makes an erasure after the fill observable
@@ -1162,11 +1171,11 @@ impl<'a, H: Host> Interpreter<'a, H> {
         &self,
         name: &str,
         args: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
-        upto: u64,
+        head: u64,
     ) -> Result<Value, Error> {
         let def = self.fold_def(name)?;
         let module = def.module.as_deref();
-        self.folding(def, args, Some(upto))
+        self.folding(def, args, Some(head))
             .map_err(|err| err.in_module(module))
     }
 
@@ -1178,11 +1187,15 @@ impl<'a, H: Host> Interpreter<'a, H> {
 
     /// One named fold, folded. Shredding is the caller's, which is the whole difference
     /// between the two public doors onto this.
+    ///
+    /// `head` is a log length and not a position, for the reason
+    /// [`fold_stored`](Self::fold_stored) takes one: `None` reads to whatever the log has
+    /// reached, and `Some(n)` reads the first `n` events.
     fn folding(
         &self,
         def: &Fold,
         args: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
-        upto: Option<u64>,
+        head: Option<u64>,
     ) -> Result<Value, Error> {
         // A fold's body is arms only: `Builder::stmt` is the one path onto either half of
         // a stage and a fold parser never reaches it, so an IR that grew statements here
@@ -1213,15 +1226,21 @@ impl<'a, H: Host> Interpreter<'a, H> {
             resolved: &resolved,
             envelope: &def.envelope,
         };
-        fold(
-            self.program,
-            &def.exprs,
-            &self.host,
-            &folding,
-            0,
-            upto,
-            &mut frame,
-        )?;
+        // A head of zero is a log with nothing in it, and there is no inclusive bound that
+        // says so: `Some(0)` is position zero. A command's read takes the same two steps
+        // (`at > from`, then `at - 1`) for the same reason, since the number it pins
+        // itself to is a head too.
+        if head != Some(0) {
+            fold(
+                self.program,
+                &def.exprs,
+                &self.host,
+                &folding,
+                0,
+                head.map(|head| head - 1),
+                &mut frame,
+            )?;
+        }
         // Always set, because the seed above wrote it.
         Ok(frame.get(def.slot)?.clone())
     }

@@ -15,6 +15,7 @@ use crate::ir::{
 };
 use crate::lex::{Keyword, Spanned, Sym, Token, lex};
 use crate::scaled::{self, MAX_SCALE, Rounding};
+use crate::tables;
 use crate::types::{
     self, a, default_type, fills, inner_of, method_sig, response_field, seal, wrap,
 };
@@ -1430,6 +1431,29 @@ impl Parser {
         }
 
         let params = self.param_list(None)?;
+
+        // A third rule from the same derivation, and the one that needed the parameters in
+        // hand. A column sits in the table its key is kept for, and a part of that key is
+        // named for a parameter, so `fold Shop(shop_id: Shop)` asks for a table whose key
+        // column and whose only value column are both called `shop`. Nothing can create
+        // that, and `--tables` printed it without complaint.
+        let column = snake_case(&name);
+        let parts = tables::part_names(params.iter().map(|(param, ty)| (param, ty)));
+        if let Some(at_part) = parts.iter().position(|part| *part == column) {
+            let param = &params[at_part].0;
+            return Err(self
+                .err(
+                    Code::FoldRestriction,
+                    format!(
+                        "fold `{name}` derives a column called `{column}`, and its key already has a part of that name"
+                    ),
+                    at,
+                )
+                .with_hint(format!(
+                    "the part is named for `{param}` and the column for the fold, so the table would need two columns called `{column}`: name the fold for what the value is rather than for what it is keyed by, the way `ShopInstalled` is `shop_installed`"
+                )));
+        }
+
         let (_, ret) = self.fold_result()?;
         self.folds.push(Signature {
             name,
