@@ -594,47 +594,56 @@ append condition, in the journal or in a trace.
 
 **It does reach the runtime on the read path.** `splice` leaves `program.folds` standing, and
 `Interpreter::fold(name, args)` folds one of them over the whole log for one key and hands the value
-back. That is the read a stored column is filled and served by, and it is what a test's `fold` action
-calls (`docs/testing.md` section 8). It is also the only way a query-only fold runs at all, since by
+back. That is the read a stored column is **served** by, and it is what a test's `fold` action calls
+(`docs/testing.md` section 8). It is also the only way a query-only fold runs at all, since by
 rule 12 no command may read one.
+
+`Interpreter::fold_stored` is the read a column is **filled** by, and it differs in the two ways a
+store needs: it stops at a log position the store gives it, so every column of a row is at one and a
+query reads one position, and it hands a `Value::Sealed` back rather than shredding it, so the store
+holds the ciphertext and shreds on its own read. That second half is what `project_into` does and
+`project` does not, for the same reason, and without it filling a non-optional sealed column whose
+subject was already erased would fail where the same column through a projector does not.
 
 The two are not in tension. A fold a decision reads is inlined and never executes as itself; a fold
 a read model is runs by name and never touches a decision. One declaration, two use sites, and the
 splice is what keeps the first from paying for the second.
 
-**The digest gains nothing, and the construct itself moved no hash.** `src/digest.rs` gives the
-rule: `const`, `refusal` and `guard` are absent from the digest form *because the parser inlines
-all three, so a declaration of any of them runs nothing and its content is already at every use
-site*. A named fold is spliced identically, so it is the fourth. `docs/digest.md` rule 7 gains one
-word and nothing else, and a program with no named folds hashes exactly as it did.
+**A named fold earns a digest entry, and the argument for that is not the one this section first
+gave.** It read: `const`, `refusal` and `guard` are absent from the digest form *because the parser
+inlines all three, so a declaration of any of them runs nothing and its content is already at every
+use site*, and a named fold is spliced identically, so it is the fourth. The premise is false. A
+splice deletes a `const`, a `refusal` and a `guard`; it does **not** delete a fold. `splice` leaves
+`program.folds` standing and `Interpreter::fold` runs one by name, which is the read a stored column
+is filled and served by, and a query-only fold has no use site to have been inlined into at all.
 
-Two **bug fixes** on the same branch did move hashes, which is what `hek-digest 5` is for: a
-statement below a guard moved from a stage's `(pre ..)` to its `(post ..)`, and a fold whose return
-type already spells its seal stopped being sealed a second time. The second is the sharper one: a
-declared `Sealed(T, S)?` was lowered to `Opt(Sealed(Sealed(T, S), S))`, a type no source can write,
-disagreeing with the `Update::ty` of its own arms, and hashed in that shape. It also meant the
-declared subject was never checked against the one the arms carry, so
-`-> Sealed(String, Shop)? ` over an arm folding content sealed under `Customer` checked clean. Both
-are now right and both are in one unreleased version.
+So a fold is a declaration that does something as itself, and it earns an entry whose hash is what a
+store keys a column by. `docs/digest.md` rules 7 and 9 carry the rest: the signature is the
+parameters and the return type, because those are what `tables::layout` reads for the table, the key
+order and the column's type. A moved `signature_hash` is therefore a column that changes table or
+type, and a moved `hash` alone is one that refolds where it is. Every named fold earns an entry and
+not only the query-only ones, for the reason that document gives.
 
-That is the opposite of what this document said while it was still a design, and the correction is
-worth keeping rather than quietly fixing: "a fold is a declaration now, so it earns an entry" is an
-argument from the shape of the source, and the digest is a record of **what a program does**. A
-declaration that is copied into its callers and then deleted does nothing, so there is nothing to
-record. `subject` is the contrast that makes the line clear: it earns an entry because its parent
-appears nowhere else in the program, which is not true of anything a splice leaves behind.
+`hek-digest 6` is the entry arriving, and it moved every hash in every program. Two **bug fixes**
+had already moved hashes under `hek-digest 5`: a statement below a guard moved from a stage's
+`(pre ..)` to its `(post ..)`, and a fold whose return type already spells its seal stopped being
+sealed a second time. The second is the sharper one: a declared `Sealed(T, S)?` was lowered to
+`Opt(Sealed(Sealed(T, S), S))`, a type no source can write, disagreeing with the `Update::ty` of its
+own arms, and hashed in that shape. It also meant the declared subject was never checked against the
+one the arms carry, so `-> Sealed(String, Shop)? ` over an arm folding content sealed under
+`Customer` checked clean. Both are now right.
 
-A consequence worth stating, because it is a real loss rather than a saving: a fold's change is
-visible only inside whatever folded it, so renaming one or editing an arm moves the hash of every
-command that reads it and nothing identifies the fold as the cause. That is already true of a guard
-and of a `const`, and `hek digest --expanded` is where an author goes to see which.
+**What the entry buys back is attribution**, which was the real loss while there was none. A fold's
+change used to be visible only inside whatever folded it, so renaming one or editing an arm moved
+the hash of every command that reads it and nothing identified the fold as the cause. Those hashes
+still move, because the content really is at each of those sites, but the fold's own entry moves with
+them, so `hek digest --expanded` is no longer the only way to find out which fold did it.
 
-**The argument above now holds for a fold a decision reads, and not for a query-only one.** "It is
-inlined everywhere, so nothing runs" is false of a fold with no use site: by rule 12 no command may
-read one, `hek check --tables` presents it as a stored column, and `Interpreter::fold` executes it
-by name. Deleting or retyping one is nonetheless not a change per `hek digest`, which is a hole
-rather than a decision. Closing it is the same question as "what is a stored fold's digest entry",
-it needs a `hek-digest` bump, and it belongs with the storage work rather than here.
+`subject` was the contrast offered for the old line: it earns an entry because its parent appears
+nowhere else in the program, "which is not true of anything a splice leaves behind". A fold is
+exactly what a splice leaves behind and it earns one anyway, so the contrast was never about the
+splice. It is about whether a declaration still does anything once its callers have been served, and
+a fold does.
 
 **It also makes a fold testable, and it now is.** `docs/testing.md` §9 refuses to assert state on
 the grounds that "a folded value is an intermediate", which stops being true of a declaration with a

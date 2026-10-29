@@ -1107,8 +1107,8 @@ impl<'a, H: Host> Interpreter<'a, H> {
     /// **This is the first thing that executes a named fold.** Everywhere else one runs
     /// by having been spliced into a caller by [`crate::inline`], and a fold a command
     /// reads never exists at runtime as itself. A read model is a named fold kept for
-    /// every key ([`crate::tables`]), so a stored column is read by calling this with the
-    /// key, and that is also what a test's `fold` action does.
+    /// every key ([`crate::tables`]), so a stored column is served by calling this with
+    /// the key, and that is also what a test's `fold` action does.
     ///
     /// The whole log, with no upper bound. The two conventions a handler folds under both
     /// exist to protect something this does not have: a command stops below its pinned
@@ -1116,23 +1116,73 @@ impl<'a, H: Host> Interpreter<'a, H> {
     /// and an effect arm stops at its trigger so delivery is a function of a prefix. A
     /// read model has neither an append condition nor a trigger, and reads the log as it
     /// now stands, which is what [`project_into`](Self::project_into) does too.
+    ///
+    /// A store filling a column wants neither half of that, and calls
+    /// [`fold_stored`](Self::fold_stored) instead.
     pub fn fold(
         &self,
         name: &str,
         args: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
     ) -> Result<Value, Error> {
-        let def = self
-            .program
-            .fold(name)
-            .ok_or_else(|| Error::new(ErrorKind::UnknownFold(name.to_string())))?;
+        let def = self.fold_def(name)?;
         let module = def.module.as_deref();
-        self.folding(def, args).map_err(|err| err.in_module(module))
+        let mut folded = self
+            .folding(def, args, None)
+            .map_err(|err| err.in_module(module))?;
+        // A column holding sealed content whose key is gone reads back absent, exactly as
+        // the same column does through `project`. This hands the value to whoever asked
+        // for it, so there is no later step to shred in.
+        shred(&self.host, &mut folded, || def.name.to_string())
+            .map_err(|err| err.in_module(module))?;
+        Ok(folded)
     }
 
+    /// The same fold, bounded at a log position and with a sealed value handed through.
+    ///
+    /// **This is the read a store fills a column from**, and it is to [`fold`](Self::fold)
+    /// what [`project_into`](Self::project_into) is to [`project`](Self::project). Two
+    /// differences, and a store needs both:
+    ///
+    /// - **`upto` is where the fold stops**, inclusive. A store records one position with
+    ///   the whole table so that every column of a row is at the same one and a query
+    ///   reads one position, and `docs/host.md` says `head` and `read` are not atomic
+    ///   together, so the bound has to be the store's rather than whatever the log has
+    ///   reached by the time each column is folded.
+    /// - **A `Value::Sealed` is handed back rather than shredded**, for the reason
+    ///   `project_into` hands one to `Rows::put`: the store holds the ciphertext and
+    ///   shreds on its own read, which is what makes an erasure after the fill observable
+    ///   without refolding anything. Shredding here would also fail the fill for a
+    ///   non-optional sealed column whose subject was erased before it, where the same
+    ///   column through a projector stores its ciphertext and raises at the query.
+    ///
+    /// The two travel together because a store wants both, not because they are one
+    /// thing. A console showing a value as of a position wants the bound and the shred,
+    /// and is the caller that would split them.
+    pub fn fold_stored(
+        &self,
+        name: &str,
+        args: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
+        upto: u64,
+    ) -> Result<Value, Error> {
+        let def = self.fold_def(name)?;
+        let module = def.module.as_deref();
+        self.folding(def, args, Some(upto))
+            .map_err(|err| err.in_module(module))
+    }
+
+    fn fold_def(&self, name: &str) -> Result<&'a Fold, Error> {
+        self.program
+            .fold(name)
+            .ok_or_else(|| Error::new(ErrorKind::UnknownFold(name.to_string())))
+    }
+
+    /// One named fold, folded. Shredding is the caller's, which is the whole difference
+    /// between the two public doors onto this.
     fn folding(
         &self,
         def: &Fold,
         args: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
+        upto: Option<u64>,
     ) -> Result<Value, Error> {
         // A fold's body is arms only: `Builder::stmt` is the one path onto either half of
         // a stage and a fold parser never reaches it, so an IR that grew statements here
@@ -1169,18 +1219,11 @@ impl<'a, H: Host> Interpreter<'a, H> {
             &self.host,
             &folding,
             0,
-            None,
+            upto,
             &mut frame,
         )?;
         // Always set, because the seed above wrote it.
-        let mut folded = frame.get(def.slot)?.clone();
-        // A column holding sealed content whose key is gone reads back absent, exactly
-        // as the same column does through `project`. This is the read a stored column is
-        // served by and there is no later step to shred in: unlike `project_into`, which
-        // hands a `Value::Sealed` to a store that will shred on its own read, this hands
-        // the value to whoever asked for it.
-        shred(&self.host, &mut folded, || def.name.to_string())?;
-        Ok(folded)
+        Ok(frame.get(def.slot)?.clone())
     }
 
     /// One attempt: a DCB conflict leaves as [`ErrorKind::Conflict`] for the host to do
@@ -2119,7 +2162,7 @@ fn fitted(value: Value, ty: &Type) -> Result<Value, ErrorKind> {
     })
 }
 
-fn fitted_at(value: Value, ty: &Type, span: Span) -> Result<Value, Error> {
+pub(crate) fn fitted_at(value: Value, ty: &Type, span: Span) -> Result<Value, Error> {
     fitted(value, ty).map_err(|kind| Error::at(kind, span))
 }
 

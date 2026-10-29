@@ -32,9 +32,9 @@ pub use sexp::{Sexp, SexpError};
 
 use crate::ir::{
     Absent, Action, Arm, Bind, Builtin, Command, Effect, EntityDef, EntityField, EnumDef, EnvBind,
-    EnvField, EventDef, Expect, Expr, ExprId, Exprs, FieldDef, Filter, Function, Handler, Ident,
-    Iter, Literal, Program, Projector, RecordDef, RecordField, ReplySpec, Return, Setup, Slice,
-    Slot, Stage, Stmt, SubjectDef, Test, Type, UnOp,
+    EnvField, EventDef, Expect, Expr, ExprId, Exprs, FieldDef, Filter, Fold, Function, Handler,
+    Ident, Iter, Literal, Program, Projector, RecordDef, RecordField, ReplySpec, Return, Setup,
+    Slice, Slot, Stage, Stmt, SubjectDef, Test, Type, UnOp,
 };
 use crate::parse::children;
 use crate::value::Json;
@@ -46,7 +46,7 @@ use crate::value::Json;
 /// what a hash means. Bumping this moves every hash at once, which is the point: a global
 /// change of hash then has one legible cause instead of looking like every declaration was
 /// edited on the same day.
-pub const VERSION: &str = "hek-digest 5";
+pub const VERSION: &str = "hek-digest 6";
 
 /// A SHA-256 over a packed form. Rendered as sixty-four lowercase hex digits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -91,6 +91,9 @@ pub enum Kind {
     Enum,
     Record,
     Function,
+    /// After `Function` and before `Command` for the reason `Subject` is first: a fold is a
+    /// leaf a command reads, so it sits between what it is made of and what reads it.
+    Fold,
     Command,
     Projector,
     Effect,
@@ -105,6 +108,7 @@ impl Kind {
             Kind::Enum => "enum",
             Kind::Record => "record",
             Kind::Function => "function",
+            Kind::Fold => "fold",
             Kind::Command => "command",
             Kind::Projector => "projector",
             Kind::Effect => "effect",
@@ -119,6 +123,7 @@ impl Kind {
             "enum" => Kind::Enum,
             "record" => Kind::Record,
             "function" => Kind::Function,
+            "fold" => Kind::Fold,
             "command" => Kind::Command,
             "projector" => Kind::Projector,
             "effect" => Kind::Effect,
@@ -246,6 +251,9 @@ impl Digest {
         for def in &program.functions {
             forms.push((Kind::Function, def.name.clone(), function(def)));
         }
+        for def in &program.folds {
+            forms.push((Kind::Fold, def.name.clone(), fold(def)));
+        }
         for def in &program.commands {
             forms.push((Kind::Command, def.name.clone(), command(def)));
         }
@@ -265,6 +273,12 @@ impl Digest {
         // `const`, `refusal` and `guard` are absent on purpose. The parser inlines all
         // three (`parse.rs:4853`, `parse.rs:6719`, `inline::splice`), so a declaration of
         // any of them runs nothing and its content is already at every use site.
+        //
+        // A named fold is not a fourth, which is where this list stood until storage
+        // needed an answer. `splice` leaves `program.folds` standing and
+        // `Interpreter::fold` runs one by name, so a fold is a declaration that does
+        // something as itself: it is the read a stored column is filled and served by,
+        // and a query-only one has no use site to have been inlined into at all.
         Digest::assemble(forms, tests)
     }
 
@@ -482,6 +496,14 @@ fn signature(kind: Kind, form: &Sexp, helpers: &HashMap<String, Sexp>) -> Option
         Kind::Subject | Kind::Event | Kind::Enum | Kind::Record => {
             parts.extend(form.rest().iter().skip(1).cloned());
         }
+        // The table, the key order and the column type, which is the whole of what something
+        // outside the body decides from a fold: `tables::layout` reads the parameters for the
+        // key and the return type for the column. So a moved `signature_hash` is a column
+        // that changes table or type, and a moved `hash` alone is one that refolds in place.
+        Kind::Fold => {
+            parts.extend(form.section("params").cloned());
+            parts.extend(form.section("returns").cloned());
+        }
         Kind::Command => {
             parts.extend(form.section("params").cloned());
             let mut codes: Vec<String> = Vec::new();
@@ -654,6 +676,38 @@ fn function(def: &Function) -> Sexp {
     }
     parts.push(node("body", frame.body(&def.body)));
     node("function", parts)
+}
+
+/// A named fold, whose body is arms and nothing else.
+///
+/// The outer head is `fold` and so is the accumulator node inside the `(stage ..)`, which
+/// is two uses of one token and not a clash: a declaration head is only ever at the start
+/// of a line, and `head_of` reads nothing else.
+fn fold(def: &Fold) -> Sexp {
+    let mut frame = Frame::new(&def.exprs);
+    // A fold's parameter names leave the program twice over: they are the argument names
+    // at a `fold x = Name { .. }` call site, and `tables::layout` derives a stored
+    // column's key parts from them. So the name stays, the way a command's does, and the
+    // slot is implied by position.
+    let params: Vec<Sexp> = def
+        .params
+        .iter()
+        .map(|param| node("p", [atom(param.name.clone()), ty(&param.ty)]))
+        .collect();
+    for param in &def.params {
+        frame.slot(param.slot);
+    }
+    let mut parts = vec![atom(def.name.clone()), node("params", params)];
+    // Declared rather than read off the accumulator, for the reason a `fn`'s is: the
+    // splice runs after parsing, so a caller's body is lowered before this body exists.
+    parts.push(node("returns", [ty(&def.ret)]));
+    // Before the stage, because an arm reads these slots and a slot is numbered by first
+    // appearance. One list for the whole fold rather than one per arm, which is how the IR
+    // holds it (`docs/folds.md` rule 12): every arm sees the same envelope, and a
+    // non-empty list is what makes the fold query-only.
+    parts.extend(frame.trigger(&[], &def.envelope));
+    parts.push(frame.stage(&def.stage));
+    node("fold", parts)
 }
 
 fn command(def: &Command) -> Sexp {

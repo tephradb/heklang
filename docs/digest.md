@@ -151,10 +151,9 @@ What that buys, and what it costs:
   therefore changes every command that uses it, which is right: they all now decide differently.
   Extracting a `guard` is **not** free, though, because the splice materialises its parameters as
   assignments in the caller. What the rule buys here is that a guard is never counted twice.
-- An unused `const`, `refusal`, `guard` or named `fold` is invisible, so deleting one is not a
-  change. All four are inlined, so a declaration of any of them runs nothing and its content is
-  already at every use site. A named fold earns no entry for that reason, and adding the construct
-  moved no hash: see `docs/folds.md` rule 11, which argued the opposite until it was built.
+- An unused `const`, `refusal` or `guard` is invisible, so deleting one is not a change. All three
+  are inlined, so a declaration of any of them runs nothing and its content is already at every use
+  site.
 
 **A `secret` is the fourth, for the first half of that reason and not the second.** It runs nothing,
 so it has no entry. It is not inlined either, because there is no value in the program to inline:
@@ -169,6 +168,22 @@ rule 16).
 
 A runtime that wants the deployment surface reads `Program::secrets` rather than the digest, so
 "does this deploy need a credential the last one did not" needs no entry either.
+
+**A named fold is in it, and getting there took an argument.** This rule read "all four are
+inlined" until storage needed an answer. `splice` leaves `program.folds` standing and
+`Interpreter::fold` runs one by name, so a fold is a declaration that does something *as itself*: it
+is the read a stored column is filled and served by, and a query-only fold (`docs/folds.md` rule 12)
+has no use site to have been inlined into at all. So a fold earns an entry, its hash is what a store
+keys a column by, and deleting or retyping one is a change. `hek-digest 6` is that entry arriving.
+
+**Every named fold, not only the storable or the query-only ones.** Making the entry conditional on
+storability would put `tables::layout` inside the digest, so an edit to an event's fields could add
+or remove an entry for a fold nobody touched; making it conditional on the envelope would put one
+declaration in or out of the digest depending on whether an arm happens to bind `as e`. The cost is
+that a fold a command reads is recorded twice, once as itself and once inside each caller's spliced
+form, which is the same redundancy an `event` already has between its own entry and every `emit` of
+it. What it buys back is the attribution `docs/folds.md` rule 11 names as a loss: a moved fold hash
+now says which fold moved.
 
 ## 8. Every entry carries its own hash
 
@@ -210,6 +225,7 @@ body never has to be decoded to run a compatibility check.
 | `event` | the declaration: path, fields, types, `@subject`, `@max`, `@absent`, `@no_index` |
 | `enum` | the declaration: variants and the default, by name |
 | `record` | the declaration: fields, types, `@max`, `@absent` |
+| `fold` | name, parameters in declaration order with their types, and the return type |
 | `command` | name, parameters in order with their types, and the refusal codes it can answer with |
 | `projector` | name, and per entity: columns with types, `@max` and defaults, the key columns in key order, the indexes |
 | `effect` | name, and per arm: the events it subscribes to, its delivery modifier and its partition key |
@@ -236,6 +252,19 @@ to keep true.
 code, a widened `@max` or a new optional field counts as a break is policy, and policy does not
 belong in here.
 
+**A fold's signature is what decides where its column lives.** `tables::layout` reads the parameters
+for the table and the key order, and the return type for the column's type, so a moved
+`signature_hash` is a column that changes table or type and a moved `hash` alone is one that refolds
+where it is. A store telling those two apart therefore needs no policy of its own, which is the
+paragraph above applied rather than excepted.
+
+**A fold's parameters stay in declaration order**, which rule 5 would otherwise sort: a fold's
+arguments are named, so a caller may write them in any order and the list looks like a set. It is
+not one, because the order is observable in the layout. Two parameters of the same subject become
+key parts `student_1` and `student_2` in the order the fold declares them, so swapping them renames
+a column. Over-reporting a reorder that changed nothing costs a needless refold of one column;
+under-reporting one that renamed a part would leave the column where it no longer belongs.
+
 A signature is derived from the packed form rather than from the IR, so one implementation serves
 both a freshly parsed program and a stored row, and the two cannot disagree about what a signature
 is.
@@ -258,7 +287,7 @@ carries, and a reader never has to go looking for what one covered.
 
 ## 11. The version line is part of the hash
 
-The first line is `hek-digest 5`, and it is hashed with the rest. The digest is the meaning of a
+The first line is `hek-digest 6`, and it is hashed with the rest. The digest is the meaning of a
 program *as this version of heklang reads it*, so a change to how the parser desugars, or to the
 packed form's own spelling, is a change to what a hash means. Bumping the version moves every hash
 at once, which is the point: a global change then has one legible cause instead of looking like
@@ -309,7 +338,7 @@ capitalised, which keeps them apart from the lowercase heads a value uses: `(Mon
 
 | | Heads |
 | --- | --- |
-| declaration | `subject` `event` `enum` `record` `function` `command` `projector` `effect` `test` |
+| declaration | `subject` `event` `enum` `record` `function` `fold` `command` `projector` `effect` `test` |
 | structure | `params` `p` `f` `col` `key` `index` `entity` `on` `events` `delivery` `bind` `env` `now` `stage` `pre` `post` `fold` `slice` `filter` `keyed` `acc` `variants` `default` `absent` `max` `no_index` `returns` `body` `sig` `rejects` `id` `under` |
 | statement | `set` `if` `then` `else` `emit` `put` `patch` `update` `delete` `fail` `log` `erase` `for` `in` `index` `item` `do` `discard` `call` `return` `value` `outcome` |
 | type | `Bool` `Int` `String` `Uuid` `Timestamp` `Rounding` `Json` `Response` `Outcome` `Secret` `(Event @path)` `(Decimal n)` `(Money n)` `(Enum N)` `(Record N)` `(List t)` `(Map k v)` `(Opt t)` `(Subject N)` `(Sealed t Subject)` |
@@ -326,7 +355,7 @@ That is one small set to keep rather than a field table per head.
 Packed, which is what is hashed:
 
 ```
-hek-digest 5
+hek-digest 6
 (event @order.placed (f customer_id Int) (f order_id Uuid) (f total (Money 2)))
 (command Place (params (p order_id Uuid) (p customer_id Int) (p total (Money 2))) (stage (fold $3 Int (int 0)) (slice @order.placed (filter customer_id $1) (acc $3 Int (+ $3 (int 1)))) (post (if (>= $3 (int 10)) (then (return (reject (str "too_many_open") (str "too many open orders"))))) (emit @order.placed (f customer_id $1) (f order_id $0) (f total $2)))))
 ```

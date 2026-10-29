@@ -108,14 +108,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Interpreter::fold(name, args)` folds one named fold over the whole log for one key, beside
   `project` and `project_into`. **The first thing that executes a named fold**: everywhere else one
   runs by having been spliced into its caller, so `docs/folds.md` rule 11 is rewritten too. It is
-  the read a stored column will be served by, and the test action goes through it rather than
-  through a test-only path. Sealed content whose key has been erased reads back absent, exactly as
-  the same column does through `project`.
+  the read a stored column is served by, and the test action goes through it rather than through a
+  test-only path. Sealed content whose key has been erased reads back absent, exactly as the same
+  column does through `project`.
 
   Restoring the 27 read-model tests that retiring a ported application's projectors deleted found
   four bugs in the first 78 cases: two in the converted folds (a seven-day overage clock started at
   the wrong threshold, and an order withheld before its contact event had no customer), and the two
   under Fixed below.
+- `Interpreter::fold_stored(name, args, upto)` is the read a store **fills** a column from, where
+  `Interpreter::fold` is the one it is served by. Two differences, and a store needs both: the fold
+  stops at the position the store gives it, so every column of a row is at one and a query reads
+  one, and a `Value::Sealed` is handed back rather than shredded, so the store holds the ciphertext
+  and shreds on its own read. The second is what `project_into` does and `project` does not, and
+  without it filling a non-optional sealed column whose subject was erased before the fill would
+  fail, where the same column through a projector stores its ciphertext and raises at the query.
+- `tables::fixed(program, fold, part, at)` reads the value an arm pins a key part to, which is
+  rule 13's `param == value` seen from the store. The `ExprId` in `ArmMatch::Fixed` indexes the
+  fold's own arena, so it cannot be evaluated without the fold; the conjunct resolves against an
+  empty frame, which is the whole of the rule's guarantee, and the value arrives at the part's
+  declared type, so a part of `Money(2)` pinned to `0` is an amount rather than an `Int`.
 
 ### Changed
 
@@ -126,15 +138,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Store::get` and `Store::rows` with it. A single-column key is a one-element slice rather than a
   special case, and the sequence orders lexicographically, which is what keeps a prefix of a
   compound key a range the read API can page on.
-- The digest version is `hek-digest 5`, and three fixes on this branch share it. None of the
-  features does: compound keys moved no hash at all, because a one-column key writes exactly the
-  `(key x)` node it wrote before; a named fold is inlined like a `guard` and so earns no entry; and
-  the `fold` test action moves the form only for a program that writes one, and only under
-  `--tests`. All verified byte for byte against the `hek/` corpus, whose hash is unchanged.
+- The digest version is `hek-digest 6`, and **every** hash moves with it, because the version line
+  is hashed with the form. The bump is a named fold earning an entry of its own. A fold is not
+  inlined away the way a `guard` is: `splice` leaves `program.folds` standing and
+  `Interpreter::fold` runs one by name, so a fold is a declaration that does something as itself,
+  and its entry hash is what a store keys a derived column by. The signature is the parameters and
+  the return type, which is what decides the table, the key order and the column's type, so a moved
+  `signature_hash` is a column that changes table or type and a moved `hash` alone is one that
+  refolds in place.
 
-  The third fix is the optional lift on a spliced call's argument, which adds a `Wrap` node to the
-  caller's arena. It moves the form only for a declaration that passes a bare value to an optional
-  `guard` or named `fold` parameter, and no `hek/` declaration does.
+  Three fixes on this branch move hashes beyond the bump itself, and none of the features does:
+  compound keys move no hash at all, because a one-column key writes exactly the `(key x)` node it
+  wrote before, and the `fold` test action moves the form only for a program that writes one, and
+  only under `--tests`.
+
+  The third of those fixes is the optional lift on a spliced call's argument, which adds a `Wrap`
+  node to the caller's arena. It moves the form only for a declaration that passes a bare value to
+  an optional `guard` or named `fold` parameter, and no `hek/` declaration does.
 
   A statement written below a `guard` moves from the stage's `(pre ..)` to its `(post ..)`, which is
   where `docs/guards.md` rule 3 always said it was, so the packed form of a command with one

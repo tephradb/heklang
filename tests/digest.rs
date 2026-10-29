@@ -596,6 +596,151 @@ fn a_guard_is_printed_where_it_runs() {
 }
 
 // ---------------------------------------------------------------------------
+// Rule 6, continued: a named fold is not a fourth
+// ---------------------------------------------------------------------------
+
+const SPEND: &str = "\
+fold LifetimeSpend(customer_id: Customer) -> spend: Money(2) = 0 {
+  on @order.placed(customer_id) { total } => spend + total
+}
+";
+
+/// A query-only fold, which is the shape the exclusion was actually false of: rule 12
+/// makes it unreadable by any command, so it has no use site to have been inlined into.
+const LAST_AT: &str = "\
+fold LastPlacedAt(customer_id: Customer) -> Timestamp? = none {
+  on @order.placed as e (customer_id) => e.at
+}
+";
+
+#[test]
+fn a_named_fold_earns_an_entry() {
+    let digest = with_events(SPEND);
+    let spend = entry(&digest, "LifetimeSpend");
+    assert_eq!(spend.kind, Kind::Fold);
+    assert!(
+        spend.form.packed().starts_with("(fold LifetimeSpend "),
+        "got {}",
+        spend.form.packed()
+    );
+}
+
+#[test]
+fn a_fold_sorts_between_what_it_is_made_of_and_what_reads_it() {
+    let digest = with_events(&format!(
+        "{SPEND}
+         fn doubled(amount: Money(2)) -> Money(2) {{ return amount + amount }}
+         command Grant(customer_id: Customer, order_id: Uuid) {{
+           fold spend = LifetimeSpend {{ customer_id }}
+           emit @order.placed {{ order_id, customer_id, total: doubled(spend) }}
+         }}"
+    ));
+    let kinds: Vec<Kind> = digest.entries().iter().map(|entry| entry.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            Kind::Subject,
+            Kind::Event,
+            Kind::Event,
+            Kind::Function,
+            Kind::Fold,
+            Kind::Command
+        ],
+        "a fold is a leaf a command reads, so it sits after `fn` and before `command`"
+    );
+}
+
+#[test]
+fn a_folds_signature_is_its_key_and_its_column_type() {
+    let digest = with_events(SPEND);
+    let signature = entry(&digest, "LifetimeSpend")
+        .signature
+        .as_ref()
+        .expect("a fold has a signature")
+        .packed();
+    assert_eq!(
+        signature,
+        "(sig fold LifetimeSpend (params (p customer_id (Subject Customer))) (returns (Money 2)))",
+        "the parameters are the table's key and the return type is the column's, which is \
+         the whole of what something outside the body decides from a fold"
+    );
+}
+
+#[test]
+fn editing_an_arm_moves_a_folds_hash_and_not_its_signature() {
+    let before = with_events(SPEND);
+    let after = with_events(
+        "fold LifetimeSpend(customer_id: Customer) -> spend: Money(2) = 0 {
+           on @order.placed(customer_id) { total } => spend + total + total
+         }",
+    );
+    let (before, after) = (
+        entry(&before, "LifetimeSpend"),
+        entry(&after, "LifetimeSpend"),
+    );
+    assert_ne!(before.hash, after.hash, "the column's values changed");
+    assert_eq!(
+        before.signature_hash, after.signature_hash,
+        "its table, key order and type did not, so the column refolds where it is"
+    );
+}
+
+#[test]
+fn renaming_a_parameter_moves_a_folds_signature() {
+    let before = with_events(SPEND);
+    let after = with_events(
+        "fold LifetimeSpend(buyer_id: Customer) -> spend: Money(2) = 0 {
+           on @order.placed(customer_id: buyer_id) { total } => spend + total
+         }",
+    );
+    let (before, after) = (
+        entry(&before, "LifetimeSpend"),
+        entry(&after, "LifetimeSpend"),
+    );
+    assert_ne!(
+        before.signature_hash, after.signature_hash,
+        "a parameter names a key part, so renaming one moves the table the column is in"
+    );
+}
+
+#[test]
+fn a_query_only_fold_earns_an_entry_like_any_other() {
+    let digest = with_events(LAST_AT);
+    let last = entry(&digest, "LastPlacedAt");
+    assert_eq!(
+        last.kind,
+        Kind::Fold,
+        "no command may read this one, which is exactly why the entry has to be here"
+    );
+}
+
+#[test]
+fn deleting_a_query_only_fold_is_a_change() {
+    let with = with_events(LAST_AT);
+    let without = with_events("");
+    assert_ne!(
+        with.hash(),
+        without.hash(),
+        "it is presented as a stored column and runs by name, so losing it is a change"
+    );
+}
+
+#[test]
+fn a_fold_entry_reads_back_from_its_row() {
+    let digest = with_events(SPEND);
+    let row = entry(&digest, "LifetimeSpend");
+    let read = Entry::from_packed(
+        &row.form.packed(),
+        row.signature.as_ref().map(|sig| sig.packed()).as_deref(),
+    )
+    .expect("a fold's row reads back");
+    assert_eq!(read.kind, Kind::Fold);
+    assert_eq!(read.name, "LifetimeSpend");
+    assert_eq!(read.hash, row.hash);
+    assert_eq!(read.signature_hash, row.signature_hash);
+}
+
+// ---------------------------------------------------------------------------
 // Rule 7: every entry carries its own hash
 // ---------------------------------------------------------------------------
 

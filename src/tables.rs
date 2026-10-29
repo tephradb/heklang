@@ -9,8 +9,10 @@
 //! [`layout`] returns, and the runtime creates the real tables from the same rules, which
 //! is why the rules live in the library rather than in the CLI.
 
+use crate::interp::{Error, ErrorKind, eval_pure, fitted_at};
 use crate::ir::{EventPath, Expr, ExprId, Filter, Fold, Ident, Param, Program, Type};
 use crate::parse::snake_case;
+use crate::value::Value;
 
 /// Every table a program implies, and every fold that cannot be kept.
 #[derive(Debug, Clone, Default)]
@@ -378,4 +380,25 @@ fn same(a: &[KeyPart], b: &[KeyPart]) -> bool {
 
 fn parts(table: &Table) -> Vec<&str> {
     table.key.iter().map(|part| part.name.as_str()).collect()
+}
+
+/// The value an arm pins a key part to, for [`ArmMatch::Fixed`].
+///
+/// **Evaluated against an empty frame, which is the whole of rule 13's guarantee.** The
+/// right side of a `param == value` conjunct may not read a slot, so it is a literal, a
+/// `const` or a pure `fn` of those: whatever writes the row holds the event and the key it
+/// is writing and no frame at all, and this is that caller's door onto the value. An
+/// `ExprId` indexes the fold's own arena, so it cannot be evaluated without the fold, and
+/// that is why this is here rather than left for a store to work out.
+///
+/// `part` is the key part the arm pins, which is the one at the same index in
+/// [`Table::key`] as the [`ArmMatch`] is in [`ColumnArm::fields`]. Its declared type is
+/// what the value is fitted to, so a part of `Money(2)` pinned to `0` is an amount rather
+/// than an `Int`, the same fit `Interpreter::fold` makes when it resolves the conjunct.
+pub fn fixed(program: &Program, fold: &Ident, part: &KeyPart, at: ExprId) -> Result<Value, Error> {
+    let def = program
+        .fold(fold)
+        .ok_or_else(|| Error::new(ErrorKind::UnknownFold(fold.to_string())))?;
+    let value = eval_pure(program, &def.exprs, def.frame, at)?;
+    fitted_at(value, &part.ty, def.exprs.span(at))
 }

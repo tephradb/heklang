@@ -5,7 +5,7 @@
 //! source cannot check by eye: which parameter an arm actually supplies, which event
 //! field fills it, and what orders a key once it has more than one part.
 
-use heklang::{ArmMatch, Layout, Program, layout, parse};
+use heklang::{ArmMatch, Layout, Program, Value, fixed, layout, parse};
 
 fn program(source: &str) -> Program {
     match parse(source) {
@@ -475,5 +475,78 @@ fold Counted(shop_id: Shop, code: String) -> n: Int = 0 {
     assert!(
         matches!(arm.fields[1], ArmMatch::Fixed(_)),
         "the gate wins over the field bind, because it is what the row is written at"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Rule 13, from the store's side: reading the value an arm fixes a part to
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_value_an_arm_fixes_a_key_part_to_is_readable() {
+    let source = "subject Shop(Int)
+event @hold.place.failed { shop_id: Shop, order_id: Int, attempt: Int }
+event @hold.release.failed { shop_id: Shop, order_id: Int, attempt: Int }
+
+fold RetryAttempt(shop_id: Shop, kind: String, order_id: Int) -> Int = 0 {
+  on @hold.place.failed(shop_id, order_id, kind == \"hold_place\") { attempt } => attempt
+  on @hold.release.failed(shop_id, order_id, kind == \"hold_release\") { attempt } => attempt
+}
+";
+    let program = program(source);
+    let layout = layout(&program);
+    let table = &layout.tables[0];
+    let at = table
+        .key
+        .iter()
+        .position(|part| part.name == "kind")
+        .expect("`kind` is a key part");
+    let column = &table.columns[0];
+
+    let pinned: Vec<Value> = column
+        .arms
+        .iter()
+        .map(|arm| match arm.fields[at] {
+            ArmMatch::Fixed(id) => fixed(&program, &column.fold, &table.key[at], id)
+                .expect("a conjunct resolves against an empty frame"),
+            ref other => panic!("expected a fixed part, got {other:?}"),
+        })
+        .collect();
+
+    assert_eq!(
+        pinned,
+        vec![Value::str("hold_place"), Value::str("hold_release")],
+        "a writer holds the event and the key it is writing and no frame, so this is the \
+         only way it learns which key an arm writes"
+    );
+}
+
+#[test]
+fn a_fixed_value_arrives_at_the_parts_own_type() {
+    let source = "subject Shop(Int)
+event @order.placed { shop_id: Shop, total: Money(2) }
+
+fold PlacedAtFloor(shop_id: Shop, floor: Money(2)) -> n: Int = 0 {
+  on @order.placed(shop_id, floor == 0) => n + 1
+}
+";
+    let program = program(source);
+    let layout = layout(&program);
+    let table = &layout.tables[0];
+    let at = table
+        .key
+        .iter()
+        .position(|part| part.name == "floor")
+        .expect("`floor` is a key part");
+    let column = &table.columns[0];
+    let ArmMatch::Fixed(id) = column.arms[0].fields[at] else {
+        panic!("expected a fixed part");
+    };
+
+    assert_eq!(
+        fixed(&program, &column.fold, &table.key[at], id).expect("resolves"),
+        Value::money(0, 2),
+        "a part of Money(2) pinned to `0` is an amount, not an Int: the row is written at \
+         the value the fold declares, which is the same fit the interpreter makes"
     );
 }

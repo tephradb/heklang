@@ -3,7 +3,7 @@
 //! the value arrives, that the slices reach the append condition, and that a fold and a
 //! guard stay disjoint in what they may do.
 
-use heklang::{Event, EventPath, Filter, Interpreter, Outcome, Program, Value, parse};
+use heklang::{Event, EventPath, Filter, Interpreter, Outcome, Program, Type, Value, parse};
 
 /// `@a.b { field: value }`, so a `given` in prose and a `given` in a test read alike.
 fn given<'a>(
@@ -1501,5 +1501,146 @@ command C(shop_id: Shop, kind: String) {
         hint(source).contains("no signature to declare one in"),
         "{}",
         hint(source)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Rule 11: the read a store fills a column from
+// ---------------------------------------------------------------------------
+
+const SPEND: &str = "subject Customer(Int)
+event @order.placed { customer_id: Customer, total: Money(2) }
+
+fold LifetimeSpend(customer_id: Customer) -> spend: Money(2) = 0 {
+  on @order.placed(customer_id) { total } => spend + total
+}
+";
+
+/// A sealed column, optional, which is the shape rule 12 gives an erased subject.
+const EMAIL: &str = "subject Customer(Int)
+event @order.placed { customer_id: Customer, email: String @subject(customer_id) }
+
+fold LatestEmail(customer_id: Customer) -> Sealed(String, Customer)? = none {
+  on @order.placed(customer_id) { email } => email
+}
+";
+
+/// The same column declared non-optional, which is what `fold` has no value for once the
+/// key is gone and `fold_stored` does not need one.
+const EMAIL_PLAIN: &str = "subject Customer(Int)
+event @order.placed { customer_id: Customer, email: String @subject(customer_id) }
+
+fold LatestEmail(customer_id: Customer) -> Sealed(String, Customer) = \"\" {
+  on @order.placed(customer_id) { email } => email
+}
+";
+
+#[test]
+fn a_stored_fold_stops_at_the_position_it_is_given() {
+    let program = program(SPEND);
+    let mut interpreter = Interpreter::new(&program);
+    for _ in 0..3 {
+        given(
+            &mut interpreter,
+            "order.placed",
+            [
+                ("customer_id", Value::Int(7)),
+                ("total", Value::money(1_000, 2)),
+            ],
+        );
+    }
+    let key = || [("customer_id".to_string(), Value::Int(7))];
+
+    assert_eq!(
+        interpreter.fold("LifetimeSpend", key()).expect("folded"),
+        Value::money(3_000, 2),
+        "`fold` reads the log as it now stands"
+    );
+    // Inclusive, and positions count from zero, so this is the first event alone. A store
+    // records one position with the table, and this is how every column reaches it.
+    assert_eq!(
+        interpreter
+            .fold_stored("LifetimeSpend", key(), 0)
+            .expect("folded"),
+        Value::money(1_000, 2),
+        "bounded at position 0, which is one event"
+    );
+    assert_eq!(
+        interpreter
+            .fold_stored("LifetimeSpend", key(), 1)
+            .expect("folded"),
+        Value::money(2_000, 2),
+    );
+}
+
+#[test]
+fn a_stored_fold_hands_sealed_content_through_rather_than_shredding_it() {
+    let program = program(EMAIL);
+    let mut interpreter = Interpreter::new(&program);
+    given(
+        &mut interpreter,
+        "order.placed",
+        [
+            ("customer_id", Value::Int(7)),
+            ("email", Value::str("buyer@example.com")),
+        ],
+    );
+    interpreter.erase_subject("Customer", "7");
+    let key = || [("customer_id".to_string(), Value::Int(7))];
+
+    assert_eq!(
+        interpreter.fold("LatestEmail", key()).expect("folded"),
+        Value::none(Type::sealed(Type::String, "Customer".to_string())),
+        "`fold` hands the value to whoever asked, so it shreds on the way out"
+    );
+    // The store holds the ciphertext and shreds on its own read, which is what makes an
+    // erasure after the fill observable without refolding the column.
+    let stored = interpreter
+        .fold_stored("LatestEmail", key(), 0)
+        .expect("folded");
+    assert!(
+        matches!(
+            stored,
+            Value::Opt {
+                value: Some(ref held),
+                ..
+            } if matches!(**held, Value::Sealed { .. })
+        ),
+        "got {stored:?}"
+    );
+}
+
+#[test]
+fn filling_a_non_optional_sealed_column_survives_an_erasure_that_precedes_it() {
+    let program = program(EMAIL_PLAIN);
+    let mut interpreter = Interpreter::new(&program);
+    given(
+        &mut interpreter,
+        "order.placed",
+        [
+            ("customer_id", Value::Int(7)),
+            ("email", Value::str("buyer@example.com")),
+        ],
+    );
+    interpreter.erase_subject("Customer", "7");
+    let key = || [("customer_id".to_string(), Value::Int(7))];
+
+    // There is no value that says "this is gone" at a non-optional position, so the read
+    // raises rather than quietly holding a zero.
+    let why = interpreter
+        .fold("LatestEmail", key())
+        .expect_err("the column is not optional");
+    assert!(
+        why.to_string().contains("LatestEmail"),
+        "the message names the column: {why}"
+    );
+    // The fill must not inherit that. A projector in the same position stores its
+    // ciphertext and raises at the query, and a stored column does the same.
+    assert!(
+        matches!(
+            interpreter.fold_stored("LatestEmail", key(), 0),
+            Ok(Value::Sealed { .. })
+        ),
+        "a column filled after its subject was erased holds what is on disk"
     );
 }
