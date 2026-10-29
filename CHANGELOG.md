@@ -79,6 +79,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   section 9 is rewritten: the prohibition on asserting state was always about an intermediate
   inside a decision, and a declaration with a signature and a key is not one. **A query-only fold
   is readable here and nowhere else**, which is the first execution of one anywhere.
+- **A fold arm may match a key part the event does not carry**, written `param == value`:
+  `on @hold.place.failed(shop_id, order_id, kind == "hold_place")`. The left side is a parameter
+  rather than a field, so the conjunct says which key the arm writes rather than narrowing the
+  event, and the sigil is the whole of the difference: `:` matches a field, `==` matches a
+  parameter, and both are legal when one name is both. The right side resolves once in the frame of
+  whatever reads the fold, under the same rule a field filter's value is, and may not read the event
+  being folded. It may not read a **slot** either, a parameter or the accumulator: whatever writes
+  the row holds the event and the key and no frame, so a conjunct reading one is a key that depends
+  on the key, and `kind == kind` would otherwise make the column look storable on the strength of a
+  tautology. So the right side is a literal, a `const`, or a `fn` of those. Also refused in a
+  guard's slice and in an inline fold's arm (two reasons, two messages), for a name that is not a
+  parameter, for two conjuncts on one part in one arm, and for a value the parameter's type cannot
+  take. `docs/folds.md` rule 13.
+
+  **A conjunct that does not hold drops the slice rather than widening it**, so it folds nothing and
+  joins no append condition. That is the opposite of what the design predicted and is available only
+  because the answer is fixed for the invocation: a command reading one kind of a nine-kind queue
+  conflicts on that kind's events and no others. `Predicate`, `Query`, `Log` and `AppendCondition`
+  are byte-identical, because the conjunct is not a predicate on the event and a store asked for a
+  field the events do not carry would answer `false` for every record.
+
+  What it is for is a queue holding several kinds of work, which the ported application has two of:
+  a failure list of twelve kinds and a retry ladder of nine, each keyed by a synthetic
+  `Uuid.derive(NS, "{kind}|{ids}")` that exists only because a projector entity gets one `@key`
+  column. Five of the retry kinds are keyed `(shop_id, order_id)` and so collide without it; the
+  alternative is one fold per kind per column, 36 and 120 where 12 and 30 will do.
 - `Interpreter::fold(name, args)` folds one named fold over the whole log for one key, beside
   `project` and `project_into`. **The first thing that executes a named fold**: everywhere else one
   runs by having been spliced into its caller, so `docs/folds.md` rule 11 is rewritten too. It is

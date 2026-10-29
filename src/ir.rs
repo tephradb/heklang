@@ -1074,17 +1074,58 @@ pub struct Slice {
     pub updates: Vec<Update>,
 }
 
+/// One conjunct of a slice. Both forms resolve **once**, in the frame of whatever reads
+/// the fold, before any event is folded.
 #[derive(Debug, Clone)]
-pub struct Filter {
-    pub field: Ident,
-    pub value: ExprId,
+pub enum Filter {
+    /// `field: value`, or `(field)` for the shorthand: the event's `field` equals
+    /// `value`. This is what reaches a host as a [`crate::host::Predicate`] pair.
+    Field { field: Ident, value: ExprId },
+    /// `param == value`: the fold's parameter equals `value`, which is the key part this
+    /// arm writes. See `docs/folds.md` rule 13.
+    ///
+    /// **It is not a predicate on the event**, so it has no representation in a
+    /// `Predicate` and a host never sees it. `param` is not a field of the event, often
+    /// not a field of any event, and asking a store for one would make it answer `false`
+    /// for every record. What it decides is whether the slice participates at all: the
+    /// conjunct is resolved once against the argument the caller passed, and a slice
+    /// whose conjunct fails folds nothing and joins no append condition.
+    ///
+    /// `slot` is the parameter's, carried because [`crate::interp`]'s `resolve` has only
+    /// the slices and no [`Fold`] to look a name up in. The splice shifts it the way an
+    /// [`Update`]'s is shifted, and `ty` rides along for the reason an `Update`'s does:
+    /// the value is fitted to it, and the declaration is not in reach at that point.
+    Key {
+        param: Ident,
+        slot: Slot,
+        ty: Type,
+        value: ExprId,
+    },
 }
 
 impl Filter {
     pub fn new(field: impl Into<Ident>, value: ExprId) -> Self {
-        Self {
+        Self::Field {
             field: field.into(),
             value,
+        }
+    }
+
+    /// The expression the conjunct compares against, which both forms have and which is
+    /// resolved the same way. Named rather than matched at each site, because what the
+    /// splice shifts and what `filter_past_fold` inspects is the same thing either way.
+    pub fn value(&self) -> ExprId {
+        match self {
+            Filter::Field { value, .. } | Filter::Key { value, .. } => *value,
+        }
+    }
+
+    /// The name on the left, for a diagnostic. A field of the event, or a parameter of
+    /// the fold, and a message that says which belongs to the site rather than here.
+    pub fn name(&self) -> &Ident {
+        match self {
+            Filter::Field { field, .. } => field,
+            Filter::Key { param, .. } => param,
         }
     }
 }

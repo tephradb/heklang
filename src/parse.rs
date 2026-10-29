@@ -325,6 +325,40 @@ struct InlineFold {
     span: Span,
 }
 
+/// Which construct a slice's filters belong to, which decides whether `param == value`
+/// means anything there (`docs/folds.md` rule 13).
+///
+/// Three and not a `bool`, because the two that have no key have it for different
+/// reasons and an author reaching for the form in one of them should not be told about
+/// the other: a guard is not stored, and an inline fold has no signature to put a
+/// parameter in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeySite {
+    /// A module-scope fold's arm, the one place a key exists.
+    Fold,
+    /// An inline fold's arm.
+    Inline,
+    /// A `guard @path(..)` slice.
+    Guard,
+}
+
+impl KeySite {
+    /// What to call this site and what to do instead, or `None` where the form is legal.
+    fn no_key(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            KeySite::Fold => None,
+            KeySite::Inline => Some((
+                "an inline fold",
+                "an inline fold has no signature to declare one in: move it to module scope, where it is stored and the key means something",
+            )),
+            KeySite::Guard => Some((
+                "a guard",
+                "a guard decides rather than being stored, so there is no row for a key to name; a guard narrowing two ways is two guards",
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Signature {
     name: Ident,
@@ -4564,7 +4598,15 @@ impl Parser {
             // where a projector handler writes it and the two should read alike.
             let binding = self.fold_envelope(lower, named, slot)?;
             self.pending_envelope = binding.clone();
-            let filters = self.slice_filters(lower, &path, &def)?;
+            let filters = self.slice_filters(
+                lower,
+                &path,
+                &def,
+                match named {
+                    true => KeySite::Fold,
+                    false => KeySite::Inline,
+                },
+            )?;
             self.pending_envelope = None;
             // Only now, so a filter naming the binding is "not in scope" rather than a
             // read of a slot nothing has filled: a filter resolves once for the whole
@@ -4838,7 +4880,7 @@ impl Parser {
         let at = self.span_here();
         let path = self.expect_path()?;
         let def = self.event_def(events, &path, at)?;
-        let filters = self.slice_filters(lower, &path, def)?;
+        let filters = self.slice_filters(lower, &path, def, KeySite::Guard)?;
         Ok((path, filters))
     }
 
@@ -4893,30 +4935,60 @@ impl Parser {
         Ok(Some(binding))
     }
 
-    /// The `(field, field: value)` list a slice narrows by.
+    /// The `(field, field: value, param == value)` list a slice narrows by.
     ///
     /// Split out of [`Parser::slice_ref`] because a fold arm writes `as e` between the
     /// path and this, and the envelope binding has to be in scope for what follows it and
     /// not for this: a filter resolves once per invocation and the envelope is a property
     /// of each event folded, so the two cannot be the same value.
+    ///
+    /// `site` says which construct the slice belongs to, because the `param ==` form
+    /// means something in exactly one of them: rule 13's conjunct names a key part, and
+    /// only a module-scope fold has a key.
     fn slice_filters(
         &mut self,
         lower: &mut Lower,
         path: &EventPath,
         def: &EventDef,
+        site: KeySite,
     ) -> Result<Vec<Filter>, Diagnostic> {
         self.expect_sym(Sym::LParen)?;
+        let key = site == KeySite::Fold;
 
         let mut filters = Vec::new();
         while !self.at_sym(Sym::RParen) {
             let at = self.span_here();
-            let field = self.expect_ident()?;
-            let Some(declared) = def.field(&field) else {
-                return Err(self.err(
-                    Code::UnknownMember,
-                    format!("{path} has no field `{field}`"),
-                    at,
-                ));
+            let name = self.expect_ident()?;
+            // One token of lookahead tells the two forms apart, the way `fold` already
+            // tells its own two shapes apart: `:` and the shorthand name a field of the
+            // event, `==` names a parameter of the fold.
+            if self.at_sym(Sym::Eq) {
+                // Two conjuncts on one part cannot both hold unless they are the same
+                // value, so the arm folds nothing and `--tables` still calls the column
+                // storable. An arm that can never fire is a mistake rather than a
+                // narrowing, and this is the one place to say so.
+                if filters
+                    .iter()
+                    .any(|filter| matches!(filter, Filter::Key { param, .. } if param == &name))
+                {
+                    return Err(self
+                        .err(
+                            Code::DuplicateField,
+                            format!("`{name}` is matched twice in this arm"),
+                            at,
+                        )
+                        .with_hint(
+                            "a key part is one value per arm, so two conjuncts on it leave the arm folding nothing at all; one of them belongs on an arm of its own",
+                        ));
+                }
+                filters.push(self.key_filter(lower, &name, site, at)?);
+                if !self.eat_sym(Sym::Comma) {
+                    break;
+                }
+                continue;
+            }
+            let Some(declared) = def.field(&name) else {
+                return Err(self.unknown_filter(lower, path, &name, key, at));
             };
             let expected = declared.ty.clone();
             // A filter is lowered once per invocation, before the fold, so it is held
@@ -4925,14 +4997,14 @@ impl Parser {
             let value = if self.eat_sym(Sym::Colon) {
                 self.expr(lower, Some(expected))?
             } else {
-                if lower.b.lookup(&field).is_none() {
+                if lower.b.lookup(&name).is_none() {
                     self.folding = false;
-                    return Err(self.not_in_scope(&field, at));
+                    return Err(self.not_in_scope(&name, at));
                 }
-                self.shorthand(lower, &field, &expected, at)
+                self.shorthand(lower, &name, &expected, at)
             };
             self.folding = false;
-            filters.push(Filter::new(field, value));
+            filters.push(Filter::new(name, value));
             if !self.eat_sym(Sym::Comma) {
                 break;
             }
@@ -4940,6 +5012,104 @@ impl Parser {
 
         self.expect_sym(Sym::RParen)?;
         Ok(filters)
+    }
+
+    /// `param == value`, rule 13: the key part this arm writes.
+    ///
+    /// The left side is resolved against the fold's **parameters** rather than against
+    /// everything in scope, because that is what it means. `lookup` would answer just as
+    /// readily for the accumulator, and an accumulator on the left would be a key that
+    /// depends on what has been folded so far.
+    fn key_filter(
+        &mut self,
+        lower: &mut Lower,
+        name: &str,
+        site: KeySite,
+        at: Span,
+    ) -> Result<Filter, Diagnostic> {
+        self.expect_sym(Sym::Eq)?;
+        if let Some((what, fix)) = site.no_key() {
+            return Err(self
+                .err(
+                    Code::FoldRestriction,
+                    format!("`{name} ==` names a key part, and {what} has no key"),
+                    at,
+                )
+                .with_hint(format!(
+                    "a key part is a parameter of a stored fold, and {fix}"
+                )));
+        }
+        let Some(param) = lower
+            .b
+            .params()
+            .iter()
+            .find(|param| param.name == name)
+            .cloned()
+        else {
+            return Err(self
+                .err(
+                    Code::UnknownMember,
+                    format!("this fold has no parameter `{name}`"),
+                    at,
+                )
+                .with_hint(
+                    "`==` matches a parameter, which is a part of the key, and `:` matches a field of the event; a key part no event carries is written with `==`",
+                ));
+        };
+        // Held to the fold's own rule, as a field filter is, and for the same reason: this
+        // resolves once before anything is folded.
+        self.folding = true;
+        let value = self.expr(lower, Some(param.ty.clone()));
+        self.folding = false;
+        let value = value?;
+
+        // **The right side is a value, not a value of the row.** Whatever writes the row
+        // holds an event and the key it is writing, and no frame, so a conjunct reading a
+        // slot is a key that depends on the key. `kind == kind` is the degenerate case
+        // and `hek check --tables` would call the column storable on the strength of a
+        // tautology; `kind == order_id` is the same hole with a value that is not one.
+        if let Some((slot, at)) = lower.b.slot_read(value) {
+            let read = lower.b.slot_name(slot).unwrap_or("a value").to_string();
+            return Err(self
+                .err(
+                    Code::FoldRestriction,
+                    format!("a key part cannot be matched against `{read}`"),
+                    at,
+                )
+                .with_hint(
+                    "the row is written by something holding the event and the key and nothing else, so this side is a literal, a `const`, or a `fn` of those; a part that varies with the row is the part itself",
+                ));
+        }
+        Ok(Filter::Key {
+            param: param.name,
+            slot: param.slot,
+            ty: param.ty,
+            value,
+        })
+    }
+
+    /// A filter naming something that is not a field of the event. In a fold's arm the
+    /// likely slip is reaching for a key part with `:`, so the message says which sigil
+    /// the other form takes.
+    fn unknown_filter(
+        &self,
+        lower: &Lower,
+        path: &EventPath,
+        name: &str,
+        key: bool,
+        at: Span,
+    ) -> Diagnostic {
+        let error = self.err(
+            Code::UnknownMember,
+            format!("{path} has no field `{name}`"),
+            at,
+        );
+        match key && lower.b.params().iter().any(|param| param.name == name) {
+            true => error.with_hint(format!(
+                "`{name}` is a parameter rather than a field of {path}, so this arm pins it with `==`: `{name} == <value>`"
+            )),
+            false => error,
+        }
     }
 
     /// The span is the caller's, because every caller has just consumed the path and

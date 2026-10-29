@@ -3,7 +3,7 @@
 //! the value arrives, that the slices reach the append condition, and that a fold and a
 //! guard stay disjoint in what they may do.
 
-use heklang::{Event, EventPath, Interpreter, Outcome, Program, Value, parse};
+use heklang::{Event, EventPath, Filter, Interpreter, Outcome, Program, Value, parse};
 
 /// `@a.b { field: value }`, so a `given` in prose and a `given` in a test read alike.
 fn given<'a>(
@@ -1205,4 +1205,301 @@ command C(customer_id: Int) {
         )
         .expect("folded");
     assert_eq!(folded, Value::Int(101));
+}
+
+// ---------------------------------------------------------------------------------
+// Rule 13: an arm may match a key part the event does not carry.
+
+/// The queue shape the rule exists for: one fold holding several kinds of work, keyed by
+/// the kind alongside the ids. Without it the two arms are one value, because both are
+/// keyed by the same order.
+const QUEUE: &str = "\
+subject Shop(Int)
+
+event @hold.place.failed { shop_id: Shop, order_id: Int, attempt: Int }
+event @hold.release.failed { shop_id: Shop, order_id: Int, attempt: Int }
+event @a.done { n: Int }
+
+fold RetryAttempt(shop_id: Shop, kind: String, order_id: Int) -> Int = 0 {
+  on @hold.place.failed(shop_id, order_id, kind == \"hold_place\") { attempt } => attempt
+  on @hold.release.failed(shop_id, order_id, kind == \"hold_release\") { attempt } => attempt
+}
+";
+
+fn failed(interpreter: &mut Interpreter<'_>, path: &str, order: i64, attempt: i64) {
+    given(
+        interpreter,
+        path,
+        [
+            ("shop_id", Value::Int(1)),
+            ("order_id", Value::Int(order)),
+            ("attempt", Value::Int(attempt)),
+        ],
+    );
+}
+
+fn queued() -> Program {
+    program(QUEUE)
+}
+
+#[test]
+fn a_key_part_the_event_does_not_carry_tells_two_arms_apart() {
+    let program = queued();
+    let mut interpreter = Interpreter::new(&program);
+    failed(&mut interpreter, "hold.place.failed", 9, 2);
+    failed(&mut interpreter, "hold.release.failed", 9, 7);
+
+    let folded = |kind: &str| {
+        interpreter
+            .fold(
+                "RetryAttempt",
+                [
+                    ("shop_id".to_string(), Value::Int(1)),
+                    ("kind".to_string(), Value::str(kind)),
+                    ("order_id".to_string(), Value::Int(9)),
+                ],
+            )
+            .expect("folded")
+    };
+    assert_eq!(folded("hold_place"), Value::Int(2));
+    assert_eq!(folded("hold_release"), Value::Int(7));
+    // A kind no arm names folds nothing at all, so the value is the seed. Every slice is
+    // dead here, which is the case that must not reach the host with an empty predicate
+    // list and read the whole range instead.
+    assert_eq!(folded("order_tag"), Value::Int(0));
+}
+
+/// **The conjunct is dropped from the append condition, not widened.** A dead slice
+/// folded nothing, so conflicting on it would make the command lose to events it never
+/// read: on this nine-kind queue that is nine times the conflict surface.
+#[test]
+fn a_dead_slice_leaves_the_append_condition() {
+    let source = format!(
+        "{QUEUE}command C(shop_id: Shop, order_id: Int) {{
+  fold n = RetryAttempt {{ shop_id, order_id, kind: \"hold_place\" }}
+  emit @a.done {{ n }}
+}}
+"
+    );
+    let program = program(&source);
+    let mut interpreter = Interpreter::new(&program);
+    failed(&mut interpreter, "hold.place.failed", 9, 2);
+    failed(&mut interpreter, "hold.release.failed", 9, 7);
+
+    let execution = interpreter
+        .run(
+            "C",
+            [
+                ("shop_id".to_string(), Value::Int(1)),
+                ("order_id".to_string(), Value::Int(9)),
+            ],
+        )
+        .expect("ran");
+
+    let Outcome::Ok(events) = &execution.outcome else {
+        panic!("expected the command to append");
+    };
+    assert_eq!(events[0].field("n"), Some(&Value::Int(2)));
+
+    let read: Vec<String> = execution
+        .condition
+        .slices
+        .iter()
+        .map(|slice| slice.event.to_string())
+        .collect();
+    assert_eq!(
+        read,
+        ["@hold.place.failed"],
+        "the release arm's slice folded nothing, so it is not in the condition"
+    );
+}
+
+/// The left side is a **parameter**, which is a different kind of name from a field, and
+/// the sigil is the whole of what says so. Both are legal when one name is both.
+#[test]
+fn the_two_sigils_name_two_different_things() {
+    let source = "\
+event @a.one { shop_id: Int, kind: String }
+
+fold Both(shop_id: Int, kind: String) -> Int = 0 {
+  on @a.one(shop_id, kind: kind) => 1
+  on @a.one(shop_id, kind == \"other\") => 2
+}
+";
+    let program = program(source);
+    let fold = program.fold("Both").expect("declared");
+    // The first arm narrows the event's own `kind` field; the second pins the key part
+    // and puts nothing on the event at all.
+    assert!(matches!(
+        fold.stage.slices[0].filters[1],
+        Filter::Field { .. }
+    ));
+    assert!(matches!(
+        fold.stage.slices[1].filters[1],
+        Filter::Key { .. }
+    ));
+}
+
+#[test]
+fn a_key_filter_names_a_parameter_and_not_anything_in_scope() {
+    let source = "\
+event @a.one { shop_id: Int }
+
+fold F(shop_id: Int) -> acc: Int = 0 {
+  on @a.one(shop_id, nope == \"x\") => acc + 1
+}
+";
+    assert_eq!(error(source), "this fold has no parameter `nope`");
+    assert!(
+        hint(source).contains("`==` matches a parameter"),
+        "{}",
+        hint(source)
+    );
+}
+
+/// A guard is not stored, so it has no key for a conjunct to name. Refused rather than
+/// quietly accepted as a narrowing nobody could read back.
+#[test]
+fn a_guard_slice_has_no_key_to_match() {
+    let source = "\
+subject Shop(Int)
+refusal No \"no\"
+event @a.one { shop_id: Shop }
+event @a.done { n: Int }
+
+command C(shop_id: Shop, kind: String) {
+  guard @a.one(shop_id, kind == \"x\")
+  emit @a.done { n: 1 }
+}
+";
+    assert_eq!(
+        error(source),
+        "`kind ==` names a key part, and a guard has no key"
+    );
+}
+
+/// The right side resolves once in the caller's frame, so it cannot read the event. The
+/// arm's binds are not in scope yet when a filter parses, which is what makes this an
+/// ordinary "not in scope" rather than a rule of its own.
+#[test]
+fn a_key_filter_cannot_read_the_event_it_filters() {
+    let source = "\
+event @a.one { shop_id: Int, at: Timestamp }
+
+fold F(shop_id: Int, day: String) -> Int = 0 {
+  on @a.one(shop_id, day == at) => 1
+}
+";
+    assert!(
+        error(source).contains("`at` is not in scope"),
+        "{}",
+        error(source)
+    );
+}
+
+/// The parameter's declared type is the target, so the ordinary check catches a value
+/// that could never equal it.
+#[test]
+fn a_key_filters_value_is_typed_by_the_parameter() {
+    let source = "\
+event @a.one { shop_id: Int }
+
+fold F(shop_id: Int, kind: Int) -> Int = 0 {
+  on @a.one(shop_id, kind == \"x\") => 1
+}
+";
+    assert_eq!(error(source), "expected Int, found String");
+}
+
+/// **The right side is a value, not a value of the row.** Whatever writes the row holds
+/// the event and the key it is writing and no frame, so a conjunct reading a slot is a
+/// key that depends on the key. Found by `/code-review`: the degenerate case is a
+/// tautology, and `--tables` called the column storable on the strength of it while no
+/// event supplied the part at all.
+#[test]
+fn a_key_filter_is_matched_against_a_value_and_not_a_slot() {
+    let tautology = "\
+subject Shop(Int)
+event @a.one { shop_id: Shop }
+
+fold Counted(shop_id: Shop, kind: String) -> n: Int = 0 {
+  on @a.one(shop_id, kind == kind) => n + 1
+}
+";
+    assert_eq!(
+        error(tautology),
+        "a key part cannot be matched against `kind`"
+    );
+
+    // The same hole with a value that is not a tautology, which is why the rule is about
+    // reading a slot rather than about naming the part itself.
+    let sibling = "\
+subject Shop(Int)
+event @a.one { shop_id: Shop, order_id: Int }
+
+fold Counted(shop_id: Shop, order_id: Int, kind: Int) -> n: Int = 0 {
+  on @a.one(shop_id, order_id, kind == order_id) => n + 1
+}
+";
+    assert_eq!(
+        error(sibling),
+        "a key part cannot be matched against `order_id`"
+    );
+
+    // And the accumulator, which the same check catches where it is written rather than
+    // at the stage's close.
+    let accumulator = "\
+event @a.one { shop_id: Int }
+
+fold F(shop_id: Int, n: Int) -> acc: Int = 0 {
+  on @a.one(shop_id, n == acc) => acc + 1
+}
+";
+    assert_eq!(
+        error(accumulator),
+        "a key part cannot be matched against `acc`"
+    );
+}
+
+/// Two conjuncts on one part cannot both hold unless they are the same value, so the arm
+/// folds nothing at all while `--tables` still reports the column. An arm that can never
+/// fire is a mistake rather than a narrowing.
+#[test]
+fn a_key_part_is_matched_once_per_arm() {
+    let source = "\
+subject Shop(Int)
+event @a.one { shop_id: Shop }
+
+fold Counted(shop_id: Shop, kind: String) -> n: Int = 0 {
+  on @a.one(shop_id, kind == \"a\", kind == \"b\") => n + 1
+}
+";
+    assert_eq!(error(source), "`kind` is matched twice in this arm");
+}
+
+/// An inline fold has no signature to declare a parameter in, which is a different
+/// reason from a guard's and gets its own message: the first version of this blamed a
+/// guard for a program with no guard in it.
+#[test]
+fn an_inline_fold_has_no_key_either_and_is_told_why() {
+    let source = "\
+subject Shop(Int)
+event @a.one { shop_id: Shop }
+event @a.done { n: Int }
+
+command C(shop_id: Shop, kind: String) {
+  fold n: Int = 0
+    on @a.one(shop_id, kind == \"x\") => n + 1
+  emit @a.done { n }
+}
+";
+    assert_eq!(
+        error(source),
+        "`kind ==` names a key part, and an inline fold has no key"
+    );
+    assert!(
+        hint(source).contains("no signature to declare one in"),
+        "{}",
+        hint(source)
+    );
 }

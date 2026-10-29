@@ -216,11 +216,13 @@ impl fmt::Display for Sexp {
 /// The heads that name a part of their parent rather than a value in it. Everything not
 /// here is a value, which is what keeps `(+ (int 1) (int 2))` from reading its operands
 /// as fields.
+///
+/// This list is read by [`Sexp::json`] and by nothing else, so adding to it moves no hash.
 const KEYWORDS: &[&str] = &[
     "absent", "acc", "bind", "body", "col", "default", "delivery", "do", "else", "entity", "env",
-    "events", "expect", "f", "filter", "fold", "given", "index", "in", "item", "key", "load",
-    "max", "now", "of", "on", "p", "params", "post", "pre", "rejects", "respond", "returns",
-    "slice", "stage", "status", "then", "variants", "when", "yield",
+    "events", "expect", "f", "filter", "fold", "given", "index", "in", "item", "key", "keyed",
+    "load", "max", "now", "of", "on", "p", "params", "post", "pre", "rejects", "respond",
+    "returns", "slice", "stage", "status", "then", "variants", "when", "yield",
 ];
 
 fn is_number(text: &str) -> bool {

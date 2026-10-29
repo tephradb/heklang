@@ -504,10 +504,19 @@ module.exports = grammar({
         ')',
       ),
 
+    // Two forms, told apart by the token after the name: `:` and the bare shorthand
+    // match a field of the event, `==` matches a parameter of the fold, which is the key
+    // part this arm writes (parse.rs `key_filter`, and `docs/folds.md` rule 13). The
+    // left side is a different kind of name in each, which is why the field is named
+    // `param` rather than `field` on the second: `locals.scm` suppresses `field` from
+    // scope resolution and a parameter reference is exactly what it must not suppress.
     filter: ($) =>
-      seq(
-        field('field', $.identifier),
-        optional(seq(':', field('value', $._expression))),
+      choice(
+        seq(
+          field('field', $.identifier),
+          optional(seq(':', field('value', $._expression))),
+        ),
+        seq(field('param', $.identifier), '==', field('value', $._expression)),
       ),
 
     let_statement: ($) =>

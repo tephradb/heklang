@@ -1619,3 +1619,44 @@ fn an_override_moves_only_the_tests_hash() {
     assert_eq!(one.hash(), two.hash(), "nothing in production moved");
     assert_ne!(one.hash_with_tests(), two.hash_with_tests());
 }
+
+/// Rule 13's conjunct packs under its own head, after the field filters, and a slice
+/// with none of them packs byte for byte as it did. The second half is what keeps the
+/// corpus hash still: the two kinds are sorted apart and the field kind goes first, so
+/// nothing is prepended and the slot numbering, handed out at first appearance after the
+/// sort, does not move.
+#[test]
+fn a_key_filter_packs_after_the_field_filters() {
+    let keyed = with_events(
+        "fold Counted(customer_id: Customer, kind: String) -> n: Int = 0 {
+           on @order.placed(customer_id, kind == \"placed\") => n + 1
+           on @order.cancelled(customer_id, kind == \"cancelled\") => n + 1
+         }
+
+         command C(order_id: Uuid, customer_id: Customer, total: Money(2)) {
+           fold n = Counted { customer_id, kind: \"placed\" }
+           emit @order.placed { order_id, customer_id, total }
+         }",
+    );
+    let packed = keyed.packed();
+    assert!(
+        packed.contains("(filter customer_id $3) (keyed kind (str \"placed\"))"),
+        "the field filter sorts first and the key follows: {packed}"
+    );
+
+    // And a program whose folds are all plain is untouched, which is the property the
+    // `hek/` corpus hash checks at a larger scale.
+    let plain = with_events(
+        "command C(order_id: Uuid, customer_id: Customer, total: Money(2)) {
+           fold spend: Money(2) = 0
+             on @order.placed(customer_id) { total } => spend + total
+           emit @order.placed { order_id, customer_id, total }
+         }",
+    );
+    assert!(
+        plain.packed().contains("(filter customer_id $"),
+        "{}",
+        plain.packed()
+    );
+    assert!(!plain.packed().contains("keyed"), "{}", plain.packed());
+}

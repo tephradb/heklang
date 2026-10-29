@@ -115,6 +115,10 @@ everything any caller wanted, which is an aggregate with the serial numbers file
 against `invoke Foo { ... }` and for `guard` against `guard`. One word for the declaration and the
 use, because this is one concept.
 
+**A filter's left side is a field of the event, or a parameter.** `(shop_id, order_id: oid)` names
+fields and `(kind == "hold_place")` names a parameter, which is the key part that arm writes. Rule
+13 has it, and the sigil is the whole of the difference.
+
 **The parameters are what the filters and the seed need, and nothing else.** An arm's expression is
 self-contained in practice: of the 425 folds in the port, **not one** read a binding from the body
 that enclosed it. So a fold's parameters are the ids it is kept by, which is also why the migration
@@ -354,6 +358,11 @@ It is an **upper bound**, for the reason `docs/guards.md` rule 5 gives: a comman
 a declaration run never reaches what is below it. And it is only as complete as the program is
 named, which is the honest cost of rule 9.
 
+**One thing narrows it rather than widening it.** A rule 13 key conjunct resolves before anything
+is folded, so an arm whose conjunct fails folded nothing and is left out of the condition entirely.
+A command reading one kind of a nine-kind queue conflicts on that kind's events and no others,
+which is the only place in the language where naming a fold buys a *smaller* boundary.
+
 ## 6. A fold names nothing, so it is always a leaf
 
 A fold's body is **arms and nothing else**: no statements, no declarations, no `guard` and no second
@@ -549,6 +558,9 @@ reaching for one wants to know whether to look for a message.
 | `reveal` | the fold hands back the seal and the caller reveals it (rule 7) | `fold-restriction`, in an arm |
 | read a `secret` | a secret is not in the log, so rotating one would change a replay | `fold-restriction`, in an arm |
 | read a `fold` in a filter | a stage's filters resolve before it folds | `stage-shape`, in an arm |
+| read the event in a `param ==` filter | rule 13: the right side resolves once, before any record | `not-in-scope`, in an arm |
+| write `param ==` in a guard's slice or an inline fold's arm | rule 13: neither is stored, so neither has a key | `fold-restriction` |
+| read a parameter or the accumulator on the right of `param ==` | rule 13: a key that depends on the key, which nothing can write | `fold-restriction`, in an arm |
 | fold nothing | a value computed from arguments alone is a `fn` | `empty-declaration` |
 
 **An arm is the one place a message is needed**, because an arm is an ordinary expression and
@@ -709,6 +721,73 @@ decision has to time it. Keeping the exception narrow matters more than removing
 **Only the envelope makes a fold query-only.** Nothing else about a fold does, and nothing else
 should: the restriction exists for the two objections above, and neither applies to anything else
 a fold can write.
+
+## 13. An arm may match a key part the event does not carry
+
+A filter's left side is a field of the event, written `field: value` or as the bare
+shorthand. It may also be a **parameter of the fold**, written `param == value`, and then it is
+not a narrowing of the event at all: it says which key this arm writes.
+
+```hek
+fold RetryAttempt(shop_id: Shop, kind: String, order_id: Int) -> Int = 0 {
+  on @hold.place.failed(shop_id, order_id, kind == "hold_place") { attempt } => attempt
+  on @hold.release.failed(shop_id, order_id, kind == "hold_release") { attempt } => attempt
+}
+```
+
+**The sigil is the whole of the difference.** `:` matches a field, `==` matches a parameter, and
+both are legal when one name is both: an event carrying its own `kind` field can still be bucketed
+by a `kind` the caller passed. Nothing is overloaded on whether a name happens to be declared.
+
+**What it is for is a queue holding several kinds of work.** The application this was measured on
+has two: a failure list of twelve kinds and a retry ladder of nine, each keyed by a synthetic
+`Uuid.derive(NS, "{kind}|{ids}")`. Those ids exist only because a projector entity gets one `@key`
+column; as folds the ids are already several parameters, and the kind is the one part left with
+nowhere to go. Without it the kinds collide: `hold_place`, `hold_release`, `order_tag`,
+`order_annotation` and `drift` are all keyed `(shop_id, order_id)`, so one fold per kind per column
+is the only alternative, which is 36 folds and 120 where 12 and 30 will do.
+
+**The right side resolves once, in the frame of whatever reads the fold.** A literal, a `const`, a
+parameter, a pure `fn` of those: the same things a field filter's value may be, under the same
+`folding` rule that bars the clock, a call out, `reveal` and a secret. It may **not** read the event
+being folded, and the deferred half of the design is exactly that, a right side evaluated per
+record. Rule 12's refusal of `as e` inside a filter is the same door, and says so.
+
+**A conjunct that does not hold drops the slice rather than widening it.** The slice folds nothing,
+so it joins no append condition either. That is the opposite of what the design predicted, and it
+is available only because the answer is fixed for the invocation: a command reading one kind of a
+nine-kind queue would otherwise conflict on all nine. What a command folded is still a subset of
+what it conflicts on, and here the subset is tight.
+
+Six things are refused:
+
+**A guard's slice**, and **an inline fold's arm**, for two different reasons that get two different
+messages. A guard decides rather than being stored, so there is no row for a key to name; an inline
+fold has no signature to declare a parameter in at all.
+
+**A name that is not a parameter.** Resolved against the parameters rather than against everything
+in scope, which is the point: `lookup` would answer just as readily for the accumulator, and an
+accumulator on the left is a key that depends on what has been folded so far.
+
+**Anything on the right that reads a slot**, a parameter or the accumulator. Whatever writes the
+row holds the event and the key it is writing and no frame at all, so a conjunct reading a slot is a
+key that depends on the key. `kind == kind` is the degenerate case and it is a tautology, which
+would otherwise make `hek check --tables` call the column storable on the strength of nothing;
+`kind == order_id` is the same hole with a value that is not a tautology. So the right side is a
+literal, a `const`, or a `fn` of those.
+
+**Two conjuncts on one part in one arm.** They cannot both hold unless they are the same value, so
+the arm folds nothing while the column still looks storable. An arm that can never fire is a
+mistake rather than a narrowing.
+
+**A value the parameter's type cannot take.** The ordinary check, against the declared type of the
+parameter rather than of any field.
+
+**Seen from the read side**, the part is `ArmMatch::Fixed` rather than `Field` or `Open`, and the
+distinction is not cosmetic: `Open` means a writer ranges over that part, and an arm that fixed it
+must not be told to. An arm doing both, narrowing the event's own field *and* fixing the part,
+records the fixed value, because that is what the row is written at and the field filter is already
+in the predicate that narrows to it.
 
 ## Seen from the read side
 

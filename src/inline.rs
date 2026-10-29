@@ -396,9 +396,24 @@ fn at(site: &mut Site<'_>, callee: &Copied<'_>, call: &Placed<'_>, grown: &mut G
             filters: slice
                 .filters
                 .iter()
-                .map(|filter| Filter {
-                    field: filter.field.clone(),
-                    value: shift_expr_id(filter.value, expr_off),
+                .map(|filter| match filter {
+                    Filter::Field { field, value } => Filter::Field {
+                        field: field.clone(),
+                        value: shift_expr_id(*value, expr_off),
+                    },
+                    // The parameter's slot moves with the frame, the way an `Update`'s
+                    // does below; the value is an expression and moves with the arena.
+                    Filter::Key {
+                        param,
+                        slot,
+                        ty,
+                        value,
+                    } => Filter::Key {
+                        param: param.clone(),
+                        slot: shift_slot(*slot, slot_off),
+                        ty: ty.clone(),
+                        value: shift_expr_id(*value, expr_off),
+                    },
                 })
                 .collect(),
             binds: slice

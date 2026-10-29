@@ -32,9 +32,9 @@ pub use sexp::{Sexp, SexpError};
 
 use crate::ir::{
     Absent, Action, Arm, Bind, Builtin, Command, Effect, EntityDef, EntityField, EnumDef, EnvBind,
-    EnvField, EventDef, Expect, Expr, ExprId, Exprs, FieldDef, Function, Handler, Ident, Iter,
-    Literal, Program, Projector, RecordDef, RecordField, ReplySpec, Return, Setup, Slice, Slot,
-    Stage, Stmt, SubjectDef, Test, Type, UnOp,
+    EnvField, EventDef, Expect, Expr, ExprId, Exprs, FieldDef, Filter, Function, Handler, Ident,
+    Iter, Literal, Program, Projector, RecordDef, RecordField, ReplySpec, Return, Setup, Slice,
+    Slot, Stage, Stmt, SubjectDef, Test, Type, UnOp,
 };
 use crate::parse::children;
 use crate::value::Json;
@@ -942,8 +942,17 @@ impl<'a> Frame<'a> {
 
     fn slice(&mut self, slice: &Slice) -> Sexp {
         let mut parts = vec![atom(slice.event.to_string())];
-        for (field, value) in self.sorted(&filters(slice)) {
+        // The two kinds are sorted apart and the field kind goes first, which is what
+        // keeps a slice with no key filter packing byte for byte as it did, slot
+        // numbering and all: numbers are handed out at first appearance, after the sort.
+        // Separately rather than over the union, because `sorted`'s purity gate is
+        // all-or-nothing and an impure key value would otherwise stop the field filters
+        // sorting.
+        for (field, value) in self.sorted(&field_filters(slice)) {
             parts.push(node("filter", [atom(field), value]));
+        }
+        for (param, value) in self.sorted(&key_filters(slice)) {
+            parts.push(node("keyed", [atom(param), value]));
         }
         for bind in sorted_binds(&slice.binds) {
             let slot = self.slot(bind.slot);
@@ -1381,11 +1390,30 @@ fn pure(exprs: &Exprs, id: ExprId) -> bool {
     }
 }
 
-fn filters(slice: &Slice) -> Vec<(Ident, ExprId)> {
+/// The `field: value` conjuncts, in the `(name, value)` shape `sorted` consumes.
+fn field_filters(slice: &Slice) -> Vec<(Ident, ExprId)> {
     slice
         .filters
         .iter()
-        .map(|filter| (filter.field.clone(), filter.value))
+        .filter_map(|filter| match filter {
+            Filter::Field { field, value } => Some((field.clone(), *value)),
+            Filter::Key { .. } => None,
+        })
+        .collect()
+}
+
+/// The `param == value` conjuncts (`docs/folds.md` rule 13). The slot is deliberately
+/// not packed: post-splice it is the slot that runs, but it differs per copy of a fold
+/// the digest gives no entry of its own, and the parameter's name is what identifies the
+/// key part.
+fn key_filters(slice: &Slice) -> Vec<(Ident, ExprId)> {
+    slice
+        .filters
+        .iter()
+        .filter_map(|filter| match filter {
+            Filter::Key { param, value, .. } => Some((param.clone(), *value)),
+            Filter::Field { .. } => None,
+        })
         .collect()
 }
 

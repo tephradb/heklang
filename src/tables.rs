@@ -9,7 +9,7 @@
 //! [`layout`] returns, and the runtime creates the real tables from the same rules, which
 //! is why the rules live in the library rather than in the CLI.
 
-use crate::ir::{EventPath, Expr, ExprId, Fold, Ident, Param, Program, Type};
+use crate::ir::{EventPath, Expr, ExprId, Filter, Fold, Ident, Param, Program, Type};
 use crate::parse::snake_case;
 
 /// Every table a program implies, and every fold that cannot be kept.
@@ -62,18 +62,39 @@ pub struct Column {
 #[derive(Debug, Clone)]
 pub struct ColumnArm {
     pub event: EventPath,
-    /// For each part of the table's key, in the table's order, the **event field** whose
-    /// value fills it, or `None` when this arm does not pin that part.
+    /// For each part of the table's key, in the table's order, what this arm pins it to.
+    pub fields: Vec<ArmMatch>,
+}
+
+/// How one arm fills one part of the key.
+///
+/// Three states and not two, because an arm can pin a part to something that is not a
+/// field of the event at all (`docs/folds.md` rule 13). Collapsing `Fixed` into `Open`
+/// would make the fold storable while telling the writer to range over the very part the
+/// arm fixed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArmMatch {
+    /// The **event field** whose value fills this part.
     ///
     /// The field, not the parameter, because the two are often two different names:
     /// `on @address.change.escalated(shop_id, order_id, request_id: item_id)` fills a key
     /// part called `item` from a field called `request_id`. Working that out is the same
     /// analysis storability already does, so it is recorded here rather than left for a
     /// second implementation of the rule to get wrong.
-    ///
-    /// A `None` is not a defect: an arm matching a subset of the key is a range update
-    /// over the parts it leaves open.
-    pub fields: Vec<Option<Ident>>,
+    Field(Ident),
+    /// A value the arm fixes, from `param == value`: not on the event, and resolved once
+    /// in the frame of whatever reads the fold. The id indexes that fold's own arena.
+    Fixed(ExprId),
+    /// Not pinned by this arm, which is not a defect: an arm matching a subset of the key
+    /// is a range update over the parts it leaves open.
+    Open,
+}
+
+impl ArmMatch {
+    /// Whether this arm pins the part at all, either way.
+    pub fn pinned(&self) -> bool {
+        !matches!(self, ArmMatch::Open)
+    }
 }
 
 /// A fold that cannot be kept, because part of its key is not something an event
@@ -106,11 +127,27 @@ pub fn layout(program: &Program) -> Layout {
                     .iter()
                     .map(|(at, _)| {
                         let param = &fold.params[*at];
-                        slice
-                            .filters
-                            .iter()
-                            .find(|filter| pins(fold, filter.value, param))
-                            .map(|filter| filter.field.clone())
+                        // Rule 13 first, because an arm may do both and the key conjunct
+                        // is the stronger statement: `(kind, kind == "x")` writes the row
+                        // at `"x"` and narrows the event to the rows whose field agrees,
+                        // and a writer told only the field would write at whatever the
+                        // event carried.
+                        let fixed = slice.filters.iter().find_map(|filter| match filter {
+                            Filter::Key {
+                                param: named,
+                                value,
+                                ..
+                            } => (named == &param.name).then_some(ArmMatch::Fixed(*value)),
+                            Filter::Field { .. } => None,
+                        });
+                        let found = fixed.or_else(|| {
+                            slice.filters.iter().find_map(|filter| match filter {
+                                Filter::Field { field, value } => pins(fold, *value, param)
+                                    .then(|| ArmMatch::Field(field.clone())),
+                                Filter::Key { .. } => None,
+                            })
+                        });
+                        found.unwrap_or(ArmMatch::Open)
                     })
                     .collect(),
             })
@@ -122,7 +159,7 @@ pub fn layout(program: &Program) -> Layout {
         let unmatched: Vec<Ident> = key
             .iter()
             .enumerate()
-            .filter(|(at, _)| arms.iter().all(|arm| arm.fields[*at].is_none()))
+            .filter(|(at, _)| arms.iter().all(|arm| !arm.fields[*at].pinned()))
             .map(|(_, (at, _))| fold.params[*at].name.clone())
             .collect();
         if !unmatched.is_empty() {

@@ -166,6 +166,9 @@
 (field_expression field: (identifier) @variable.other.member)
 (stored_field field: (identifier) @variable.other.member)
 (filter field: (identifier) @variable.other.member)
+; `param == value` names a parameter of the fold rather than a field of the event, so it
+; highlights as the parameter reference it is (docs/folds.md rule 13).
+(filter param: (identifier) @variable.parameter)
 (named_argument name: (identifier) @variable.other.member)
 (erased_clause subject: (identifier) @variable.other.member)
 (annotation_arguments (identifier) @variable.other.member)

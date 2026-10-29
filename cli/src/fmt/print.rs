@@ -111,7 +111,8 @@ impl<'a> Printer<'a> {
             "fold_declaration" => self.fold(node),
             "fold_arm" => self.fold_arm(node),
             "slice_reference" => self.slice(node),
-            "filter" | "field_initializer" => self.optional_value(node),
+            "filter" => self.filter(node),
+            "field_initializer" => self.optional_value(node),
             "let_statement" => self.assignment("let", node),
             "if_statement" => self.if_statement(node),
             "for_statement" => self.keyed("for", node),
@@ -1223,6 +1224,17 @@ impl<'a> Printer<'a> {
     /// and a field initializer, and writing `{ order_id }` is writing every name.
     fn optional_value(&self, node: Node<'a>) -> Doc<'a> {
         self.joined(node, ": ")
+    }
+
+    /// A filter's two forms, which differ only in the separator: `field: value` or the
+    /// bare shorthand, and `param == value` for the key part an arm writes
+    /// (`docs/folds.md` rule 13). Asked of the node rather than counted, because the
+    /// separator is an anonymous child and the named ones are the same either way.
+    fn filter(&self, node: Node<'a>) -> Doc<'a> {
+        match self.has_token(node, "==") {
+            true => self.joined(node, " == "),
+            false => self.joined(node, ": "),
+        }
     }
 
     /// Children separated by a single space, which is most of the language.

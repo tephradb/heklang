@@ -175,6 +175,13 @@ impl Builder {
         slot
     }
 
+    /// What has been declared, for a position that has to resolve a **parameter** rather
+    /// than any name in scope: `docs/folds.md` rule 13's `param == value` names one, and
+    /// `lookup` would answer for a `let` or the accumulator just as readily.
+    pub fn params(&self) -> &[Param] {
+        &self.params
+    }
+
     pub fn opt_param(&mut self, name: &str, inner: Type) -> Slot {
         self.param(name, Type::opt(inner))
     }
@@ -272,8 +279,8 @@ impl Builder {
             .iter()
             .flat_map(|slice| &slice.filters)
             .find_map(|filter| {
-                self.reads_pending(filter.value)
-                    .then(|| (filter.field.clone(), self.exprs.span(filter.value)))
+                self.reads_pending(filter.value())
+                    .then(|| (filter.name().clone(), self.exprs.span(filter.value())))
             })
     }
 
@@ -282,6 +289,37 @@ impl Builder {
     /// `docs/commands.md` has the numbered order.
     pub fn reads_pending(&self, value: ExprId) -> bool {
         self.unset_read(value).is_some()
+    }
+
+    /// The first slot an expression loads, with the span to point at.
+    ///
+    /// `docs/folds.md` rule 13's right side asks it. A key conjunct has to be computable
+    /// by whatever **writes** the row, which holds an event and the key it is writing and
+    /// no frame at all, so a value reading any slot makes the key depend on the key.
+    /// `kind == kind` is the degenerate case and it is a tautology; `kind == order_id` is
+    /// the same hole with a value that is not.
+    pub fn slot_read(&self, value: ExprId) -> Option<(Slot, Span)> {
+        let mut stack = vec![value];
+        while let Some(id) = stack.pop() {
+            let Some(expr) = self.exprs.get(id) else {
+                continue;
+            };
+            if let Expr::Load(slot) = expr {
+                return Some((*slot, self.exprs.span(id)));
+            }
+            stack.extend(crate::parse::children(expr));
+        }
+        None
+    }
+
+    /// The name a slot was declared under, for a diagnostic about one. A parameter or an
+    /// accumulator, which between them are everything a fold's arm can reach.
+    pub fn slot_name(&self, slot: Slot) -> Option<&str> {
+        self.params
+            .iter()
+            .find(|param| param.slot == slot)
+            .map(|param| param.name.as_str())
+            .or_else(|| self.fold_of(slot).map(|var| var.name.as_str()))
     }
 
     /// Whether anything in this declaration loads `slot`. A named fold's accumulator asks

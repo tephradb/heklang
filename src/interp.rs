@@ -12,8 +12,8 @@ use crate::host::{
 };
 use crate::ir::{
     Absent, Arm, BinOp, Builtin, Command, Delivery, Effect, EntityDef, EnvBind, EnvField,
-    EventPath, Expr, ExprId, Exprs, Fold, Function, Ident, Iter, Param, Program, Projector, Return,
-    Slice, Slot, Span, Stmt, Type, UnOp,
+    EventPath, Expr, ExprId, Exprs, Filter, Fold, Function, Ident, Iter, Param, Program, Projector,
+    Return, Slice, Slot, Span, Stmt, Type, UnOp,
 };
 use crate::scaled::{self, Rounding};
 use crate::value::{self, Event, Invoked, Json, Key, Record, Value};
@@ -874,7 +874,7 @@ impl<'a, H: Host> Interpreter<'a, H> {
         'stages: for stage in &arm.stages {
             for half in [Half::Pre, Half::Post] {
                 if half == Half::Post && (!stage.folds.is_empty() || stage.reads()) {
-                    let predicates = resolve(program, &arm.exprs, &stage.slices, &mut frame)?;
+                    let resolved = resolve(program, &arm.exprs, &stage.slices, &mut frame)?;
                     for var in &stage.folds {
                         let value = eval(program, &arm.exprs, &mut frame, var.init, None)?;
                         let value = fitted_at(value, &var.ty, arm.exprs.span(var.init))?;
@@ -884,18 +884,18 @@ impl<'a, H: Host> Interpreter<'a, H> {
                         // Rule 3: the fold stops at the trigger's own position,
                         // inclusive, so state is a pure function of the log prefix and
                         // that position, and counts the trigger.
-                        let query = Query {
-                            slices: predicates,
-                            from: 0,
-                            upto: Some(position),
+                        let folding = Folding {
+                            slices: &stage.slices,
+                            resolved: &resolved,
+                            envelope: &[],
                         };
                         fold(
                             program,
                             &arm.exprs,
                             &self.host,
-                            &query,
-                            &stage.slices,
-                            &[],
+                            &folding,
+                            0,
+                            Some(position),
                             &mut frame,
                         )?;
                     }
@@ -1151,25 +1151,25 @@ impl<'a, H: Host> Interpreter<'a, H> {
 
         // Resolve before seeding, which is what both other drivers do and is safe for the
         // same reason: a filter cannot read the accumulator (`Builder::filter_past_fold`).
-        let predicates = resolve(self.program, &def.exprs, &def.stage.slices, &mut frame)?;
+        let resolved = resolve(self.program, &def.exprs, &def.stage.slices, &mut frame)?;
         for var in &def.stage.folds {
             let value = eval(self.program, &def.exprs, &mut frame, var.init, None)?;
             let value = fitted_at(value, &var.ty, def.exprs.span(var.init))?;
             frame.set(var.slot, value)?;
         }
 
-        let query = Query {
-            slices: predicates,
-            from: 0,
-            upto: None,
+        let folding = Folding {
+            slices: &def.stage.slices,
+            resolved: &resolved,
+            envelope: &def.envelope,
         };
         fold(
             self.program,
             &def.exprs,
             &self.host,
-            &query,
-            &def.stage.slices,
-            &def.envelope,
+            &folding,
+            0,
+            None,
             &mut frame,
         )?;
         // Always set, because the seed above wrote it.
@@ -1306,11 +1306,11 @@ fn execute(
             if !stage.folds.is_empty() || stage.reads() {
                 // Resolved per stage and per attempt, rather than once for the command,
                 // because a filter may now name a `fold` an earlier stage folded.
-                let predicates = resolve(program, &command.exprs, &stage.slices, &mut frame)?;
+                let resolved = resolve(program, &command.exprs, &stage.slices, &mut frame)?;
                 // A stage whose filters moved since the last attempt folded a different
                 // slice, so its carry answers a different question.
                 let resume = match (leading, &carried) {
-                    (true, Some(carry)) if carry.predicates == predicates => Some(carry),
+                    (true, Some(carry)) if carry.slices == resolved => Some(carry),
                     _ => None,
                 };
                 match resume {
@@ -1350,22 +1350,25 @@ fn execute(
                     // to fold. The guard is also what keeps an empty log out of the
                     // `upto: None` case, which means read to the head.
                     if at > from {
-                        let query = Query {
-                            slices: predicates.clone(),
-                            from,
-                            upto: at.checked_sub(1),
+                        let folding = Folding {
+                            slices: &stage.slices,
+                            resolved: &resolved,
+                            envelope: &[],
                         };
                         fold(
                             program,
                             &command.exprs,
                             host,
-                            &query,
-                            &stage.slices,
-                            &[],
+                            &folding,
+                            from,
+                            at.checked_sub(1),
                             &mut frame,
                         )?;
                     }
-                    read.extend(predicates.iter().cloned());
+                    // Rule 13: the live slices only. A slice whose key gate failed folded
+                    // nothing, so conflicting on it would make the command lose to events
+                    // it never read.
+                    read.extend(narrowing(&resolved));
 
                     if leading {
                         // Taken before the statements below the declarations, which is
@@ -1374,7 +1377,7 @@ fn execute(
                         // reach what the next attempt folds onto.
                         folded = Some(Carry {
                             through: at,
-                            predicates,
+                            slices: resolved,
                             folds: stage
                                 .folds
                                 .iter()
@@ -1437,17 +1440,22 @@ fn execute(
     }
 }
 
-/// What one attempt hands the next for one stage: the state it folded, and the
-/// predicates it folded with. The predicates travel beside the values because a later
-/// stage's filter may read an earlier stage's folded state, so unlike the pinned head
-/// they are not fixed for the run: a stage whose filters moved folded a different slice
-/// and has nothing to carry onto.
+/// What one attempt hands the next for one stage: the state it folded, and the resolved
+/// slices it folded with. The slices travel beside the values because a later stage's
+/// filter may read an earlier stage's folded state, so unlike the pinned head they are
+/// not fixed for the run: a stage whose filters moved folded a different slice and has
+/// nothing to carry onto.
+///
+/// **A [`Resolved`] rather than a [`Predicate`], and that is load-bearing.** A rule 13
+/// key gate has no representation in a predicate, so two arms on one event differing only
+/// in their gates resolve to *equal* predicates; comparing predicates alone would resume
+/// one attempt's delta through the other attempt's arms.
 #[derive(Clone)]
 struct Carry {
     /// The position the states below are folded through, exclusive. A retry folds
     /// `[through, after)` onto them rather than starting at the seed.
     through: u64,
-    predicates: Vec<Predicate>,
+    slices: Vec<Resolved>,
     folds: Vec<Value>,
 }
 
@@ -1499,62 +1507,137 @@ fn resolve(
     exprs: &Exprs,
     slices: &[Slice],
     frame: &mut Frame,
-) -> Result<Vec<Predicate>, Error> {
+) -> Result<Vec<Resolved>, Error> {
     slices
         .iter()
         .map(|slice| {
             let def = program.event(&slice.event);
-            let filters = slice
-                .filters
-                .iter()
-                .map(|filter| {
-                    let value = eval(program, exprs, frame, filter.value, None)?;
-                    let value = match def.and_then(|def| def.field(&filter.field)) {
-                        Some(field) => fitted_at(value, &field.ty, exprs.span(filter.value))?,
-                        None => value,
-                    };
-                    Ok((filter.field.clone(), value))
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-            Ok(Predicate::new(slice.event.clone(), filters))
+            let mut filters = Vec::new();
+            let mut live = true;
+            for filter in &slice.filters {
+                let value = eval(program, exprs, frame, filter.value(), None)?;
+                match filter {
+                    Filter::Field { field, .. } => {
+                        let value = match def.and_then(|def| def.field(field)) {
+                            Some(declared) => {
+                                fitted_at(value, &declared.ty, exprs.span(filter.value()))?
+                            }
+                            None => value,
+                        };
+                        filters.push((field.clone(), value));
+                    }
+                    // Rule 13: the key this arm writes, which is not a predicate on the
+                    // event and so never joins `filters`. Fitted to the parameter's
+                    // declared type for the reason a field's value is, so a bare value in
+                    // an optional parameter compares as the optional.
+                    Filter::Key { slot, ty, .. } => {
+                        let value = fitted_at(value, ty, exprs.span(filter.value()))?;
+                        live = live && frame.get(*slot)? == &value;
+                    }
+                }
+            }
+            Ok(Resolved {
+                predicate: Predicate::new(slice.event.clone(), filters),
+                live,
+            })
         })
         .collect()
 }
 
-/// The query and the slices are parallel by construction: `resolve` makes one
-/// predicate per slice, in order. The host narrows, and this re-checks, because a
-/// store that can only narrow approximately is still correct.
-/// `envelope` is the binds a named fold's arms wrote with `as` (`docs/folds.md` rule 12),
-/// filled from the record rather than the event, because that is the only place the
-/// append time and position exist. Every other caller folds a body that cannot bind one
-/// and passes `&[]`.
+/// One slice, resolved: the predicate a host narrows with, and whether this invocation
+/// reads the slice at all.
+///
+/// The second half is rule 13's. A `Filter::Key` conjunct is resolved once against the
+/// argument the caller passed, so a slice whose conjunct fails participates in **nothing**:
+/// it folds no events and joins no append condition. Dropping it rather than widening is
+/// available precisely because the answer cannot move between attempts of one run, and it
+/// matters: a command reading one kind of a nine-kind queue would otherwise conflict on
+/// all nine.
+///
+/// **`live` is why this type exists rather than a bare `Predicate`.** A key conjunct has
+/// no representation in a predicate, so two arms on one event differing only in their key
+/// gates resolve to *equal* predicates. A carry comparing predicates alone would resume
+/// one attempt's delta through the other's arms.
+///
+/// The predicate is built for a dead slice too. Its sibling field filters are evaluated
+/// either way, so a type error in one raises whether or not the key gate held, which is
+/// the determinism a resolved value should have.
+#[derive(Clone, PartialEq, Eq)]
+struct Resolved {
+    predicate: Predicate,
+    live: bool,
+}
+
+/// The three parallel lists one stage folds with, in one place so the invariant has one
+/// home: a slice, the predicate it resolved to, and the envelope binds its arms wrote.
+struct Folding<'a> {
+    slices: &'a [Slice],
+    resolved: &'a [Resolved],
+    envelope: &'a [EnvBind],
+}
+
+impl Folding<'_> {
+    /// The predicates a host is asked to narrow with, and the ones a command conflicts
+    /// on: the live slices only.
+    fn narrowing(&self) -> Vec<Predicate> {
+        narrowing(self.resolved)
+    }
+}
+
+fn narrowing(resolved: &[Resolved]) -> Vec<Predicate> {
+    resolved
+        .iter()
+        .filter(|slice| slice.live)
+        .map(|slice| slice.predicate.clone())
+        .collect()
+}
+
+/// The host narrows, and this re-checks, because a store that can only narrow
+/// approximately is still correct.
+///
+/// **The query is built here, from the same resolved list the matching reads.** It used
+/// to be built by each of the three callers and passed in, which made the parallelism
+/// between it and the slices an invariant three places had to keep; now there is one
+/// construction and nothing to assert. `from` and `upto` are the one thing a caller still
+/// decides, because the range is the one latitude `docs/host.md` section 4 does not give.
 fn fold(
     program: &Program,
     exprs: &Exprs,
     log: &dyn Log,
-    query: &Query,
-    slices: &[Slice],
-    envelope: &[EnvBind],
+    stage: &Folding<'_>,
+    from: u64,
+    upto: Option<u64>,
     frame: &mut Frame,
 ) -> Result<(), Error> {
-    // `zip` below truncates, so a query built from more slices than it is folding with
-    // would match a stage against another stage's predicates and bind the wrong events
-    // into its slots. Silent, and only visible once a command has more than one stage.
+    // `zip` below truncates, so a resolved list shorter than the slices would match a
+    // stage against another stage's predicates and bind the wrong events into its slots.
+    // Silent, and only visible once a command has more than one stage.
     debug_assert_eq!(
-        query.slices.len(),
-        slices.len(),
-        "a fold's query and its slices are one per slice, in order"
+        stage.resolved.len(),
+        stage.slices.len(),
+        "a fold's slices and their resolved predicates are one per slice, in order"
     );
-    log.read(query, &mut |record| {
+    let query = Query {
+        slices: stage.narrowing(),
+        from,
+        upto,
+    };
+    // Rule 13: every slice's key gate failed, so this invocation reads nothing. Returning
+    // here rather than asking with an empty `slices` matters, because an empty list reads
+    // as "narrow by nothing" to a host and would deliver the whole range.
+    if query.slices.is_empty() {
+        return Ok(());
+    }
+    log.read(&query, &mut |record| {
         let event = &record.event;
         // Before the slices, because an arm's value reads these and a slice's updates
         // are that value. One list for the whole fold, so a record that matches no slice
         // writes them harmlessly.
-        for bind in envelope {
+        for bind in stage.envelope {
             frame.set(bind.slot, envelope_value(record, bind.field))?;
         }
-        for (slice, predicate) in slices.iter().zip(&query.slices) {
-            if !matches(predicate, event)? {
+        for (slice, resolved) in stage.slices.iter().zip(stage.resolved) {
+            if !resolved.live || !matches(&resolved.predicate, event)? {
                 continue;
             }
 

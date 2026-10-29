@@ -1860,7 +1860,17 @@
     "fields": {
       "field": {
         "multiple": false,
-        "required": true,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "param": {
+        "multiple": false,
+        "required": false,
         "types": [
           {
             "type": "identifier",

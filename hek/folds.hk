@@ -156,3 +156,15 @@ test "an effect arm reads a named fold, including a sealed one" {
 
   expect http.post("secret:LOYALTY_URL")
 }
+
+// Rule 13. A key part the events do not carry: `kind` tells the two arms apart, and
+// without it they would be one value because both are keyed by the same customer.
+//
+// `==` and not `:`, and the sigil is the whole of the difference: `:` matches a field of
+// the event, `==` matches a parameter, which is a part of the key. The conjunct resolves
+// once against the argument the caller passed, so reading this for one kind folds the
+// other arm's events not at all and does not conflict on them either.
+fold CustomerEventCount(customer_id: Customer, kind: String) -> n: Int = 0 {
+  on @order.placed(customer_id, kind == "placed") => n + 1
+  on @order.cancelled(customer_id, kind == "cancelled") => n + 1
+}

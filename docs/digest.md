@@ -310,12 +310,12 @@ capitalised, which keeps them apart from the lowercase heads a value uses: `(Mon
 | | Heads |
 | --- | --- |
 | declaration | `subject` `event` `enum` `record` `function` `command` `projector` `effect` `test` |
-| structure | `params` `p` `f` `col` `key` `index` `entity` `on` `events` `delivery` `bind` `env` `now` `stage` `pre` `post` `fold` `slice` `filter` `acc` `variants` `default` `absent` `max` `no_index` `returns` `body` `sig` `rejects` `id` `under` |
+| structure | `params` `p` `f` `col` `key` `index` `entity` `on` `events` `delivery` `bind` `env` `now` `stage` `pre` `post` `fold` `slice` `filter` `keyed` `acc` `variants` `default` `absent` `max` `no_index` `returns` `body` `sig` `rejects` `id` `under` |
 | statement | `set` `if` `then` `else` `emit` `put` `patch` `update` `delete` `fail` `log` `erase` `for` `in` `index` `item` `do` `discard` `call` `return` `value` `outcome` |
 | type | `Bool` `Int` `String` `Uuid` `Timestamp` `Rounding` `Json` `Response` `Outcome` `Secret` `(Event @path)` `(Decimal n)` `(Money n)` `(Enum N)` `(Record N)` `(List t)` `(Map k v)` `(Opt t)` `(Subject N)` `(Sealed t Subject)` |
 | value | `$n` `bool` `int` `dec` `money` `str` `uuid` `ts` `none` `some` `variant` `rounding` `array` `of` `map-empty` `obj` `json-num` `new` |
 | expression | `neg` `not` `+ - * / % == != < <= > >= && \|\|` `.method` `field` `choose` `interp` `fn` `builtin` `invoke` `unwrap` `wrap` `reveal` `secret` `reject` `invalid` `make` `comp` `when` `yield` `bad` |
-| test | `given` `respond` `status` `timeout` `erased` `run` `project` `deliver` `expect` `event` `from` `nothing` `row` `norow` `http` `failed` `skipped` |
+| test | `given` `respond` `status` `timeout` `erased` `run` `project` `deliver` `fold` `expect` `event` `from` `nothing` `row` `norow` `http` `failed` `skipped` |
 
 The JSON view turns a list into `{"kind": head, ..}`. A child that is itself a list headed by one of
 the **structure** heads becomes a key of its own; everything else is a value and lands in `args`.

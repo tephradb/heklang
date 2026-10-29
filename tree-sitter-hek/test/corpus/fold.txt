@@ -149,3 +149,61 @@ command ConfirmEdit(shop_id: Shop, order_id: Int) {
             name: (identifier))
           (field_initializer
             name: (identifier)))))))
+
+================================================================================
+a filter may match a parameter with `==` rather than a field with `:`
+================================================================================
+
+fold RetryAttempt(shop_id: Shop, kind: String, order_id: Int) -> Int = 0 {
+  on @hold.place.failed(shop_id, order_id, kind == "hold_place") { attempt } => attempt
+  on @hold.release.failed(order_id: oid, kind == "hold_release") => 0
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fold_definition
+    name: (type_identifier)
+    parameters: (parameters
+      (parameter
+        name: (identifier)
+        type: (type
+          (type_identifier)))
+      (parameter
+        name: (identifier)
+        type: (type
+          (primitive_type)))
+      (parameter
+        name: (identifier)
+        type: (type
+          (primitive_type))))
+    type: (fold_type
+      (type
+        (primitive_type)))
+    seed: (integer_literal)
+    body: (fold_body
+      (fold_arm
+        (slice_reference
+          path: (event_path)
+          (filter
+            field: (identifier))
+          (filter
+            field: (identifier))
+          (filter
+            param: (identifier)
+            value: (string
+              (string_content))))
+        destructure: (destructure
+          (identifier))
+        value: (identifier))
+      (fold_arm
+        (slice_reference
+          path: (event_path)
+          (filter
+            field: (identifier)
+            value: (identifier))
+          (filter
+            param: (identifier)
+            value: (string
+              (string_content))))
+        value: (integer_literal)))))

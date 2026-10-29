@@ -5,7 +5,7 @@
 //! source cannot check by eye: which parameter an arm actually supplies, which event
 //! field fills it, and what orders a key once it has more than one part.
 
-use heklang::{Layout, Program, layout, parse};
+use heklang::{ArmMatch, Layout, Program, layout, parse};
 
 fn program(source: &str) -> Program {
     match parse(source) {
@@ -242,9 +242,15 @@ fold CodeBlocked(code: String, shop_id: Shop) -> Bool = false {
     let arms = &layout.tables[0].columns[0].arms;
     assert_eq!(
         arms[0].fields,
-        [Some("shop_id".into()), Some("code".into())]
+        [
+            ArmMatch::Field("shop_id".into()),
+            ArmMatch::Field("code".into())
+        ]
     );
-    assert_eq!(arms[1].fields, [Some("shop_id".into()), None]);
+    assert_eq!(
+        arms[1].fields,
+        [ArmMatch::Field("shop_id".into()), ArmMatch::Open]
+    );
 }
 
 /// The event's field and the parameter it binds are two names, and often two different
@@ -266,7 +272,10 @@ fold Placed(shop_id: Shop, ticket_id: Int) -> Bool = false {
     let arm = &layout.tables[0].columns[0].arms[0];
     assert_eq!(
         arm.fields,
-        [Some("shop_id".into()), Some("order_id".into())]
+        [
+            ArmMatch::Field("shop_id".into()),
+            ArmMatch::Field("order_id".into())
+        ]
     );
 }
 
@@ -407,4 +416,64 @@ fold Late(day: Int) -> Bool = false {
         .map(|table| table.name.as_str())
         .collect();
     assert_eq!(names, ["day_int", "day_string"]);
+}
+
+/// A key part no event carries, from `docs/folds.md` rule 13's `param == value`. The
+/// part is matched, so the fold is storable, and it is matched by a **value** rather than
+/// by a field, which is the third state `ArmMatch` exists for.
+#[test]
+fn a_key_part_an_arm_fixes_is_matched_without_a_field() {
+    let source = app("
+fold Counted(shop_id: Shop, kind: String) -> n: Int = 0 {
+  on @order.placed(shop_id, kind == \"placed\") => n + 1
+  on @order.cancelled(shop_id, kind == \"cancelled\") => n + 1
+}
+");
+
+    assert_eq!(tables(&source), ["shop__kind  counted"]);
+    assert!(
+        unstored(&source).is_empty(),
+        "the kind is supplied by every arm, so the fold is kept"
+    );
+
+    let arms = &read(&source).tables[0].columns[0].arms;
+    assert!(matches!(arms[0].fields[0], ArmMatch::Field(ref field) if field == "shop_id"));
+    // Fixed and not Open, which is the distinction that matters to whatever writes the
+    // row: Open means range over the part, and this arm fixed it.
+    assert!(matches!(arms[0].fields[1], ArmMatch::Fixed(_)));
+    assert!(matches!(arms[1].fields[1], ArmMatch::Fixed(_)));
+}
+
+/// And one no arm fixes is still unstored, so the new form earns storability rather than
+/// granting it: `kind` here is a parameter the seed reads and no arm names.
+#[test]
+fn a_key_part_no_arm_fixes_is_still_unstored() {
+    let source = app("
+fold Counted(shop_id: Shop, kind: String) -> n: String = kind {
+  on @order.placed(shop_id) => n
+}
+");
+
+    assert_eq!(unstored(&source), ["Counted  kind"]);
+}
+
+/// An arm may both narrow the event's own field and fix the key part, and the key
+/// conjunct is the stronger statement, so it is what the layout records. Found by
+/// `/code-review`: taking the field first told a writer to write at whatever the event
+/// carried, while the read side answered the seed for every key but the fixed one.
+#[test]
+fn a_part_an_arm_both_binds_and_fixes_records_the_fixed_value() {
+    let source = app("
+fold Counted(shop_id: Shop, code: String) -> n: Int = 0 {
+  on @shop.blocked(shop_id, code, code == \"plan_limit\") => n + 1
+}
+");
+
+    assert_eq!(tables(&source), ["shop__code  counted"]);
+    let arm = &read(&source).tables[0].columns[0].arms[0];
+    assert!(matches!(arm.fields[0], ArmMatch::Field(ref field) if field == "shop_id"));
+    assert!(
+        matches!(arm.fields[1], ArmMatch::Fixed(_)),
+        "the gate wins over the field bind, because it is what the row is written at"
+    );
 }

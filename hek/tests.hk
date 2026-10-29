@@ -212,3 +212,15 @@ test "a note past the column is kept to its first eight characters" {
 
   expect OrderNote[ADA] { note: "note: le" }
 }
+
+// Rule 13 from the read side. One fold, two kinds, and asking for one of them folds the
+// other arm's events not at all: without the `kind` part in the key both arms would
+// count into one value and this would be 2.
+test "a key part the events do not carry tells two arms apart" {
+  given placed(ADA, 1, "ada@example.com", 25.99)
+  given @order.cancelled { order_id: ADA, customer_id: 1, refund: 25.99 }
+
+  fold CustomerEventCount { customer_id: 1, kind: "placed" }
+
+  expect 1
+}
