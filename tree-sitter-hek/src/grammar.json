@@ -1690,6 +1690,10 @@
         {
           "type": "SYMBOL",
           "name": "deliver_clause"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "fold_clause"
         }
       ]
     },
@@ -1745,6 +1749,27 @@
             "type": "SYMBOL",
             "name": "identifier"
           }
+        }
+      ]
+    },
+    "fold_clause": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "fold"
+        },
+        {
+          "type": "FIELD",
+          "name": "fold",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_type_name"
+          }
+        },
+        {
+          "type": "SYMBOL",
+          "name": "field_initializer_list"
         }
       ]
     },
@@ -1806,15 +1831,7 @@
         },
         {
           "type": "SYMBOL",
-          "name": "invoke_expression"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "call_expression"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "method_call"
+          "name": "_expression"
         }
       ]
     },

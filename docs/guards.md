@@ -35,7 +35,7 @@ and over: one repeats `fold shop: Bool = false / on @shop.connected(shop_id) => 
 **thirteen times byte-identical**, each followed by its own copy of the rejection; the other gives
 two commands six identical folds and a shared six-argument `fn` whose three `Bool`s and three `Int`s
 transpose without a type error. What drifts when those fall out of step is the append condition, and
-`docs/testing.md` §8 keeps that out of a test on purpose.
+`docs/testing.md` §9 keeps that out of a test on purpose.
 
 ---
 

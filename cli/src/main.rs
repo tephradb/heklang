@@ -66,7 +66,7 @@ fn main() -> ExitCode {
 }
 
 /// `Ok(false)` is a program that was read fine and did not pass; `Err` is not being
-/// able to look at all. Same cut `docs/testing.md` rule 9 makes between a failed test
+/// able to look at all. Same cut `docs/testing.md` rule 10 makes between a failed test
 /// and an errored one, for the same reason.
 fn run() -> Result<bool, String> {
     let mut args = env::args().skip(1);
@@ -390,7 +390,7 @@ fn suite(program: &Program) -> bool {
 /// names it, so once guards compose the append condition is a closure rather than
 /// something a reader can take off the page. This is how to see it: two commands meant to
 /// conflict on the same events can be compared here, which is the one question
-/// `docs/testing.md` §8 deliberately keeps out of a test.
+/// `docs/testing.md` §9 deliberately keeps out of a test.
 ///
 /// **Asked for, not printed by default.** `check` is a pass/fail gate, and this is one
 /// line per command rather than a summary, so a 26-command program pays 26 lines on every

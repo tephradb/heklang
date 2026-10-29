@@ -69,7 +69,9 @@ action and in `expect invoke` alike. Parentheses stay positional.
 `given`, `respond`, `erased`, `run`, `project`, `deliver`, `expect`, `no`, `nothing` and `skipped`
 are claimed **only inside a test body**. `secret` is the one word this construct shares with a
 declaration rather than reserving for itself (`docs/effects.md` rule 16), and it is soft in both
-places, so a field or a parameter of that name stays writable. A construct that only tests use should cost no name anywhere
+places, so a field or a parameter of that name stays writable. The `fold` action costs no name
+either, for the opposite reason: it is the keyword a fold is already declared with, and whether the
+name after it binds a local tells the two apart. A construct that only tests use should cost no name anywhere
 else, and an entity field called `given` or a command parameter called `no` stays writable. This is
 the same device the soft builtin names use (`docs/effects.md` rule 11).
 
@@ -139,7 +141,7 @@ found it.
 
 **Rejected: a `background` block shared by a file's tests.** It attacks the same 1,400 lines and is
 cheaper still, and it cannot express the variation, so an override would be needed anyway. It also
-costs the property section 9 is built on: a test's log is visible in the test.
+costs the property section 10 is built on: a test's log is visible in the test.
 
 ### A `given` is checked against the declaration
 
@@ -147,7 +149,7 @@ An event field's `@max` is enforced here, the same bound an `emit` enforces
 (`docs/declarations.md`). A test writing a value past it is stating a world the runtime could not
 produce, and it used to be appended silently.
 
-It is the test **erroring** rather than failing, which section 9's distinction already has a place
+It is the test **erroring** rather than failing, which section 10's distinction already has a place
 for: the case could not say what it was about, which is not the same as asserting the wrong thing.
 An `emit` answers `Outcome::Invalid` instead, and that is a command's channel rather than a
 directive's.
@@ -238,6 +240,7 @@ Exactly one, and it decides which expectations are legal:
 | `run Command { name: value, ... }` | the command against the given log |
 | `project Projector` | the projector over the whole given log |
 | `deliver Effect` | the effect over the whole given log, following it as an `invoke` lengthens it |
+| `fold Fold { name: value, ... }` | the named fold over the whole given log, for that key |
 
 **`deliver` drives, so there is no position to write.** A test says which effect, not which event: an
 effect that fires on three of the given events makes three invocations, and the expectations are the
@@ -256,6 +259,10 @@ boundary with, and a faithful `live` arm over a log that is all history would fi
 untestable. What a test can say is what the arm does when it runs, which is what the body is for. If a
 real case for boundary testing turns up, the additive move is an `activate <Effect>` statement usable
 between `given`s, splitting the log into history and live.
+
+**`fold` runs no handler, and it is the only action that does not.** The other three name something
+that decides, projects or calls out; a named fold is a value and a key, so the action is the read
+itself. Section 8 is what it expects.
 
 ## 5. What `run` expects
 
@@ -371,10 +378,57 @@ differently because they are about different things.
 replay, and being able to assert on the line is how a test pins the branch an arm took when the arm's
 only other output is a decision not to call out.
 
-## 8. What a test cannot assert
+## 8. What `fold` expects
 
-- **State.** There is no `expect token == "x"`. A folded value is an intermediate, and the
-  reason to have it is what the arm did with it, which is already in the trace.
+| Expectation | Matches |
+| --- | --- |
+| `expect <value>` | the value the fold folded to, for the key the action named |
+
+Exactly one, and that is the difference from every other action. `run`, `project` and `deliver` each
+produce a sequence and take as many expectations as it has members; a fold has one accumulator, so a
+second `expect` would be a second answer to one question and is refused where it is written. So is a
+test with none: `fold LifetimeSpend { customer_id: 7 }` with nothing after it folds a value and
+throws it away.
+
+```hek
+test "lifetime spend nets the cancellation" {
+  given @order.placed    { customer_id: 7, total: 400.00 }
+  given @order.cancelled { customer_id: 7, refund: 150.00 }
+
+  fold LifetimeSpend { customer_id: 7 }
+
+  expect 250.00
+}
+```
+
+The arguments are the fold's parameters, written exactly as a command reads it
+(`fold spend = LifetimeSpend { customer_id }`) minus the binding, and they are the key. A key no
+event touched folds to the seed rather than to nothing, which is what makes `expect 0` an assertion
+about the seed and the reason there is no `expect nothing` here.
+
+**The value is compared as a value, under the fold's declared type.** `Value::same`, the same
+comparison a row's column goes through in section 6, so a `Money(2)` is matched on its scale and a
+subject-bound value on its content. The failure names the fold and both sides.
+
+**A query-only fold is readable here, and nowhere else** (`docs/folds.md` rule 12). An arm that binds
+the envelope with `as` makes the fold unreadable by a command, because an append time is not a thing
+a decision may be built on. A test is not a decision, and under the default world the envelope is
+exactly predictable: `Harness::push` stamps one minute per event from 2020-01-01T00:00:00Z, so the
+third `given` is at `"2020-01-01T00:02:00Z"`. That predictability is a property of the test harness
+rather than of the language, which is already true of any row asserted on an `e.at` column.
+
+**This is also the read a runtime makes.** Section 9's closing rule is that everything the runner
+asserts goes through the same public API an embedder has, and `fold` is no exception: it calls
+`Interpreter::fold`, which is what a host will call to fill a stored column for one key. A test is
+the first caller rather than a private path into the fold.
+
+## 9. What a test cannot assert
+
+- **An intermediate.** There is no `expect token == "x"` for a `fold` written inside a decision. The
+  reason to have one is what the handler did with it, which is already in the appended events or the
+  trace, and the value itself is not an output. A **named** fold with a signature is a different
+  thing, and section 8 is how it is asserted: it is a declaration with a name, a type and a key, so
+  the value is the output.
 - **Anything through an arbitrary boolean.** There is no `assert <expr>`. A case is a table of
   inputs and outputs; once it can compute, it is a program with its own bugs, and the thing that
   fails is no longer legible in a report.
@@ -397,7 +451,7 @@ trace come from the interpreter, and the one thing left that a world supplies is
 against a real log and real read models without anything on the list above becoming visible, and
 without a second definition of what `expect` means.
 
-## 9. Running
+## 10. Running
 
 `run_tests(&program)` returns one result per test, in declaration order, each carrying the test's
 name, its module and its outcome. A result is one of:

@@ -499,7 +499,7 @@ fn a_long_hint_wraps_under_itself() {
 /// A guard's slices join the boundary of whatever names it, transitively, so the append
 /// condition stops being something a reader can take off the page. `check` prints the
 /// closure, which is what makes two commands' boundaries comparable at all: a test
-/// cannot ask (`docs/testing.md` §8).
+/// cannot ask (`docs/testing.md` §9).
 #[test]
 fn check_names_what_a_command_guards() {
     let source = "\
@@ -673,6 +673,35 @@ fn check_prints_the_table_layout_when_asked() {
             < text.find("TABLE shop__order").expect("the order table"),
         "{text}"
     );
+}
+
+/// A column asserted the way a user does: `hek test` over a `fold` action. The same
+/// folds the listing above derives, read back by name through the built binary.
+#[test]
+fn a_fold_action_asserts_a_column_end_to_end() {
+    let root = project(
+        "fold-action",
+        &[
+            ("app.hk", TABLES),
+            (
+                "tests.hk",
+                "test \"one shop's orders add up\" {
+  given @order.placed { shop_id: 1, order_id: 9, total: 10.00 }
+  given @order.placed { shop_id: 1, order_id: 9, total: 2.50 }
+  given @order.placed { shop_id: 2, order_id: 9, total: 99.00 }
+  fold OrderTotal { shop_id: 1, order_id: 9 }
+  expect 12.50
+}
+",
+            ),
+        ],
+    );
+    let output = run(&root, &[]);
+
+    assert!(output.status.success(), "{}", stdout(&output));
+    let text = stdout(&output);
+    assert!(text.contains("pass   one shop's orders add up"), "{text}");
+    assert!(text.contains("1 passed, 0 failed"), "{text}");
 }
 
 /// `check` is a pass/fail gate, so this listing is asked for too.

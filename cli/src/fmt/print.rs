@@ -95,6 +95,7 @@ impl<'a> Printer<'a> {
             "run_clause" => self.keyed("run", node),
             "project_clause" => self.keyed("project", node),
             "deliver_clause" => self.keyed("deliver", node),
+            "fold_clause" => self.keyed("fold", node),
             "erased_clause" => self.keyed("erased", node),
             "respond_clause" => self.respond(node),
             "expect_clause" => self.expect(node),

@@ -195,8 +195,10 @@ pub fn layout(program: &Program) -> Layout {
 /// pins the field to something the key cannot be recovered from, and a walk looking for
 /// the slot anywhere underneath would wrongly accept it.
 ///
-/// `Expr::Wrap` is deliberately not peeled: it is only ever an operand of the comparison
-/// that made it (`Builder::wrap`), so it cannot be a filter's value.
+/// `Expr::Wrap` is deliberately not peeled, and neither of its two synthesisers can put
+/// one here: `Parser::lift` makes it an operand of a comparison, and `Parser::lifted` the
+/// value of a spliced call's parameter assignment, which lives in the **caller's** arena
+/// rather than in `fold.exprs`.
 fn pins(fold: &Fold, value: ExprId, param: &Param) -> bool {
     let mut id = value;
     // A fold body has no statements and so nothing that narrows, but peeling is free and

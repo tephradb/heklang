@@ -696,6 +696,44 @@ fn a_test_is_not_in_the_program_hash() {
     assert!(all.contains("hash_with_tests"), "{all}");
 }
 
+/// The `fold` action and its value expectation both have a form, and neither moves the
+/// program's hash: a named fold earns no entry of its own, and a test is not production.
+#[test]
+fn a_fold_action_has_a_form_under_the_tests() {
+    let with = with_events(
+        "fold LifetimeSpend(customer_id: Customer) -> spend: Money(2) = 0 {
+           on @order.placed(customer_id) { total } => spend + total
+         }
+
+         test \"what one customer has spent\" {
+           given @order.placed { order_id: \"0190d1a1-0000-7000-8000-000000000001\", customer_id: 1, total: 25.99 }
+           fold LifetimeSpend { customer_id: 1 }
+           expect 25.99
+         }",
+    );
+    let without = with_events(
+        "fold LifetimeSpend(customer_id: Customer) -> spend: Money(2) = 0 {
+           on @order.placed(customer_id) { total } => spend + total
+         }",
+    );
+
+    let packed = with.packed_with_tests();
+    assert!(
+        packed.contains("(fold LifetimeSpend (f customer_id (int 1)))"),
+        "the action names the fold and its key: {packed}"
+    );
+    assert!(
+        packed.contains("(expect (value (money 2 2599)))"),
+        "and the expectation is the value it folded to: {packed}"
+    );
+    assert_eq!(
+        without.hash(),
+        with.hash(),
+        "a test still runs nothing in production"
+    );
+    assert_ne!(without.hash_with_tests(), with.hash_with_tests());
+}
+
 // ---------------------------------------------------------------------------
 // Rule 9: the version line is part of the hash
 // ---------------------------------------------------------------------------

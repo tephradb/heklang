@@ -363,7 +363,12 @@ module.exports = grammar({
       seq('secret', field('name', $.identifier), '=', field('value', $._expression)),
 
     _action_clause: ($) =>
-      choice($.run_clause, $.project_clause, $.deliver_clause),
+      choice(
+        $.run_clause,
+        $.project_clause,
+        $.deliver_clause,
+        $.fold_clause,
+      ),
 
     run_clause: ($) =>
       seq('run', field('command', $.identifier), $.field_initializer_list),
@@ -371,6 +376,13 @@ module.exports = grammar({
     project_clause: ($) => seq('project', field('projector', $.identifier)),
 
     deliver_clause: ($) => seq('deliver', field('effect', $.identifier)),
+
+    // The fourth action: a named fold read by name, which is how a stored column is
+    // asserted (docs/testing.md section 8). It shares its word with `fold_declaration`
+    // and nothing else is ambiguous, because a statement's `fold` binds a local and
+    // this one does not: `=` against `{` is a one-token decision.
+    fold_clause: ($) =>
+      seq('fold', field('fold', $._type_name), $.field_initializer_list),
 
     expect_clause: ($) => seq('expect', optional($._expectation)),
 
@@ -384,9 +396,15 @@ module.exports = grammar({
         $.outcome_expression,
         $.refusal_expression,
         $.fail_statement,
-        $.invoke_expression,
-        $.call_expression,
-        $.method_call,
+        // The value a `fold` action folded to, and only there: the parser refuses a bare
+        // value under every other action, which is what keeps a free-standing
+        // `assert <expr>` out of the language (docs/testing.md section 9).
+        //
+        // This subsumes the three expectations that used to be listed here by name,
+        // `invoke_expression`, `call_expression` and `method_call`: all three are
+        // `_primary`, and leaving them beside it makes one input derivable two ways.
+        // The nodes are unchanged, so `expect log("x")` is still a `method_call`.
+        $._expression,
       ),
 
     event_expectation: ($) =>

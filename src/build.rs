@@ -688,9 +688,12 @@ impl Builder {
 
     /// An expression lifted into the optional of `inner`, which is `Literal::Some` for a
     /// value the parser had not already resolved. Named for the node rather than for
-    /// `none` above it, because it is not that function's pair: `Expr::Wrap` is only ever
-    /// an operand of the comparison that made it, and `Parser::lift` is the only caller
-    /// that keeps it one. See `docs/optionals.md`.
+    /// `none` above it, because it is not that function's pair.
+    ///
+    /// Its two callers are `Parser::lift` and `Parser::lifted`, and each keeps the node
+    /// out of receiver and root position: the first makes it an operand of the comparison
+    /// that made it, the second the value of a spliced call's parameter assignment. See
+    /// `Expr::Wrap` and `docs/optionals.md`.
     pub fn wrap(&mut self, value: ExprId, inner: Type) -> ExprId {
         self.expr(Expr::Wrap { value, inner })
     }

@@ -840,6 +840,11 @@ fn test(def: &Test) -> Sexp {
         }
         Action::Project { projector, .. } => node("project", [atom(projector.clone())]),
         Action::Deliver { effect, .. } => node("deliver", [atom(effect.clone())]),
+        Action::Fold { fold, args, .. } => {
+            let mut part = vec![atom(fold.clone())];
+            part.extend(frame.keyed(args));
+            node("fold", part)
+        }
     });
     for expect in &def.expect {
         parts.push(node("expect", [frame.expect(expect)]));
@@ -1134,6 +1139,10 @@ impl<'a> Frame<'a> {
                 node("failed", [message])
             }
             Expect::Skipped { .. } => atom("skipped"),
+            Expect::Folded { value, .. } => {
+                let value = self.expr(*value);
+                node("value", [value])
+            }
         }
     }
 

@@ -35,6 +35,8 @@ and it holds at **every** position that declares a type:
 | an `emit` field | `emit @order.shipped { tracking }` where the field is `String?` |
 | an entity field in `put`, `patch` and `update` | `put Order { tracking }` into a `String?` column |
 | a fold seed and every fold arm | `fold token: String? = none` with a `String`-valued arm |
+| a `guard`'s or a named `fold`'s argument | `fold s = Sum { bias: 5 }` where `bias` is `Int?` |
+| a slice filter | `on @hold.failed(fulfillment_order_id)` where the field is `Int?` |
 | a record literal field | `Facts { note }` where `note` is declared `String?` |
 | a list or map element | `xs.push(name)` where `xs` is a `List(String?)` |
 | a test's `given` field and expected value | `expect Order[id] { tracking: "TRK-1" }` against a `String?` column |
@@ -46,7 +48,16 @@ and a `List(String)` still does not fill a `List(String?)`: the wrap is one leve
 the declared type, not a conversion that recurses.
 
 **Why the list is exhaustive rather than illustrative.** Each of these is a separate site in the
-interpreter, and the rule is only worth anything if it holds at all of them. It has three times not:
+interpreter, and the rule is only worth anything if it holds at all of them. It has five times not,
+and the last two rows above are the fourth and fifth. A **slice filter** resolved its value with no
+declared type to fit it to, so a bare `Int` was compared against the `Int?` the event holds and the
+slice matched nothing at all. A **spliced call's argument**, a `guard`'s or a named `fold`'s, became
+a `Stmt::Assign`, which carries no declared type, so nothing downstream could coerce it and the
+callee's `.is_none()` died at run time on a clean `hek check`; that one is wrapped in the parser
+instead, at the call site, which is the only place that knows both types. Both were silent in the
+worst way: the first changed what a decision was made on and reported nothing at all.
+
+The three before them:
 a fold seed and a fold arm each stored a bare value into an optional slot until they were fixed;
 the record and container positions did the same until the sweep that produced this table; and the
 last two rows failed differently again, by rejecting the write outright, so that an optional-typed

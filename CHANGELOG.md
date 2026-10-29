@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   duplicated folds in the port that measured the construct are sealed.
 - `duplicate-fold`: one inline fold written the same way in two bodies, which is `docs/folds.md`
   rule 9. An error rather than a warning, because a fold declares the slice its caller conflicts on
-  and `docs/testing.md` §8 keeps the append condition out of a test, so nothing else reports two
+  and `docs/testing.md` §9 keeps the append condition out of a test, so nothing else reports two
   copies drifting apart. An effect's arm counts as a body. Compared as written, including the
   accumulator's name, so the check under-counts and never misfires. It fires 167 times on the
   pre-migration port, and found one duplicate the migration's own tooling had missed. The first
@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two-place diagnostic in the crate.
 - `unused-accumulator`: a named fold that binds an accumulator name no arm reads. A fold's value
   is its declaration's name, so the name is written only where an arm reads the running value.
+- A named fold's name is spelled like a type: an initial capital, and no `_`. The second name in
+  heklang whose spelling leaves the program, after a `refusal`'s, and held to the same two rules for
+  the same reason: a named fold is a stored column and the column's name is `snake_case` of this
+  one, so the rules keep that derivation reversible and `fold Sum` beside `fold sum` can no longer
+  derive one column twice. An inline fold's accumulator is a local and is unaffected.
 - `hek check --boundaries` names what a command reads as well as what it guards, transitively
   through its guards.
 - **Compound `@key`.** An entity's key may be several columns: `@key` goes on each one, written
@@ -65,6 +70,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `hek check --tables` gives two key signatures that derive one table name a name each, by taking
   the part types into both. `(day: String)` and `(day: Int)` were two tables both called `day`,
   which a runtime keying on the name would have served as one. No program has done it.
+- **`fold` is a fourth test action**, so a named fold's value can be asserted:
+  `fold LifetimeSpend { customer_id: 7 }` and then `expect 250.00`. Written as a command reads a
+  fold, minus the binding. Exactly one expectation, unlike every other action, because a fold has
+  one accumulator and a second `expect` would be a second answer to one question; a test with none
+  is refused too. `expect <value>` stays illegal under `run`, `project` and `deliver`, which is
+  what keeps a free-standing `assert <expr>` out of the language. `docs/testing.md` section 8, and
+  section 9 is rewritten: the prohibition on asserting state was always about an intermediate
+  inside a decision, and a declaration with a signature and a key is not one. **A query-only fold
+  is readable here and nowhere else**, which is the first execution of one anywhere.
+- `Interpreter::fold(name, args)` folds one named fold over the whole log for one key, beside
+  `project` and `project_into`. **The first thing that executes a named fold**: everywhere else one
+  runs by having been spliced into its caller, so `docs/folds.md` rule 11 is rewritten too. It is
+  the read a stored column will be served by, and the test action goes through it rather than
+  through a test-only path. Sealed content whose key has been erased reads back absent, exactly as
+  the same column does through `project`.
+
+  Restoring the 27 read-model tests that retiring a ported application's projectors deleted found
+  four bugs in the first 78 cases: two in the converted folds (a seven-day overage clock started at
+  the wrong threshold, and an order withheld before its contact event had no customer), and the two
+  under Fixed below.
 
 ### Changed
 
@@ -75,10 +100,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Store::get` and `Store::rows` with it. A single-column key is a one-element slice rather than a
   special case, and the sequence orders lexicographically, which is what keeps a prefix of a
   compound key a range the read API can page on.
-- The digest version is `hek-digest 5`, and two fixes on this branch share it. Neither of the two
+- The digest version is `hek-digest 5`, and three fixes on this branch share it. None of the
   features does: compound keys moved no hash at all, because a one-column key writes exactly the
-  `(key x)` node it wrote before, and a named fold is inlined like a `guard` and so earns no entry.
-  Both verified byte for byte against the `hek/` corpus.
+  `(key x)` node it wrote before; a named fold is inlined like a `guard` and so earns no entry; and
+  the `fold` test action moves the form only for a program that writes one, and only under
+  `--tests`. All verified byte for byte against the `hek/` corpus, whose hash is unchanged.
+
+  The third fix is the optional lift on a spliced call's argument, which adds a `Wrap` node to the
+  caller's arena. It moves the form only for a declaration that passes a bare value to an optional
+  `guard` or named `fold` parameter, and no `hek/` declaration does.
 
   A statement written below a `guard` moves from the stage's `(pre ..)` to its `(post ..)`, which is
   where `docs/guards.md` rule 3 always said it was, so the packed form of a command with one
@@ -92,6 +122,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A spliced call's argument was not coerced into an optional parameter.** `fold s = Sum { bias: 5 }`
+  where `bias` is `Int?` put a bare `Int` in the slot, and the callee's `bias.is_none()` died at run
+  time on a clean `hek check`; the same hole was on the `guard` path. Every other declared position
+  coerces at run time, where the type is in hand, but the splice turns an argument into a
+  `Stmt::Assign`, which carries no declared type, so the lift is written in the parser at the call
+  site. It also kept one declaration answering one way: `Interpreter::fold` reads the same fold
+  through `bind_params`, which does coerce, so a `fold` test could otherwise pass on a fold no
+  command could run. `docs/optionals.md`'s table gains the position, and `Expr::Wrap` gains a second
+  synthesiser.
+- **`hek check` aborted on a fold arm reading a payload field through its envelope binding.**
+  `on @a.one as e (shop_id) => e.n` reached the handler path that binds a field on demand, and a
+  module-scope fold has no event declaration there to unwrap, so the compiler panicked with
+  `only called inside a handler`. It is now a diagnostic naming the field and where it belongs. The
+  sixth refusal in `docs/folds.md` rule 12.
+- **An envelope binding could be rebound as a field of its own arm.** `on @a.one as e (shop_id) { e }`
+  checked clean: the shadow check runs before the arm's binds are allocated, so this was the one
+  spelling it could not see, and resolution puts the envelope ahead of the scopes, which left the
+  bind unreachable for that arm. Now `declared-twice` at the bind.
+- **A slice filter on an optional event field matched nothing.** `on @hold.release.failed(shop_id,
+  fulfillment_order_id)` where the field is declared `Int?` compared a bare `Int` against the
+  optional the event holds, so the slice folded no events at all. The parser accepts the bare value,
+  because that is the coercion rule at a declared position, and the predicate the fold read with
+  carried the unwrapped one. Silent: the arm reads as written, `hek check` passes, and the only
+  symptom is a value that is always the seed. **Not a read-model bug**: the same filter in a
+  command's fold decides on nothing. The fit is applied where the predicate is built rather than
+  where a record is matched, because the predicate is also what a host narrows with.
+- **A named fold holding sealed content handed back the plaintext after the key was erased.** The
+  shredding that empties a sealed column lives in `project`'s wrapper over the `Rows` seam, and the
+  fold read had no equivalent, so a fold declared `Sealed(Address, Customer)?` read as the address
+  in the clear for an erased customer. `Interpreter::fold` now shreds the value it returns, and a
+  fold whose type is not optional raises `ShreddedColumn` the way a required column does.
+  `project_into` is deliberately still unchanged: those rows belong to a store that shreds on its
+  own read.
 - **A named fold's arm filters were never checked against its own stage.** A command's body closes
   each stage through `decl_body`, which runs the check; a fold's body is arms only, so nothing was
   calling it. `fold F(..) -> acc: Int = 0 { on @a.b(id: acc) => acc + 1 }` reported `checked 1 file`

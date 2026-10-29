@@ -147,3 +147,15 @@ test "a number is only unique within a shop" {
   expect no Invoice[1, 1]
   expect Invoice[2, 1] { total: 30.00 }
 }
+
+// The one place a query-only fold executes: a `fold` action names it and asserts the
+// value, which is how a stored column is read back. The timestamp is the harness's own,
+// one minute per event from 2020-01-01T00:00:00Z, so the second `@usage.recorded` for
+// this shop and month is the stamp the meter kept.
+test "the meter keeps the last append time" {
+  given @usage.recorded { shop_id: 1, period: "2026-10" }
+  given @usage.recorded { shop_id: 1, period: "2026-10" }
+  given @usage.recorded { shop_id: 2, period: "2026-10" }
+  fold UsageLastRecordedAt { shop_id: 1, period: "2026-10" }
+  expect "2020-01-01T00:01:00Z"
+}

@@ -99,6 +99,14 @@ projector Required {
   on @contact.recorded { buyer_id, note } { put Note { buyer_id, note } }
 }
 
+fold ContactEmail(buyer_id: Buyer) -> Sealed(String, Buyer)? = none {
+  on @contact.recorded(buyer_id) { email } => email
+}
+
+fold ContactNote(buyer_id: Buyer) -> Sealed(String, Buyer) = \"\" {
+  on @contact.recorded(buyer_id) { note } => note
+}
+
 effect Mail {
   on @contact.recorded { @key buyer_id } {
     fold email: String? = none
@@ -132,6 +140,22 @@ fn t_long(item_id: Int) -> @item.added {
 
 fn a_name(item_id: Int) -> String {
   return \"item {item_id}\"
+}
+";
+
+/// Section 8's fixture: named folds over `PRELUDE`'s events. `PlanLastSoldAt` binds the
+/// envelope, so it is query-only (`docs/folds.md` rule 12) and a test is the only thing
+/// that can read it.
+const FOLDS: &str = "fold PlanRevenue(plan_id: Int) -> earned: Money(2) = 0 {
+  on @plan.sold(plan_id) { price } => earned + price
+}
+
+fold PlanTitle(plan_id: Int) -> String? = none {
+  on @plan.created(plan_id) { title } => title
+}
+
+fold PlanLastSoldAt(plan_id: Int) -> Timestamp? = none {
+  on @plan.sold as e (plan_id) => e.at
 }
 ";
 
@@ -185,6 +209,20 @@ fn fixture_verdicts(body: &str) -> Vec<TestResult> {
 
 fn fixture_err(body: &str) -> String {
     let source = format!("{PRELUDE}\n{FIXTURES}\n{body}");
+    parse(&source)
+        .expect_err("expected this test declaration to be rejected")
+        .text()
+}
+
+/// The same pair again, against the named folds.
+fn fold_verdicts(body: &str) -> Vec<TestResult> {
+    let source = format!("{PRELUDE}\n{FOLDS}\n{body}");
+    let program = parse(&source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+    run_tests(&program)
+}
+
+fn fold_err(body: &str) -> String {
+    let source = format!("{PRELUDE}\n{FOLDS}\n{body}");
     parse(&source)
         .expect_err("expected this test declaration to be rejected")
         .text()
@@ -581,6 +619,53 @@ fn a_column_never_written_reads_back_as_a_shredded_one() {
     assert!(only(&results).passed(), "{}", only(&results));
 }
 
+/// **The same rule through the `fold` action.** A stored column is read by name rather
+/// than off a row, and the shredding lives in `project`'s wrapper over `Rows`, so until
+/// this was written a named fold holding sealed content handed back the plaintext after
+/// the key was gone. It was found by restoring a converted application's erasure tests,
+/// which is exactly where it would have been found in production.
+#[test]
+fn a_fold_holding_sealed_content_shreds_too() {
+    let results = sealed_verdicts(
+        "test \"the erased buyer's email reads back absent\" {
+  given @contact.recorded { shop_id: 1, buyer_id: 7, email: \"ada@example.com\", note: \"n\", at: \"2019-12-31T12:00:00Z\" }
+  erased Buyer \"7\"
+  fold ContactEmail { buyer_id: 7 }
+  expect none
+}",
+    );
+    assert!(only(&results).passed(), "{}", only(&results));
+
+    let results = sealed_verdicts(
+        "test \"a buyer nobody erased still has one\" {
+  given @contact.recorded { shop_id: 1, buyer_id: 7, email: \"ada@example.com\", note: \"n\", at: \"2019-12-31T12:00:00Z\" }
+  fold ContactEmail { buyer_id: 7 }
+  expect \"ada@example.com\"
+}",
+    );
+    assert!(only(&results).passed(), "{}", only(&results));
+}
+
+/// And the required case answers the way a required column does: there is no value that
+/// says "this is gone", so it raises rather than handing back the plaintext.
+#[test]
+fn a_required_sealed_fold_cannot_hold_a_shredded_key() {
+    let results = sealed_verdicts(
+        "test \"a required fold has no absent\" {
+  given @contact.recorded { shop_id: 1, buyer_id: 7, email: none, note: \"ada\", at: \"2019-12-31T12:00:00Z\" }
+  erased Buyer \"7\"
+  fold ContactNote { buyer_id: 7 }
+  expect \"ada\"
+}",
+    );
+    let why = errored(only(&results));
+    assert!(
+        why.contains("`ContactNote` holds content sealed under `Buyer` = `7`"),
+        "{why}"
+    );
+    assert!(why.contains("Declare the column optional"), "{why}");
+}
+
 /// The one column that cannot answer. An emptied column holds the absent optional,
 /// which is the value rule 12 gives an erased subject; a required column has no such
 /// value, so the row is refused rather than written holding either the plaintext or a
@@ -927,7 +1012,166 @@ fn expect_nothing_covers_an_effect_that_did_nothing() {
     assert!(only(&results).passed(), "{}", only(&results));
 }
 
-// Rule 8: what a test cannot assert.
+// Rule 8: what `fold` expects.
+
+#[test]
+fn a_fold_action_asserts_the_value_it_folded_to() {
+    let results = fold_verdicts(
+        "test \"revenue adds the sales up\" {
+  given @plan.sold { plan_id: 1, price: 19.99 }
+  given @plan.sold { plan_id: 1, price: 5.01 }
+  given @plan.sold { plan_id: 2, price: 99.00 }
+  fold PlanRevenue { plan_id: 1 }
+  expect 25.00
+}",
+    );
+    assert!(only(&results).passed(), "{}", only(&results));
+}
+
+/// A key no event touched folds to the seed rather than to nothing, which is what makes
+/// `expect 0` an assertion about the seed.
+#[test]
+fn an_untouched_key_folds_to_the_seed() {
+    let results = fold_verdicts(
+        "test \"a plan nobody bought has earned nothing\" {
+  given @plan.sold { plan_id: 1, price: 19.99 }
+  fold PlanRevenue { plan_id: 9 }
+  expect 0.00
+}",
+    );
+    assert!(only(&results).passed(), "{}", only(&results));
+}
+
+#[test]
+fn an_optional_fold_with_nothing_to_fold_is_none() {
+    let results = fold_verdicts(
+        "test \"an unknown plan has no title\" {
+  given @plan.created { plan_id: 1, title: \"Pro\", price: 19.99 }
+  fold PlanTitle { plan_id: 9 }
+  expect none
+}",
+    );
+    assert!(only(&results).passed(), "{}", only(&results));
+}
+
+#[test]
+fn a_mismatch_names_the_fold_and_both_sides() {
+    let results = fold_verdicts(
+        "test \"wrong\" {
+  given @plan.sold { plan_id: 1, price: 19.99 }
+  fold PlanRevenue { plan_id: 1 }
+  expect 25.00
+}",
+    );
+    assert_eq!(
+        why(only(&results)),
+        "PlanRevenue: expected 25.00, got 19.99"
+    );
+}
+
+/// **The one place a query-only fold runs.** `docs/folds.md` rule 12 refuses it to every
+/// command, so until the action existed nothing could execute one at all. The clock is
+/// the harness's: one minute per event from 2020-01-01T00:00:00Z, so the second `given`
+/// is the stamp the fold kept.
+#[test]
+fn a_query_only_fold_is_read_by_a_test() {
+    let results = fold_verdicts(
+        "test \"the last sale's append time\" {
+  given @plan.sold { plan_id: 1, price: 19.99 }
+  given @plan.sold { plan_id: 1, price: 5.01 }
+  given @plan.sold { plan_id: 2, price: 99.00 }
+  fold PlanLastSoldAt { plan_id: 1 }
+  expect \"2020-01-01T00:01:00Z\"
+}",
+    );
+    assert!(only(&results).passed(), "{}", only(&results));
+}
+
+#[test]
+fn the_action_names_a_declared_fold() {
+    let message = fold_err("test \"nope\" { fold PlanTurnover { plan_id: 1 } }");
+    assert_eq!(message, "fold `PlanTurnover` is not declared");
+}
+
+#[test]
+fn the_arguments_are_the_folds_parameters() {
+    let message = fold_err("test \"nope\" { fold PlanRevenue { plan: 1 } }");
+    assert_eq!(message, "`PlanRevenue` has no parameter `plan`");
+}
+
+#[test]
+fn a_fold_needs_every_argument() {
+    let message = fold_err("test \"nope\" { fold PlanRevenue { } expect 0.00 }");
+    assert_eq!(message, "`PlanRevenue` needs `plan_id`");
+}
+
+/// One accumulator, one answer. Refused where it is written rather than reported as a
+/// mismatch, so `hek check` has it.
+#[test]
+fn a_fold_takes_one_expectation() {
+    let message = fold_err(
+        "test \"two answers\" {
+  given @plan.sold { plan_id: 1, price: 19.99 }
+  fold PlanRevenue { plan_id: 1 }
+  expect 19.99
+  expect 0.00
+}",
+    );
+    assert_eq!(
+        message,
+        "`fold PlanRevenue` folds to one value, and this expects a second; one accumulator, \
+         one answer; a second value is a second fold and its own test"
+    );
+}
+
+#[test]
+fn a_fold_action_without_an_expectation_asserts_nothing() {
+    let message = fold_err(
+        "test \"folds and throws it away\" {
+  given @plan.sold { plan_id: 1, price: 19.99 }
+  fold PlanRevenue { plan_id: 1 }
+}",
+    );
+    assert_eq!(
+        message,
+        "`fold PlanRevenue` folds to a value, and this test does not say which"
+    );
+}
+
+/// `expect nothing` would be asking whether the seed is absent, which `expect none`
+/// already says.
+#[test]
+fn expect_nothing_is_not_a_folded_value() {
+    let message = fold_err(
+        "test \"nope\" {
+  fold PlanTitle { plan_id: 1 }
+  expect nothing
+}",
+    );
+    assert_eq!(
+        message,
+        "`expect nothing` is not something `fold PlanTitle` produces; the action decides \
+         which expectations a test can write"
+    );
+}
+
+/// The action is the gate, which is what keeps a free-standing `assert <expr>` out of
+/// the language: a bare value is only legal under `fold`.
+#[test]
+fn a_bare_value_is_not_an_expectation_under_run() {
+    let message = fold_err(
+        "test \"nope\" {
+  run RecordSync { plan_id: 1 }
+  expect 1
+}",
+    );
+    assert_eq!(
+        message,
+        "a `run` produces events, `invalid` or `reject`, found a number"
+    );
+}
+
+// Rule 9: what a test cannot assert.
 
 #[test]
 fn a_test_cannot_reach_the_world() {
@@ -943,7 +1187,7 @@ fn a_test_cannot_reach_the_world() {
     );
 }
 
-// Rule 9: running.
+// Rule 10: running.
 
 /// A mismatch and an error are different facts, and collapsing them would make a broken
 /// program look like a wrong assertion.
@@ -1180,7 +1424,7 @@ test \"a personal column is readable\" {
 }
 
 // ---------------------------------------------------------------------------
-// Rule 8, the other half: the same expectations against a world the crate does not own.
+// Rule 9, the other half: the same expectations against a world the crate does not own.
 // ---------------------------------------------------------------------------
 
 /// Read models that are not a `Store`, counting what reached them so a test can tell a

@@ -249,7 +249,7 @@ because each of them is a statement about the program rather than about a declar
 `check_files` is what `hek` calls.
 
 A test prints as `pass`, `FAIL` or `ERROR`, and the last two carry a reason on the line
-below. `docs/testing.md` rule 9 is why the last two are separate: a mismatch is the test
+below. `docs/testing.md` rule 10 is why the last two are separate: a mismatch is the test
 doing its job, and an error is the program being unable to run at all.
 
 Reading a directory or a file at all is a different kind of problem again, so it goes to

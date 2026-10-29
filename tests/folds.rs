@@ -648,7 +648,9 @@ fn a_fold_is_one_read_of_the_log() {
 }
 
 // ---------------------------------------------------------------------------------
-// Rule 11: where this diverges from the runtime, which is nowhere.
+// Rule 11: where this diverges from the runtime. Nowhere on the decision path, because
+// the splice removes it; and `Interpreter::fold` on the read path, which is how a stored
+// column is served.
 
 #[test]
 fn a_named_fold_does_not_reach_the_runtime() {
@@ -674,6 +676,79 @@ fn a_fold_is_in_the_program_under_its_name() {
     assert!(program.fold("LifetimeSpend").is_some());
     assert!(program.fold("HasOrdered").is_some());
     assert!(program.fold("Nope").is_none());
+}
+
+/// And it is foldable by name, over the whole log, for one key. The read a stored column
+/// is filled by, and the same entry point a test's `fold` action goes through.
+#[test]
+fn a_named_fold_folds_by_name_for_a_key() {
+    let program = placing();
+    let mut interpreter = Interpreter::new(&program);
+    placed(&mut interpreter, 7, 400);
+    placed(&mut interpreter, 7, 50);
+    placed(&mut interpreter, 8, 999);
+    given(
+        &mut interpreter,
+        "order.cancelled",
+        [
+            ("order_id", Value::Int(1)),
+            ("customer_id", Value::Int(7)),
+            ("refund", Value::Int(150)),
+        ],
+    );
+
+    let folded = interpreter
+        .fold(
+            "LifetimeSpend",
+            [("customer_id".to_string(), Value::Int(7))],
+        )
+        .expect("folded");
+    assert_eq!(folded, Value::Int(300));
+
+    // A key no event touched is the seed rather than an absence: a row that has not been
+    // written to still has a value, which is what makes a stored column total.
+    let folded = interpreter
+        .fold(
+            "LifetimeSpend",
+            [("customer_id".to_string(), Value::Int(9))],
+        )
+        .expect("folded");
+    assert_eq!(folded, Value::Int(0));
+}
+
+#[test]
+fn folding_an_undeclared_name_says_so() {
+    let program = placing();
+    let interpreter = Interpreter::new(&program);
+    let err = interpreter
+        .fold("Turnover", [("customer_id".to_string(), Value::Int(7))])
+        .expect_err("not declared");
+    assert_eq!(err.to_string(), "unknown fold `Turnover`");
+}
+
+/// The argument contract is a command's, because `bind_params` is the same code: a
+/// missing one, an extra one and a wrong type all answer the way `run` does.
+#[test]
+fn folding_checks_its_arguments() {
+    let program = placing();
+    let interpreter = Interpreter::new(&program);
+    let err = interpreter
+        .fold("LifetimeSpend", [] as [(String, Value); 0])
+        .expect_err("needs the key");
+    assert_eq!(err.to_string(), "missing argument `customer_id`");
+
+    // The missing one is reported first, which is why this passes the key as well: an
+    // extra argument is only the complaint once every parameter is bound.
+    let err = interpreter
+        .fold(
+            "LifetimeSpend",
+            [
+                ("customer_id".to_string(), Value::Int(7)),
+                ("period".to_string(), Value::Int(1)),
+            ],
+        )
+        .expect_err("not a parameter");
+    assert_eq!(err.to_string(), "unexpected argument `period`");
 }
 
 // ---------------------------------------------------------------------------------
@@ -1003,4 +1078,131 @@ fold F(shop_id: Int, e: String) -> Timestamp? = none {{
 "
     );
     assert_eq!(error(&source), "`e` is already in scope");
+}
+
+/// A payload field reached through the binding, which `/code-review` found aborts the
+/// compiler: the bypass that lets an arm read its own envelope reached the handler path
+/// below it, and a module-scope fold has no `self.event` for that path to unwrap.
+#[test]
+fn a_payload_field_through_the_binding_is_a_diagnostic_and_not_a_panic() {
+    let source = format!(
+        "{STAMPED}
+fold LastThreshold(shop_id: Int, period: String) -> Int = 0 {{
+  on @usage.threshold.reached as e (shop_id, period) => e.threshold
+}}
+"
+    );
+    assert_eq!(
+        error(&source),
+        "`e.threshold` is not an envelope field, and an arm's `as` binding carries only `at`, `id` and `position`"
+    );
+    assert!(
+        hint(&source).contains("binds the event's own fields in `{ }`"),
+        "{}",
+        hint(&source)
+    );
+}
+
+/// The other half of the shadow check, and the half the first one structurally cannot
+/// see: `fold_envelope` runs before the arm's binds are allocated, so a bind of the
+/// binding's own name was the one spelling it missed. Resolution puts the envelope ahead
+/// of the scopes, so the bind was unreachable for that arm and checked clean.
+#[test]
+fn an_envelope_binding_cannot_be_rebound_as_a_field_of_its_own_arm() {
+    let source = "\
+event @usage.counted { shop_id: Int, e: Int }
+
+fold LastAt(shop_id: Int) -> Timestamp? = none {
+  on @usage.counted as e (shop_id) { e } => e.at
+}
+";
+    assert_eq!(error(source), "`e` is this arm's envelope binding");
+}
+
+/// A named fold's name leaves the program as a stored column's, so it is held to the two
+/// rules that keep `snake_case` reversible. Without them `Sum` and `sum` derive one
+/// column and a runtime building the real table keys both folds to it.
+#[test]
+fn a_named_folds_name_is_spelled_like_a_type() {
+    let lower = format!(
+        "{EVENTS}fold lifetimeSpend(customer_id: Int) -> s: Int = 0 {{
+  on @order.placed(customer_id) {{ total }} => s + total
+}}
+"
+    );
+    assert_eq!(
+        error(&lower),
+        "a named fold is named like a type, so `lifetimeSpend` starts with a capital"
+    );
+
+    let scored = format!(
+        "{EVENTS}fold Lifetime_Spend(customer_id: Int) -> s: Int = 0 {{
+  on @order.placed(customer_id) {{ total }} => s + total
+}}
+"
+    );
+    assert_eq!(
+        error(&scored),
+        "a named fold's name has no `_`, and `Lifetime_Spend` has one"
+    );
+
+    // An inline fold's accumulator is a local and keeps the local spelling, which is the
+    // whole reason the rule sits on the signature rather than on the keyword.
+    program(&format!(
+        "{EVENTS}command C(customer_id: Int) {{
+  fold spend: Int = 0
+    on @order.placed(customer_id) {{ total }} => spend + total
+  emit @order.placed {{ order_id: 1, customer_id, total: spend }}
+}}
+"
+    ));
+}
+
+/// **One declaration has to answer one way through both drivers.** A spliced call assigns
+/// its argument into the callee's parameter slot with no declared type to coerce against,
+/// so a bare value in an optional parameter stayed bare; `Interpreter::fold` reads the
+/// same fold through `bind_params`, which coerces. The fold action therefore passed on a
+/// fold the command could not run. Found by `/code-review`; the hole pre-dated the action
+/// on the `guard` path, which is why the lift is written at the call site rather than in
+/// either driver.
+#[test]
+fn an_optional_parameter_takes_a_bare_argument_through_the_splice_too() {
+    let source = "\
+event @order.placed { order_id: Int, customer_id: Int, total: Int }
+event @order.counted { n: Int }
+
+fold Sum(customer_id: Int, bias: Int?) -> s: Int = 0 {
+  on @order.placed(customer_id) { total } =>
+    if bias.is_none() { s + total } else { s + total + 100 }
+}
+
+command C(customer_id: Int) {
+  fold s = Sum { customer_id, bias: 5 }
+  emit @order.counted { n: s }
+}
+";
+    let program = program(source);
+    let mut interpreter = Interpreter::new(&program);
+    placed(&mut interpreter, 7, 1);
+
+    let Outcome::Ok(events) = interpreter
+        .run("C", [("customer_id".to_string(), Value::Int(7))])
+        .expect("ran")
+        .outcome
+    else {
+        panic!("expected the command to append");
+    };
+    assert_eq!(events[0].field("n"), Some(&Value::Int(101)));
+
+    // And the same fold by name, which is the driver that always coerced.
+    let folded = interpreter
+        .fold(
+            "Sum",
+            [
+                ("customer_id".to_string(), Value::Int(7)),
+                ("bias".to_string(), Value::Int(5)),
+            ],
+        )
+        .expect("folded");
+    assert_eq!(folded, Value::Int(101));
 }

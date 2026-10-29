@@ -2,7 +2,7 @@
 //!
 //! Everything here stands in for something a runtime owns: a log, a key store and a
 //! network. Keeping it in its own module is what stops "what the harness does" from
-//! reading as "what the language does", a distinction `docs/testing.md` rule 8 already
+//! reading as "what the language does", a distinction `docs/testing.md` rule 9 already
 //! depends on.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};

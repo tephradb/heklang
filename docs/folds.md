@@ -65,7 +65,7 @@ The worst single case repeated `fold shop_domain: String = "" / on @shop.install
 `fold token` and `fold order_gid` fourteen times each beside it. One module, `effects/email.hk`,
 carried 57 folds that were 11 distinct ones.
 
-What drifts when those fall out of step is the append condition, and `docs/testing.md` §8 keeps that
+What drifts when those fall out of step is the append condition, and `docs/testing.md` §9 keeps that
 out of a test on purpose:
 
 > Slice counts, **the append condition**, and how many times the fold ran are not outputs.
@@ -96,6 +96,14 @@ accumulator** (rule 3), and no `return`.
 
 **A fold is named for the VALUE, never for the entity.** `OrderName`, `ShopAccessToken`,
 `OpenProposal`, `QuoteFailureCount`. Not `Order`, not `Shop`, not `Proposal`.
+
+**And it is spelled like a type: an initial capital, and no `_`.** The second name in heklang whose
+spelling leaves the program, the first being a `refusal`'s (`docs/declarations.md`), and held to the
+same two rules for the same reason. A named fold is a stored column and the column's name is
+`snake_case` of this one, so the two rules keep that derivation reversible and two folds can never
+arrive as one column. Without them `fold Sum` beside `fold sum` derives `sum` twice and a runtime
+building the real table keys both to it. An inline fold's accumulator is a local and keeps the local
+spelling, which is why the rule is on the signature rather than on the keyword.
 
 This is `docs/guards.md` rule 1 read for values instead of propositions, and it is the whole of what
 keeps the construct from growing aggregates. One value out means there is nothing to put fields on,
@@ -438,7 +446,7 @@ the binds, the seed and the arms:
 > this fold is also declared at `quote-outcome.hk:68`; name it, so the two cannot drift apart
 
 It is an **error** rather than a warning. A rule about the append condition that an author may
-ignore is not a rule, and `docs/testing.md` §8 means no test will catch what ignoring it costs.
+ignore is not a rule, and `docs/testing.md` §9 means no test will catch what ignoring it costs.
 
 **Two *bodies*, not two declarations.** An effect's arm counts as one, and that is not a detail: the
 worst case the rule was measured on is nineteen arms of **one** effect folding the same thing
@@ -567,10 +575,20 @@ the backstop and reports "fold `F` folds nothing".
 
 ## 11. Where this diverges from the runtime
 
-Nothing, because a named fold does not reach the runtime. Like a guard it is a parse-time construct
-that `src/inline.rs` splices out before `Program` is finished, so a host, the interpreter and
+**Nothing on the decision path.** Where a command reads a fold, it is a parse-time construct: like a
+guard, `src/inline.rs` splices it out before `Program` is finished, so a host, the interpreter and
 `docs/host.md`'s traits see a command with its folds written out. There is no named fold in the
 append condition, in the journal or in a trace.
+
+**It does reach the runtime on the read path.** `splice` leaves `program.folds` standing, and
+`Interpreter::fold(name, args)` folds one of them over the whole log for one key and hands the value
+back. That is the read a stored column is filled and served by, and it is what a test's `fold` action
+calls (`docs/testing.md` section 8). It is also the only way a query-only fold runs at all, since by
+rule 12 no command may read one.
+
+The two are not in tension. A fold a decision reads is inlined and never executes as itself; a fold
+a read model is runs by name and never touches a decision. One declaration, two use sites, and the
+splice is what keeps the first from paying for the second.
 
 **The digest gains nothing, and the construct itself moved no hash.** `src/digest.rs` gives the
 rule: `const`, `refusal` and `guard` are absent from the digest form *because the parser inlines
@@ -599,9 +617,17 @@ visible only inside whatever folded it, so renaming one or editing an arm moves 
 command that reads it and nothing identifies the fold as the cause. That is already true of a guard
 and of a `const`, and `hek digest --expanded` is where an author goes to see which.
 
-**It also makes a fold testable.** `docs/testing.md` §8 refuses to assert state on the grounds that
-"a folded value is an intermediate", which stops being true of a declaration with a signature. What
-that section rules out stays ruled out; a named fold is simply no longer in it.
+**The argument above now holds for a fold a decision reads, and not for a query-only one.** "It is
+inlined everywhere, so nothing runs" is false of a fold with no use site: by rule 12 no command may
+read one, `hek check --tables` presents it as a stored column, and `Interpreter::fold` executes it
+by name. Deleting or retyping one is nonetheless not a change per `hek digest`, which is a hole
+rather than a decision. Closing it is the same question as "what is a stored fold's digest entry",
+it needs a `hek-digest` bump, and it belongs with the storage work rather than here.
+
+**It also makes a fold testable, and it now is.** `docs/testing.md` §9 refuses to assert state on
+the grounds that "a folded value is an intermediate", which stops being true of a declaration with a
+signature. A `fold` action asserts one, and section 8 of that document is what it expects. What §9
+rules out stays ruled out; a named fold is simply no longer in it.
 
 **Rejected: `read` as the keyword.** It was the first proposal, and it is a second name for a
 concept that already has one. A named fold folds, the accumulator and arms are the same syntax
@@ -612,10 +638,14 @@ applies here word for word. The construct adds one position, not one word.
 
 `docs/commands.md` keeps the envelope out of a fold: an event's `at`, `id` and `position` are not
 foldable, so an event a decision has to time carries its own `Timestamp` field. **That rule stays
-for decisions**, for two reasons that have nothing to do with taste. A test writes payload fields
-and the append time is the runtime's, so a decision over `e.at` cannot be pinned in one. And an
-imported or backfilled event's append time is when it was imported, so every decision over it is
-silently wrong about when the thing happened.
+for decisions**, and the reason that carries it is backfill: an imported or replayed event's append
+time is when it was imported, so a decision over it is silently wrong about when the thing happened,
+and nothing in the event says so.
+
+The second reason used to be that a test could not pin an append time, and that half has since
+stopped being true: a `fold` action asserts a query-only fold's value against the harness's own
+clock (`docs/testing.md` section 8). It was always the weaker half, because it was a statement about
+the test harness rather than about the language. Backfill is the one that is about the data.
 
 Neither objection is about storage. So an arm may bind the envelope with the same `as` a projector
 handler uses, and a fold that does is **query-only**: stored and queried, never folded by a command.
@@ -630,7 +660,7 @@ fold UsageLastRecordedAt(shop_id: Shop, period: String) -> Timestamp? = none {
 `.position`. The slots are filled from the event being folded, so two arms naming one field share
 one slot and an arm that names none is unaffected.
 
-Five things are refused, each because it would otherwise mean something the construct cannot do.
+Six things are refused, each because it would otherwise mean something the construct cannot do.
 
 **A command or a guard that folds one.** This is the whole rule, and the message says which:
 
@@ -654,12 +684,20 @@ would decide on its own that the whole fold is query-only, so a word with no mea
 command its read. Four arms of a converted application wrote `as e` and then used a declared time
 instead, which is the right thing to write and the wrong thing to announce.
 
-**A binding that hides a name already in scope.** The accumulator, or a parameter. Resolution
-consults the envelope binding before the scopes, so a name that is both wins as the envelope and
-whatever it hid becomes unreachable for that arm: an accumulator called `last` beside `as last`
-read as the running value in one arm and as the record being folded in the next, and checked
-clean. Everywhere else in the language a name cannot hide an enclosing one, and this is no
-exception.
+**A binding that hides a name already in scope.** The accumulator, a parameter, or a field the same
+arm binds. Resolution consults the envelope binding before the scopes, so a name that is both wins
+as the envelope and whatever it hid becomes unreachable for that arm: an accumulator called `last`
+beside `as last` read as the running value in one arm and as the record being folded in the next,
+and checked clean. Everywhere else in the language a name cannot hide an enclosing one, and this is
+no exception. **The same-arm case is checked separately**, after the binds are allocated rather than
+before: `on @a.one as e (shop_id) { e }` is the one spelling the first check structurally cannot
+see, because the binding is read before the arm's own scope exists.
+
+**A payload field reached through the binding.** `e.threshold` is not a shorter way to write
+`{ threshold }`. The binding carries three fields and is not a second route to the record, which is
+what keeps a fold's reads visible in its arms: the binds are the fold's declared surface on the
+event, and a projector handler's `e.field` works only because a handler binds on demand and a fold
+does not. The message names the field and says where it belongs.
 
 **Two classes of fold is a real cost**, and it is the cheaper side by a wide margin. The alternative
 is a declared `Timestamp` to fold instead, and in the application that measured this, the read

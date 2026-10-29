@@ -350,6 +350,16 @@ fn check<W: World>(program: &Program, test: &Test, mut world: W) -> Result<Optio
             }
             check_deliver(&mut values, &test.expect, interpreter.trace())
         }
+        Action::Fold { fold, args, .. } => {
+            let mut bound = Vec::new();
+            for (name, value) in args {
+                bound.push((name.clone(), values.eval(*value)?));
+            }
+            let folded = interpreter
+                .fold(fold, bound)
+                .map_err(|err: Error| err.to_string())?;
+            check_fold(&mut values, fold, &test.expect, &folded)
+        }
     }
 }
 
@@ -542,6 +552,36 @@ fn mismatch(
         }
     }
     Ok(None)
+}
+
+/// The one value a named fold folded to.
+///
+/// Exactly one expectation, unlike every other action: a fold has one accumulator, so a
+/// second `expect` would be a second answer to the same question. The parser refuses both
+/// a second one and none at all, so the two branches below are the same kind of backstop
+/// `check_project`'s last arm is.
+fn check_fold(
+    values: &mut Values<'_>,
+    fold: &str,
+    expect: &[Expect],
+    folded: &Value,
+) -> Result<Option<String>, String> {
+    let ty = values.program.fold(fold).map(|def| def.ret.clone());
+    if expect.len() != 1 {
+        return Ok(Some(format!(
+            "a fold folds to one value, and this test expects {}",
+            expect.len()
+        )));
+    }
+    let Expect::Folded { value, .. } = &expect[0] else {
+        return Ok(Some(format!(
+            "a fold produces a value, not {}",
+            describe(&expect[0])
+        )));
+    };
+    let wanted = values.at(*value, ty.as_ref())?;
+    Ok((!folded.same(&wanted))
+        .then(|| format!("{fold}: expected {}, got {}", shown(&wanted), shown(folded))))
 }
 
 /// Rule 7: the trace, one for one and in order.
@@ -836,5 +876,6 @@ fn describe(expect: &Expect) -> String {
         Expect::Log { .. } => "log".to_string(),
         Expect::Failed { .. } => "failed".to_string(),
         Expect::Skipped { .. } => "skipped".to_string(),
+        Expect::Folded { .. } => "a value".to_string(),
     }
 }

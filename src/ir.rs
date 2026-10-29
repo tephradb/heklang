@@ -973,10 +973,14 @@ pub struct Fold {
 impl Fold {
     /// Whether this fold may be stored and queried but not folded by a command.
     ///
-    /// An event's append time is not a thing a decision may read: a test writes payload
-    /// fields and cannot pin it, and a backfilled event's is when it was imported rather
-    /// than when it happened. A read model has neither problem, so the envelope is open
-    /// to a fold that only ever feeds one.
+    /// An event's append time is not a thing a decision may read: a backfilled event's
+    /// is when it was imported rather than when it happened, so a decision over it is
+    /// wrong about the world and nothing in the event says so. A read model is reporting
+    /// what the log holds rather than deciding on it, so the envelope is open to a fold
+    /// that only ever feeds one.
+    ///
+    /// A test may still read one, through the `fold` action: it runs no decision, and
+    /// the harness's clock is exactly predictable (`docs/testing.md` section 8).
     pub fn query_only(&self) -> bool {
         !self.envelope.is_empty()
     }
@@ -1235,17 +1239,22 @@ pub enum Expr {
     /// nothing else: no source token spells it, so an absent value here is malformed
     /// IR rather than a runtime case. See `docs/optionals.md`.
     Unwrap(ExprId),
-    /// The bare side of an `==` or `!=` whose other side is a `T?`, lifted to the
-    /// optional it is being compared against. The mirror of `Unwrap`, and synthesised by
-    /// the comparison and by nothing else: no source token spells it, and it is an
-    /// operand of the `Binary` built in the same breath, never a receiver or a root. So
-    /// what runs is the `Opt` against `Opt` the interpreter already had, and its type
-    /// test stays exact.
+    /// A bare value lifted to the optional it has to fill. The mirror of `Unwrap`, and
+    /// synthesised rather than written: no source token spells it.
+    ///
+    /// **Two synthesisers, and both put it where it cannot be a receiver or a root.**
+    /// `Parser::lift` builds it for the bare side of an `==` or `!=` whose other side is
+    /// a `T?`, as an operand of the `Binary` built in the same breath, so what runs is
+    /// the `Opt` against `Opt` the interpreter already had and its type test stays exact.
+    /// `Parser::lifted` builds it for an argument of a **spliced** call, a `guard` or a
+    /// named `fold`, whose parameter declares the optional: the splice turns that
+    /// argument into a `Stmt::Assign`, which carries no declared type, so it is the one
+    /// declared position with nothing downstream to coerce it.
     ///
     /// `inner` is the type it is an optional **of**, taken from the static type the
-    /// comparison just checked rather than from the value, for the reason `Comp` carries
-    /// one: an empty comprehension holds a `List(Json)` at run time and the comparison
-    /// was written against what it declared. See `docs/optionals.md`.
+    /// parser just checked rather than from the value, for the reason `Comp` carries one:
+    /// an empty comprehension holds a `List(Json)` at run time and the comparison was
+    /// written against what it declared. See `docs/optionals.md`.
     Wrap {
         value: ExprId,
         inner: Type,
@@ -1747,6 +1756,17 @@ pub enum Action {
         effect: Ident,
         span: Span,
     },
+    /// `fold Name { args }`: fold a named fold over the whole log and hand its value
+    /// back.
+    ///
+    /// The only action that runs no handler. A read model is a named fold kept for every
+    /// key (see [`crate::tables`]), and this is how a test pins one of those values. It
+    /// is written as a command reads a fold, minus the binding.
+    Fold {
+        fold: Ident,
+        args: Vec<(Ident, ExprId)>,
+        span: Span,
+    },
 }
 
 /// Rules 5 to 7. Which variants may appear is decided by the action, at parse time.
@@ -1810,6 +1830,15 @@ pub enum Expect {
         span: Span,
     },
     Skipped {
+        span: Span,
+    },
+    /// `expect <value>` under a `fold` action: the value the fold folded to.
+    ///
+    /// A bare value is safe only because the action gates it. Under `run`, `project` and
+    /// `deliver` this variant is unreachable, which is what keeps a free-standing
+    /// `assert <expr>` out of the language.
+    Folded {
+        value: ExprId,
         span: Span,
     },
 }

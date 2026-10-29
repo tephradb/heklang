@@ -2,7 +2,7 @@
 //! are used here: a narrowed value satisfies a non-optional target, and reading an
 //! optional's methods off one is rejected with a message that says why.
 
-use heklang::{Interpreter, Outcome, Type, Value, parse};
+use heklang::{Event, EventPath, Interpreter, Outcome, Type, Value, parse};
 
 const ID: &str = "0190d1a1-0000-7000-8000-000000000001";
 
@@ -501,4 +501,52 @@ event @item.synced { id: Uuid, plan_id: Uuid }
     );
     parse(&through_a_let)
         .unwrap_or_else(|err| panic!("a `let` binds a slot the branch narrows: {err}"));
+}
+
+// ---------------------------------------------------------------------------------
+// A filter is a declared position too
+
+/// **A bare value filtering an optional field has to be fitted at run time, or the
+/// slice folds nothing.** The parser accepts `on @a.failed(fulfillment_order_id)` where
+/// the field is declared `Int?`, because that is the coercion rule at a declared
+/// position. The predicate the fold then reads with used to carry the unwrapped value,
+/// so it compared `Int` against the `Int?` the event holds, matched no record and
+/// silently answered the seed.
+///
+/// Silent is what makes it worth its own test: the arm reads as written, `hek check`
+/// passes, and the only symptom is a value that is always the seed. It was found by
+/// restoring a converted application's read-model tests, where one arm of one fold
+/// existed solely to clear a deadline on a terminal failure and never fired.
+#[test]
+fn a_filter_fits_a_bare_value_to_an_optional_field() {
+    let source = "event @hold.failed { order_id: Int, fulfillment_order_id: Int?, retryable: Bool }
+
+fold FailedFor(fulfillment_order_id: Int) -> n: Int = 0 {
+  on @hold.failed(fulfillment_order_id) => n + 1
+}
+";
+    let program = parse(source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+    let mut interpreter = Interpreter::new(&program);
+    for id in [Value::some(Value::Int(8001)), Value::none(Type::Int)] {
+        interpreter.append(Event::new(
+            EventPath::new(["hold", "failed"]),
+            [
+                ("order_id".to_string(), Value::Int(9001)),
+                ("fulfillment_order_id".to_string(), id),
+                ("retryable".to_string(), Value::Bool(false)),
+            ],
+        ));
+    }
+
+    let folded = interpreter
+        .fold(
+            "FailedFor",
+            [("fulfillment_order_id".to_string(), Value::Int(8001))],
+        )
+        .expect("folded");
+    assert_eq!(
+        folded,
+        Value::Int(1),
+        "the present one matches and the absent one does not"
+    );
 }

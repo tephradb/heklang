@@ -1362,6 +1362,39 @@ impl Parser {
         }
         self.declare("fold", &name, named);
 
+        // The second name in heklang whose spelling leaves the program, for the same
+        // reason a refusal's does: a named fold is a stored column and the column's name
+        // is `snake_case` of this one (`crate::tables`). The two rules a refusal is held
+        // to make that derivation reversible, so two folds can never arrive as one
+        // column and the check for that is unnecessary rather than merely unlikely.
+        // Without them `fold Sum` beside `fold sum` derives one `sum` column twice, and
+        // a runtime building the real table keys both folds to it.
+        if !name.starts_with(|ch: char| ch.is_ascii_uppercase()) {
+            return Err(self
+                .err(
+                    Code::FoldRestriction,
+                    format!("a named fold is named like a type, so `{name}` starts with a capital"),
+                    at,
+                )
+                .with_hint(format!(
+                    "the stored column's name is derived from this one, and `{}` is `{}`",
+                    upper_first(&name),
+                    snake_case(&upper_first(&name))
+                )));
+        }
+        if name.contains('_') {
+            return Err(self
+                .err(
+                    Code::FoldRestriction,
+                    format!("a named fold's name has no `_`, and `{name}` has one"),
+                    at,
+                )
+                .with_hint(
+                    "the underscores go in the derived column rather than the name: \
+                     `LifetimeSpend` is `lifetime_spend`",
+                ));
+        }
+
         let params = self.param_list(None)?;
         let (_, ret) = self.fold_result()?;
         self.folds.push(Signature {
@@ -3537,6 +3570,24 @@ impl Parser {
             return Ok(lower.b.read(slot));
         }
 
+        // Everything below binds a payload field on demand, which only a handler can do:
+        // a fold arm's fields come from its own `{ }`, and a fold has no `self.event` to
+        // read a declaration out of. `docs/folds.md` rule 12's binding is three fields and
+        // not a second way to reach the record.
+        if self.arm_envelope {
+            return Err(self
+                .err(
+                    Code::UnknownMember,
+                    format!(
+                        "`{name}.{field}` is not an envelope field, and an arm's `as` binding carries only `at`, `id` and `position`"
+                    ),
+                    at,
+                )
+                .with_hint(format!(
+                    "a fold arm binds the event's own fields in `{{ }}`, which is where `{field}` belongs: `on @path(..) {{ {field} }} => {field}`"
+                )));
+        }
+
         let def = self.event.as_ref().expect("only called inside a handler");
         if def.field(&field).is_none() && self.triggers.len() > 1 {
             let listed: Vec<String> = self.triggers.iter().map(EventPath::to_string).collect();
@@ -4211,12 +4262,13 @@ impl Parser {
             }
             let expected = declared.clone();
             let value = if self.eat_sym(Sym::Colon) {
-                self.expr(lower, Some(expected))?
+                self.expr(lower, Some(expected.clone()))?
             } else if lower.b.lookup(&field).is_none() {
                 return Err(self.not_in_scope(&field, at));
             } else {
                 self.shorthand(lower, &field, &expected, at)
             };
+            let value = self.lifted(lower, value, &expected, at);
             // An argument becomes a prologue assignment, which runs before any fold, so
             // this would read the other fold's seed rather than what it folds to. The
             // same mistake a seed makes, rejected the same way.
@@ -4337,12 +4389,13 @@ impl Parser {
             }
             let expected = declared.clone();
             let value = if self.eat_sym(Sym::Colon) {
-                self.expr(lower, Some(expected))?
+                self.expr(lower, Some(expected.clone()))?
             } else if lower.b.lookup(&field).is_none() {
                 return Err(self.not_in_scope(&field, at));
             } else {
                 self.shorthand(lower, &field, &expected, at)
             };
+            let value = self.lifted(lower, value, &expected, at);
             if let Some((read, at)) = lower.b.fold_read(value) {
                 return Err(self
                     .err(
@@ -4565,6 +4618,24 @@ impl Parser {
                     // declaration, settled below for the reason rule 12's subject is.
                     if field == acc && shadow.is_none() {
                         shadow = Some(bind);
+                    }
+                    // The other half of `fold_envelope`'s shadow check, and it has to be
+                    // here: that one runs before this scope exists, so a bind of the
+                    // binding's own name is the one spelling it cannot see. Refused
+                    // rather than recorded, because resolution puts the envelope ahead of
+                    // the scopes, so the bind would be unreachable for this arm.
+                    if let Some(bound) = &binding
+                        && &field == bound
+                    {
+                        return Err(self
+                            .err(
+                                Code::DeclaredTwice,
+                                format!("`{field}` is this arm's envelope binding"),
+                                bind,
+                            )
+                            .with_hint(
+                                "an envelope binding is the event being folded, and a name cannot mean that and one of its fields in one arm; give the binding a name of its own",
+                            ));
                     }
                     binds.push(lower.b.bind(&field, Some(declared.ty.clone())));
                     if !self.eat_sym(Sym::Comma) {
@@ -5082,7 +5153,27 @@ impl Parser {
 
         let mut expect = Vec::new();
         while !self.at_sym(Sym::RBrace) && !matches!(self.peek(), Token::End) {
+            // A fold has one accumulator, so a second expectation is a second answer to
+            // one question. Every other action produces a sequence and takes as many
+            // expectations as it wrote members.
+            if let Action::Fold { fold, .. } = &action
+                && !expect.is_empty()
+            {
+                return self.fail_hint(
+                    Code::TestShape,
+                    format!("`fold {fold}` folds to one value, and this expects a second"),
+                    "one accumulator, one answer; a second value is a second fold and its own test",
+                );
+            }
             expect.push(self.expect_decl(&mut lower, program, &action)?);
+        }
+        if let Action::Fold { fold, .. } = &action
+            && expect.is_empty()
+        {
+            return self.fail(
+                Code::TestShape,
+                format!("`fold {fold}` folds to a value, and this test does not say which"),
+            );
         }
         self.expect_sym(Sym::RBrace)?;
         self.kind = outer;
@@ -5500,6 +5591,23 @@ impl Parser {
             }
             return Ok(Action::Deliver { effect, span });
         }
+        // `fold`, not a soft word, so this is the keyword a declaration starts with. A
+        // test body has nothing else that could begin with it, and the arguments are
+        // written exactly as a command's read is, minus the binding.
+        if self.eat_word(Keyword::Fold) {
+            let at = self.span_here();
+            let fold = self.expect_ident()?;
+            let Some(def) = program.fold(&fold) else {
+                return Err(self.err(
+                    Code::NotDeclared,
+                    format!("fold `{fold}` is not declared"),
+                    at,
+                ));
+            };
+            let params = def.params.clone();
+            let args = self.named_args(lower, &params, &fold)?;
+            return Ok(Action::Fold { fold, args, span });
+        }
         if self.at_word(Keyword::Emit) {
             return self.fail(
                 Code::TestShape,
@@ -5509,7 +5617,7 @@ impl Parser {
         self.fail(
             Code::TestShape,
             format!(
-                "a test does one thing: `run`, `project` or `deliver`, found {}",
+                "a test does one thing: `run`, `project`, `deliver` or `fold`, found {}",
                 self.peek()
             ),
         )
@@ -5589,7 +5697,11 @@ impl Parser {
 
         if self.eat_soft("nothing") {
             return match action {
-                Action::Project { .. } => self.wrong_expectation(action, "`expect nothing`"),
+                // A fold always folded to something: `expect nothing` would be asking
+                // whether the seed is absent, which `expect none` already says.
+                Action::Project { .. } | Action::Fold { .. } => {
+                    self.wrong_expectation(action, "`expect nothing`")
+                }
                 _ => Ok(Expect::Nothing { span }),
             };
         }
@@ -5603,6 +5715,12 @@ impl Parser {
                 self.row_expectation(lower, def, span)
             }
             Action::Deliver { .. } => self.effect_expectation(lower, program, span),
+            Action::Fold { fold, .. } => {
+                let def = program.fold(fold).expect("resolved by the action");
+                let ret = def.ret.clone();
+                let value = self.expr(lower, Some(ret))?;
+                Ok(Expect::Folded { value, span })
+            }
         }
     }
 
@@ -5611,6 +5729,7 @@ impl Parser {
             Action::Run { command, .. } => ("run", command.as_str()),
             Action::Project { projector, .. } => ("project", projector.as_str()),
             Action::Deliver { effect, .. } => ("deliver", effect.as_str()),
+            Action::Fold { fold, .. } => ("fold", fold.as_str()),
         };
         self.fail_hint(
             Code::TestShape,
@@ -8350,6 +8469,36 @@ impl Parser {
         self.note(self.advised(Code::TypeMismatch, mismatch(&found, want), at));
     }
 
+    /// A spliced call's argument, lifted into the optional its parameter declares.
+    ///
+    /// Every other declared position coerces at run time, where the type is in hand: an
+    /// `emit`'s field through `coerce`, a command's or a named fold's argument through
+    /// `bind_params`, a seed and an arm through `fitted_at`. A **spliced** call has no
+    /// such position. `inline::at` assigns the caller's argument straight into the
+    /// callee's parameter slot and a `Stmt::Assign` carries no declared type, so the lift
+    /// has to be written here, at the one place that knows both types.
+    ///
+    /// Without it `fold s = Sum { bias: 5 }` put a bare `Int` in a `bias: Int?` slot and
+    /// the callee's `bias.is_none()` died at run time on a clean `hek check`. It is also
+    /// what keeps one declaration answering one way: `Interpreter::fold` reads the same
+    /// fold through `bind_params`, which does coerce, so a test could otherwise pass on a
+    /// fold no command could run.
+    fn lifted(&self, lower: &mut Lower, value: ExprId, want: &Type, at: Span) -> ExprId {
+        let Type::Opt(inner) = want else {
+            return value;
+        };
+        // `None` is a value whose type the parser could not settle, and a mismatch there
+        // is `check_type`'s to report rather than this one's to guess at.
+        let Some(found) = self.type_of(lower, value) else {
+            return value;
+        };
+        if &found != inner.as_ref() {
+            return value;
+        }
+        lower.b.at(at);
+        lower.b.wrap(value, found)
+    }
+
     /// The bare-name shorthand `{ order_id }`, which is `{ order_id: order_id }` and has
     /// to be checked as one.
     ///
@@ -10301,7 +10450,7 @@ impl Parser {
     ///
     /// **The whole point is the append condition.** A fold declares the slice its caller
     /// conflicts on, so two copies that fall out of step give two commands two different
-    /// boundaries for one question, and `docs/testing.md` §8 keeps the condition out of a
+    /// boundaries for one question, and `docs/testing.md` §9 keeps the condition out of a
     /// test on purpose. A port measured 167 byte-identical copies among 425 folds, and the
     /// failure mode is a command deciding on a stale value and appending anyway.
     ///
