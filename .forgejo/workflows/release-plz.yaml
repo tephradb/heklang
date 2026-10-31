@@ -26,18 +26,26 @@ jobs:
   release-plz:
     runs-on: native
     env:
-      # **No sccache in this job**, which `ci.yaml` relies on happily. release-plz runs
-      # cargo-semver-checks to work out whether a bump is breaking, and that builds rustdoc
-      # for each crate in a temp tree of its own (`/tmp/.tmpXXXX/hostexecutor/target/
-      # semver-checks/local-hek-0_5_5-.../`). The runner's sccache cannot reach its cache
-      # from there and dies with `sccache: encountered fatal error` and exit status 254,
-      # which cargo reports as `failed to parse process output` and release-plz as
-      # `failed to determine next versions`. An empty wrapper is how cargo is told to call
-      # rustc directly, and it beats a `build.rustc-wrapper` in the runner's CARGO_HOME too.
+      # **Keep cargo-semver-checks out of `/tmp`.** release-plz runs it to work out whether
+      # a bump is breaking, and it builds rustdoc for each crate in a scratch workspace of
+      # its own under the system temp dir (`/tmp/.tmpXXXX/hostexecutor/target/semver-checks/
+      # local-hek-0_5_5-.../`). The runner sets `PrivateTmp = true`, so that `/tmp` is a
+      # systemd tmpfs rather than the disk, and a whole dependency tree does not build in
+      # it: first `sccache: encountered fatal error` (exit 254), then, with the wrapper off,
+      # `couldn't create a temp dir: No such file or directory` on the rustc metadata
+      # tempfile. Both surface three layers up as `failed to determine next versions`.
       #
-      # The cost is a cold build per release run, which is the right trade: semver-checks is
-      # what turns a breaking change into a minor bump on a 0.x crate, and without it a
-      # `feat` alone would have cut 0.11.2 where 0.12.0 was owed.
+      # The runner already moves `CARGO_HOME` and `SCCACHE_DIR` to its state directory for
+      # related reasons; `TMPDIR` was the one heavy path left pointing at the private tmpfs.
+      # The workspace is on disk, so putting the scratch tree beside the checkout is enough.
+      # The proper fix is `TMPDIR` beside `SCCACHE_DIR` in the runner's own config, which
+      # would cover every repo rather than this one.
+      TMPDIR: ${{ github.workspace }}/.release-plz-tmp
+      # No sccache here either, and deliberately still off. It failed in the same place for
+      # what is probably the same reason, so it may well work once the line above lands, but
+      # nothing has shown that yet. Restore it once a release run is green, and take the
+      # cold build until then: semver-checks is what turns a breaking change into a minor
+      # bump on a 0.x crate, and without it a `feat` alone cuts 0.11.2 where 0.12.0 is owed.
       RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@v4
@@ -47,11 +55,15 @@ jobs:
           token: ${{ secrets.FORGE_TOKEN }}
 
       # release-plz commits the version bumps and changelog onto the release branch, and git
-      # refuses to commit without an identity.
-      - name: Configure git identity
+      # refuses to commit without an identity. The scratch directory is made here because
+      # `TMPDIR` naming one that does not exist is its own `No such file or directory`, and
+      # it is cleared because the workspace is reused between runs.
+      - name: Configure git identity and the scratch directory
         run: |
           git config user.name "release-plz"
           git config user.email "dev@tqwewe.com"
+          rm -rf "$TMPDIR"
+          mkdir -p "$TMPDIR"
 
       # Publish + tag + Forgejo release for any crate whose version is unpublished.
       - name: Publish and tag
