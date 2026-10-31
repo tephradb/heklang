@@ -176,9 +176,16 @@ destructure's binds and the envelope binding, which do not exist yet where the f
 form, so a command could neither narrow the log to those events nor conflict on them. A test reads
 it with `fold` or `fill`, and a deployment serves it from the table. The refusal names the part.
 
-Four refusals: a subject-typed parameter (ids are minted by the key store, not derived), an inline
-fold's arm (not stored, so no key), a name that is not a parameter, and a part the arm already
-wrote some other way.
+**A computed part and the key are kept apart, in both directions.** The part reads the record: the
+destructure's binds, the envelope binding, `const`s and pure `fn`s of those, and not a parameter or
+the accumulator, because the sink evaluates it to decide which row the record belongs to and so runs
+before there is a key or a row. And no filter of the arm may read a part the arm computes, because a
+filter resolves once for the whole slice against the key its caller asked for, and there is no such
+key. Both halves used to check clean and fail only in the sink.
+
+Six refusals: a subject-typed parameter (ids are minted by the key store, not derived), an inline
+fold's arm (not stored, so no key), a name that is not a parameter, a part the arm already wrote
+some other way, a read of the key or the accumulator, and a filter reading a part the arm computes.
 
 **No builtin is needed for the usual case.** `Timestamp.year()`/`month()` and `Int.pad(width)` are
 all there, so `fn month_of(at: Timestamp) -> String { return "{at.year()}-{at.month().pad(2)}" }`

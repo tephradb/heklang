@@ -974,7 +974,37 @@ read by key has the caller's argument in the parameter's slot, so it computes pe
 computes **is** the key, and it binds the parameter from that. One of the two therefore scans,
 which is what a by-key read of a fold already does.
 
-Four things are refused:
+**A computed part and the key are kept apart, and in both directions.** The part reads the record:
+the destructure's binds, the envelope binding, `const`s and pure `fn`s of those. Not a parameter,
+not even one this same arm pins some other way, and not the accumulator. And no filter of the arm
+may read a part the arm computes.
+
+That is not a conservative line, it is the exact one, and each half is a driver that could not
+otherwise answer:
+
+- The sink evaluates the expression to decide which row the record belongs to, so it runs *before*
+  there is a key to bind the parameters from and *before* there is a row to read the accumulator out
+  of. A by-key read has both in its frame and answers happily, which is how the hole stayed open:
+  `key bucket = n` and `key bucket = tag.len()` both checked clean and then failed a fill with
+  `slot read before it was set`, a message about the interpreter rather than about the program.
+- A filter resolves **once** for the whole slice, against the key its caller asked for, and a
+  computed part has no such key. `(label: month)` writes the part twice over, since a filter pins a
+  part by its *value* rather than by its name; `(label: month.upper())` pins nothing, so the column
+  stayed storable while the filter narrowed the log to the records whose field already equalled what
+  the part computed, dropping every other one from the read model with nothing to say so.
+
+**The second half is what lets the sink check the arm's narrowing first**, which it has to: a by-key
+read skips a record its predicate rejects and never runs the expression at all, so
+`key rate = 100 / units` under `(kind: "paid")` must not fail a replay on a free record with no
+units. With a filter unable to read a computed part, no conjunct the sink has to resolve depends on
+a part it has not computed yet, so the frame-free ones can be checked before anything is evaluated.
+
+Binding the parts an arm pins from a field first, and computing the rest against them, is a real
+feature and a different one. It would make what a part may read depend on what else the arm pinned
+and on the order two computed parts were written in, where this rule is one sentence, and none of
+the cases that asked for computed keys reads a key part.
+
+Six things are refused:
 
 **A part of a subject type.** A subject's ids are minted and filed by the key store, so a computed
 one would address a row under a key nothing issued while `KeyPart::subject` reported it as that
@@ -989,6 +1019,14 @@ does not is an ordinary expression in the arm.
 
 **A part already written in that arm**, whichever of the three ways wrote it, for the reason two
 rule 13 conjuncts on one part are refused.
+
+**A read of the key or the accumulator**, which is the rule above:
+
+> `` `tag` is a part of the key this arm is computing, so a computed key part cannot read it ``
+
+**A filter reading a part the arm computes**, which is the same rule the other way:
+
+> `` `month` is a key part this arm computes, so the filter on `label` cannot read it ``
 
 **Seen from the read side**, the part is `ArmMatch::Computed` and it counts as **pinned**: one
 record writes one key, which is not a range, so a host deriving range indexes needs to know nothing

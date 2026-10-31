@@ -5239,6 +5239,12 @@ impl Parser {
             // both hold, so the arm would fold nothing while `--tables` still called the
             // column storable, which is the reason `slice_filters` refuses the pair of
             // conjuncts it can see.
+            //
+            // By **name** here, which catches the shorthand `(month)` and the long
+            // `(month: ..)`. A field of another name whose value is the parameter writes
+            // the part too, because `tables::pins` reads the value rather than the name,
+            // and that is the loop at the end of this function: it is the same defect one
+            // step more general, and one refusal for it is enough.
             let matched = filters.iter().any(|filter| match filter {
                 Filter::Key { param, .. } => param == &name,
                 Filter::Field { field, .. } => field == &name,
@@ -5256,21 +5262,76 @@ impl Parser {
             }
             self.expect_sym(Sym::Assign)?;
             // The fold's own rule, as an arm's value is held to it: no clock, no call out.
-            // Unlike rule 13's conjunct this *may* read the record, which is the point, so
-            // there is no `slot_read` check here.
             self.folding = true;
             let value = self.expr(lower, Some(param.ty.clone()));
             self.folding = false;
+            let value = value?;
+            // Unlike rule 13's conjunct this *may* read the record, which is the point, so
+            // the check is narrower than `slot_read`'s rather than absent: the record's
+            // names are in, and the key's own and the accumulator are out.
+            if let Some((slot, at)) = lower.b.key_read(value) {
+                let name = lower.b.slot_name(slot).unwrap_or_default().to_string();
+                let what = match lower.b.params().iter().any(|other| other.slot == slot) {
+                    true => "a part of the key this arm is computing",
+                    false => "the accumulator",
+                };
+                return Err(self
+                    .err(
+                        Code::FoldRestriction,
+                        format!("`{name}` is {what}, so a computed key part cannot read it"),
+                        at,
+                    )
+                    .with_hint(
+                        "a computed part decides which row the record belongs to, so it runs before there is a key to bind the parameters from and before there is a row to hold the accumulator; it reads the record's own fields, the envelope binding, consts and pure `fn`s of those",
+                    ));
+            }
             keys.push(ComputedKey {
                 param: param.name,
                 slot: param.slot,
                 ty: param.ty,
-                value: value?,
+                value,
                 span: at,
             });
             if !self.eat_sym(Sym::Comma) {
                 break;
             }
+        }
+
+        // **The other direction of the rule above, and the drivers need both.** A filter
+        // resolves *once* for the whole slice, against the key the caller asked for; a
+        // computed part is per record and there is no such key, so a filter reading one
+        // has nothing to resolve against. `(label: month)` is the plain case and
+        // `(label: month.upper())` the one the duplicate check above cannot see at all:
+        // it pins no part, so the arm stayed storable while the filter narrowed the log
+        // to the records whose field already equalled what the part computed, silently
+        // dropping every other one from the read model.
+        //
+        // It is also what makes the sink able to check an arm's narrowing *before* it
+        // evaluates a computed part: with this refused, no filter it has to resolve
+        // depends on a part it has not computed yet.
+        let slots: Vec<Slot> = keys.iter().map(|key| key.slot).collect();
+        for filter in filters {
+            let Filter::Field { field, value } = filter else {
+                continue;
+            };
+            let Some((slot, at)) = lower.b.reads_one_of(*value, &slots) else {
+                continue;
+            };
+            let Some(key) = keys.iter().find(|key| key.slot == slot) else {
+                continue;
+            };
+            return Err(self
+                .err(
+                    Code::FoldRestriction,
+                    format!(
+                        "`{}` is a key part this arm computes, so the filter on `{field}` cannot read it",
+                        key.param
+                    ),
+                    at,
+                )
+                .with_hint(
+                    "a filter resolves once for the whole slice, against the key its caller asked for, and a computed part is per record with no such key to resolve against; narrow on a field of the event, or compute the part from the field rather than filtering on it",
+                ));
         }
         Ok(keys)
     }

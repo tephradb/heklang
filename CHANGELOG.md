@@ -165,6 +165,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because a subject's ids are minted and filed by the key store rather than derived. No new builtin
   was needed for the motivating case: `Timestamp.year()`/`month()` and `Int.pad(width)` compose
   into `month_of` in a pure `fn`.
+
+  **A computed part and the key are kept apart, in both directions.** The part reads the record: its
+  binds, the envelope binding, consts and pure `fn`s of those, and not a parameter or the
+  accumulator. And no filter of the arm may read a part the arm computes. Each half is a driver that
+  could not otherwise answer, and all three shapes below checked clean before this:
+
+  - The sink evaluates the expression to decide which row the record belongs to, so it runs before
+    there is a key to bind the parameters from and before there is a row holding the accumulator. A
+    by-key read has both and answers, so `key bucket = n` and `key bucket = tag.len()` failed a
+    `fill` with `slot read before it was set`.
+  - A filter resolves once for the whole slice, against the key its caller asked for, and a computed
+    part has no such key. `(label: month)` writes the part twice over, since a filter pins a part by
+    its value rather than by its name, and `(label: month.upper())` pins nothing at all: the column
+    stayed storable while the filter narrowed the log to the records whose field already equalled
+    what the part computed, dropping every other one from the read model.
+
+  **And the sink now checks an arm's narrowing before it evaluates a computed part**, which the
+  second half above is what makes possible: with no conjunct able to read a part the sink has not
+  computed, the frame-free ones can be resolved first. A by-key read skips a record its predicate
+  rejects and never runs the expression, so `key rate = 100 / units` under `(kind: "paid")` failed
+  the whole replay on a free record with no units where the same fold read by key answered.
 - **A per-record sink for the derived read model**: `Tables` and the `Columns` seam, which are to
   `fold_stored` what `Projection` and `Rows` are to a projector rebuild. `Tables::apply(record,
   columns)` applies one record to whatever columns its arms name, carrying the accumulator in the

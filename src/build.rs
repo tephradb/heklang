@@ -301,12 +301,21 @@ impl Builder {
     /// `kind == kind` is the degenerate case and it is a tautology; `kind == order_id` is
     /// the same hole with a value that is not.
     pub fn slot_read(&self, value: ExprId) -> Option<(Slot, Span)> {
+        self.loaded(value, |_| true)
+    }
+
+    /// The first slot an expression loads that `hit` accepts, with the span to point at.
+    /// The one walk the three questions below are asked of, so a node that carries a slot
+    /// has one place to be found.
+    fn loaded(&self, value: ExprId, hit: impl Fn(Slot) -> bool) -> Option<(Slot, Span)> {
         let mut stack = vec![value];
         while let Some(id) = stack.pop() {
             let Some(expr) = self.exprs.get(id) else {
                 continue;
             };
-            if let Expr::Load(slot) = expr {
+            if let Expr::Load(slot) = expr
+                && hit(*slot)
+            {
                 return Some((*slot, self.exprs.span(id)));
             }
             stack.extend(crate::parse::children(expr));
@@ -314,8 +323,41 @@ impl Builder {
         None
     }
 
+    /// The first of `slots` an expression loads, with the span to point at.
+    ///
+    /// `docs/folds.md` rule 14's other direction asks it: a slice filter resolves once
+    /// against the key its caller asked for, so one reading a part the same arm *computes*
+    /// has nothing to resolve against.
+    pub fn reads_one_of(&self, value: ExprId, slots: &[Slot]) -> Option<(Slot, Span)> {
+        self.loaded(value, |slot| slots.contains(&slot))
+    }
+
+    /// The first **parameter or accumulator** an expression loads, which is what a
+    /// computed key part may not read (`docs/folds.md` rule 14).
+    ///
+    /// **The sink has neither when it needs the key.** A computed part is evaluated to
+    /// decide which row the record belongs to, so it runs before there is a key, which is
+    /// what would bind the parameters, and before there is a row, which is what holds the
+    /// accumulator. A by-key read has both in its frame and answers happily, so a part
+    /// reading one checks clean and then fails the fill with `slot read before it was
+    /// set`: the two drivers of one expression disagree, which is the one thing rule 14
+    /// rests on them not doing.
+    ///
+    /// A deny-list rather than an allow-list of what the record offers, because the
+    /// record's own names are not the only legal ones: a comprehension inside the
+    /// expression binds a slot of its own, and an allow-list would refuse it. These two
+    /// are the whole of what a fold's frame holds that the sink cannot fill.
+    ///
+    /// The test is [`Builder::slot_name`], which is also what the diagnostic calls for
+    /// the name, so the two cannot come to disagree: a slot this reported and that could
+    /// not name would be a refusal with nothing to say.
+    pub fn key_read(&self, value: ExprId) -> Option<(Slot, Span)> {
+        self.loaded(value, |slot| self.slot_name(slot).is_some())
+    }
+
     /// The name a slot was declared under, for a diagnostic about one. A parameter or an
-    /// accumulator, which between them are everything a fold's arm can reach.
+    /// accumulator, which between them are everything a fold's arm can reach that is not
+    /// a name of the record it folds.
     pub fn slot_name(&self, slot: Slot) -> Option<&str> {
         self.params
             .iter()

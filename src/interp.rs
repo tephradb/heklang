@@ -997,6 +997,21 @@ impl<'a> Tables<'a> {
         // building it means reading and sealing every bound field.
         let mut computed: Option<Frame> = None;
 
+        // **The arm's own narrowing, before a computed part is evaluated.** A by-key read
+        // checks the predicate and skips the record before it ever runs the expression
+        // (`fold`'s inner loop), so the sink must not raise on a record the arm was never
+        // going to fold: `key bucket = 100 / units` under `(kind: "paid")` failed the
+        // whole replay on a free record with no units, where the same fold read by key
+        // answered. `folded` checks the predicate too, and has to, because it is what
+        // knows the key; this is the half of it that can be known without one.
+        if !def.stage.slices[at].keys.is_empty()
+            && !self
+                .narrowed(record, def, at)
+                .map_err(|err| err.in_module(module))?
+        {
+            return Ok(());
+        }
+
         // The key, part by part, in the table's order. A part the arm pinned is known
         // from the record or from the arm itself; one it left open is a range, and the
         // pinned parts are what narrows it.
@@ -1057,6 +1072,44 @@ impl<'a> Tables<'a> {
             self.fold_into(record, table, column, at, key, columns)?;
         }
         Ok(())
+    }
+
+    /// Whether this arm's **frame-free** filters hold for this record, which is as much
+    /// of its predicate as can be checked before the key is known.
+    ///
+    /// A filter whose value reads a slot cannot be resolved here: it reads a parameter,
+    /// and a parameter comes from the key, which is what the computed part is being
+    /// evaluated to find. The ones that remain are the narrowing conjuncts in every real
+    /// case, since `(kind: "paid")` is a literal and `(shop_id)` is the vacuous kind: it
+    /// compares the field the key part was taken *from* against itself.
+    ///
+    /// **Nothing it skips is a record the arm would have folded.** A frame-free value is
+    /// the same value in both drivers, so a record this rejects is one `folded` would
+    /// reject too. A filter reading an *open* parameter is left to `folded`, which runs
+    /// per ranged key and has one.
+    fn narrowed(&self, record: &Record, def: &Fold, at: usize) -> Result<bool, Error> {
+        let slice = &def.stage.slices[at];
+        let declared = self.program.event(&slice.event);
+        let mut frame = Frame::new(def.frame);
+        for filter in &slice.filters {
+            let Filter::Field { field: name, value } = filter else {
+                continue;
+            };
+            if slot_read(&def.exprs, *value) {
+                continue;
+            }
+            let held = eval(self.program, &def.exprs, &mut frame, *value, None)?;
+            // Fitted as `resolved_one` fits it, for the reason it does: a bare value
+            // against an optional field compares as the optional or matches nothing.
+            let held = match declared.and_then(|event| event.field(name)) {
+                Some(declared) => fitted_at(held, &declared.ty, def.exprs.span(*value))?,
+                None => held,
+            };
+            if field(&record.event, name)? != &held {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// The frame a computed key part is evaluated in: this record's envelope and this
@@ -2331,6 +2384,26 @@ pub fn partition_key(arm: &Arm, event: &Event) -> Result<Vec<Key>, Error> {
             })
         })
         .collect()
+}
+
+/// Whether an expression loads a frame slot, and so cannot be evaluated without one.
+///
+/// [`Builder::slot_read`](crate::Builder::slot_read) is the parse-time half of this, and
+/// it answers *which* slot because a diagnostic names it. Here the question is only
+/// whether there is one: [`Tables::narrowed`] has no frame to offer and wants to know
+/// which filters it can resolve anyway.
+fn slot_read(exprs: &Exprs, value: ExprId) -> bool {
+    let mut stack = vec![value];
+    while let Some(id) = stack.pop() {
+        let Some(expr) = exprs.get(id) else {
+            continue;
+        };
+        if matches!(expr, Expr::Load(_)) {
+            return true;
+        }
+        stack.extend(crate::parse::children(expr));
+    }
+    false
 }
 
 fn field<'a>(event: &'a Event, name: &str) -> Result<&'a Value, Error> {

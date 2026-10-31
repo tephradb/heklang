@@ -881,3 +881,100 @@ fold OrderAnyHold(shop_id: Shop, order_id: Int) -> Bool = false {{
         ]
     );
 }
+
+// ---------------------------------------------------------------------------
+
+/// Rule 14 through both drivers, which is where a computed key part's correctness lives:
+/// the sink writes the row at what the expression evaluates to, and a by-key read
+/// compares, so `agrees` is the only place the two can be caught disagreeing.
+///
+/// Everything a computed part may read is here, and the comprehension is why the rule is
+/// written as a deny-list of the key rather than an allow-list of the record: the binding
+/// it allocates is a slot of the fold's frame like any other.
+const COMPUTED: &str = "const OFFSET: Int = 100
+
+event @usage.recorded { shop_id: Int, kind: String, units: Int, tags: List(String) }
+
+fn month_of(at: Timestamp) -> String {
+  return \"{at.year()}-{at.month().pad(2)}\"
+}
+
+fold UsageCounted(shop_id: Int, month: String) -> n: Int = 0 {
+  on @usage.recorded as e (shop_id) { units } key month = month_of(e.at) => n + units
+}
+
+fold TaggedUnits(shop_id: Int, bucket: Int) -> n: Int = 0 {
+  on @usage.recorded(shop_id) { units, tags }
+    key bucket = units + OFFSET + [t.len() for t in tags].len() => n + units
+}
+
+fold Rated(shop_id: Int, rate: Int) -> n: Int = 0 {
+  on @usage.recorded(shop_id, kind: \"paid\") { units } key rate = 100 / units => n + units
+}
+";
+
+fn usage(interpreter: &mut Interpreter<'_>, kind: &str, units: i64) {
+    given(
+        interpreter,
+        "usage.recorded",
+        [
+            ("shop_id", Value::Int(1)),
+            ("kind", Value::str(kind)),
+            ("units", Value::Int(units)),
+            (
+                "tags",
+                Value::list(heklang::Type::String, [Value::str("ab"), Value::str("c")]),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_computed_key_part_reaches_the_same_row_through_both_drivers() {
+    let program = program(COMPUTED);
+    let mut interpreter = Interpreter::new(&program);
+    usage(&mut interpreter, "paid", 5);
+    let cells = agrees(&program, &interpreter);
+
+    // The envelope binding, through a pure `fn`: the harness stamps 2020-01-01.
+    assert_eq!(
+        cells.get(
+            "month__shop",
+            &[Key::Str("2020-01".into()), Key::Int(1)],
+            "usage_counted"
+        ),
+        Some(&Value::Int(5))
+    );
+    // A `const`, a bind and a comprehension over a bound list: 5 + 100 + 2.
+    assert_eq!(
+        cells.get(
+            "bucket__shop",
+            &[Key::Int(107), Key::Int(1)],
+            "tagged_units"
+        ),
+        Some(&Value::Int(5))
+    );
+}
+
+/// **The arm's narrowing is checked before the key is evaluated**, because a by-key read
+/// never runs the expression for a record its predicate rejects.
+///
+/// `Rated` divides by `units` and only counts paid usage, so a free record with no units
+/// is one the arm does not match. The sink used to compute the key first and fail the
+/// whole replay with `division by zero`, where the same fold read by key answered: a
+/// program that checks clean and that one driver cannot run at all.
+#[test]
+fn the_sink_does_not_evaluate_a_key_for_a_record_the_arm_rejects() {
+    let program = program(COMPUTED);
+    let mut interpreter = Interpreter::new(&program);
+    usage(&mut interpreter, "paid", 5);
+    usage(&mut interpreter, "free", 0);
+    let cells = agrees(&program, &interpreter);
+
+    assert_eq!(
+        cells.get("rate__shop", &[Key::Int(20), Key::Int(1)], "rated"),
+        Some(&Value::Int(5)),
+        "the paid record alone, at 100 / 5"
+    );
+    assert_eq!(cells.len("rate__shop"), 1, "the free record is in no row");
+}

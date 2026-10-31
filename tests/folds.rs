@@ -1898,3 +1898,137 @@ fold F(id: Int, kind: String) -> Int = 0 {
 ";
     assert_eq!(error(field), "`kind` is matched twice in this arm");
 }
+
+/// Rule 14's fifth refusal, and the one the other four were hiding: a computed part may
+/// not read the key it is computing or the accumulator.
+///
+/// **It is the two drivers disagreeing, which is the one thing rule 14 rests on.** A
+/// computed part decides which row the record belongs to, so the sink evaluates it before
+/// there is a key to bind the parameters from and before there is a row to read the
+/// accumulator out of; a by-key read has both in its frame and answers. So both shapes
+/// below used to check clean and then fail a `fill` with `slot read before it was set`,
+/// which is a message about the interpreter rather than about the program.
+#[test]
+fn a_computed_key_part_reads_the_record_and_nothing_of_the_key() {
+    let accumulator = "\
+event @usage.recorded { shop_id: Int, units: Int }
+
+fold UsageCounted(shop_id: Int, bucket: Int) -> n: Int = 0 {
+  on @usage.recorded(shop_id) { units } key bucket = n => n + units
+}
+";
+    assert_eq!(
+        error(accumulator),
+        "`n` is the accumulator, so a computed key part cannot read it"
+    );
+
+    // A parameter, including one this same arm pins some other way. Binding the pinned
+    // parts before computing the rest is a feature and not this one: it would make what a
+    // part may read depend on what else the arm pinned and on the order two computed parts
+    // were written in, where this rule is one sentence.
+    let part = "\
+event @usage.recorded { shop_id: Int, units: Int }
+
+fold UsageCounted(shop_id: Int, tag: String, bucket: Int) -> n: Int = 0 {
+  on @usage.recorded(shop_id, tag == \"a\") { units } key bucket = tag.len() => n + units
+}
+";
+    assert_eq!(
+        error(part),
+        "`tag` is a part of the key this arm is computing, so a computed key part cannot read it"
+    );
+}
+
+/// The same rule read the other way, which both drivers need.
+///
+/// A filter resolves **once** for the whole slice, against the key its caller asked for,
+/// and a computed part is per record with no such key, so a filter reading one has
+/// nothing to resolve against. `(label: month)` writes the part twice over, since
+/// `tables::pins` reads a filter's value rather than its name; `(label: month.upper())`
+/// pins nothing, so the column stayed storable while the filter quietly narrowed the log
+/// to the records whose field already equalled what the part computed and dropped every
+/// other one from the read model.
+///
+/// It is also what lets the sink check an arm's narrowing before it evaluates a computed
+/// part, which is `tests/sink.rs`'s half of this: with it refused, no filter the sink has
+/// to resolve depends on a part it has not computed yet.
+#[test]
+fn a_filter_cannot_read_a_key_part_the_arm_computes() {
+    let source = |filter: &str| {
+        format!(
+            "\
+event @usage.recorded {{ shop_id: Int, label: String, units: Int }}
+
+fold UsageCounted(shop_id: Int, month: String) -> n: Int = 0 {{
+  on @usage.recorded(shop_id, {filter}) {{ units, label }} key month = label.upper() => n + units
+}}
+"
+        )
+    };
+    let wanted = "`month` is a key part this arm computes, so the filter on `label` cannot read it";
+    assert_eq!(error(&source("label: month")), wanted);
+    assert_eq!(error(&source("label: month.upper()")), wanted);
+
+    // The shorthand and the long form on the part's own name stay the plainer message,
+    // since a pair that is plainly a pair reads better as one.
+    let named = "\
+event @a.one { id: Int, kind: String, n: Int }
+
+fold F(id: Int, kind: String) -> Int = 0 {
+  on @a.one(id, kind) { n, kind } key kind = kind.upper() => n
+}
+";
+    assert_eq!(error(named), "`kind` is matched twice in this arm");
+}
+
+#[test]
+fn a_computed_key_part_may_read_everything_the_record_offers() {
+    // The other side of the refusal above, and a comprehension is why it is written as a
+    // deny-list: the binding it allocates is a slot of the fold's frame like any other,
+    // so an allow-list of the record's own names would refuse one.
+    let source = "\
+const OFFSET: Int = 100
+
+event @usage.recorded { shop_id: Int, units: Int, tags: List(String) }
+
+fn month_of(at: Timestamp) -> String {
+  return \"{at.year()}-{at.month().pad(2)}\"
+}
+
+fold UsageCounted(shop_id: Int, month: String) -> n: Int = 0 {
+  on @usage.recorded as e (shop_id) { units } key month = month_of(e.at) => n + units
+}
+
+fold TaggedUnits(shop_id: Int, bucket: Int) -> n: Int = 0 {
+  on @usage.recorded(shop_id) { units, tags }
+    key bucket = units + OFFSET + [t.len() for t in tags].len() => n + units
+}
+";
+    let program = program(source);
+    let mut interpreter = Interpreter::new(&program);
+    given(
+        &mut interpreter,
+        "usage.recorded",
+        [
+            ("shop_id", Value::Int(1)),
+            ("units", Value::Int(5)),
+            (
+                "tags",
+                Value::list(Type::String, [Value::str("ab"), Value::str("c")]),
+            ),
+        ],
+    );
+    // The by-key driver, which is half of what checking clean is worth: the refused
+    // shapes checked clean and answered here too, and failed only in the sink.
+    // `tests/sink.rs` runs this same program through both and asserts they agree, which
+    // is the half that catches what this one cannot.
+    assert_eq!(
+        interpreter
+            .fold(
+                "TaggedUnits",
+                [("shop_id", Value::Int(1)), ("bucket", Value::Int(107))]
+            )
+            .expect("the bucket is 5 + 100 + 2"),
+        Value::Int(5)
+    );
+}
