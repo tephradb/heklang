@@ -335,6 +335,50 @@ fn an_index_written_two_ways_is_one_index() {
     );
 }
 
+/// `docs/projectors.md` rule 11: a compound key is a sequence, so its column order is
+/// part of the entity rather than a presentation detail. The columns are written in key
+/// order and never sorted, which is what the `(key ..)` node has to carry.
+#[test]
+fn swapping_two_key_columns_is_a_change() {
+    // Only the declaration differs: the columns are the same two, of the same type, and
+    // the subscript is the same text. So the `(col ..)` entries, which are sorted by
+    // name, are identical and the `(key ..)` node is the only thing left to carry it.
+    // Sorting that node makes these two programs one, which is the mutation this test
+    // exists to catch.
+    differs(
+        "projector P {
+           entity E { a: Int @key, b: Int @key, seen: Int }
+           on @order.placed { order_id } { patch E[1, 2] { seen: .seen + 1 } }
+         }",
+        "projector P {
+           entity E { b: Int @key, a: Int @key, seen: Int }
+           on @order.placed { order_id } { patch E[1, 2] { seen: .seen + 1 } }
+         }",
+        "a compound key's column order decides what a prefix of it can be read on",
+    );
+}
+
+/// And the subscript is ordered for the same reason: the same two values in the other
+/// order address a different row.
+#[test]
+fn swapping_two_key_values_is_a_change() {
+    differs(
+        "projector P {
+           entity E { a: Int @key, b: Int @key, seen: Int }
+           on @order.placed { order_id } {
+             patch E[1, 2] { seen: .seen + 1 }
+           }
+         }",
+        "projector P {
+           entity E { a: Int @key, b: Int @key, seen: Int }
+           on @order.placed { order_id } {
+             patch E[2, 1] { seen: .seen + 1 }
+           }
+         }",
+        "a subscript names one row, and these name two",
+    );
+}
+
 #[test]
 fn swapping_two_statements_is_a_change() {
     differs(
@@ -552,6 +596,151 @@ fn a_guard_is_printed_where_it_runs() {
 }
 
 // ---------------------------------------------------------------------------
+// Rule 6, continued: a named fold is not a fourth
+// ---------------------------------------------------------------------------
+
+const SPEND: &str = "\
+fold LifetimeSpend(customer_id: Customer) -> spend: Money(2) = 0 {
+  on @order.placed(customer_id) { total } => spend + total
+}
+";
+
+/// A query-only fold, which is the shape the exclusion was actually false of: rule 12
+/// makes it unreadable by any command, so it has no use site to have been inlined into.
+const LAST_AT: &str = "\
+fold LastPlacedAt(customer_id: Customer) -> Timestamp? = none {
+  on @order.placed as e (customer_id) => e.at
+}
+";
+
+#[test]
+fn a_named_fold_earns_an_entry() {
+    let digest = with_events(SPEND);
+    let spend = entry(&digest, "LifetimeSpend");
+    assert_eq!(spend.kind, Kind::Fold);
+    assert!(
+        spend.form.packed().starts_with("(fold LifetimeSpend "),
+        "got {}",
+        spend.form.packed()
+    );
+}
+
+#[test]
+fn a_fold_sorts_between_what_it_is_made_of_and_what_reads_it() {
+    let digest = with_events(&format!(
+        "{SPEND}
+         fn doubled(amount: Money(2)) -> Money(2) {{ return amount + amount }}
+         command Grant(customer_id: Customer, order_id: Uuid) {{
+           fold spend = LifetimeSpend {{ customer_id }}
+           emit @order.placed {{ order_id, customer_id, total: doubled(spend) }}
+         }}"
+    ));
+    let kinds: Vec<Kind> = digest.entries().iter().map(|entry| entry.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            Kind::Subject,
+            Kind::Event,
+            Kind::Event,
+            Kind::Function,
+            Kind::Fold,
+            Kind::Command
+        ],
+        "a fold is a leaf a command reads, so it sits after `fn` and before `command`"
+    );
+}
+
+#[test]
+fn a_folds_signature_is_its_key_and_its_column_type() {
+    let digest = with_events(SPEND);
+    let signature = entry(&digest, "LifetimeSpend")
+        .signature
+        .as_ref()
+        .expect("a fold has a signature")
+        .packed();
+    assert_eq!(
+        signature,
+        "(sig fold LifetimeSpend (params (p customer_id (Subject Customer))) (returns (Money 2)))",
+        "the parameters are the table's key and the return type is the column's, which is \
+         the whole of what something outside the body decides from a fold"
+    );
+}
+
+#[test]
+fn editing_an_arm_moves_a_folds_hash_and_not_its_signature() {
+    let before = with_events(SPEND);
+    let after = with_events(
+        "fold LifetimeSpend(customer_id: Customer) -> spend: Money(2) = 0 {
+           on @order.placed(customer_id) { total } => spend + total + total
+         }",
+    );
+    let (before, after) = (
+        entry(&before, "LifetimeSpend"),
+        entry(&after, "LifetimeSpend"),
+    );
+    assert_ne!(before.hash, after.hash, "the column's values changed");
+    assert_eq!(
+        before.signature_hash, after.signature_hash,
+        "its table, key order and type did not, so the column refolds where it is"
+    );
+}
+
+#[test]
+fn renaming_a_parameter_moves_a_folds_signature() {
+    let before = with_events(SPEND);
+    let after = with_events(
+        "fold LifetimeSpend(buyer_id: Customer) -> spend: Money(2) = 0 {
+           on @order.placed(customer_id: buyer_id) { total } => spend + total
+         }",
+    );
+    let (before, after) = (
+        entry(&before, "LifetimeSpend"),
+        entry(&after, "LifetimeSpend"),
+    );
+    assert_ne!(
+        before.signature_hash, after.signature_hash,
+        "a parameter names a key part, so renaming one moves the table the column is in"
+    );
+}
+
+#[test]
+fn a_query_only_fold_earns_an_entry_like_any_other() {
+    let digest = with_events(LAST_AT);
+    let last = entry(&digest, "LastPlacedAt");
+    assert_eq!(
+        last.kind,
+        Kind::Fold,
+        "no command may read this one, which is exactly why the entry has to be here"
+    );
+}
+
+#[test]
+fn deleting_a_query_only_fold_is_a_change() {
+    let with = with_events(LAST_AT);
+    let without = with_events("");
+    assert_ne!(
+        with.hash(),
+        without.hash(),
+        "it is presented as a stored column and runs by name, so losing it is a change"
+    );
+}
+
+#[test]
+fn a_fold_entry_reads_back_from_its_row() {
+    let digest = with_events(SPEND);
+    let row = entry(&digest, "LifetimeSpend");
+    let read = Entry::from_packed(
+        &row.form.packed(),
+        row.signature.as_ref().map(|sig| sig.packed()).as_deref(),
+    )
+    .expect("a fold's row reads back");
+    assert_eq!(read.kind, Kind::Fold);
+    assert_eq!(read.name, "LifetimeSpend");
+    assert_eq!(read.hash, row.hash);
+    assert_eq!(read.signature_hash, row.signature_hash);
+}
+
+// ---------------------------------------------------------------------------
 // Rule 7: every entry carries its own hash
 // ---------------------------------------------------------------------------
 
@@ -650,6 +839,44 @@ fn a_test_is_not_in_the_program_hash() {
     let all = with.json_with_tests().to_string();
     assert!(all.contains("\"tests\""), "{all}");
     assert!(all.contains("hash_with_tests"), "{all}");
+}
+
+/// The `fold` action and its value expectation both have a form, and neither moves the
+/// program's hash: a named fold earns no entry of its own, and a test is not production.
+#[test]
+fn a_fold_action_has_a_form_under_the_tests() {
+    let with = with_events(
+        "fold LifetimeSpend(customer_id: Customer) -> spend: Money(2) = 0 {
+           on @order.placed(customer_id) { total } => spend + total
+         }
+
+         test \"what one customer has spent\" {
+           given @order.placed { order_id: \"0190d1a1-0000-7000-8000-000000000001\", customer_id: 1, total: 25.99 }
+           fold LifetimeSpend { customer_id: 1 }
+           expect 25.99
+         }",
+    );
+    let without = with_events(
+        "fold LifetimeSpend(customer_id: Customer) -> spend: Money(2) = 0 {
+           on @order.placed(customer_id) { total } => spend + total
+         }",
+    );
+
+    let packed = with.packed_with_tests();
+    assert!(
+        packed.contains("(fold LifetimeSpend (f customer_id (int 1)))"),
+        "the action names the fold and its key: {packed}"
+    );
+    assert!(
+        packed.contains("(expect (value (money 2 2599)))"),
+        "and the expectation is the value it folded to: {packed}"
+    );
+    assert_eq!(
+        without.hash(),
+        with.hash(),
+        "a test still runs nothing in production"
+    );
+    assert_ne!(without.hash_with_tests(), with.hash_with_tests());
 }
 
 // ---------------------------------------------------------------------------
@@ -1536,4 +1763,45 @@ fn an_override_moves_only_the_tests_hash() {
     ));
     assert_eq!(one.hash(), two.hash(), "nothing in production moved");
     assert_ne!(one.hash_with_tests(), two.hash_with_tests());
+}
+
+/// Rule 13's conjunct packs under its own head, after the field filters, and a slice
+/// with none of them packs byte for byte as it did. The second half is what keeps the
+/// corpus hash still: the two kinds are sorted apart and the field kind goes first, so
+/// nothing is prepended and the slot numbering, handed out at first appearance after the
+/// sort, does not move.
+#[test]
+fn a_key_filter_packs_after_the_field_filters() {
+    let keyed = with_events(
+        "fold Counted(customer_id: Customer, kind: String) -> n: Int = 0 {
+           on @order.placed(customer_id, kind == \"placed\") => n + 1
+           on @order.cancelled(customer_id, kind == \"cancelled\") => n + 1
+         }
+
+         command C(order_id: Uuid, customer_id: Customer, total: Money(2)) {
+           fold n = Counted { customer_id, kind: \"placed\" }
+           emit @order.placed { order_id, customer_id, total }
+         }",
+    );
+    let packed = keyed.packed();
+    assert!(
+        packed.contains("(filter customer_id $3) (keyed kind (str \"placed\"))"),
+        "the field filter sorts first and the key follows: {packed}"
+    );
+
+    // And a program whose folds are all plain is untouched, which is the property the
+    // `hek/` corpus hash checks at a larger scale.
+    let plain = with_events(
+        "command C(order_id: Uuid, customer_id: Customer, total: Money(2)) {
+           fold spend: Money(2) = 0
+             on @order.placed(customer_id) { total } => spend + total
+           emit @order.placed { order_id, customer_id, total }
+         }",
+    );
+    assert!(
+        plain.packed().contains("(filter customer_id $"),
+        "{}",
+        plain.packed()
+    );
+    assert!(!plain.packed().contains("keyed"), "{}", plain.packed());
 }

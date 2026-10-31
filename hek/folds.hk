@@ -1,0 +1,170 @@
+// folds/customer.hk
+//
+// A named fold is a slice of the log and the value it folds to, declared once and read by
+// name. It is the value half of what `guard` does for a proposition: a guard refuses and
+// hands nothing back, so a fold whose result a command needs could not be factored at all.
+// `place_order.hk` still carries that in a comment, above the `lifetime_spend` it folds
+// inline because a guard could not give it one.
+//
+// Parens declare and braces use, the rule `command`/`invoke` and `guard`/`guard` already
+// hold to. See `docs/folds.md`.
+
+// The accumulator is named only where an arm reads the running value, which is what makes
+// one legal spelling per fold: `spend` is written because `=> spend + total` reads it.
+fold LifetimeSpend(customer_id: Customer) -> spend: Money(2) = 0 {
+  on @order.placed(customer_id) { total } => spend + total
+  on @order.cancelled(customer_id) { refund } => spend - refund
+}
+
+fold OpenOrderCount(customer_id: Customer) -> open: Int = 0 {
+  on @order.placed(customer_id) => open + 1
+  on @order.cancelled(customer_id) => open - 1
+}
+
+// No name, because no arm reads the running value: the arm replaces it with the event's
+// own field. Writing `-> placed: Bool = false` here would be `unused-accumulator`, and
+// the reason is worth seeing on the page: a second name for the declaration's own value.
+fold CustomerHasOrdered(customer_id: Customer) -> Bool = false {
+  on @order.placed(customer_id) => true
+}
+
+// `Sealed(T, Subject)` is spellable in a fold's return type and nowhere else, the way
+// `Response`, `Secret`, `Outcome` and an event type each have exactly one position. It
+// creates no seal: only `@subject` on an event field does that, and this names one that
+// came out of the log. The caller `reveal`s it.
+//
+// The subject is in the type and the id rides in the value, which is why no parameter
+// names it: a customer-sealed fold takes its id from the event's own `customer_id`.
+fold LatestOrderEmail(customer_id: Customer) -> Sealed(String, Customer)? = none {
+  on @order.placed(customer_id) { email } => email
+}
+
+// guards/loyalty.hk
+//
+// A guard may hold its own accumulators, exactly as it always could. What changes is what
+// it reaches for first: here the proposition is one named read and one refusal, so there is
+// nothing left to declare. `docs/folds.md` rule 4 has why this is a recommendation rather
+// than a rule.
+refusal NotEnoughOrders "this customer has not ordered enough to qualify"
+
+guard HasOrderedBefore(customer_id: Customer) {
+  fold ordered = CustomerHasOrdered { customer_id }
+
+  if !ordered {
+    reject NotEnoughOrders
+  }
+}
+
+// commands/loyalty.hk
+
+event @loyalty.tier.granted {
+  customer_id: Customer,
+  tier: String @max(20),
+  lifetime_spend: Money(2),
+}
+
+command GrantLoyaltyTier(customer_id: Customer, tier: String) {
+  guard HasOrderedBefore { customer_id }
+
+  // Two reads, two slices, and the boundary is the union of exactly those. One fold
+  // returning both facts would make a command that wanted the spend conflict on
+  // cancellations it never looked at, which is the aggregate rule 1 is about.
+  fold spend = LifetimeSpend { customer_id }
+  fold open = OpenOrderCount { customer_id }
+
+  if open > 5 {
+    invalid "settle the open orders before taking a tier"
+  }
+
+  emit @loyalty.tier.granted { customer_id, tier, lifetime_spend: spend }
+}
+
+test "a fold hands its value back, and two arms net off" {
+  given @order.placed {
+    order_id: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+    customer_id: 7,
+    email: "ada@example.com",
+    address: Address { line1: "1 Bank St", city: "London", postcode: "EC2" },
+    total: 400.00,
+    tax_rate: 0.2000,
+    notes: "",
+  }
+  given @order.cancelled {
+    order_id: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+    customer_id: 7,
+    refund: 150.00,
+  }
+
+  run GrantLoyaltyTier { customer_id: 7, tier: "silver" }
+
+  expect @loyalty.tier.granted { customer_id: 7, tier: "silver", lifetime_spend: 250.00 }
+}
+
+test "a guard reading a named fold still refuses" {
+  run GrantLoyaltyTier { customer_id: 9, tier: "silver" }
+  expect reject NotEnoughOrders
+}
+
+// effects/loyalty.hk
+//
+// An effect arm reads a named fold the same way a command does, and this is where the
+// construct earns most of its keep: 178 of the 425 inline folds in the port that measured
+// it are in an arm, and an arm has no `guard`, so nothing was spliced into one before.
+//
+// The arguments come off the trigger, which is the shape `docs/effects.md` rule 2 already
+// recommends: what an arm needs from `e` is computed above the fold, and a named fold's
+// arguments are evaluated there too.
+secret LOYALTY_URL
+
+effect AnnounceTier {
+  on live @loyalty.tier.granted as e { @key customer_id } {
+    fold spend = LifetimeSpend { customer_id: e.customer_id }
+    fold mail = LatestOrderEmail { customer_id: e.customer_id }
+
+    // `reveal` is the caller's, which is the whole reason the seal is in the fold's
+    // return type rather than inferred: the fold hands back content, not plaintext.
+    let to = reveal(mail)
+    if to.is_none() {
+      log("customer {e.customer_id} has no readable email")
+      return
+    }
+
+    let response = http.post(LOYALTY_URL, { "to": to, "tier": e.tier, "spend": spend })
+    if response.status >= 400 {
+      fail "the loyalty announcement was refused: {response.status}"
+    }
+  }
+}
+
+test "an effect arm reads a named fold, including a sealed one" {
+  given @order.placed {
+    order_id: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+    customer_id: 7,
+    email: "ada@example.com",
+    address: Address { line1: "1 Bank St", city: "London", postcode: "EC2" },
+    total: 400.00,
+    tax_rate: 0.2000,
+    notes: "",
+  }
+  given @loyalty.tier.granted { customer_id: 7, tier: "silver", lifetime_spend: 400.00 }
+
+  // A declared secret resolves in the harness to `secret:NAME`, so no override is needed
+  // here: the test is about the arm reading two named folds, not about the credential.
+  respond "secret:LOYALTY_URL" 200
+
+  deliver AnnounceTier
+
+  expect http.post("secret:LOYALTY_URL")
+}
+
+// Rule 13. A key part the events do not carry: `kind` tells the two arms apart, and
+// without it they would be one value because both are keyed by the same customer.
+//
+// `==` and not `:`, and the sigil is the whole of the difference: `:` matches a field of
+// the event, `==` matches a parameter, which is a part of the key. The conjunct resolves
+// once against the argument the caller passed, so reading this for one kind folds the
+// other arm's events not at all and does not conflict on them either.
+fold CustomerEventCount(customer_id: Customer, kind: String) -> n: Int = 0 {
+  on @order.placed(customer_id, kind == "placed") => n + 1
+  on @order.cancelled(customer_id, kind == "cancelled") => n + 1
+}

@@ -66,6 +66,7 @@ module.exports = grammar({
         $.refusal_declaration,
         $.command_declaration,
         $.guard_definition,
+        $.fold_definition,
         $.projector_declaration,
         $.effect_declaration,
         $.test_declaration,
@@ -188,6 +189,40 @@ module.exports = grammar({
         field('parameters', $.parameters),
         field('body', $.block),
       ),
+
+    // A named fold. The accumulator name before the type is written only when an arm
+    // reads the running value, which is why it is optional here. See `docs/folds.md`.
+    fold_definition: ($) =>
+      seq(
+        'fold',
+        field('name', $._type_name),
+        field('parameters', $.parameters),
+        '->',
+        optional(seq(field('accumulator', $.identifier), ':')),
+        field('type', $.fold_type),
+        '=',
+        field('seed', $._expression),
+        field('body', $.fold_body),
+      ),
+
+    // `Sealed(T, Subject)` is spellable in this one position, so it is its own rule
+    // rather than an arm of `type`: that keeps `List(Sealed(..))` unparseable, which is
+    // the same device the checker uses. See `docs/folds.md` rule 7.
+    fold_type: ($) =>
+      choice(
+        $.type,
+        seq(
+          'Sealed',
+          '(',
+          field('content', $.type),
+          ',',
+          field('subject', $._type_name),
+          ')',
+          optional('?'),
+        ),
+      ),
+
+    fold_body: ($) => seq('{', repeat($.fold_arm), '}'),
 
     // A named refusal and the one message it carries. Parens declare and braces use,
     // the same split `guard` has; a refusal with no fields declares no parens and is
@@ -328,7 +363,13 @@ module.exports = grammar({
       seq('secret', field('name', $.identifier), '=', field('value', $._expression)),
 
     _action_clause: ($) =>
-      choice($.run_clause, $.project_clause, $.deliver_clause),
+      choice(
+        $.run_clause,
+        $.project_clause,
+        $.deliver_clause,
+        $.fold_clause,
+        $.fill_clause,
+      ),
 
     run_clause: ($) =>
       seq('run', field('command', $.identifier), $.field_initializer_list),
@@ -336,6 +377,18 @@ module.exports = grammar({
     project_clause: ($) => seq('project', field('projector', $.identifier)),
 
     deliver_clause: ($) => seq('deliver', field('effect', $.identifier)),
+
+    // The fourth action: a named fold read by name, which is how a stored column is
+    // asserted (docs/testing.md section 8). It shares its word with `fold_declaration`
+    // and nothing else is ambiguous, because a statement's `fold` binds a local and
+    // this one does not: `=` against `{` is a one-token decision.
+    fold_clause: ($) =>
+      seq('fold', field('fold', $._type_name), $.field_initializer_list),
+
+    // The fifth action, and the one with nothing to name: a program has one derived
+    // read model, so `fill` says which log to follow into it and the rows say the rest
+    // (docs/testing.md section 9). Soft, like `project` and `deliver`.
+    fill_clause: ($) => 'fill',
 
     expect_clause: ($) => seq('expect', optional($._expectation)),
 
@@ -349,9 +402,15 @@ module.exports = grammar({
         $.outcome_expression,
         $.refusal_expression,
         $.fail_statement,
-        $.invoke_expression,
-        $.call_expression,
-        $.method_call,
+        // The value a `fold` action folded to, and only there: the parser refuses a bare
+        // value under every other action, which is what keeps a free-standing
+        // `assert <expr>` out of the language (docs/testing.md section 9).
+        //
+        // This subsumes the three expectations that used to be listed here by name,
+        // `invoke_expression`, `call_expression` and `method_call`: all three are
+        // `_primary`, and leaving them beside it makes one input derivable two ways.
+        // The nodes are unchanged, so `expect log("x")` is still a `method_call`.
+        $._expression,
       ),
 
     event_expectation: ($) =>
@@ -368,9 +427,7 @@ module.exports = grammar({
       seq(
         optional('no'),
         field('entity', $.identifier),
-        '[',
-        field('key', $._expression),
-        ']',
+        $.subscript,
         optional($.field_initializer_list),
       ),
 
@@ -405,15 +462,26 @@ module.exports = grammar({
         seq('guard', field('guard', $._type_name), $.field_initializer_list),
       ),
 
+    // Two shapes, told apart by the token after the name: `:` declares a fold here and
+    // `=` reads one declared at module scope. See `docs/folds.md` rule 2.
     fold_declaration: ($) =>
-      seq(
-        'fold',
-        field('name', $.identifier),
-        ':',
-        field('type', $.type),
-        '=',
-        field('seed', $._expression),
-        repeat($.fold_arm),
+      choice(
+        seq(
+          'fold',
+          field('name', $.identifier),
+          ':',
+          field('type', $.type),
+          '=',
+          field('seed', $._expression),
+          repeat($.fold_arm),
+        ),
+        seq(
+          'fold',
+          field('name', $.identifier),
+          '=',
+          field('fold', $._type_name),
+          $.field_initializer_list,
+        ),
       ),
 
     fold_arm: ($) =>
@@ -427,13 +495,34 @@ module.exports = grammar({
 
     // A slice always carries its parentheses, which is what tells a fold arm from a
     // handler when both begin `on @path` (parse.rs `slice_ref`).
+    //
+    // `as e` is accepted here and refused by the parser anywhere but a module-scope
+    // fold arm, where it makes the fold query-only (parse.rs `fold_envelope`, and
+    // `docs/folds.md` rule 12). Written on the shared rule rather than on `fold_arm` so
+    // the binding keeps the position a projector handler puts it in, which is what makes
+    // the two read alike.
     slice_reference: ($) =>
-      seq(field('path', $.event_path), '(', commaSep($.filter), ')'),
-
-    filter: ($) =>
       seq(
-        field('field', $.identifier),
-        optional(seq(':', field('value', $._expression))),
+        field('path', $.event_path),
+        optional(seq('as', field('binding', $.identifier))),
+        '(',
+        commaSep($.filter),
+        ')',
+      ),
+
+    // Two forms, told apart by the token after the name: `:` and the bare shorthand
+    // match a field of the event, `==` matches a parameter of the fold, which is the key
+    // part this arm writes (parse.rs `key_filter`, and `docs/folds.md` rule 13). The
+    // left side is a different kind of name in each, which is why the field is named
+    // `param` rather than `field` on the second: `locals.scm` suppresses `field` from
+    // scope resolution and a parameter reference is exactly what it must not suppress.
+    filter: ($) =>
+      choice(
+        seq(
+          field('field', $.identifier),
+          optional(seq(':', field('value', $._expression))),
+        ),
+        seq(field('param', $.identifier), '==', field('value', $._expression)),
       ),
 
     let_statement: ($) =>
@@ -548,20 +637,12 @@ module.exports = grammar({
       seq(
         choice('patch', 'update'),
         field('entity', $.identifier),
-        '[',
-        field('key', $._expression),
-        ']',
+        $.subscript,
         $.field_initializer_list,
       ),
 
     delete_statement: ($) =>
-      seq(
-        'delete',
-        field('entity', $.identifier),
-        '[',
-        field('key', $._expression),
-        ']',
-      ),
+      seq('delete', field('entity', $.identifier), $.subscript),
 
     // `log(...)`, `erase(...)` and a discarded `http.*` call. `fail` is no longer one of
     // them: it takes no parens, so it is not a call.
@@ -724,6 +805,17 @@ module.exports = grammar({
       ),
 
     list: ($) => seq('[', commaSep($._expression), ']'),
+
+    // `[a, b]`: one `key` per `@key` column, in key order, because a compound key is a
+    // sequence (docs/projectors.md rule 11). The arity against the declaration is the
+    // checker's, not the grammar's.
+    //
+    // A node of its own rather than brackets inlined into the three statements that take
+    // one, so that it **owns its delimiters**: that is what `indents.scm` keys on, and it
+    // is what lets the formatter place a comment written among the keys instead of
+    // lifting it above the whole statement. Structurally identical to `list`, and no
+    // conflict with it, because only one of the two is reachable at any position.
+    subscript: ($) => seq('[', commaSep1(field('key', $._expression)), ']'),
 
     comprehension: ($) =>
       seq(

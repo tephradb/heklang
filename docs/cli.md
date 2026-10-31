@@ -20,7 +20,7 @@ pass   an email that already placed an order is refused
 ## Usage
 
 ```
-hek [check|test|fmt|digest] [--boundaries] [--check]
+hek [check|test|fmt|digest] [--boundaries] [--tables] [--check]
     [--packed|--hash|--json] [--tests] [path|-]
 ```
 
@@ -34,7 +34,7 @@ hek [check|test|fmt|digest] [--boundaries] [--check]
 
 `path` is a directory or a single `.hk` file, and defaults to the current directory.
 
-`--boundaries` adds one line per command naming what it guards, transitively
+`--boundaries` adds one line per command naming what it guards and what it reads, transitively
 (`docs/guards.md`). It is asked for rather than printed, because `check` is a pass/fail
 gate and this is an enumeration rather than a summary: a 26-command program would pay 26
 lines on every run to restate what its own `guard` lines already say. What it adds is the
@@ -46,8 +46,73 @@ checked 9 files
   5 events, 6 commands, 9 guards, 12 refusals, 3 consts, 21 tests
 
   Subscribe guards CourseIsDefined, StudentIsRegistered, CourseHasSeats
+            reads CourseExists, StudentExists, CourseSubscriptionCount
   Unsubscribe guards SubscriptionIsActive
 ```
+
+`--tables` prints the read model the program's named folds imply. Nothing declares it: a
+fold already says what a value is, which events change it and what it is keyed by, so a
+fold is a column, its parameters are the key, and a table is the folds that share one.
+Asked for rather than printed, for the reason `--boundaries` is.
+
+```
+$ hek check --tables
+checked 9 files
+  5 events, 2 commands, 4 folds, 1 subject, 7 tests
+
+  TABLE shop  (shop: Shop)  1 column
+    shop_installed: Bool       <- @shop.installed, @shop.uninstalled
+
+  TABLE shop__order  (shop: Shop, order: Int)  2 columns
+    order_cancelled: Bool      <- @order.cancelled
+    order_total: Money(2)      <- @order.placed
+```
+
+A key part is named by its subject when it has one and by its parameter otherwise, with
+one trailing `_id` taken off. Subject parts lead, ordered so a parent sits above the
+children whose keys wrap under it; plain parts follow alphabetically. A table sorts below
+every table it narrows, which is what puts a one-column table next to the forty-column one
+it should probably have been part of.
+
+**Where two parts would take one name**, by repeating a subject or by spelling it two ways,
+each is named by its **parameter** instead: `(to_id: Region, from_id: Region)` is `(from,
+to)`. Never by position. A counter over declaration order made two folds declaring one
+pair in opposite orders into one table whose key columns meant different parameters in
+each, and a suffix is spellable, so `_1` collided with a parameter already called that.
+A parameter is the one name unique within a fold, so it cannot do either.
+
+**Two key signatures can still want one table name**, because a name is only its parts'
+names joined and a part is told apart by name *and* type. `(day: String)` and `(day: Int)`
+are two tables, so each takes the part types into its name: `day_string` and `day_int`.
+
+**A part's name is not callable, so a column also records the parameters it came from.**
+`Column::args` is the parameter per key position in the table's key order, which is what
+`Interpreter::fold_stored` and `Tables::apply` have to be called with: `(shop_id: Shop,
+request_id: Int)` keys a table on `(shop, request)` and neither of those is a parameter.
+A reader matching part names back onto parameters reimplements `tables::part_names` to do
+it, and gets `missing argument` for every fold the first time it is slightly wrong. Per
+column and not per table, because one key signature is reached by parameters of different
+names: `(shop_id: Shop)` and `(shop: Shop)` are one key.
+
+**A key part and a column may not take one name**, and that one is refused rather than
+disambiguated. `fold Shop(shop_id: Shop)` wants a table whose key column and whose only
+value column are both `shop`, which nothing can create, and unlike the two cases above the
+author has somewhere to go: a fold is named for the value and not for the entity
+(`docs/folds.md` rule 1), so `ShopInstalled` is the name and `shop_installed` the column.
+The refusal is the parser's, and it reads the same derivation this listing does.
+
+A fold whose key no event supplies cannot be kept, and is listed at the end instead:
+
+```
+  not stored, because no event supplies the key:
+    OrdersSince  (at)
+```
+
+**That is a line and not an error.** Such a fold is perfectly good and a command can read
+it; nothing says every fold has to be storable. heklang has no warning channel to say it
+in either (`docs/diagnostics.md` §11), so the listing says it and the run still passes.
+Only *some* arm has to supply a given part, not every arm: an arm matching part of the key
+is a range update over the rest.
 
 **`hek fmt -` formats one module from stdin onto stdout**, which is the shape an editor's
 format-on-save wants: helix and the editors that copied it replace the buffer with whatever
@@ -211,7 +276,7 @@ because each of them is a statement about the program rather than about a declar
 `check_files` is what `hek` calls.
 
 A test prints as `pass`, `FAIL` or `ERROR`, and the last two carry a reason on the line
-below. `docs/testing.md` rule 9 is why the last two are separate: a mismatch is the test
+below. `docs/testing.md` rule 10 is why the last two are separate: a mismatch is the test
 doing its job, and an error is the program being unable to run at all.
 
 Reading a directory or a file at all is a different kind of problem again, so it goes to

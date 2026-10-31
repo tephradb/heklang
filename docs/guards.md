@@ -35,7 +35,7 @@ and over: one repeats `fold shop: Bool = false / on @shop.connected(shop_id) => 
 **thirteen times byte-identical**, each followed by its own copy of the rejection; the other gives
 two commands six identical folds and a shared six-argument `fn` whose three `Bool`s and three `Int`s
 transpose without a type error. What drifts when those fall out of step is the append condition, and
-`docs/testing.md` §8 keeps that out of a test on purpose.
+`docs/testing.md` §10 keeps that out of a test on purpose.
 
 ---
 
@@ -100,6 +100,24 @@ place a reader looks for it.
 
 A run of guards and `fold`s is one **stage**: one read of the log, with every decision in the run
 made after it. `docs/commands.md` has the order.
+
+**"Each before the statements below them" is enforced, and for one release it was not.** A statement
+below a `guard` used to land in the stage's *prologue*, which runs before the stage folds, so it
+answered before the guard did:
+
+```
+command D(id: Int) {
+  guard G { id }
+  return          // used to run first, and `G` never decided
+}
+```
+
+An `emit` there was survivable, because a refusal replaces the outcome and discards the events. A
+bare `return`, an `invalid` or a conditional `reject` was not: the guard was skipped and nothing
+reported it. The cause was that a `guard` declares no slice *at parse time* (its slices arrive when
+it is spliced), so the stage looked empty and the statement was taken for one written above the
+declarations. `docs/folds.md` rule 2 found it, because a named fold could not be left that way.
+Fixed, at the cost of `hek-digest 5`.
 
 **A statement above a guard decides before it, and reads nothing to do so.** This is what makes the
 precedence the author's rather than the construct's:
@@ -298,9 +316,16 @@ below its own `fold`, and everything after it is below that. Rule 3 gives the au
 the first case and cannot give it for this one.
 
 **A guard binds nothing into its caller.** Its folds are its own, so a `guard CourseHasSeats`
-gives the command no `seats`. A caller that wants a value folds it inline; the slice is already in
-the boundary, so the second fold costs an accumulator and nothing else. Handing values back would
-make a guard an object with fields, which is the aggregate rule 1 is about.
+gives the command no `seats`. Handing values back would make a guard an object with fields, which is
+the aggregate rule 1 is about.
+
+**A value that two commands both want is a named `fold`**, which is the other half of this rule and
+postdates it. The sentence above used to continue "a caller that wants a value folds it inline; the
+slice is already in the boundary, so the second fold costs an accumulator and nothing else", and
+that was true of the runtime and wrong about the source: a port measured 167 byte-identical copies
+of one fold across 425, and what drifts when they fall out of step is the append condition.
+`docs/folds.md` is the construct, and it keeps rule 1 intact by handing back **one** value named for
+the value rather than a bag named for an entity.
 
 ## 7. Naming a guard
 

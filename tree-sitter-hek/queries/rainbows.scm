@@ -1,5 +1,6 @@
 [
   (block)
+  (fold_body)
   (destructure)
   (field_initializer_list)
   (object_literal)
@@ -11,6 +12,7 @@
   (slice_reference)
   (parenthesized_expression)
   (interpolation)
+  (subscript)
 ] @rainbow.scope
 
 ["(" ")" "[" "]" "{" "}"] @rainbow.bracket

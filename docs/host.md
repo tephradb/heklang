@@ -164,8 +164,16 @@ is wrong, and nothing will catch it.
 record handed to a resumed fold that already folded it is counted twice. Both bounds are inclusive.
 
 `upto` is what distinguishes the readers: `None` for a projector, `Some(after - 1)` for a command,
-which folds to the head it took `after` from and no further, and `Some(position)` for an effect arm,
-which folds to and including its own trigger (`docs/effects.md` rule 3).
+which folds to the head it took `after` from and no further, `Some(head - 1)` for a store filling a
+stored column, which is the same conversion over the head its checkpoint records, and
+`Some(position)` for an effect arm, which folds to and including its own trigger (`docs/effects.md`
+rule 3).
+
+**Two of the four hold a head and subtract, which is why no caller outside this file does.** A head
+is what this seam hands out and an inclusive position is what it takes, and the one place that
+conversion is interesting is an empty log, where there is no position below the head to name:
+`Interpreter::fold_stored` therefore takes the head and reads nothing at zero, rather than asking a
+store for a position it does not have (`docs/folds.md` section 11).
 
 `from` is `0` for everything except a command's retry, where it is the position the previous attempt
 folded through. **A host answers it by seeking, not by filtering**, or the field buys nothing: the
@@ -268,9 +276,9 @@ live.
 
 ```rust
 pub trait Rows {
-    fn row(&self, entity: &str, key: &Key) -> Result<Option<Row>, Error>;
-    fn put(&mut self, entity: &Ident, key: Key, row: Row) -> Result<(), Error>;
-    fn delete(&mut self, entity: &Ident, key: &Key) -> Result<(), Error>;
+    fn row(&self, entity: &str, key: &[Key]) -> Result<Option<Row>, Error>;
+    fn put(&mut self, entity: &Ident, key: Vec<Key>, row: Row) -> Result<(), Error>;
+    fn delete(&mut self, entity: &Ident, key: &[Key]) -> Result<(), Error>;
 }
 
 let projection = Projection::new(&program, "Orders")?;
@@ -282,6 +290,13 @@ projection.apply(&record, &mut my_rows)?;  // one record, handlers in declaratio
 invocation. `Store` is one implementation and a persistent read model is another, so
 `Interpreter::project` is `project_into` against an in-memory `Store` and there are not two write
 paths to keep in step.
+
+**A key is a sequence, not a scalar.** One `Key` per `@key` column, in the order the entity declared
+them (`docs/projectors.md` rule 11), and a single-column key is a one-element slice rather than a
+special case. A host stores them so that the sequence orders **lexicographically**, which is what
+makes a prefix of a compound key a range its read API can page on, the way a prefix of a compound
+index is. A host that joins them into one string of its own is free to, as long as that ordering
+survives the join.
 
 **It reads as well as writes**, which is the only surprising line in it. `docs/projectors.md` rule 3
 fills a `patch`'s stored loads from the row before evaluating any of the write's value expressions,
@@ -308,6 +323,51 @@ reader.
 **What is still not here**: where a row lands, what a column is called in a store, and what an index
 does. Rule 8 of `docs/projectors.md` still holds, and a host reads `Projection::projector()` for the
 entities and enums it needs to build a schema from.
+
+## 7a. The derived read model is the same seam, one level narrower
+
+```rust
+pub trait Columns {
+    fn value(&self, table: &str, key: &[Key], column: &str) -> Result<Option<Value>, Error>;
+    fn set(&mut self, table: &str, key: Vec<Key>, column: &str, value: Value) -> Result<(), Error>;
+    fn keys(&self, table: &str, pinned: &[(usize, Key)]) -> Result<Vec<Vec<Key>>, Error>;
+}
+
+let tables = Tables::new(&program);
+let query = tables.query();                 // every event any column folds, each once
+tables.apply(&record, &mut my_columns)?;    // one record, pinned arms then ranges
+```
+
+`Columns` is to `Tables` what `Rows` is to `Projection`, and the shapes rhyme on purpose: not part
+of `Host`, a key is a sequence that must order lexicographically, it reads as well as writes, and
+`Tables` holds no host so a deployment drives it off a thread that never touches the log reader.
+`Cells` is the in-memory implementation, as `Store` is for rows.
+
+**Per program rather than per projector.** Nothing declares a derived table: a read model is a named
+fold kept for every key, so `tables::layout` derives the whole set from the program's folds and
+there is one of them. `table` and `column` are that layout's own names, which is what keeps `hek
+check --tables` and the real tables from disagreeing about what an author is looking at.
+
+**It reads for a sharper reason than `Rows` does.** A `patch` reads the row to fill its stored
+loads; a fold's accumulator **is** the stored column, so without `value` there is nothing to fold
+onto and every record would restart from the seed.
+
+**An absent value and an absent key are one thing, deliberately.** `value` answering `None` means
+the column is at its seed, which is what a fold over no matching events folds to, so a store holds
+only the keys something has written and a key nothing minted needs no row. `keys` has the same
+boundary: a range update covers the keys the table holds. `docs/folds.md` section 11 states what
+that costs and why it is safe.
+
+**`keys` is held to `read`'s cut, not to `row`'s.** Over-delivering is a cost and under-delivering is
+a bug: a key handed back that the arm does not write is re-checked and skipped, while one withheld is
+a column that silently stops following its log.
+
+**A sealed column is nullable whatever its declared type says.** Rule 9 of `docs/projectors.md`
+makes an erase empty the column and only an optional has an empty value, so a store deciding
+nullability from the declared type alone writes a null into a `NOT NULL` column the first time a
+subject is erased. It also keeps the field name beside the ciphertext, because one column can hold
+content sealed under two different field names and `decrypt` is asked for the one it was sealed
+with. `docs/folds.md` section 11 has both.
 
 ## 8. What stays the language's
 

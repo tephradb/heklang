@@ -7,15 +7,16 @@ use uuid::Uuid;
 
 use crate::harness::{Harness, Journal, Reply};
 use crate::host::{
-    AppendCondition, Attempt, Calls, Host, Keys, Log, Parts, Predicate, Query, Recorded, Request,
-    Rows,
+    AppendCondition, Attempt, Calls, Columns, Host, Keys, Log, Parts, Predicate, Query, Recorded,
+    Request, Rows,
 };
 use crate::ir::{
-    Absent, Arm, BinOp, Builtin, Command, Delivery, Effect, EntityDef, EnvField, EventPath, Expr,
-    ExprId, Exprs, Function, Ident, Iter, Program, Projector, Return, Slice, Slot, Span, Stmt,
-    Type, UnOp,
+    Absent, Arm, BinOp, Builtin, Command, Delivery, Effect, EntityDef, EnvBind, EnvField,
+    EventPath, Expr, ExprId, Exprs, Filter, Fold, Function, Ident, Iter, Param, Program, Projector,
+    Return, Slice, Slot, Span, Stmt, Type, UnOp,
 };
 use crate::scaled::{self, Rounding};
+use crate::tables::{self, ArmMatch, Column, Layout, Table};
 use crate::value::{self, Event, Invoked, Json, Key, Record, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +37,7 @@ pub enum ErrorKind {
     UnknownCommand(String),
     UnknownProjector(String),
     UnknownEffect(String),
+    UnknownFold(String),
     NoSuchPosition(u64),
     /// Rule 12: terminal rather than a wedge, because no retry recovers erased data.
     /// The message names the erase as possibly non-local, which it usually is: rule 9
@@ -186,6 +188,7 @@ impl fmt::Display for ErrorKind {
             ErrorKind::UnknownCommand(name) => write!(f, "unknown command `{name}`"),
             ErrorKind::UnknownProjector(name) => write!(f, "unknown projector `{name}`"),
             ErrorKind::UnknownEffect(name) => write!(f, "unknown effect `{name}`"),
+            ErrorKind::UnknownFold(name) => write!(f, "unknown fold `{name}`"),
             ErrorKind::NoSuchPosition(position) => write!(f, "no event at position {position}"),
             ErrorKind::Erased { field, subject, id } => write!(
                 f,
@@ -441,7 +444,7 @@ enum Ret {
 /// recorded in the IR and ignored here.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Store {
-    entities: BTreeMap<Ident, BTreeMap<Key, Row>>,
+    entities: BTreeMap<Ident, BTreeMap<Vec<Key>, Row>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -454,12 +457,18 @@ impl Row {
 }
 
 impl Store {
-    pub fn get(&self, entity: &str, key: &Key) -> Option<&Row> {
+    /// One row by its whole key. A single-column key is a one-element slice:
+    /// `get("Order", &[Key::Int(7)])`.
+    pub fn get(&self, entity: &str, key: &[Key]) -> Option<&Row> {
         self.entities.get(entity)?.get(key)
     }
 
-    pub fn rows(&self, entity: &str) -> impl Iterator<Item = (&Key, &Row)> {
-        self.entities.get(entity).into_iter().flatten()
+    pub fn rows(&self, entity: &str) -> impl Iterator<Item = (&[Key], &Row)> {
+        self.entities
+            .get(entity)
+            .into_iter()
+            .flatten()
+            .map(|(key, row)| (key.as_slice(), row))
     }
 
     pub fn len(&self, entity: &str) -> usize {
@@ -474,11 +483,11 @@ impl Store {
 /// The in-memory read models are one implementation of the seam a persistent store also
 /// implements, rather than a shape a host has to mirror.
 impl Rows for Store {
-    fn row(&self, entity: &str, key: &Key) -> Result<Option<Row>, Error> {
+    fn row(&self, entity: &str, key: &[Key]) -> Result<Option<Row>, Error> {
         Ok(self.get(entity, key).cloned())
     }
 
-    fn put(&mut self, entity: &Ident, key: Key, row: Row) -> Result<(), Error> {
+    fn put(&mut self, entity: &Ident, key: Vec<Key>, row: Row) -> Result<(), Error> {
         self.entities
             .entry(entity.clone())
             .or_default()
@@ -486,11 +495,74 @@ impl Rows for Store {
         Ok(())
     }
 
-    fn delete(&mut self, entity: &Ident, key: &Key) -> Result<(), Error> {
+    fn delete(&mut self, entity: &Ident, key: &[Key]) -> Result<(), Error> {
         if let Some(rows) = self.entities.get_mut(entity) {
             rows.remove(key);
         }
         Ok(())
+    }
+}
+
+/// In-memory derived tables, one map per table and one value per column. The test double
+/// [`Store`] is for a projector's rows, and this is the same thing for the read model a
+/// program's named folds imply.
+///
+/// A key with no entry and a column with no value are one thing, which is [`Columns`]'
+/// own rule: both mean the column is at its seed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Cells {
+    tables: BTreeMap<String, BTreeMap<Vec<Key>, BTreeMap<String, Value>>>,
+}
+
+impl Cells {
+    pub fn get(&self, table: &str, key: &[Key], column: &str) -> Option<&Value> {
+        self.tables.get(table)?.get(key)?.get(column)
+    }
+
+    /// Every key this table holds, in key order, which is the order a sequence of
+    /// [`Key`] sorts in.
+    pub fn rows(&self, table: &str) -> impl Iterator<Item = &[Key]> {
+        self.tables
+            .get(table)
+            .into_iter()
+            .flatten()
+            .map(|(key, _)| key.as_slice())
+    }
+
+    pub fn len(&self, table: &str) -> usize {
+        self.tables.get(table).map_or(0, BTreeMap::len)
+    }
+
+    pub fn is_empty(&self, table: &str) -> bool {
+        self.len(table) == 0
+    }
+}
+
+impl Columns for Cells {
+    fn value(&self, table: &str, key: &[Key], column: &str) -> Result<Option<Value>, Error> {
+        Ok(self.get(table, key, column).cloned())
+    }
+
+    fn set(&mut self, table: &str, key: Vec<Key>, column: &str, value: Value) -> Result<(), Error> {
+        self.tables
+            .entry(table.to_string())
+            .or_default()
+            .entry(key)
+            .or_default()
+            .insert(column.to_string(), value);
+        Ok(())
+    }
+
+    fn keys(&self, table: &str, pinned: &[(usize, Key)]) -> Result<Vec<Vec<Key>>, Error> {
+        Ok(self
+            .rows(table)
+            .filter(|key| {
+                pinned
+                    .iter()
+                    .all(|(at, want)| key.get(*at).is_some_and(|held| held == want))
+            })
+            .map(<[Key]>::to_vec)
+            .collect())
     }
 }
 
@@ -515,16 +587,16 @@ pub(crate) struct Shredding<'a> {
 }
 
 impl Rows for Shredding<'_> {
-    fn row(&self, entity: &str, key: &Key) -> Result<Option<Row>, Error> {
+    fn row(&self, entity: &str, key: &[Key]) -> Result<Option<Row>, Error> {
         self.rows.row(entity, key)
     }
 
-    fn put(&mut self, entity: &Ident, key: Key, row: Row) -> Result<(), Error> {
+    fn put(&mut self, entity: &Ident, key: Vec<Key>, row: Row) -> Result<(), Error> {
         let row = shredded(self.keys, entity, row)?;
         self.rows.put(entity, key, row)
     }
 
-    fn delete(&mut self, entity: &Ident, key: &Key) -> Result<(), Error> {
+    fn delete(&mut self, entity: &Ident, key: &[Key]) -> Result<(), Error> {
         self.rows.delete(entity, key)
     }
 }
@@ -538,58 +610,142 @@ impl Rows for Shredding<'_> {
 /// holds anything else about it.
 fn shredded(keys: &dyn Keys, entity: &Ident, mut row: Row) -> Result<Row, Error> {
     for (name, value) in row.0.iter_mut() {
-        // Nothing is cloned to decide this, because most columns are not seals and a
-        // `Type` clone allocates: the key store's answer is what the arms below branch
-        // on, and only the erased one owns anything.
-        let (subject, id) = {
-            // `Opt` is outermost around a seal (`docs/effects.md` rule 12), so one peel
-            // is the whole of the nesting there is.
-            let sealed = match &*value {
-                held @ Value::Sealed { .. } => held,
-                Value::Opt {
-                    value: Some(held), ..
-                } => &**held,
-                _ => continue,
-            };
-            let Value::Sealed {
-                field,
-                subject,
-                id,
-                content,
-            } = sealed
-            else {
-                continue;
-            };
-            // The lifecycle question, not the content: a projection moves sealed
-            // content and never reads it, so this asks whether the column still has
-            // any rather than what it is.
-            if keys.is_live(subject, id, field, content)? {
-                continue;
-            }
-            (subject.clone(), id.clone())
-        };
-        match value {
-            Value::Opt { inner, .. } => {
-                *value = Value::Opt {
-                    inner: inner.clone(),
-                    value: None,
-                }
-            }
-            // A column that is not optional has no value that says "this is gone": the
-            // erased case for sealed content is an optional, which is the same thing
-            // `@absent` is told where it is written. Loud here rather than a row that
-            // quietly keeps the plaintext or quietly holds a zero.
-            _ => {
-                return Err(ErrorKind::ShreddedColumn {
-                    column: format!("{entity}.{name}"),
-                    subject,
-                    id,
-                }
-                .into());
-            }
-        }
+        shred(keys, value, || format!("{entity}.{name}"))?;
     }
     Ok(row)
+}
+
+/// One column, emptied if it holds sealed content the key store can no longer open.
+///
+/// `column` is called only on the path that raises, because naming a column allocates
+/// and almost no column is an erased seal.
+fn shred(keys: &dyn Keys, value: &mut Value, column: impl FnOnce() -> String) -> Result<(), Error> {
+    // Nothing is cloned to decide this, because most columns are not seals and a
+    // `Type` clone allocates: the key store's answer is what the arms below branch
+    // on, and only the erased one owns anything.
+    let (subject, id) = {
+        // `Opt` is outermost around a seal (`docs/effects.md` rule 12), so one peel
+        // is the whole of the nesting there is.
+        let sealed = match &*value {
+            held @ Value::Sealed { .. } => held,
+            Value::Opt {
+                value: Some(held), ..
+            } => &**held,
+            _ => return Ok(()),
+        };
+        let Value::Sealed {
+            field,
+            subject,
+            id,
+            content,
+        } = sealed
+        else {
+            return Ok(());
+        };
+        // The lifecycle question, not the content: a projection moves sealed
+        // content and never reads it, so this asks whether the column still has
+        // any rather than what it is.
+        if keys.is_live(subject, id, field, content)? {
+            return Ok(());
+        }
+        (subject.clone(), id.clone())
+    };
+    match value {
+        Value::Opt { inner, .. } => {
+            *value = Value::Opt {
+                inner: inner.clone(),
+                value: None,
+            };
+            Ok(())
+        }
+        // A column that is not optional has no value that says "this is gone": the
+        // erased case for sealed content is an optional, which is the same thing
+        // `@absent` is told where it is written. Loud here rather than a row that
+        // quietly keeps the plaintext or quietly holds a zero.
+        _ => Err(ErrorKind::ShreddedColumn {
+            column: column(),
+            subject,
+            id,
+        }
+        .into()),
+    }
+}
+
+/// One column with its sealed content **opened**, which is what a test's comparison needs
+/// and nothing else does.
+///
+/// A stored sealed column holds the log's own ciphertext under the field, subject and id
+/// it was sealed with, because that is what lets a store hold one without opening it and
+/// what makes an erasure observable without refolding. A test writes the plaintext, so the
+/// two meet only once this has run: it is the same `decrypt` call `reveal` makes, with the
+/// same argument list, and `docs/testing.md` section 6 is the rule it serves.
+///
+/// **This is a comparison and not a read**, which is why it is here rather than on any
+/// path a program can reach. Rule 12's boundary is about what a *program* may read and is
+/// enforced at parse time; a test states an input and asks whether that is what came out.
+///
+/// The two outcomes for a key that is gone are [`shred`]'s, for its reasons: an optional
+/// reads back absent, and a column with no absent value says so loudly rather than
+/// comparing against a ciphertext nobody can check.
+pub(crate) fn opened(
+    keys: &dyn Keys,
+    value: &mut Value,
+    column: impl FnOnce() -> String,
+) -> Result<(), Error> {
+    // Decided under an immutable borrow and acted on after it, exactly as `shred` is, so
+    // that the erased arms can rewrite the value they inspected.
+    let plaintext = {
+        let sealed = match &*value {
+            held @ Value::Sealed { .. } => held,
+            Value::Opt {
+                value: Some(held), ..
+            } => &**held,
+            _ => return Ok(()),
+        };
+        let Value::Sealed {
+            field,
+            subject,
+            id,
+            content,
+        } = sealed
+        else {
+            return Ok(());
+        };
+        match keys.decrypt(subject, id, field, content)? {
+            Some(plaintext) => Ok(plaintext),
+            None => Err((subject.clone(), id.clone())),
+        }
+    };
+    let (subject, id) = match plaintext {
+        Ok(plaintext) => {
+            let held = match value {
+                Value::Opt {
+                    value: Some(held), ..
+                } => &mut **held,
+                held => held,
+            };
+            if let Value::Sealed { content, .. } = held {
+                *content = plaintext.into();
+            }
+            return Ok(());
+        }
+        Err(gone) => gone,
+    };
+    match value {
+        Value::Opt { inner, .. } => {
+            *value = Value::Opt {
+                inner: inner.clone(),
+                value: None,
+            };
+            Ok(())
+        }
+        _ => Err(ErrorKind::ShreddedColumn {
+            column: column(),
+            subject,
+            id,
+        }
+        .into()),
+    }
 }
 
 /// One projector, ready to be applied to records a host supplies.
@@ -665,6 +821,281 @@ impl<'a> Projection<'a> {
             )?;
         }
         Ok(())
+    }
+}
+
+/// The derived read model, ready to be applied to records a host supplies.
+///
+/// **This is the per-record sink, and it is what a column should cost.**
+/// [`Interpreter::fold_stored`] fills one column at one key by folding the whole log,
+/// which is the right read for a backfill and the wrong one for following a log: on the
+/// ported application's order table the median write is two columns of 87, so a host
+/// driving that per record pays two whole-log scans forever. This applies one record to
+/// whatever columns its arms name, carrying the accumulator in the store instead of in a
+/// frame, and is to [`Interpreter::fold_stored`] what [`Projection::apply`] is to a
+/// rebuild.
+///
+/// Holds no [`Host`] for the reason [`Projection`] holds none: the caller owns the log
+/// reader and the columns, so a host drives this from a thread that never touches the
+/// log. It is also why the two halves of a fill are separable at all, since the
+/// accumulator crossing the seam is what removes the need for one.
+///
+/// **It is more correct than refolding, not only cheaper.** A host deciding which columns
+/// a record could have changed has only [`ColumnArm`](crate::ColumnArm), which carries
+/// the key parts an arm pins and not the field filters it also wrote, so it must
+/// over-approximate and refold columns the record does not touch. That is harmless when
+/// the answer is re-derived from the log and it is not harmless here, so this re-checks
+/// each arm's predicate per record, exactly as [`Projection::apply`] re-checks a
+/// handler's path.
+pub struct Tables<'a> {
+    program: &'a Program,
+    layout: Layout,
+}
+
+impl<'a> Tables<'a> {
+    pub fn new(program: &'a Program) -> Self {
+        Self {
+            layout: tables::layout(program),
+            program,
+        }
+    }
+
+    /// The layout this was built from, so a host that also builds its schema from it
+    /// derives it once.
+    pub fn layout(&self) -> &Layout {
+        &self.layout
+    }
+
+    /// What the whole read model reads, which is a host's subscription: one predicate per
+    /// event any column folds, each once.
+    ///
+    /// **With no filters, and that is not laziness.** Two columns on one event filter it
+    /// differently and a subscription is their union, so narrowing it by either one's
+    /// conjuncts would withhold records the other needs. `docs/host.md` section 4 is the
+    /// cut: over-delivering is a cost and under-delivering is a bug, and [`apply`](Self::apply)
+    /// re-checks every arm anyway.
+    ///
+    /// **This method exists so that no host builds the query itself.** The first store to
+    /// try it built the subscription out of [`EventPath`]'s `Display`, which keeps the
+    /// `@` sigil that an event type does not have. The query matched nothing, so the
+    /// thread followed the log, folded none of it, and advanced its checkpoint over every
+    /// batch, while the status endpoint reported nothing behind. A subscription that is
+    /// silently empty is indistinguishable from being caught up, so it is derived here
+    /// where one test covers every host.
+    pub fn query(&self) -> Query {
+        let mut slices: Vec<Predicate> = Vec::new();
+        for table in &self.layout.tables {
+            for column in &table.columns {
+                for event in &column.events {
+                    let slice = Predicate::new(event.clone(), Vec::new());
+                    if !slices.contains(&slice) {
+                        slices.push(slice);
+                    }
+                }
+            }
+        }
+        Query {
+            slices,
+            from: 0,
+            upto: None,
+        }
+    }
+
+    /// Applies one record to every column an arm of it names.
+    ///
+    /// **Fully pinned arms first, then the ranges.** An arm that leaves a key part open
+    /// is a range update over every key carrying the parts it did pin, and a key this
+    /// same record mints is one of them: a column written at a new key by one arm has to
+    /// be visible to another arm's range over it. Reading the range first would miss it
+    /// and nothing afterwards would correct it, because the next record's range reads a
+    /// column that was already written and finds nothing wrong with it.
+    ///
+    /// Within one record is the whole of the ordering obligation. A key minted by an
+    /// earlier record is already in the store, so a host applying records in position
+    /// order needs no batch-wide pass.
+    pub fn apply(&self, record: &Record, columns: &mut dyn Columns) -> Result<(), Error> {
+        for pinned_only in [true, false] {
+            for table in &self.layout.tables {
+                for column in &table.columns {
+                    for (at, arm) in column.arms.iter().enumerate() {
+                        if arm.event != record.event.path {
+                            continue;
+                        }
+                        let complete = arm.fields.iter().all(ArmMatch::pinned);
+                        if complete != pinned_only {
+                            continue;
+                        }
+                        self.arm(record, table, column, at, columns)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// One arm of one column, at every key this record writes it for.
+    fn arm(
+        &self,
+        record: &Record,
+        table: &Table,
+        column: &Column,
+        at: usize,
+        columns: &mut dyn Columns,
+    ) -> Result<(), Error> {
+        let arm = &column.arms[at];
+        // The key, part by part, in the table's order. A part the arm pinned is known
+        // from the record or from the arm itself; one it left open is a range, and the
+        // pinned parts are what narrows it.
+        let mut key: Vec<Option<Key>> = Vec::with_capacity(table.key.len());
+        for (part, matched) in table.key.iter().zip(&arm.fields) {
+            let value = match matched {
+                ArmMatch::Field(named) => {
+                    let value = field(&record.event, named)?.clone();
+                    fitted_at(value, &part.ty, Span::default())?
+                }
+                // Rule 13: not on the event at all, and resolved against an empty frame.
+                ArmMatch::Fixed(id) => tables::fixed(self.program, &column.fold, part, *id)?,
+                ArmMatch::Open => {
+                    key.push(None);
+                    continue;
+                }
+            };
+            // A key part is a scalar by construction, since `Type::can_key` is what let
+            // this fold be stored at all, so a value that will not reduce is a bug in the
+            // layout rather than a program a host should be told about.
+            let Some(part) = Key::from_value(&value) else {
+                return Err(ErrorKind::MalformedIr.into());
+            };
+            key.push(Some(part));
+        }
+
+        let whole: Option<Vec<Key>> = key.iter().cloned().collect();
+        let keys = match whole {
+            Some(key) => vec![key],
+            None => {
+                let pinned: Vec<(usize, Key)> = key
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(at, part)| part.clone().map(|part| (at, part)))
+                    .collect();
+                columns.keys(&table.name, &pinned)?
+            }
+        };
+        for key in keys {
+            self.fold_into(record, table, column, at, key, columns)?;
+        }
+        Ok(())
+    }
+
+    /// One arm of one column at one key: the fold's own body, with the accumulator read
+    /// from the store and written back to it.
+    fn fold_into(
+        &self,
+        record: &Record,
+        table: &Table,
+        column: &Column,
+        at: usize,
+        key: Vec<Key>,
+        columns: &mut dyn Columns,
+    ) -> Result<(), Error> {
+        let def = self
+            .program
+            .fold(&column.fold)
+            .ok_or_else(|| Error::new(ErrorKind::UnknownFold(column.fold.to_string())))?;
+        let module = def.module.as_deref();
+        // Stamped once here, which is the boundary that knows which module the fold came
+        // from, exactly as `run` and `project` are the boundary for a handler's.
+        let folded = self
+            .folded(record, table, column, at, &key, def, columns)
+            .map_err(|err| err.in_module(module))?;
+        // Not shredded. This is the fill path, so it behaves as `fold_stored` does and
+        // hands a `Value::Sealed` through for the store to hold and shred on its own
+        // read, which is what makes an erasure after the fill observable without
+        // refolding anything.
+        match folded {
+            Some(folded) => columns.set(&table.name, key, &column.name, folded),
+            // The record failed the arm's own filters, so this key is not one it writes.
+            None => Ok(()),
+        }
+    }
+
+    /// What one arm folds this record onto the column's held value, or `None` where the
+    /// arm does not match it after all.
+    #[allow(clippy::too_many_arguments)]
+    fn folded(
+        &self,
+        record: &Record,
+        table: &Table,
+        column: &Column,
+        at: usize,
+        key: &[Key],
+        def: &Fold,
+        columns: &dyn Columns,
+    ) -> Result<Option<Value>, Error> {
+        let slice = &def.stage.slices[at];
+        let mut frame = Frame::new(def.frame);
+
+        // The parameters from the key, which is the inverse of what a caller does and the
+        // reason `Column::args` is recorded: a key part is named for its subject or for
+        // the parameter with one `_id` off, so the part's name is not callable.
+        for (name, part) in column.args.iter().zip(key) {
+            let Some(param) = def.params.iter().find(|param| &param.name == name) else {
+                return Err(ErrorKind::MalformedIr.into());
+            };
+            let value = fitted_at(value::from_key(part), &param.ty, Span::default())?;
+            frame.set(param.slot, value)?;
+        }
+
+        // **Resolved after the parameters, which is what makes a rule 13 gate hold.** A
+        // caller resolves a key conjunct as a *gate*, comparing what the arm writes
+        // against the argument it was given; there is no argument here, so the key came
+        // from the arm and the gate is true by construction. Going through the same
+        // function anyway is what keeps a field filter fitted identically, and a dead
+        // slice at this point is a disagreement between `layout` and the arm rather than
+        // a case to skip.
+        let resolved = resolved_one(self.program, &def.exprs, slice, &mut frame)?;
+        if !resolved.live {
+            return Err(ErrorKind::MalformedIr.into());
+        }
+        // The check a host cannot make for itself: an arm's field filters, which
+        // `ColumnArm` does not carry.
+        if !matches(&resolved.predicate, &record.event)? {
+            return Ok(None);
+        }
+
+        // The accumulator: what the column holds, or the seed where it holds nothing. A
+        // key no event has touched folds to the seed, so an absent row and an absent
+        // value are one thing (`docs/folds.md` section 11).
+        let held = match columns.value(&table.name, key, &column.name)? {
+            Some(value) => value,
+            None => {
+                let var = def
+                    .stage
+                    .folds
+                    .iter()
+                    .find(|var| var.slot == def.slot)
+                    .ok_or(ErrorKind::MalformedIr)?;
+                let value = eval(self.program, &def.exprs, &mut frame, var.init, None)?;
+                fitted_at(value, &var.ty, def.exprs.span(var.init))?
+            }
+        };
+        frame.set(def.slot, held)?;
+
+        // From here it is the fold driver's own inner loop, for one slice.
+        for bind in &def.envelope {
+            frame.set(bind.slot, envelope_value(record, bind.field))?;
+        }
+        for bind in &slice.binds {
+            let value = field(&record.event, &bind.field)?.clone();
+            let value = seal(self.program, &record.event, &bind.field, value)?;
+            frame.set(bind.slot, value)?;
+        }
+        for update in &slice.updates {
+            let value = eval(self.program, &def.exprs, &mut frame, update.value, None)?;
+            let value = fitted_at(value, &update.ty, def.exprs.span(update.value))?;
+            frame.set(update.slot, value)?;
+        }
+        Ok(Some(frame.get(def.slot)?.clone()))
     }
 }
 
@@ -859,7 +1290,7 @@ impl<'a, H: Host> Interpreter<'a, H> {
         'stages: for stage in &arm.stages {
             for half in [Half::Pre, Half::Post] {
                 if half == Half::Post && (!stage.folds.is_empty() || stage.reads()) {
-                    let predicates = resolve(program, &arm.exprs, &stage.slices, &mut frame)?;
+                    let resolved = resolve(program, &arm.exprs, &stage.slices, &mut frame)?;
                     for var in &stage.folds {
                         let value = eval(program, &arm.exprs, &mut frame, var.init, None)?;
                         let value = fitted_at(value, &var.ty, arm.exprs.span(var.init))?;
@@ -869,17 +1300,18 @@ impl<'a, H: Host> Interpreter<'a, H> {
                         // Rule 3: the fold stops at the trigger's own position,
                         // inclusive, so state is a pure function of the log prefix and
                         // that position, and counts the trigger.
-                        let query = Query {
-                            slices: predicates,
-                            from: 0,
-                            upto: Some(position),
+                        let folding = Folding {
+                            slices: &stage.slices,
+                            resolved: &resolved,
+                            envelope: &[],
                         };
                         fold(
                             program,
                             &arm.exprs,
                             &self.host,
-                            &query,
-                            &stage.slices,
+                            &folding,
+                            0,
+                            Some(position),
                             &mut frame,
                         )?;
                     }
@@ -1086,6 +1518,149 @@ impl<'a, H: Host> Interpreter<'a, H> {
             .map_err(|err| err.in_module(module.as_deref()))
     }
 
+    /// Folds one named fold over the whole log and hands back the value it folded to.
+    ///
+    /// **This is the first thing that executes a named fold.** Everywhere else one runs
+    /// by having been spliced into a caller by [`crate::inline`], and a fold a command
+    /// reads never exists at runtime as itself. A read model is a named fold kept for
+    /// every key ([`crate::tables`]), so a stored column is served by calling this with
+    /// the key, and that is also what a test's `fold` action does.
+    ///
+    /// The whole log, with no upper bound. The two conventions a handler folds under both
+    /// exist to protect something this does not have: a command stops below its pinned
+    /// head so a decision is not made on events its append condition is about to reject,
+    /// and an effect arm stops at its trigger so delivery is a function of a prefix. A
+    /// read model has neither an append condition nor a trigger, and reads the log as it
+    /// now stands, which is what [`project_into`](Self::project_into) does too.
+    ///
+    /// A store filling a column wants neither half of that, and calls
+    /// [`fold_stored`](Self::fold_stored) instead.
+    pub fn fold(
+        &self,
+        name: &str,
+        args: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
+    ) -> Result<Value, Error> {
+        let def = self.fold_def(name)?;
+        let module = def.module.as_deref();
+        let mut folded = self
+            .folding(def, args, None)
+            .map_err(|err| err.in_module(module))?;
+        // A column holding sealed content whose key is gone reads back absent, exactly as
+        // the same column does through `project`. This hands the value to whoever asked
+        // for it, so there is no later step to shred in.
+        shred(&self.host, &mut folded, || def.name.to_string())
+            .map_err(|err| err.in_module(module))?;
+        Ok(folded)
+    }
+
+    /// The same fold, bounded at a log length and with a sealed value handed through.
+    ///
+    /// **This is the read a store fills a column from**, and it is to [`fold`](Self::fold)
+    /// what [`project_into`](Self::project_into) is to [`project`](Self::project). Two
+    /// differences, and a store needs both:
+    ///
+    /// - **`head` is how long the log was**, which is the number [`Log::head`] answers and
+    ///   therefore the position the next append lands at, not the last one folded. A store
+    ///   records one of those with the whole table so that every column of a row is at the
+    ///   same one and a query reads one position, and `docs/host.md` says `head` and `read`
+    ///   are not atomic together, so the bound has to be the store's rather than whatever
+    ///   the log has reached by the time each column is folded.
+    ///
+    ///   It takes a head rather than the inclusive last position `Query::upto` carries
+    ///   because a head is the only number a store has: it is what the seam hands out,
+    ///   what a command pins its own read to, and what a checkpoint records. Asking for
+    ///   `head - 1` instead put the subtraction at every call site and left an empty log
+    ///   with nothing to pass, since `0` is a position like any other and would have
+    ///   folded the first event into a column recorded as holding none of it. A caller
+    ///   that really does hold a position asks for `position + 1`.
+    /// - **A `Value::Sealed` is handed back rather than shredded**, for the reason
+    ///   `project_into` hands one to `Rows::put`: the store holds the ciphertext and
+    ///   shreds on its own read, which is what makes an erasure after the fill observable
+    ///   without refolding anything. Shredding here would also fail the fill for a
+    ///   non-optional sealed column whose subject was erased before it, where the same
+    ///   column through a projector stores its ciphertext and raises at the query.
+    ///
+    /// The two travel together because a store wants both, not because they are one
+    /// thing. A console showing a value as of a position wants the bound and the shred,
+    /// and is the caller that would split them.
+    pub fn fold_stored(
+        &self,
+        name: &str,
+        args: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
+        head: u64,
+    ) -> Result<Value, Error> {
+        let def = self.fold_def(name)?;
+        let module = def.module.as_deref();
+        self.folding(def, args, Some(head))
+            .map_err(|err| err.in_module(module))
+    }
+
+    fn fold_def(&self, name: &str) -> Result<&'a Fold, Error> {
+        self.program
+            .fold(name)
+            .ok_or_else(|| Error::new(ErrorKind::UnknownFold(name.to_string())))
+    }
+
+    /// One named fold, folded. Shredding is the caller's, which is the whole difference
+    /// between the two public doors onto this.
+    ///
+    /// `head` is a log length and not a position, for the reason
+    /// [`fold_stored`](Self::fold_stored) takes one: `None` reads to whatever the log has
+    /// reached, and `Some(n)` reads the first `n` events.
+    fn folding(
+        &self,
+        def: &Fold,
+        args: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
+        head: Option<u64>,
+    ) -> Result<Value, Error> {
+        // A fold's body is arms only: `Builder::stmt` is the one path onto either half of
+        // a stage and a fold parser never reaches it, so an IR that grew statements here
+        // is a bug in the builder rather than something to quietly run.
+        debug_assert!(
+            def.stage.pre.is_empty() && def.stage.post.is_empty(),
+            "a fold's body is arms, so its stage has no statements"
+        );
+
+        let mut frame = Frame::new(def.frame);
+        let mut args: BTreeMap<Ident, Value> = args
+            .into_iter()
+            .map(|(name, value)| (name.into(), value))
+            .collect();
+        bind_params(&def.params, &mut args, &mut frame)?;
+
+        // Resolve before seeding, which is what both other drivers do and is safe for the
+        // same reason: a filter cannot read the accumulator (`Builder::filter_past_fold`).
+        let resolved = resolve(self.program, &def.exprs, &def.stage.slices, &mut frame)?;
+        for var in &def.stage.folds {
+            let value = eval(self.program, &def.exprs, &mut frame, var.init, None)?;
+            let value = fitted_at(value, &var.ty, def.exprs.span(var.init))?;
+            frame.set(var.slot, value)?;
+        }
+
+        let folding = Folding {
+            slices: &def.stage.slices,
+            resolved: &resolved,
+            envelope: &def.envelope,
+        };
+        // A head of zero is a log with nothing in it, and there is no inclusive bound that
+        // says so: `Some(0)` is position zero. A command's read takes the same two steps
+        // (`at > from`, then `at - 1`) for the same reason, since the number it pins
+        // itself to is a head too.
+        if head != Some(0) {
+            fold(
+                self.program,
+                &def.exprs,
+                &self.host,
+                &folding,
+                0,
+                head.map(|head| head - 1),
+                &mut frame,
+            )?;
+        }
+        // Always set, because the seed above wrote it.
+        Ok(frame.get(def.slot)?.clone())
+    }
+
     /// One attempt: a DCB conflict leaves as [`ErrorKind::Conflict`] for the host to do
     /// something about. See [`run_retrying`](Self::run_retrying) for doing it here.
     pub fn run(
@@ -1159,7 +1734,7 @@ fn execute(
         .into_iter()
         .map(|(name, value)| (name.into(), value))
         .collect();
-    bind_params(command, &mut args, &mut prepared)?;
+    bind_params(&command.params, &mut args, &mut prepared)?;
 
     // What one attempt hands the next: the state the first reading stage folded, the
     // predicates it folded with, and the position it folded through. A fold is a left
@@ -1209,11 +1784,11 @@ fn execute(
             if !stage.folds.is_empty() || stage.reads() {
                 // Resolved per stage and per attempt, rather than once for the command,
                 // because a filter may now name a `fold` an earlier stage folded.
-                let predicates = resolve(program, &command.exprs, &stage.slices, &mut frame)?;
+                let resolved = resolve(program, &command.exprs, &stage.slices, &mut frame)?;
                 // A stage whose filters moved since the last attempt folded a different
                 // slice, so its carry answers a different question.
                 let resume = match (leading, &carried) {
-                    (true, Some(carry)) if carry.predicates == predicates => Some(carry),
+                    (true, Some(carry)) if carry.slices == resolved => Some(carry),
                     _ => None,
                 };
                 match resume {
@@ -1253,21 +1828,25 @@ fn execute(
                     // to fold. The guard is also what keeps an empty log out of the
                     // `upto: None` case, which means read to the head.
                     if at > from {
-                        let query = Query {
-                            slices: predicates.clone(),
-                            from,
-                            upto: at.checked_sub(1),
+                        let folding = Folding {
+                            slices: &stage.slices,
+                            resolved: &resolved,
+                            envelope: &[],
                         };
                         fold(
                             program,
                             &command.exprs,
                             host,
-                            &query,
-                            &stage.slices,
+                            &folding,
+                            from,
+                            at.checked_sub(1),
                             &mut frame,
                         )?;
                     }
-                    read.extend(predicates.iter().cloned());
+                    // Rule 13: the live slices only. A slice whose key gate failed folded
+                    // nothing, so conflicting on it would make the command lose to events
+                    // it never read.
+                    read.extend(narrowing(&resolved));
 
                     if leading {
                         // Taken before the statements below the declarations, which is
@@ -1276,7 +1855,7 @@ fn execute(
                         // reach what the next attempt folds onto.
                         folded = Some(Carry {
                             through: at,
-                            predicates,
+                            slices: resolved,
                             folds: stage
                                 .folds
                                 .iter()
@@ -1339,26 +1918,34 @@ fn execute(
     }
 }
 
-/// What one attempt hands the next for one stage: the state it folded, and the
-/// predicates it folded with. The predicates travel beside the values because a later
-/// stage's filter may read an earlier stage's folded state, so unlike the pinned head
-/// they are not fixed for the run: a stage whose filters moved folded a different slice
-/// and has nothing to carry onto.
+/// What one attempt hands the next for one stage: the state it folded, and the resolved
+/// slices it folded with. The slices travel beside the values because a later stage's
+/// filter may read an earlier stage's folded state, so unlike the pinned head they are
+/// not fixed for the run: a stage whose filters moved folded a different slice and has
+/// nothing to carry onto.
+///
+/// **A [`Resolved`] rather than a [`Predicate`], and that is load-bearing.** A rule 13
+/// key gate has no representation in a predicate, so two arms on one event differing only
+/// in their gates resolve to *equal* predicates; comparing predicates alone would resume
+/// one attempt's delta through the other attempt's arms.
 #[derive(Clone)]
 struct Carry {
     /// The position the states below are folded through, exclusive. A retry folds
     /// `[through, after)` onto them rather than starting at the seed.
     through: u64,
-    predicates: Vec<Predicate>,
+    slices: Vec<Resolved>,
     folds: Vec<Value>,
 }
 
+/// The argument contract: optional coercion, a missing one, an extra one and a wrong
+/// type. Takes the parameters rather than the declaration, because a command and a named
+/// fold both have a list of them and the contract is the same for either.
 fn bind_params(
-    command: &Command,
+    params: &[Param],
     args: &mut BTreeMap<Ident, Value>,
     frame: &mut Frame,
 ) -> Result<(), Error> {
-    for param in &command.params {
+    for param in params {
         let value = match (args.remove(&param.name), &param.ty) {
             (Some(value), Type::Opt(inner)) if value.has_type(inner) => Value::some(value),
             (Some(value), _) => value,
@@ -1384,51 +1971,162 @@ fn bind_params(
 /// Every slice with its filters evaluated. This runs before the fold, so what a run
 /// read is known whatever the body goes on to decide, which is why the condition comes
 /// back with a refusal too.
+///
+/// **Each value is fitted to the field's declared type**, which is what optional coercion
+/// means at this position. `on @hold.release.failed(fulfillment_order_id)` against a
+/// field declared `Int?` compares a bare `Int` with the optional the event holds, and
+/// without the fit the filter matches nothing at all: the parser allows the bare value
+/// (`docs/optionals.md`), so the slice reads as written and silently folds no events. The
+/// fit has to be here rather than in [`matches`] because the predicate is also what the
+/// host narrows with, and a store comparing a column to an unwrapped value has the same
+/// problem one layer down.
 fn resolve(
     program: &Program,
     exprs: &Exprs,
     slices: &[Slice],
     frame: &mut Frame,
-) -> Result<Vec<Predicate>, Error> {
+) -> Result<Vec<Resolved>, Error> {
     slices
         .iter()
-        .map(|slice| {
-            let filters = slice
-                .filters
-                .iter()
-                .map(|filter| {
-                    let value = eval(program, exprs, frame, filter.value, None)?;
-                    Ok((filter.field.clone(), value))
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-            Ok(Predicate::new(slice.event.clone(), filters))
-        })
+        .map(|slice| resolved_one(program, exprs, slice, frame))
         .collect()
 }
 
-/// The query and the slices are parallel by construction: `resolve` makes one
-/// predicate per slice, in order. The host narrows, and this re-checks, because a
-/// store that can only narrow approximately is still correct.
+/// One slice, resolved against one frame.
+///
+/// Split out of [`resolve`] for [`Tables::apply`], which resolves a slice at a time
+/// because each column, arm and key it writes has a frame of its own: two arms on one
+/// event differing only in their rule 13 gates bind the same parameter to two different
+/// values, so one frame cannot answer for both.
+fn resolved_one(
+    program: &Program,
+    exprs: &Exprs,
+    slice: &Slice,
+    frame: &mut Frame,
+) -> Result<Resolved, Error> {
+    let def = program.event(&slice.event);
+    let mut filters = Vec::new();
+    let mut live = true;
+    for filter in &slice.filters {
+        let value = eval(program, exprs, frame, filter.value(), None)?;
+        match filter {
+            Filter::Field { field, .. } => {
+                let value = match def.and_then(|def| def.field(field)) {
+                    Some(declared) => fitted_at(value, &declared.ty, exprs.span(filter.value()))?,
+                    None => value,
+                };
+                filters.push((field.clone(), value));
+            }
+            // Rule 13: the key this arm writes, which is not a predicate on the
+            // event and so never joins `filters`. Fitted to the parameter's
+            // declared type for the reason a field's value is, so a bare value in
+            // an optional parameter compares as the optional.
+            Filter::Key { slot, ty, .. } => {
+                let value = fitted_at(value, ty, exprs.span(filter.value()))?;
+                live = live && frame.get(*slot)? == &value;
+            }
+        }
+    }
+    Ok(Resolved {
+        predicate: Predicate::new(slice.event.clone(), filters),
+        live,
+    })
+}
+
+/// One slice, resolved: the predicate a host narrows with, and whether this invocation
+/// reads the slice at all.
+///
+/// The second half is rule 13's. A `Filter::Key` conjunct is resolved once against the
+/// argument the caller passed, so a slice whose conjunct fails participates in **nothing**:
+/// it folds no events and joins no append condition. Dropping it rather than widening is
+/// available precisely because the answer cannot move between attempts of one run, and it
+/// matters: a command reading one kind of a nine-kind queue would otherwise conflict on
+/// all nine.
+///
+/// **`live` is why this type exists rather than a bare `Predicate`.** A key conjunct has
+/// no representation in a predicate, so two arms on one event differing only in their key
+/// gates resolve to *equal* predicates. A carry comparing predicates alone would resume
+/// one attempt's delta through the other's arms.
+///
+/// The predicate is built for a dead slice too. Its sibling field filters are evaluated
+/// either way, so a type error in one raises whether or not the key gate held, which is
+/// the determinism a resolved value should have.
+#[derive(Clone, PartialEq, Eq)]
+struct Resolved {
+    predicate: Predicate,
+    live: bool,
+}
+
+/// The three parallel lists one stage folds with, in one place so the invariant has one
+/// home: a slice, the predicate it resolved to, and the envelope binds its arms wrote.
+struct Folding<'a> {
+    slices: &'a [Slice],
+    resolved: &'a [Resolved],
+    envelope: &'a [EnvBind],
+}
+
+impl Folding<'_> {
+    /// The predicates a host is asked to narrow with, and the ones a command conflicts
+    /// on: the live slices only.
+    fn narrowing(&self) -> Vec<Predicate> {
+        narrowing(self.resolved)
+    }
+}
+
+fn narrowing(resolved: &[Resolved]) -> Vec<Predicate> {
+    resolved
+        .iter()
+        .filter(|slice| slice.live)
+        .map(|slice| slice.predicate.clone())
+        .collect()
+}
+
+/// The host narrows, and this re-checks, because a store that can only narrow
+/// approximately is still correct.
+///
+/// **The query is built here, from the same resolved list the matching reads.** It used
+/// to be built by each of the three callers and passed in, which made the parallelism
+/// between it and the slices an invariant three places had to keep; now there is one
+/// construction and nothing to assert. `from` and `upto` are the one thing a caller still
+/// decides, because the range is the one latitude `docs/host.md` section 4 does not give.
 fn fold(
     program: &Program,
     exprs: &Exprs,
     log: &dyn Log,
-    query: &Query,
-    slices: &[Slice],
+    stage: &Folding<'_>,
+    from: u64,
+    upto: Option<u64>,
     frame: &mut Frame,
 ) -> Result<(), Error> {
-    // `zip` below truncates, so a query built from more slices than it is folding with
-    // would match a stage against another stage's predicates and bind the wrong events
-    // into its slots. Silent, and only visible once a command has more than one stage.
+    // `zip` below truncates, so a resolved list shorter than the slices would match a
+    // stage against another stage's predicates and bind the wrong events into its slots.
+    // Silent, and only visible once a command has more than one stage.
     debug_assert_eq!(
-        query.slices.len(),
-        slices.len(),
-        "a fold's query and its slices are one per slice, in order"
+        stage.resolved.len(),
+        stage.slices.len(),
+        "a fold's slices and their resolved predicates are one per slice, in order"
     );
-    log.read(query, &mut |record| {
+    let query = Query {
+        slices: stage.narrowing(),
+        from,
+        upto,
+    };
+    // Rule 13: every slice's key gate failed, so this invocation reads nothing. Returning
+    // here rather than asking with an empty `slices` matters, because an empty list reads
+    // as "narrow by nothing" to a host and would deliver the whole range.
+    if query.slices.is_empty() {
+        return Ok(());
+    }
+    log.read(&query, &mut |record| {
         let event = &record.event;
-        for (slice, predicate) in slices.iter().zip(&query.slices) {
-            if !matches(predicate, event)? {
+        // Before the slices, because an arm's value reads these and a slice's updates
+        // are that value. One list for the whole fold, so a record that matches no slice
+        // writes them harmlessly.
+        for bind in stage.envelope {
+            frame.set(bind.slot, envelope_value(record, bind.field))?;
+        }
+        for (slice, resolved) in stage.slices.iter().zip(stage.resolved) {
+            if !resolved.live || !matches(&resolved.predicate, event)? {
                 continue;
             }
 
@@ -1660,16 +2358,15 @@ fn exec_stmt(
         }
         Stmt::Patch {
             entity,
-            key,
+            keys,
             absent,
             loads,
             fields,
             span,
         } => {
-            let key_value = eval(program, exprs, frame, *key, None)?;
+            let key = subscript(program, exprs, frame, keys)?;
             let (projector, rows) = write_sink(sink, *span)?;
             let def = entity_def(projector, entity, *span)?;
-            let key = key_of(&key_value, exprs.span(*key))?;
 
             // Rule 5: a `patch` materializes from zeros, so it always has a prior value
             // for `.field` to read. An `update` drops the write instead, which is why a
@@ -1702,12 +2399,18 @@ fn exec_stmt(
                 .map_err(|err| err.located(*span))?;
             Ok(Flow::Next)
         }
-        Stmt::Delete { entity, key } => {
-            let span = exprs.span(*key);
-            let key_value = eval(program, exprs, frame, *key, None)?;
+        Stmt::Delete { entity, keys } => {
+            // The first key's span, or nothing to point at. A valid program always has one
+            // (`subscript` checks the arity against a key that is never empty), so an
+            // empty list is malformed IR rather than a program error, and indexing it is
+            // the one place the compound-key change could have panicked on one.
+            let span = match keys.first() {
+                Some(first) => exprs.span(*first),
+                None => return Err(ErrorKind::MalformedIr.into()),
+            };
+            let key = subscript(program, exprs, frame, keys)?;
             let (projector, rows) = write_sink(sink, span)?;
             entity_def(projector, entity, span)?;
-            let key = key_of(&key_value, span)?;
             rows.delete(entity, &key).map_err(|err| err.located(span))?;
             Ok(Flow::Next)
         }
@@ -1912,7 +2615,7 @@ fn fitted(value: Value, ty: &Type) -> Result<Value, ErrorKind> {
     })
 }
 
-fn fitted_at(value: Value, ty: &Type, span: Span) -> Result<Value, Error> {
+pub(crate) fn fitted_at(value: Value, ty: &Type, span: Span) -> Result<Value, Error> {
     fitted(value, ty).map_err(|kind| Error::at(kind, span))
 }
 
@@ -1991,25 +2694,47 @@ fn key_of(value: &Value, span: Span) -> Result<Key, Error> {
     Key::from_value(value).ok_or_else(|| Error::at(ErrorKind::BadKey(value.ty()), span))
 }
 
-fn row_key(def: &EntityDef, row: &Row, span: Span) -> Result<Key, Error> {
-    let name = &def.key_field().name;
-    let value = row.0.get(name).ok_or_else(|| {
-        Error::at(
-            ErrorKind::MissingEntityField {
-                entity: def.name.clone(),
-                field: name.clone(),
-            },
-            span,
-        )
-    })?;
-    key_of(value, span)
+/// `Entity[a, b]`: one key per column, in key order. The parser has already checked the
+/// arity against the declaration, so this does not re-check it; what it cannot check is
+/// that each value is one a key can be made of, which is what `key_of` answers.
+fn subscript(
+    program: &Program,
+    exprs: &Exprs,
+    frame: &mut Frame,
+    keys: &[ExprId],
+) -> Result<Vec<Key>, Error> {
+    keys.iter()
+        .map(|&id| {
+            let value = eval(program, exprs, frame, id, None)?;
+            key_of(&value, exprs.span(id))
+        })
+        .collect()
+}
+
+/// A `put`'s key, read off the row it writes: the key columns are columns like any
+/// other there, which is why `put` takes no subscript.
+fn row_key(def: &EntityDef, row: &Row, span: Span) -> Result<Vec<Key>, Error> {
+    def.key_fields()
+        .map(|field| {
+            let value = row.0.get(&field.name).ok_or_else(|| {
+                Error::at(
+                    ErrorKind::MissingEntityField {
+                        entity: def.name.clone(),
+                        field: field.name.clone(),
+                    },
+                    span,
+                )
+            })?;
+            key_of(value, span)
+        })
+        .collect()
 }
 
 fn materialize(
     def: &EntityDef,
     projector: &Projector,
     program: &Program,
-    key: &Key,
+    key: &[Key],
     span: Span,
 ) -> Result<Row, Error> {
     let defs = value::Defs {
@@ -2018,9 +2743,10 @@ fn materialize(
         records: &program.records,
     };
     let mut row = Row::default();
-    for field in &def.fields {
-        let value = if field.name == def.key_field().name {
-            key_value(key)
+    for (position, field) in def.fields.iter().enumerate() {
+        // A key column's zero is never read, because the subscript holds its value.
+        let value = if let Some(at) = def.keys.iter().position(|&key| key == position) {
+            key_value(&key[at])
         } else {
             value::initial(field, defs).ok_or_else(|| {
                 Error::at(
@@ -3766,7 +4492,7 @@ pub enum Effectful {
 }
 
 /// One value out of a declaration that has values and no statements, evaluated against
-/// an empty frame with no sink. `docs/testing.md` rule 8: a test reaches nothing a
+/// an empty frame with no sink. `docs/testing.md` rule 10: a test reaches nothing a
 /// program could not, and having no sink is what makes that structural.
 pub fn eval_pure(
     program: &Program,

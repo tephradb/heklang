@@ -141,13 +141,13 @@ fn as_binds_at_id_and_position() {
     let row = store
         .get(
             "Order",
-            &Key::Uuid("0190d1a1-0000-7000-9000-000000000001".into()),
+            &[Key::Uuid("0190d1a1-0000-7000-9000-000000000001".into())],
         )
         .expect("`e.id` became the key");
     assert_eq!(row.field("customer_id"), Some(&Value::Int(7)));
     assert_eq!(
         store
-            .get("Customer", &Key::Int(7))
+            .get("Customer", &[Key::Int(7)])
             .expect("the patch landed")
             .field("order_count"),
         Some(&Value::Int(1)),
@@ -177,7 +177,7 @@ fn the_envelope_reaches_at_as_a_timestamp() {
         .project("P")
         .unwrap_or_else(|err| panic!("{err}"));
     let row = store
-        .get("Stamp", &Key::Uuid("order-1".into()))
+        .get("Stamp", &[Key::Uuid("order-1".into())])
         .expect("the put ran");
     assert_eq!(
         row.field("at"),
@@ -217,7 +217,7 @@ fn put_writes_every_field_patch_only_the_listed_ones() {
     );
 
     let row = store
-        .get("Order", &Key::Uuid("order-1".into()))
+        .get("Order", &[Key::Uuid("order-1".into())])
         .expect("the row exists");
     assert_eq!(
         row.field("total"),
@@ -255,8 +255,8 @@ fn delete_removes_the_row() {
         vec![placed(1, 7, 2_599), placed(2, 7, 1_000), purged(1)],
     );
 
-    assert!(store.get("Order", &Key::Uuid("order-1".into())).is_none());
-    assert!(store.get("Order", &Key::Uuid("order-2".into())).is_some());
+    assert!(store.get("Order", &[Key::Uuid("order-1".into())]).is_none());
+    assert!(store.get("Order", &[Key::Uuid("order-2".into())]).is_some());
 }
 
 // Rule 3: stored-value reference.
@@ -272,7 +272,7 @@ fn a_leading_dot_reads_the_stored_value_a_bare_name_does_not() {
     );
 
     let row = store
-        .get("Order", &Key::Uuid("order-1".into()))
+        .get("Order", &[Key::Uuid("order-1".into())])
         .expect("the row exists");
     assert_eq!(
         row.field("total"),
@@ -355,7 +355,9 @@ fn an_idempotent_stored_value_write_counts_a_repeated_id_once() {
         .project("P")
         .unwrap_or_else(|err| panic!("{err}"));
 
-    let row = store.get("Customer", &Key::Int(7)).expect("the row exists");
+    let row = store
+        .get("Customer", &[Key::Int(7)])
+        .expect("the row exists");
     assert_eq!(
         row.field("order_count"),
         Some(&Value::Int(2)),
@@ -395,7 +397,7 @@ fn a_patch_materializes_a_missing_row_from_zeros() {
     );
 
     let row = store
-        .get("Order", &Key::Uuid("order-1".into()))
+        .get("Order", &[Key::Uuid("order-1".into())])
         .expect("the patch materialized the row");
     assert_eq!(row.field("customer_id"), Some(&Value::Int(0)));
     assert_eq!(
@@ -427,7 +429,7 @@ fn a_deleted_row_re_materializes_on_the_next_patch() {
     );
 
     let row = store
-        .get("Order", &Key::Uuid("order-1".into()))
+        .get("Order", &[Key::Uuid("order-1".into())])
         .expect("the patch brought the row back");
     assert_eq!(
         row.field("total"),
@@ -446,7 +448,7 @@ fn update_applies_to_a_row_that_exists() {
     );
 
     let row = store
-        .get("Order", &Key::Uuid("order-1".into()))
+        .get("Order", &[Key::Uuid("order-1".into())])
         .expect("the row was put before the update");
     assert_eq!(
         row.field("status"),
@@ -472,7 +474,7 @@ fn update_on_an_absent_row_creates_nothing() {
     );
 
     assert_eq!(
-        store.get("Order", &Key::Uuid("order-1".into())),
+        store.get("Order", &[Key::Uuid("order-1".into())]),
         None,
         "no row, not a row whose columns happen to be unchanged"
     );
@@ -491,7 +493,7 @@ fn a_dot_field_inside_an_update_reads_the_stored_value() {
     );
 
     let row = store
-        .get("Order", &Key::Uuid("order-1".into()))
+        .get("Order", &[Key::Uuid("order-1".into())])
         .expect("the row exists");
     assert_eq!(row.field("total"), Some(&Value::money(2_699, 2)));
 }
@@ -509,12 +511,12 @@ fn update_and_patch_on_the_same_absent_key_differ() {
     );
 
     assert_eq!(
-        store.get("Order", &Key::Uuid("order-1".into())),
+        store.get("Order", &[Key::Uuid("order-1".into())]),
         None,
         "an identity: absent means the order does not exist"
     );
     let counter = store
-        .get("Customer", &Key::Int(7))
+        .get("Customer", &[Key::Int(7)])
         .expect("a counter: absent means zero of it");
     assert_eq!(counter.field("order_count"), Some(&Value::Int(1)));
 }
@@ -529,7 +531,7 @@ fn a_deleted_row_stays_deleted_under_update() {
     );
 
     assert_eq!(
-        store.get("Order", &Key::Uuid("order-1".into())),
+        store.get("Order", &[Key::Uuid("order-1".into())]),
         None,
         "the half of `delete` is not a tombstone that a statement can close"
     );
@@ -632,7 +634,7 @@ fn a_written_timestamp_default_materializes_a_row() {
     let store = interpreter
         .project("P")
         .unwrap_or_else(|err| panic!("expected this to project: {err}"));
-    let row = store.get("Thing", &Key::Int(1)).expect("the row");
+    let row = store.get("Thing", &[Key::Int(1)]).expect("the row");
     assert_eq!(
         row.field("stamp"),
         Some(&Value::Timestamp(1_577_836_800_000_000))
@@ -687,7 +689,7 @@ fn a_put_only_entity_needs_no_zero() {
         .project("P")
         .unwrap_or_else(|err| panic!("{err}"));
     let row = store
-        .get("Thing", &Key::Uuid("order-1".into()))
+        .get("Thing", &[Key::Uuid("order-1".into())])
         .expect("the put landed");
     assert_eq!(row.field("origin"), Some(&Value::uuid("order-1")));
 }
@@ -723,7 +725,7 @@ fn a_default_or_a_zero_always_has_the_declared_type() {
     for projector in &program.projectors {
         for entity in &projector.entities {
             for (index, field) in entity.fields.iter().enumerate() {
-                if index == entity.key {
+                if entity.keys.contains(&index) {
                     continue;
                 }
                 let defs = heklang::value::Defs {
@@ -828,7 +830,7 @@ fn an_optional_field_takes_a_present_default() {
         vec![placed(1, 1, 1_000)],
     );
     let row = store
-        .get("Thing", &Key::Uuid("order-1".into()))
+        .get("Thing", &[Key::Uuid("order-1".into())])
         .expect("the patch materialized");
     assert_eq!(
         row.field("note"),
@@ -1038,6 +1040,334 @@ fn a_name_from_one_handler_is_not_in_scope_in_another() {
     assert_eq!(message, "`mine` is not in scope");
 }
 
+// ---------------------------------------------------------------------------------
+// Rule 11: compound keys.
+
+/// A projector keyed on a pair, with the counter shape the rule is written around.
+/// Its own declarations, because the fixture's entities are single-keyed and the point
+/// is the entity rather than the handler.
+fn pair_source(body: &str) -> String {
+    format!(
+        "subject Shop(Int)
+event @usage.recorded {{ shop_id: Shop, period: String @max(7) }}
+projector U {{
+  entity Period {{
+    shop_id: Shop @key,
+    period: String @max(7) @key,
+    counted: Int,
+  }}
+
+{body}
+}}
+"
+    )
+}
+
+fn recorded(shop_id: i64, period: &str) -> Event {
+    Event::new(
+        EventPath::new(["usage", "recorded"]),
+        [
+            ("shop_id", Value::Int(shop_id)),
+            ("period", Value::str(period)),
+        ],
+    )
+}
+
+const COUNT: &str = "  on @usage.recorded { shop_id, period } {
+    patch Period[shop_id, period] { counted: .counted + 1 }
+  }";
+
+fn pair_err(body: &str) -> String {
+    parse(&pair_source(body))
+        .expect_err("expected this projector to be rejected")
+        .text()
+}
+
+fn pair_store(body: &str, log: Vec<Event>) -> Store {
+    let source = pair_source(body);
+    let program = parse(&source).unwrap_or_else(|err| panic!("{err}"));
+    Interpreter::with_log(&program, log)
+        .project("U")
+        .unwrap_or_else(|err| panic!("{err}"))
+}
+
+/// The declaration: `@key` on each column, and the written order is the key's order.
+#[test]
+fn several_columns_are_one_key_in_written_order() {
+    let source = pair_source(COUNT);
+    let program = parse(&source).unwrap_or_else(|err| panic!("{err}"));
+    let def = program
+        .projector("U")
+        .and_then(|projector| projector.entity("Period"))
+        .expect("declared");
+    assert_eq!(def.keys, vec![0, 1]);
+    let names: Vec<&str> = def.key_fields().map(|field| field.name.as_str()).collect();
+    assert_eq!(names, vec!["shop_id", "period"]);
+}
+
+/// And a one-column key is the same rule with one column, so nothing about an existing
+/// entity changes shape.
+#[test]
+fn one_column_is_a_key_of_one() {
+    let source = source(PLACE);
+    let program = parse(&source).unwrap_or_else(|err| panic!("{err}"));
+    let def = program
+        .projector("P")
+        .and_then(|projector| projector.entity("Order"))
+        .expect("declared");
+    assert_eq!(def.keys, vec![0]);
+}
+
+/// The columns need not be adjacent or first: where a column is declared says nothing
+/// about what it means.
+#[test]
+fn key_columns_need_not_be_adjacent() {
+    let source = "subject Shop(Int)
+event @usage.recorded { shop_id: Shop, period: String @max(7) }
+projector U {
+  entity Period {
+    counted: Int,
+    shop_id: Shop @key,
+    note: String,
+    period: String @max(7) @key,
+  }
+  on @usage.recorded { shop_id, period } {
+    update Period[shop_id, period] { counted: .counted + 1 }
+  }
+}
+";
+    let program = parse(source).unwrap_or_else(|err| panic!("{err}"));
+    let def = program
+        .projector("U")
+        .and_then(|projector| projector.entity("Period"))
+        .expect("declared");
+    assert_eq!(def.keys, vec![1, 3]);
+}
+
+/// Both halves are part of the identity, which is the whole claim: one shop's two
+/// months are two rows, and two shops' one month are two more.
+#[test]
+fn the_whole_key_is_the_identity() {
+    let store = pair_store(
+        COUNT,
+        vec![
+            recorded(1, "2026-09"),
+            recorded(1, "2026-10"),
+            recorded(1, "2026-10"),
+            recorded(2, "2026-10"),
+        ],
+    );
+    assert_eq!(store.len("Period"), 3);
+    let counted = |shop: i64, period: &str| {
+        store
+            .get("Period", &[Key::Int(shop), Key::Str(period.into())])
+            .and_then(|row| row.field("counted"))
+            .cloned()
+    };
+    assert_eq!(counted(1, "2026-09"), Some(Value::Int(1)));
+    assert_eq!(counted(1, "2026-10"), Some(Value::Int(2)));
+    assert_eq!(counted(2, "2026-10"), Some(Value::Int(1)));
+    assert_eq!(counted(2, "2026-09"), None);
+}
+
+/// Order matters, because the sequence is what orders: the key read with its columns
+/// swapped is a different key and finds nothing.
+#[test]
+fn the_key_order_is_part_of_the_key() {
+    let store = pair_store(COUNT, vec![recorded(1, "2026-10")]);
+    assert!(
+        store
+            .get("Period", &[Key::Int(1), Key::Str("2026-10".into())])
+            .is_some()
+    );
+    assert!(
+        store
+            .get("Period", &[Key::Str("2026-10".into()), Key::Int(1)])
+            .is_none()
+    );
+}
+
+/// Rule 5 through rule 11: a materializing `patch` fills every key column from the
+/// subscript, so a key column needs no zero and a subject id in one needs no default.
+#[test]
+fn a_materialized_row_carries_its_whole_key() {
+    let store = pair_store(COUNT, vec![recorded(7, "2026-10")]);
+    let row = store
+        .get("Period", &[Key::Int(7), Key::Str("2026-10".into())])
+        .expect("the row exists");
+    assert_eq!(row.field("shop_id"), Some(&Value::Int(7)));
+    assert_eq!(row.field("period"), Some(&Value::str("2026-10")));
+    assert_eq!(row.field("counted"), Some(&Value::Int(1)));
+}
+
+/// `put` has no subscript, so a key column is a column there and every one of them is
+/// required like any other.
+#[test]
+fn put_fills_every_key_column_itself() {
+    let store = pair_store(
+        "  on @usage.recorded { shop_id, period } {
+    put Period { shop_id, period, counted: 1 }
+  }",
+        vec![recorded(3, "2026-10")],
+    );
+    let row = store
+        .get("Period", &[Key::Int(3), Key::Str("2026-10".into())])
+        .expect("the row exists");
+    assert_eq!(row.field("counted"), Some(&Value::Int(1)));
+
+    let message = pair_err(
+        "  on @usage.recorded { shop_id, period } {
+    put Period { shop_id, counted: 1 }
+  }",
+    );
+    assert_eq!(
+        message,
+        "`put Period` needs `period`; a `put` writes the whole row, so it never reads a default"
+    );
+}
+
+/// A `delete` names the whole key too.
+#[test]
+fn delete_names_the_whole_key() {
+    let store = pair_store(
+        "  on @usage.recorded { shop_id, period } {
+    put Period { shop_id, period, counted: 1 }
+    delete Period[shop_id, period]
+  }",
+        vec![recorded(3, "2026-10")],
+    );
+    assert!(store.is_empty("Period"));
+}
+
+/// The arity is checked against the declaration, in both directions, and the hint lists
+/// the columns rather than the count: a wrong count is almost always a compound key
+/// addressed as if it were one column.
+#[test]
+fn a_subscript_takes_one_value_per_key_column() {
+    let short = pair_err(
+        "  on @usage.recorded { shop_id, period } {
+    patch Period[shop_id] { counted: .counted + 1 }
+  }",
+    );
+    assert_eq!(
+        short,
+        "`Period` has a 2-column key, so a subscript takes 2 values, found 1; write `Period[shop_id, period]`"
+    );
+
+    let long = pair_err(
+        "  on @usage.recorded { shop_id, period } {
+    delete Period[shop_id, period, 1]
+  }",
+    );
+    assert!(
+        long.starts_with("`Period` has a 2-column key, so a subscript takes 2 values, found 3"),
+        "{long}"
+    );
+
+    // And the singular reads as one, the way a wrong argument count does.
+    let one = err("  on @order.placed { order_id } {\n    delete Order[]\n  }");
+    assert!(
+        one.starts_with("`Order` has a 1-column key, so a subscript takes 1 value, found 0"),
+        "{one}"
+    );
+}
+
+/// Each position is typed from the column it addresses, so a literal resolves there the
+/// way it does in a column write.
+#[test]
+fn each_key_position_is_typed_from_its_column() {
+    let message = pair_err(
+        "  on @usage.recorded { shop_id, period } {
+    patch Period[shop_id, 1] { counted: .counted + 1 }
+  }",
+    );
+    assert_eq!(message, "expected String, found Int");
+}
+
+/// The fix half of rule 11. Before it this checked clean and filed a row under one id
+/// holding another.
+#[test]
+fn a_patch_may_not_write_a_key_column() {
+    let message = pair_err(
+        "  on @usage.recorded { shop_id, period } {
+    patch Period[shop_id, period] { shop_id, counted: .counted + 1 }
+  }",
+    );
+    assert_eq!(
+        message,
+        "`shop_id` is a key column of `Period`, so `patch` may not write it; the subscript already says which row this is, and a row's key cannot change; take it out of the body"
+    );
+}
+
+/// The same for `update`, named for the keyword the author actually wrote.
+#[test]
+fn an_update_may_not_write_a_key_column_either() {
+    let message = pair_err(
+        "  on @usage.recorded { shop_id, period } {
+    update Period[shop_id, period] { period, counted: 1 }
+  }",
+    );
+    assert!(
+        message.starts_with("`period` is a key column of `Period`, so `update` may not write it"),
+        "{message}"
+    );
+}
+
+/// And it holds for a one-column key, which is where the defect lived: the rule is not
+/// about compound keys, it is about the subscript being the key's only writer.
+#[test]
+fn a_single_key_column_is_no_more_writable() {
+    let message = err("  on @order.placed { order_id, total } {
+    patch Order[order_id] { order_id, total }
+  }");
+    assert!(
+        message.starts_with("`order_id` is a key column of `Order`, so `patch` may not write it"),
+        "{message}"
+    );
+}
+
+/// The `@max` invariant reads a materializing subscript, because `materialize` writes
+/// each key value into its column. With a single key nothing checked this.
+#[test]
+fn a_bounded_key_column_is_measured_against_the_event() {
+    let source = "subject Shop(Int)
+event @usage.recorded { shop_id: Shop, period: String }
+projector U {
+  entity Period {
+    shop_id: Shop @key,
+    period: String @max(7) @key,
+    counted: Int,
+  }
+  on @usage.recorded { shop_id, period } {
+    patch Period[shop_id, period] { counted: .counted + 1 }
+  }
+}
+";
+    let message = refused(source);
+    assert!(
+        message.starts_with(
+            "this write narrows `period`: @usage.recorded declares no bound and `Period.period` is `@max(7)`"
+        ),
+        "{message}"
+    );
+
+    // An `update` never materializes, so its subscript stores nothing and the same pair
+    // of declarations is not a disagreement anything can meet.
+    parse(&source.replace("patch Period", "update Period")).expect("an update stores no key");
+}
+
+/// Rule 11's own restriction stays per column: a compound key does not relax what a key
+/// column may be.
+#[test]
+fn every_key_column_must_be_keyable() {
+    let message = err_entity_body("order_id: Uuid @key, total: Money(2) @key");
+    assert_eq!(
+        message,
+        "`total` is a Money(2), which cannot be an entity key"
+    );
+}
+
+// ---------------------------------------------------------------------------------
 // Rule 9: subject propagation, and the two checks over it. Both are implemented now;
 // what stood here were two `unimplemented!()` placeholders from before they were. The
 // conflict check is `two_handlers_cannot_seal_one_column_under_two_subjects`, below
@@ -1218,12 +1548,9 @@ projector P {{
 }
 
 #[test]
-fn an_entity_needs_exactly_one_key() {
+fn an_entity_needs_at_least_one_key() {
     let message = err_entity_body("order_id: Uuid, total: Money(2)");
     assert_eq!(message, "entity `Order` has no `@key` field");
-
-    let message = err_entity_body("order_id: Uuid @key, total: Money(2) @key");
-    assert_eq!(message, "entity `Order` has more than one `@key`");
 }
 
 // Statement gating.
@@ -1776,7 +2103,7 @@ fn a_put_with_a_key_says_a_put_takes_none() {
         "{message}"
     );
     assert!(
-        message.contains("marked `@key`"),
+        message.contains("`@key`"),
         "the hint should say where the key comes from: {message}"
     );
 }

@@ -2,7 +2,7 @@
 //! are used here: a narrowed value satisfies a non-optional target, and reading an
 //! optional's methods off one is rejected with a message that says why.
 
-use heklang::{Interpreter, Outcome, Type, Value, parse};
+use heklang::{Event, EventPath, Interpreter, Outcome, Type, Value, parse};
 
 const ID: &str = "0190d1a1-0000-7000-8000-000000000001";
 
@@ -501,4 +501,87 @@ event @item.synced { id: Uuid, plan_id: Uuid }
     );
     parse(&through_a_let)
         .unwrap_or_else(|err| panic!("a `let` binds a slot the branch narrows: {err}"));
+}
+
+// ---------------------------------------------------------------------------------
+// A filter is a declared position too
+
+/// **A bare value filtering an optional field has to be fitted at run time, or the
+/// slice folds nothing.** The parser accepts `on @a.failed(fulfillment_order_id)` where
+/// the field is declared `Int?`, because that is the coercion rule at a declared
+/// position. The predicate the fold then reads with used to carry the unwrapped value,
+/// so it compared `Int` against the `Int?` the event holds, matched no record and
+/// silently answered the seed.
+///
+/// Silent is what makes it worth its own test: the arm reads as written, `hek check`
+/// passes, and the only symptom is a value that is always the seed. It was found by
+/// restoring a converted application's read-model tests, where one arm of one fold
+/// existed solely to clear a deadline on a terminal failure and never fired.
+#[test]
+fn a_filter_fits_a_bare_value_to_an_optional_field() {
+    let source = "event @hold.failed { order_id: Int, fulfillment_order_id: Int?, retryable: Bool }
+
+fold FailedFor(fulfillment_order_id: Int) -> n: Int = 0 {
+  on @hold.failed(fulfillment_order_id) => n + 1
+}
+";
+    let program = parse(source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+    let mut interpreter = Interpreter::new(&program);
+    for id in [Value::some(Value::Int(8001)), Value::none(Type::Int)] {
+        interpreter.append(Event::new(
+            EventPath::new(["hold", "failed"]),
+            [
+                ("order_id".to_string(), Value::Int(9001)),
+                ("fulfillment_order_id".to_string(), id),
+                ("retryable".to_string(), Value::Bool(false)),
+            ],
+        ));
+    }
+
+    let folded = interpreter
+        .fold(
+            "FailedFor",
+            [("fulfillment_order_id".to_string(), Value::Int(8001))],
+        )
+        .expect("folded");
+    assert_eq!(
+        folded,
+        Value::Int(1),
+        "the present one matches and the absent one does not"
+    );
+}
+
+/// The shape the gap was found on, twice: a fold arm carrying the accumulator forward or
+/// replacing it with the envelope's append time. Both arms are the value, and until the
+/// `if` lifted each of them this had to be split across two `return`s in a `fn`.
+#[test]
+fn a_fold_arm_may_choose_between_the_bare_value_and_the_optional() {
+    let source = "subject Shop(Int)
+const FULL: Int = 100
+
+event @usage.threshold.reached { shop_id: Shop, threshold: Int }
+
+fold CapReachedAt(shop_id: Shop) -> at: Timestamp? = none {
+  on @usage.threshold.reached as e (shop_id) { threshold } =>
+    if at.is_some() || threshold < FULL { at } else { e.at }
+}
+";
+    let program = parse(source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+    let mut interpreter = Interpreter::new(&program);
+    for threshold in [80, 100, 100] {
+        interpreter.append(Event::new(
+            EventPath::new(["usage", "threshold", "reached"]),
+            [
+                ("shop_id".to_string(), Value::Int(1)),
+                ("threshold".to_string(), Value::Int(threshold)),
+            ],
+        ));
+    }
+
+    let folded = interpreter
+        .fold("CapReachedAt", [("shop_id".to_string(), Value::Int(1))])
+        .expect("folded");
+    // The second event, which is the first at or past the cap: one minute per event from
+    // the harness's epoch, and the accumulator holds against the third.
+    assert_eq!(folded, Value::some(Value::Timestamp(1_577_836_860_000_000)));
 }

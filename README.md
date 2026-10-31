@@ -3,11 +3,11 @@
 A small, **total** language for event-sourced application logic. It is the module language for
 [hekla], a single-app event-sourcing runtime over the Dynamic Consistency Boundary.
 
-Five kinds of declaration do the work. A **command** replays the history its decision depends on
+Six kinds of declaration do the work. A **command** replays the history its decision depends on
 and appends events. A **projector** consumes events into a read model. An **effect** reacts to
 appended events with durable side effects, and is the only one that reaches the network. A
-**guard** is a named proposition about the log that several commands can share, and a **refusal**
-is a named reason one said no.
+**guard** is a named proposition about the log that several commands can share, a **fold** is a
+named slice of the log and the value it folds to, and a **refusal** is a named reason one said no.
 
 **The restrictions are the point.** A command cannot call out, read a clock or decrypt; a
 projector has no failure channel; a fold cannot observe anything but the log. Each is true because

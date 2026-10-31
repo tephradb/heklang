@@ -96,8 +96,8 @@ them is not a normalisation that needs defending.
 fields; an enum's variants; an entity's indexes; a projector's entities, enums and handlers; an
 effect's helpers and arms, and the event paths one arm lists.
 
-An entity's `@key` column and an enum's `@default` variant are carried **by name**, because both are
-stored as an index into a list this rule just sorted.
+An entity's `@key` columns and an enum's `@default` variant are carried **by name**, because both
+are stored as indexes into a list this rule just sorted.
 
 An entity's indexes are sorted for a second reason: `@index` on a column and an `index (a, b)`
 clause build the same index at different positions in the list, so without sorting the two spellings
@@ -105,12 +105,18 @@ of one index would not agree. Each index keeps its own field order, because a co
 ordered.
 
 **Not sorted:** parameters, statements, stages, slices, folds, array items, interpolation parts, an
-effect arm's partition key, and a test's `given`, `respond` and `expect` lines. Each is a sequence
-whose order is part of what it means. Slices are the one that could go either way, and they stay
+effect arm's partition key, an entity's own key columns and the values a subscript addresses them
+with, and a test's `given`, `respond` and `expect` lines. Each is a sequence whose order is part of
+what it means. Slices are the one that could go either way, and they stay
 written: sorting them would have to be settled against the slot numbering their binds hand out, and
 reordering fold arms is an edit rather than another way of writing the same thing. An arm's `@key`
 fields are the sharpest case: `docs/effects.md` rule 15 makes `{ @key a, @key b }` a different lane
-from `{ @key b, @key a }`, so sorting them would hash two different programs alike.
+from `{ @key b, @key a }`, so sorting them would hash two different programs alike. An entity's key
+columns are the same case for the same reason (`docs/projectors.md` rule 11): the sequence orders
+lexicographically, so its column order is what decides which prefixes the key can be paged on.
+
+A one-column key therefore writes exactly what it wrote before a key could be more than one column,
+which is why compound keys moved no existing hash and cost no `VERSION` bump.
 
 ## 6. A field list the target declares is sorted, unless a value calls out
 
@@ -145,7 +151,9 @@ What that buys, and what it costs:
   therefore changes every command that uses it, which is right: they all now decide differently.
   Extracting a `guard` is **not** free, though, because the splice materialises its parameters as
   assignments in the caller. What the rule buys here is that a guard is never counted twice.
-- An unused `const`, `refusal` or `guard` is invisible, so deleting one is not a change.
+- An unused `const`, `refusal` or `guard` is invisible, so deleting one is not a change. All three
+  are inlined, so a declaration of any of them runs nothing and its content is already at every use
+  site.
 
 **A `secret` is the fourth, for the first half of that reason and not the second.** It runs nothing,
 so it has no entry. It is not inlined either, because there is no value in the program to inline:
@@ -160,6 +168,22 @@ rule 16).
 
 A runtime that wants the deployment surface reads `Program::secrets` rather than the digest, so
 "does this deploy need a credential the last one did not" needs no entry either.
+
+**A named fold is in it, and getting there took an argument.** This rule read "all four are
+inlined" until storage needed an answer. `splice` leaves `program.folds` standing and
+`Interpreter::fold` runs one by name, so a fold is a declaration that does something *as itself*: it
+is the read a stored column is filled and served by, and a query-only fold (`docs/folds.md` rule 12)
+has no use site to have been inlined into at all. So a fold earns an entry, its hash is what a store
+keys a column by, and deleting or retyping one is a change. `hek-digest 6` is that entry arriving.
+
+**Every named fold, not only the storable or the query-only ones.** Making the entry conditional on
+storability would put `tables::layout` inside the digest, so an edit to an event's fields could add
+or remove an entry for a fold nobody touched; making it conditional on the envelope would put one
+declaration in or out of the digest depending on whether an arm happens to bind `as e`. The cost is
+that a fold a command reads is recorded twice, once as itself and once inside each caller's spliced
+form, which is the same redundancy an `event` already has between its own entry and every `emit` of
+it. What it buys back is the attribution `docs/folds.md` rule 11 names as a loss: a moved fold hash
+now says which fold moved.
 
 ## 8. Every entry carries its own hash
 
@@ -201,8 +225,9 @@ body never has to be decoded to run a compatibility check.
 | `event` | the declaration: path, fields, types, `@subject`, `@max`, `@absent`, `@no_index` |
 | `enum` | the declaration: variants and the default, by name |
 | `record` | the declaration: fields, types, `@max`, `@absent` |
+| `fold` | name, parameters in declaration order with their types, and the return type |
 | `command` | name, parameters in order with their types, and the refusal codes it can answer with |
-| `projector` | name, and per entity: columns with types, `@max` and defaults, the key, the indexes |
+| `projector` | name, and per entity: columns with types, `@max` and defaults, the key columns in key order, the indexes |
 | `effect` | name, and per arm: the events it subscribes to, its delivery modifier and its partition key |
 | `fn`, `test` | none; nothing outside the program can name either |
 
@@ -227,6 +252,19 @@ to keep true.
 code, a widened `@max` or a new optional field counts as a break is policy, and policy does not
 belong in here.
 
+**A fold's signature is what decides where its column lives.** `tables::layout` reads the parameters
+for the table and the key order, and the return type for the column's type, so a moved
+`signature_hash` is a column that changes table or type and a moved `hash` alone is one that refolds
+where it is. A store telling those two apart therefore needs no policy of its own, which is the
+paragraph above applied rather than excepted.
+
+**A fold's parameters stay in declaration order**, which rule 5 would otherwise sort: a fold's
+arguments are named, so a caller may write them in any order and the list looks like a set. It is
+not one, because the order is observable in the layout. Two parameters of the same subject become
+key parts `student_1` and `student_2` in the order the fold declares them, so swapping them renames
+a column. Over-reporting a reorder that changed nothing costs a needless refold of one column;
+under-reporting one that renamed a part would leave the column where it no longer belongs.
+
 A signature is derived from the packed form rather than from the IR, so one implementation serves
 both a freshly parsed program and a stored row, and the two cannot disagree about what a signature
 is.
@@ -249,7 +287,7 @@ carries, and a reader never has to go looking for what one covered.
 
 ## 11. The version line is part of the hash
 
-The first line is `hek-digest 4`, and it is hashed with the rest. The digest is the meaning of a
+The first line is `hek-digest 6`, and it is hashed with the rest. The digest is the meaning of a
 program *as this version of heklang reads it*, so a change to how the parser desugars, or to the
 packed form's own spelling, is a change to what a hash means. Bumping the version moves every hash
 at once, which is the point: a global change then has one legible cause instead of looking like
@@ -262,6 +300,7 @@ every declaration was edited on the same day.
 | 2 | the hash covers the packed form rather than the readable one, so improving the layout stops invalidating stored hashes |
 | 3 | the packed form's own spelling |
 | 4 | a comprehension carries its element type even when nothing declared one, so `(comp ...)` gained an `(of T)` it used to omit |
+| 5 | a statement written below a `guard` is in the stage's second half, where `docs/guards.md` rule 3 always said it was, so it moves from `(pre ..)` to `(post ..)` |
 
 Version 4 is the shape the rule is about, and it is worth being concrete. A comprehension used to
 record an element type only where a target had supplied one; it now always records one, taken from
@@ -299,13 +338,13 @@ capitalised, which keeps them apart from the lowercase heads a value uses: `(Mon
 
 | | Heads |
 | --- | --- |
-| declaration | `subject` `event` `enum` `record` `function` `command` `projector` `effect` `test` |
-| structure | `params` `p` `f` `col` `key` `index` `entity` `on` `events` `delivery` `bind` `env` `now` `stage` `pre` `post` `fold` `slice` `filter` `acc` `variants` `default` `absent` `max` `no_index` `returns` `body` `sig` `rejects` `id` `under` |
+| declaration | `subject` `event` `enum` `record` `function` `fold` `command` `projector` `effect` `test` |
+| structure | `params` `p` `f` `col` `key` `index` `entity` `on` `events` `delivery` `bind` `env` `now` `stage` `pre` `post` `fold` `slice` `filter` `keyed` `acc` `variants` `default` `absent` `max` `no_index` `returns` `body` `sig` `rejects` `id` `under` |
 | statement | `set` `if` `then` `else` `emit` `put` `patch` `update` `delete` `fail` `log` `erase` `for` `in` `index` `item` `do` `discard` `call` `return` `value` `outcome` |
 | type | `Bool` `Int` `String` `Uuid` `Timestamp` `Rounding` `Json` `Response` `Outcome` `Secret` `(Event @path)` `(Decimal n)` `(Money n)` `(Enum N)` `(Record N)` `(List t)` `(Map k v)` `(Opt t)` `(Subject N)` `(Sealed t Subject)` |
 | value | `$n` `bool` `int` `dec` `money` `str` `uuid` `ts` `none` `some` `variant` `rounding` `array` `of` `map-empty` `obj` `json-num` `new` |
 | expression | `neg` `not` `+ - * / % == != < <= > >= && \|\|` `.method` `field` `choose` `interp` `fn` `builtin` `invoke` `unwrap` `wrap` `reveal` `secret` `reject` `invalid` `make` `comp` `when` `yield` `bad` |
-| test | `given` `respond` `status` `timeout` `erased` `run` `project` `deliver` `expect` `event` `from` `nothing` `row` `norow` `http` `failed` `skipped` |
+| test | `given` `respond` `status` `timeout` `erased` `run` `project` `deliver` `fold` `expect` `event` `from` `nothing` `row` `norow` `http` `failed` `skipped` |
 
 The JSON view turns a list into `{"kind": head, ..}`. A child that is itself a list headed by one of
 the **structure** heads becomes a key of its own; everything else is a value and lands in `args`.
@@ -316,7 +355,7 @@ That is one small set to keep rather than a field table per head.
 Packed, which is what is hashed:
 
 ```
-hek-digest 4
+hek-digest 6
 (event @order.placed (f customer_id Int) (f order_id Uuid) (f total (Money 2)))
 (command Place (params (p order_id Uuid) (p customer_id Int) (p total (Money 2))) (stage (fold $3 Int (int 0)) (slice @order.placed (filter customer_id $1) (acc $3 Int (+ $3 (int 1)))) (post (if (>= $3 (int 10)) (then (return (reject (str "too_many_open") (str "too many open orders"))))) (emit @order.placed (f customer_id $1) (f order_id $0) (f total $2)))))
 ```

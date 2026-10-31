@@ -32,9 +32,9 @@ pub use sexp::{Sexp, SexpError};
 
 use crate::ir::{
     Absent, Action, Arm, Bind, Builtin, Command, Effect, EntityDef, EntityField, EnumDef, EnvBind,
-    EnvField, EventDef, Expect, Expr, ExprId, Exprs, FieldDef, Function, Handler, Ident, Iter,
-    Literal, Program, Projector, RecordDef, RecordField, ReplySpec, Return, Setup, Slice, Slot,
-    Stage, Stmt, SubjectDef, Test, Type, UnOp,
+    EnvField, EventDef, Expect, Expr, ExprId, Exprs, FieldDef, Filter, Fold, Function, Handler,
+    Ident, Iter, Literal, Program, Projector, RecordDef, RecordField, ReplySpec, Return, Setup,
+    Slice, Slot, Stage, Stmt, SubjectDef, Test, Type, UnOp,
 };
 use crate::parse::children;
 use crate::value::Json;
@@ -46,7 +46,7 @@ use crate::value::Json;
 /// what a hash means. Bumping this moves every hash at once, which is the point: a global
 /// change of hash then has one legible cause instead of looking like every declaration was
 /// edited on the same day.
-pub const VERSION: &str = "hek-digest 4";
+pub const VERSION: &str = "hek-digest 6";
 
 /// A SHA-256 over a packed form. Rendered as sixty-four lowercase hex digits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -91,6 +91,9 @@ pub enum Kind {
     Enum,
     Record,
     Function,
+    /// After `Function` and before `Command` for the reason `Subject` is first: a fold is a
+    /// leaf a command reads, so it sits between what it is made of and what reads it.
+    Fold,
     Command,
     Projector,
     Effect,
@@ -105,6 +108,7 @@ impl Kind {
             Kind::Enum => "enum",
             Kind::Record => "record",
             Kind::Function => "function",
+            Kind::Fold => "fold",
             Kind::Command => "command",
             Kind::Projector => "projector",
             Kind::Effect => "effect",
@@ -119,6 +123,7 @@ impl Kind {
             "enum" => Kind::Enum,
             "record" => Kind::Record,
             "function" => Kind::Function,
+            "fold" => Kind::Fold,
             "command" => Kind::Command,
             "projector" => Kind::Projector,
             "effect" => Kind::Effect,
@@ -246,6 +251,9 @@ impl Digest {
         for def in &program.functions {
             forms.push((Kind::Function, def.name.clone(), function(def)));
         }
+        for def in &program.folds {
+            forms.push((Kind::Fold, def.name.clone(), fold(def)));
+        }
         for def in &program.commands {
             forms.push((Kind::Command, def.name.clone(), command(def)));
         }
@@ -265,6 +273,12 @@ impl Digest {
         // `const`, `refusal` and `guard` are absent on purpose. The parser inlines all
         // three (`parse.rs:4853`, `parse.rs:6719`, `inline::splice`), so a declaration of
         // any of them runs nothing and its content is already at every use site.
+        //
+        // A named fold is not a fourth, which is where this list stood until storage
+        // needed an answer. `splice` leaves `program.folds` standing and
+        // `Interpreter::fold` runs one by name, so a fold is a declaration that does
+        // something as itself: it is the read a stored column is filled and served by,
+        // and a query-only one has no use site to have been inlined into at all.
         Digest::assemble(forms, tests)
     }
 
@@ -482,6 +496,14 @@ fn signature(kind: Kind, form: &Sexp, helpers: &HashMap<String, Sexp>) -> Option
         Kind::Subject | Kind::Event | Kind::Enum | Kind::Record => {
             parts.extend(form.rest().iter().skip(1).cloned());
         }
+        // The table, the key order and the column type, which is the whole of what something
+        // outside the body decides from a fold: `tables::layout` reads the parameters for the
+        // key and the return type for the column. So a moved `signature_hash` is a column
+        // that changes table or type, and a moved `hash` alone is one that refolds in place.
+        Kind::Fold => {
+            parts.extend(form.section("params").cloned());
+            parts.extend(form.section("returns").cloned());
+        }
         Kind::Command => {
             parts.extend(form.section("params").cloned());
             let mut codes: Vec<String> = Vec::new();
@@ -656,6 +678,38 @@ fn function(def: &Function) -> Sexp {
     node("function", parts)
 }
 
+/// A named fold, whose body is arms and nothing else.
+///
+/// The outer head is `fold` and so is the accumulator node inside the `(stage ..)`, which
+/// is two uses of one token and not a clash: a declaration head is only ever at the start
+/// of a line, and `head_of` reads nothing else.
+fn fold(def: &Fold) -> Sexp {
+    let mut frame = Frame::new(&def.exprs);
+    // A fold's parameter names leave the program twice over: they are the argument names
+    // at a `fold x = Name { .. }` call site, and `tables::layout` derives a stored
+    // column's key parts from them. So the name stays, the way a command's does, and the
+    // slot is implied by position.
+    let params: Vec<Sexp> = def
+        .params
+        .iter()
+        .map(|param| node("p", [atom(param.name.clone()), ty(&param.ty)]))
+        .collect();
+    for param in &def.params {
+        frame.slot(param.slot);
+    }
+    let mut parts = vec![atom(def.name.clone()), node("params", params)];
+    // Declared rather than read off the accumulator, for the reason a `fn`'s is: the
+    // splice runs after parsing, so a caller's body is lowered before this body exists.
+    parts.push(node("returns", [ty(&def.ret)]));
+    // Before the stage, because an arm reads these slots and a slot is numbered by first
+    // appearance. One list for the whole fold rather than one per arm, which is how the IR
+    // holds it (`docs/folds.md` rule 12): every arm sees the same envelope, and a
+    // non-empty list is what makes the fold query-only.
+    parts.extend(frame.trigger(&[], &def.envelope));
+    parts.push(frame.stage(&def.stage));
+    node("fold", parts)
+}
+
 fn command(def: &Command) -> Sexp {
     let mut frame = Frame::new(&def.exprs);
     // A command's parameter names do leave the program: they are the request body's keys
@@ -702,7 +756,7 @@ fn projector(def: &Projector) -> Sexp {
 }
 
 fn entity(def: &EntityDef) -> Sexp {
-    let key = def.key_field().name.clone();
+    let keys: Vec<Sexp> = def.key_fields().map(|f| atom(f.name.clone())).collect();
     let mut parts = vec![atom(def.name.clone())];
 
     let mut fields: Vec<&EntityField> = def.fields.iter().collect();
@@ -717,9 +771,12 @@ fn entity(def: &EntityDef) -> Sexp {
         }
         parts.push(node("col", part));
     }
-    // By name, for the reason an enum's default is: `EntityDef::key` is an index into the
-    // list that was just sorted.
-    parts.push(node("key", [atom(key)]));
+    // By name, for the reason an enum's default is: `EntityDef::keys` holds indexes into
+    // the list that was just sorted. **Unsorted among themselves**, because a compound
+    // key is a sequence and its column order decides what it can be paged on, which is
+    // the same argument an index's own order makes two blocks below. A one-column key
+    // therefore writes exactly what it wrote before this was a list.
+    parts.push(node("key", keys));
 
     // `@index` on a column and an `index (a, b)` clause build the same `Index` at
     // different positions in this list, so sorting is what makes the two spellings agree.
@@ -837,6 +894,13 @@ fn test(def: &Test) -> Sexp {
         }
         Action::Project { projector, .. } => node("project", [atom(projector.clone())]),
         Action::Deliver { effect, .. } => node("deliver", [atom(effect.clone())]),
+        Action::Fold { fold, args, .. } => {
+            let mut part = vec![atom(fold.clone())];
+            part.extend(frame.keyed(args));
+            node("fold", part)
+        }
+        // Nothing to name: one program has one derived read model.
+        Action::Fill { .. } => node("fill", []),
     });
     for expect in &def.expect {
         parts.push(node("expect", [frame.expect(expect)]));
@@ -934,8 +998,17 @@ impl<'a> Frame<'a> {
 
     fn slice(&mut self, slice: &Slice) -> Sexp {
         let mut parts = vec![atom(slice.event.to_string())];
-        for (field, value) in self.sorted(&filters(slice)) {
+        // The two kinds are sorted apart and the field kind goes first, which is what
+        // keeps a slice with no key filter packing byte for byte as it did, slot
+        // numbering and all: numbers are handed out at first appearance, after the sort.
+        // Separately rather than over the union, because `sorted`'s purity gate is
+        // all-or-nothing and an impure key value would otherwise stop the field filters
+        // sorting.
+        for (field, value) in self.sorted(&field_filters(slice)) {
             parts.push(node("filter", [atom(field), value]));
+        }
+        for (param, value) in self.sorted(&key_filters(slice)) {
+            parts.push(node("keyed", [atom(param), value]));
         }
         for bind in sorted_binds(&slice.binds) {
             let slot = self.slot(bind.slot);
@@ -986,7 +1059,7 @@ impl<'a> Frame<'a> {
             }
             Stmt::Patch {
                 entity,
-                key,
+                keys,
                 absent,
                 loads,
                 fields,
@@ -996,8 +1069,8 @@ impl<'a> Frame<'a> {
                     Absent::Materialize => "patch",
                     Absent::Skip => "update",
                 };
-                let key = self.expr(*key);
-                let mut parts = vec![atom(entity.clone()), node("key", [key])];
+                let keys = self.exprs(keys);
+                let mut parts = vec![atom(entity.clone()), node("key", keys)];
                 // Sorted for the same reason the fields below are: which columns rule 3
                 // loads follows from which the fields read, so leaving these in written
                 // order would leak the field order back into the slot numbering.
@@ -1008,9 +1081,9 @@ impl<'a> Frame<'a> {
                 parts.extend(self.keyed(fields));
                 node(head, parts)
             }
-            Stmt::Delete { entity, key } => {
-                let key = self.expr(*key);
-                node("delete", [atom(entity.clone()), node("key", [key])])
+            Stmt::Delete { entity, keys } => {
+                let keys = self.exprs(keys);
+                node("delete", [atom(entity.clone()), node("key", keys)])
             }
             Stmt::Fail { message, .. } => {
                 let message = self.expr(*message);
@@ -1089,18 +1162,18 @@ impl<'a> Frame<'a> {
             }
             Expect::Row {
                 entity,
-                key,
+                keys,
                 fields,
                 ..
             } => {
-                let key = self.expr(*key);
-                let mut parts = vec![atom(entity.clone()), node("key", [key])];
+                let keys = self.exprs(keys);
+                let mut parts = vec![atom(entity.clone()), node("key", keys)];
                 parts.extend(self.keyed(fields));
                 node("row", parts)
             }
-            Expect::NoRow { entity, key, .. } => {
-                let key = self.expr(*key);
-                node("norow", [atom(entity.clone()), node("key", [key])])
+            Expect::NoRow { entity, keys, .. } => {
+                let keys = self.exprs(keys);
+                node("norow", [atom(entity.clone()), node("key", keys)])
             }
             Expect::Http {
                 verb, url, body, ..
@@ -1131,6 +1204,10 @@ impl<'a> Frame<'a> {
                 node("failed", [message])
             }
             Expect::Skipped { .. } => atom("skipped"),
+            Expect::Folded { value, .. } => {
+                let value = self.expr(*value);
+                node("value", [value])
+            }
         }
     }
 
@@ -1310,6 +1387,12 @@ impl<'a> Frame<'a> {
         parts
     }
 
+    /// A subscript's key expressions, in written order: a compound key is a sequence,
+    /// and reordering it addresses a different row.
+    fn exprs(&mut self, ids: &[ExprId]) -> Vec<Sexp> {
+        ids.iter().map(|&id| self.expr(id)).collect()
+    }
+
     /// A field list whose keys the target already declares, so which order they were
     /// written in is not observable and sorting them makes the two spellings agree.
     ///
@@ -1363,11 +1446,30 @@ fn pure(exprs: &Exprs, id: ExprId) -> bool {
     }
 }
 
-fn filters(slice: &Slice) -> Vec<(Ident, ExprId)> {
+/// The `field: value` conjuncts, in the `(name, value)` shape `sorted` consumes.
+fn field_filters(slice: &Slice) -> Vec<(Ident, ExprId)> {
     slice
         .filters
         .iter()
-        .map(|filter| (filter.field.clone(), filter.value))
+        .filter_map(|filter| match filter {
+            Filter::Field { field, value } => Some((field.clone(), *value)),
+            Filter::Key { .. } => None,
+        })
+        .collect()
+}
+
+/// The `param == value` conjuncts (`docs/folds.md` rule 13). The slot is deliberately
+/// not packed: post-splice it is the slot that runs, but it differs per copy of a fold
+/// the digest gives no entry of its own, and the parameter's name is what identifies the
+/// key part.
+fn key_filters(slice: &Slice) -> Vec<(Ident, ExprId)> {
+    slice
+        .filters
+        .iter()
+        .filter_map(|filter| match filter {
+            Filter::Key { param, value, .. } => Some((param.clone(), *value)),
+            Filter::Field { .. } => None,
+        })
         .collect()
 }
 

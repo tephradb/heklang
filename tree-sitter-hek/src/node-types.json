@@ -891,93 +891,17 @@
             "named": true
           }
         ]
-      },
-      "key": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "binary_expression",
-            "named": true
-          },
-          {
-            "type": "boolean_literal",
-            "named": true
-          },
-          {
-            "type": "call_expression",
-            "named": true
-          },
-          {
-            "type": "comprehension",
-            "named": true
-          },
-          {
-            "type": "decimal_literal",
-            "named": true
-          },
-          {
-            "type": "field_expression",
-            "named": true
-          },
-          {
-            "type": "identifier",
-            "named": true
-          },
-          {
-            "type": "if_expression",
-            "named": true
-          },
-          {
-            "type": "integer_literal",
-            "named": true
-          },
-          {
-            "type": "invoke_expression",
-            "named": true
-          },
-          {
-            "type": "list",
-            "named": true
-          },
-          {
-            "type": "method_call",
-            "named": true
-          },
-          {
-            "type": "none_literal",
-            "named": true
-          },
-          {
-            "type": "object_literal",
-            "named": true
-          },
-          {
-            "type": "parenthesized_expression",
-            "named": true
-          },
-          {
-            "type": "raw_string",
-            "named": true
-          },
-          {
-            "type": "record_literal",
-            "named": true
-          },
-          {
-            "type": "stored_field",
-            "named": true
-          },
-          {
-            "type": "string",
-            "named": true
-          },
-          {
-            "type": "unary_expression",
-            "named": true
-          }
-        ]
       }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "subscript",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -1566,7 +1490,23 @@
       "required": false,
       "types": [
         {
+          "type": "binary_expression",
+          "named": true
+        },
+        {
+          "type": "boolean_literal",
+          "named": true
+        },
+        {
           "type": "call_expression",
+          "named": true
+        },
+        {
+          "type": "comprehension",
+          "named": true
+        },
+        {
+          "type": "decimal_literal",
           "named": true
         },
         {
@@ -1578,7 +1518,23 @@
           "named": true
         },
         {
+          "type": "field_expression",
+          "named": true
+        },
+        {
           "type": "fixture_expectation",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "if_expression",
+          "named": true
+        },
+        {
+          "type": "integer_literal",
           "named": true
         },
         {
@@ -1586,11 +1542,35 @@
           "named": true
         },
         {
+          "type": "list",
+          "named": true
+        },
+        {
           "type": "method_call",
           "named": true
         },
         {
+          "type": "none_literal",
+          "named": true
+        },
+        {
+          "type": "object_literal",
+          "named": true
+        },
+        {
           "type": "outcome_expression",
+          "named": true
+        },
+        {
+          "type": "parenthesized_expression",
+          "named": true
+        },
+        {
+          "type": "raw_string",
+          "named": true
+        },
+        {
+          "type": "record_literal",
           "named": true
         },
         {
@@ -1599,6 +1579,18 @@
         },
         {
           "type": "row_expectation",
+          "named": true
+        },
+        {
+          "type": "stored_field",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "unary_expression",
           "named": true
         }
       ]
@@ -1868,7 +1860,17 @@
     "fields": {
       "field": {
         "multiple": false,
-        "required": true,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "param": {
+        "multiple": false,
+        "required": false,
         "types": [
           {
             "type": "identifier",
@@ -2103,15 +2105,222 @@
     }
   },
   {
+    "type": "fold_body",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "fold_arm",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "fold_clause",
+    "named": true,
+    "fields": {
+      "fold": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "type_identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "field_initializer_list",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "fold_declaration",
     "named": true,
     "fields": {
+      "fold": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "type_identifier",
+            "named": true
+          }
+        ]
+      },
       "name": {
         "multiple": false,
         "required": true,
         "types": [
           {
             "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "seed": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "boolean_literal",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "comprehension",
+            "named": true
+          },
+          {
+            "type": "decimal_literal",
+            "named": true
+          },
+          {
+            "type": "field_expression",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "if_expression",
+            "named": true
+          },
+          {
+            "type": "integer_literal",
+            "named": true
+          },
+          {
+            "type": "invoke_expression",
+            "named": true
+          },
+          {
+            "type": "list",
+            "named": true
+          },
+          {
+            "type": "method_call",
+            "named": true
+          },
+          {
+            "type": "none_literal",
+            "named": true
+          },
+          {
+            "type": "object_literal",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
+          },
+          {
+            "type": "raw_string",
+            "named": true
+          },
+          {
+            "type": "record_literal",
+            "named": true
+          },
+          {
+            "type": "stored_field",
+            "named": true
+          },
+          {
+            "type": "string",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          }
+        ]
+      },
+      "type": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "type",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "field_initializer_list",
+          "named": true
+        },
+        {
+          "type": "fold_arm",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "fold_definition",
+    "named": true,
+    "fields": {
+      "accumulator": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "fold_body",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "type_identifier",
+            "named": true
+          }
+        ]
+      },
+      "parameters": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "parameters",
             "named": true
           }
         ]
@@ -2207,18 +2416,44 @@
         "required": true,
         "types": [
           {
+            "type": "fold_type",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "fold_type",
+    "named": true,
+    "fields": {
+      "content": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
             "type": "type",
+            "named": true
+          }
+        ]
+      },
+      "subject": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "type_identifier",
             "named": true
           }
         ]
       }
     },
     "children": {
-      "multiple": true,
+      "multiple": false,
       "required": false,
       "types": [
         {
-          "type": "fold_arm",
+          "type": "type",
           "named": true
         }
       ]
@@ -3790,100 +4025,18 @@
             "named": true
           }
         ]
-      },
-      "key": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "binary_expression",
-            "named": true
-          },
-          {
-            "type": "boolean_literal",
-            "named": true
-          },
-          {
-            "type": "call_expression",
-            "named": true
-          },
-          {
-            "type": "comprehension",
-            "named": true
-          },
-          {
-            "type": "decimal_literal",
-            "named": true
-          },
-          {
-            "type": "field_expression",
-            "named": true
-          },
-          {
-            "type": "identifier",
-            "named": true
-          },
-          {
-            "type": "if_expression",
-            "named": true
-          },
-          {
-            "type": "integer_literal",
-            "named": true
-          },
-          {
-            "type": "invoke_expression",
-            "named": true
-          },
-          {
-            "type": "list",
-            "named": true
-          },
-          {
-            "type": "method_call",
-            "named": true
-          },
-          {
-            "type": "none_literal",
-            "named": true
-          },
-          {
-            "type": "object_literal",
-            "named": true
-          },
-          {
-            "type": "parenthesized_expression",
-            "named": true
-          },
-          {
-            "type": "raw_string",
-            "named": true
-          },
-          {
-            "type": "record_literal",
-            "named": true
-          },
-          {
-            "type": "stored_field",
-            "named": true
-          },
-          {
-            "type": "string",
-            "named": true
-          },
-          {
-            "type": "unary_expression",
-            "named": true
-          }
-        ]
       }
     },
     "children": {
-      "multiple": false,
+      "multiple": true,
       "required": true,
       "types": [
         {
           "type": "field_initializer_list",
+          "named": true
+        },
+        {
+          "type": "subscript",
           "named": true
         }
       ]
@@ -4352,100 +4505,18 @@
             "named": true
           }
         ]
-      },
-      "key": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "binary_expression",
-            "named": true
-          },
-          {
-            "type": "boolean_literal",
-            "named": true
-          },
-          {
-            "type": "call_expression",
-            "named": true
-          },
-          {
-            "type": "comprehension",
-            "named": true
-          },
-          {
-            "type": "decimal_literal",
-            "named": true
-          },
-          {
-            "type": "field_expression",
-            "named": true
-          },
-          {
-            "type": "identifier",
-            "named": true
-          },
-          {
-            "type": "if_expression",
-            "named": true
-          },
-          {
-            "type": "integer_literal",
-            "named": true
-          },
-          {
-            "type": "invoke_expression",
-            "named": true
-          },
-          {
-            "type": "list",
-            "named": true
-          },
-          {
-            "type": "method_call",
-            "named": true
-          },
-          {
-            "type": "none_literal",
-            "named": true
-          },
-          {
-            "type": "object_literal",
-            "named": true
-          },
-          {
-            "type": "parenthesized_expression",
-            "named": true
-          },
-          {
-            "type": "raw_string",
-            "named": true
-          },
-          {
-            "type": "record_literal",
-            "named": true
-          },
-          {
-            "type": "stored_field",
-            "named": true
-          },
-          {
-            "type": "string",
-            "named": true
-          },
-          {
-            "type": "unary_expression",
-            "named": true
-          }
-        ]
       }
     },
     "children": {
-      "multiple": false,
-      "required": false,
+      "multiple": true,
+      "required": true,
       "types": [
         {
           "type": "field_initializer_list",
+          "named": true
+        },
+        {
+          "type": "subscript",
           "named": true
         }
       ]
@@ -4614,6 +4685,16 @@
     "type": "slice_reference",
     "named": true,
     "fields": {
+      "binding": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
       "path": {
         "multiple": false,
         "required": true,
@@ -4663,6 +4744,10 @@
         },
         {
           "type": "event_declaration",
+          "named": true
+        },
+        {
+          "type": "fold_definition",
           "named": true
         },
         {
@@ -4776,6 +4861,98 @@
     }
   },
   {
+    "type": "subscript",
+    "named": true,
+    "fields": {
+      "key": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "boolean_literal",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "comprehension",
+            "named": true
+          },
+          {
+            "type": "decimal_literal",
+            "named": true
+          },
+          {
+            "type": "field_expression",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "if_expression",
+            "named": true
+          },
+          {
+            "type": "integer_literal",
+            "named": true
+          },
+          {
+            "type": "invoke_expression",
+            "named": true
+          },
+          {
+            "type": "list",
+            "named": true
+          },
+          {
+            "type": "method_call",
+            "named": true
+          },
+          {
+            "type": "none_literal",
+            "named": true
+          },
+          {
+            "type": "object_literal",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
+          },
+          {
+            "type": "raw_string",
+            "named": true
+          },
+          {
+            "type": "record_literal",
+            "named": true
+          },
+          {
+            "type": "stored_field",
+            "named": true
+          },
+          {
+            "type": "string",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "test_body",
     "named": true,
     "fields": {},
@@ -4793,6 +4970,14 @@
         },
         {
           "type": "expect_clause",
+          "named": true
+        },
+        {
+          "type": "fill_clause",
+          "named": true
+        },
+        {
+          "type": "fold_clause",
           "named": true
         },
         {
@@ -5091,6 +5276,10 @@
     "named": false
   },
   {
+    "type": "Sealed",
+    "named": false
+  },
+  {
     "type": "String",
     "named": false
   },
@@ -5186,6 +5375,10 @@
   {
     "type": "false",
     "named": false
+  },
+  {
+    "type": "fill_clause",
+    "named": true
   },
   {
     "type": "fn",

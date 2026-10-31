@@ -1,0 +1,209 @@
+================================================================================
+a named fold declares its accumulator only when an arm reads it
+================================================================================
+
+fold OpenProposal(shop_id: Shop, order_id: Int) -> Uuid? = none {
+  on @edit.proposed(shop_id, order_id) { proposal_id } => proposal_id
+  on @edit.cancelled(shop_id, order_id) => none
+}
+
+fold QuoteFailures(order_id: Int) -> failures: Int = 0 {
+  on @edit.quote.failed(order_id) => failures + 1
+}
+
+fold MerchantEmail(shop_id: Shop) -> Sealed(String, Shop)? = none {
+  on @shop.installed(shop_id) { merchant_email } => merchant_email
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fold_definition
+    name: (type_identifier)
+    parameters: (parameters
+      (parameter
+        name: (identifier)
+        type: (type
+          (type_identifier)))
+      (parameter
+        name: (identifier)
+        type: (type
+          (primitive_type))))
+    type: (fold_type
+      (type
+        (primitive_type)))
+    seed: (none_literal)
+    body: (fold_body
+      (fold_arm
+        (slice_reference
+          path: (event_path)
+          (filter
+            field: (identifier))
+          (filter
+            field: (identifier)))
+        destructure: (destructure
+          (identifier))
+        value: (identifier))
+      (fold_arm
+        (slice_reference
+          path: (event_path)
+          (filter
+            field: (identifier))
+          (filter
+            field: (identifier)))
+        value: (none_literal))))
+  (fold_definition
+    name: (type_identifier)
+    parameters: (parameters
+      (parameter
+        name: (identifier)
+        type: (type
+          (primitive_type))))
+    accumulator: (identifier)
+    type: (fold_type
+      (type
+        (primitive_type)))
+    seed: (integer_literal)
+    body: (fold_body
+      (fold_arm
+        (slice_reference
+          path: (event_path)
+          (filter
+            field: (identifier)))
+        value: (binary_expression
+          left: (identifier)
+          right: (integer_literal)))))
+  (fold_definition
+    name: (type_identifier)
+    parameters: (parameters
+      (parameter
+        name: (identifier)
+        type: (type
+          (type_identifier))))
+    type: (fold_type
+      content: (type
+        (primitive_type))
+      subject: (type_identifier))
+    seed: (none_literal)
+    body: (fold_body
+      (fold_arm
+        (slice_reference
+          path: (event_path)
+          (filter
+            field: (identifier)))
+        destructure: (destructure
+          (identifier))
+        value: (identifier)))))
+
+================================================================================
+the two `fold` statements are told apart by the token after the name
+================================================================================
+
+command ConfirmEdit(shop_id: Shop, order_id: Int) {
+  fold open = OpenProposal { shop_id, order_id }
+  fold seen: Bool = false
+    on @edit.proposed(shop_id, order_id) => true
+  emit @edit.confirmed { shop_id, order_id }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (command_declaration
+    name: (type_identifier)
+    parameters: (parameters
+      (parameter
+        name: (identifier)
+        type: (type
+          (type_identifier)))
+      (parameter
+        name: (identifier)
+        type: (type
+          (primitive_type))))
+    body: (block
+      (fold_declaration
+        name: (identifier)
+        fold: (type_identifier)
+        (field_initializer_list
+          (field_initializer
+            name: (identifier))
+          (field_initializer
+            name: (identifier))))
+      (fold_declaration
+        name: (identifier)
+        type: (type
+          (primitive_type))
+        seed: (boolean_literal)
+        (fold_arm
+          (slice_reference
+            path: (event_path)
+            (filter
+              field: (identifier))
+            (filter
+              field: (identifier)))
+          value: (boolean_literal)))
+      (emit_statement
+        path: (event_path)
+        (field_initializer_list
+          (field_initializer
+            name: (identifier))
+          (field_initializer
+            name: (identifier)))))))
+
+================================================================================
+a filter may match a parameter with `==` rather than a field with `:`
+================================================================================
+
+fold RetryAttempt(shop_id: Shop, kind: String, order_id: Int) -> Int = 0 {
+  on @hold.place.failed(shop_id, order_id, kind == "hold_place") { attempt } => attempt
+  on @hold.release.failed(order_id: oid, kind == "hold_release") => 0
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fold_definition
+    name: (type_identifier)
+    parameters: (parameters
+      (parameter
+        name: (identifier)
+        type: (type
+          (type_identifier)))
+      (parameter
+        name: (identifier)
+        type: (type
+          (primitive_type)))
+      (parameter
+        name: (identifier)
+        type: (type
+          (primitive_type))))
+    type: (fold_type
+      (type
+        (primitive_type)))
+    seed: (integer_literal)
+    body: (fold_body
+      (fold_arm
+        (slice_reference
+          path: (event_path)
+          (filter
+            field: (identifier))
+          (filter
+            field: (identifier))
+          (filter
+            param: (identifier)
+            value: (string
+              (string_content))))
+        destructure: (destructure
+          (identifier))
+        value: (identifier))
+      (fold_arm
+        (slice_reference
+          path: (event_path)
+          (filter
+            field: (identifier)
+            value: (identifier))
+          (filter
+            param: (identifier)
+            value: (string
+              (string_content))))
+        value: (integer_literal)))))

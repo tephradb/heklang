@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `fold_definition`, the module-scope named fold, with `fold_body` for its arm run and
+  `fold_type` for the `Sealed(T, Subject)` its return position may spell. `fold_declaration` is
+  now a choice of two shapes, told apart by the token after the name: `:` declares a fold here and
+  `=` reads one declared at module scope, the same one-token decision `guard_declaration` makes.
+- Queries for all of it: `highlights`, `locals`, `tags`, `textobjects`, `rainbows`, and
+  `indents`, where a named fold joins the delimited list because it owns its braces.
+- `subscript`, the `[a, b]` a `patch_statement`, a `delete_statement` and a `row_expectation`
+  address a row with. It takes one `key` field per `@key` column, since an entity's key may now be
+  several (`docs/projectors.md` rule 11), and it is a node of its own rather than brackets inlined
+  into those three so that it **owns its delimiters**: that is what `indents.scm` keys on, and it
+  is what keeps a comment written among the keys with the key it was written against. The three
+  statements therefore hold a `(subscript ..)` where each held a bare `key` child, which is a tree
+  change for any query matching those positionally; the `entity:` field is unmoved.
+
 ## [0.6.3](https://git.tqwewe.com/tephra/heklang/compare/tree-sitter-hek-v0.6.2...tree-sitter-hek-v0.6.3) - 2026-09-21
 
 ### Added

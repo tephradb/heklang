@@ -8,12 +8,14 @@ use crate::inline;
 use crate::ir::{
     Absent, Action, Arm, BinOp, Bind, Builtin, Command, ConstDef, Delivery, Effect, EntityDef,
     EntityField, EnumDef, EnvField, EventDef, EventPath, Expect, Expr, ExprId, Exprs, FieldDef,
-    Filter, Function, Given, Guard, Handler, Ident, Index, Iter, Literal, MessagePart, Number,
-    Param, Pos, Program, Projector, RecordDef, RecordField, RefusalDef, RefusalParam, ReplySpec,
-    Return, SecretDef, Setup, Slot, Span, Stage, Stmt, SubjectDef, Test, Type, UnOp, Update,
+    Filter, Fold, Function, Given, Guard, Handler, Ident, Index, Iter, Literal, MessagePart,
+    Number, Param, Pos, Program, Projector, RecordDef, RecordField, RefusalDef, RefusalParam,
+    ReplySpec, Return, SecretDef, Setup, Slot, Span, Stage, Stmt, SubjectDef, Test, Type, UnOp,
+    Update,
 };
 use crate::lex::{Keyword, Spanned, Sym, Token, lex};
 use crate::scaled::{self, MAX_SCALE, Rounding};
+use crate::tables;
 use crate::types::{
     self, a, default_type, fills, inner_of, method_sig, response_field, seal, wrap,
 };
@@ -41,6 +43,7 @@ pub fn parse_files<'a>(
 struct Bodies {
     commands: Vec<Command>,
     guards: Vec<Guard>,
+    folds: Vec<Fold>,
     effects: Vec<Effect>,
     functions: Vec<Function>,
     /// Where each `test` starts, for pass E to come back to.
@@ -116,6 +119,17 @@ struct Parser {
     /// trigger binding there is plainly the constant it is; in an arm it would read as
     /// though it advanced with the records, which is what this rejects.
     fold_arm: bool,
+    /// Set alongside `fold_arm` when the arm bound its own envelope with `as`. That is
+    /// the one case where reading the binding inside an arm is right, because it is the
+    /// record being folded rather than a trigger standing still outside the fold.
+    arm_envelope: bool,
+    /// Whether the arm went on to read that binding. A binding nothing reads is a word
+    /// with no meaning, and worse here than elsewhere: it is what decides whether the
+    /// whole fold is query-only.
+    envelope_read: bool,
+    /// The envelope binding a fold arm has written but not yet brought into scope, held
+    /// only while its filters parse so that naming it there says why rather than just no.
+    pending_envelope: Option<Ident>,
     command_end: usize,
     /// Which declaration kind is being parsed, so a statement in the wrong one can be
     /// rejected with a message about that kind rather than a generic one.
@@ -126,6 +140,20 @@ struct Parser {
     /// The same, for a guard, so a command may name one declared below it or in
     /// another module. See `docs/guards.md`.
     guards: Vec<Signature>,
+    /// The same, for a named fold. Its `ret` is always `Some`, which is what lets a
+    /// caller's local be typed in pass D before this body is parsed. See
+    /// `docs/folds.md` rule 5.
+    folds: Vec<Signature>,
+    /// Every **inline** fold, as the tokens it was written as, with the body that wrote
+    /// it. Rule 9's `duplicate-fold` compares these: two bodies folding the same slice
+    /// the same way is the duplication the named form exists to remove, and what drifts
+    /// when the copies fall out of step is the append condition, which no test can see.
+    ///
+    /// Tokens rather than IR, the way `guard_call`'s same-arguments check does it. "A
+    /// byte-identical fold cannot differ in meaning" is a claim about the source, and
+    /// comparing the lowered form would also equate two folds an author wrote differently
+    /// on purpose.
+    inline_folds: Vec<InlineFold>,
     /// Declared refusals, whole rather than as signatures: a use site needs the
     /// message as well as the fields, because it builds the string itself. See
     /// `docs/refusals.md`.
@@ -151,6 +179,11 @@ struct Parser {
     /// The enclosing projector's declarations; empty outside one.
     enums: Vec<EnumDef>,
     entities: Vec<EntityDef>,
+    /// The derived read model, for a `fill` test's row expectations. Filled on demand,
+    /// because only a test that writes one needs it and `layout` walks every fold's every
+    /// arm; cached, because pass E's program is finished and a test body may hold
+    /// twenty-seven of those expectations.
+    derived: Option<tables::Layout>,
     /// Module scope, collected before anything that could name one. A projector's own
     /// enum shadows one of these, which is why they are two lists rather than one.
     module_enums: Vec<EnumDef>,
@@ -272,6 +305,9 @@ enum Kind {
     /// into a command, so everything a command may not do it may not do either.
     /// See `docs/guards.md`.
     Guard,
+    /// A named fold's body. A guard's body minus every way to refuse, so it holds to
+    /// everything a guard does and to rule 4 besides. See `docs/folds.md`.
+    Fold,
 }
 
 /// What a `given` or an event `expect` names: which event, the call that made it when a
@@ -279,6 +315,55 @@ enum Kind {
 /// spelled out and the overrides when a fixture made it, which is exactly the split
 /// [`Given::fields`](crate::ir::Given::fields) carries into the IR.
 type EventHead = (EventPath, Option<ExprId>, Vec<(Ident, ExprId)>);
+
+/// One inline fold, for rule 9. Located by module and span rather than by the body that
+/// wrote it, which is both what a reader navigates to and what handles the worst case the
+/// rule was measured on: nineteen arms of *one* effect folding the same thing nineteen
+/// times. Keying on the declaration would have missed every one of those.
+#[derive(Debug, Clone)]
+struct InlineFold {
+    written: Vec<Token>,
+    /// Where the declaration began, as a token index. `Parser::elsewhere` turns that
+    /// into a module-aware `Related`, which is what every other two-place diagnostic
+    /// in the crate uses; keeping the module here instead meant rebuilding one by hand.
+    pos: usize,
+    module: Option<Ident>,
+    span: Span,
+}
+
+/// Which construct a slice's filters belong to, which decides whether `param == value`
+/// means anything there (`docs/folds.md` rule 13).
+///
+/// Three and not a `bool`, because the two that have no key have it for different
+/// reasons and an author reaching for the form in one of them should not be told about
+/// the other: a guard is not stored, and an inline fold has no signature to put a
+/// parameter in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeySite {
+    /// A module-scope fold's arm, the one place a key exists.
+    Fold,
+    /// An inline fold's arm.
+    Inline,
+    /// A `guard @path(..)` slice.
+    Guard,
+}
+
+impl KeySite {
+    /// What to call this site and what to do instead, or `None` where the form is legal.
+    fn no_key(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            KeySite::Fold => None,
+            KeySite::Inline => Some((
+                "an inline fold",
+                "an inline fold has no signature to declare one in: move it to module scope, where it is stored and the key means something",
+            )),
+            KeySite::Guard => Some((
+                "a guard",
+                "a guard decides rather than being stored, so there is no row for a key to name; a guard narrowing two ways is two guards",
+            )),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct Signature {
@@ -320,6 +405,11 @@ impl Parser {
             prologue: false,
             folding: false,
             fold_arm: false,
+            arm_envelope: false,
+            envelope_read: false,
+            pending_envelope: None,
+            folds: Vec::new(),
+            inline_folds: Vec::new(),
             command_end: 0,
             kind: Kind::Command,
             commands: Vec::new(),
@@ -333,6 +423,7 @@ impl Parser {
             propagating: false,
             enums: Vec::new(),
             entities: Vec::new(),
+            derived: None,
             module_enums: Vec::new(),
             records: Vec::new(),
             subjects: Vec::new(),
@@ -566,6 +657,20 @@ impl Parser {
     }
 
     fn not_in_scope(&self, name: &str, span: Span) -> Diagnostic {
+        // The envelope binding an arm just wrote, read from the one place in that arm it
+        // does not reach. Worth its own message: the name is two tokens up the line, so
+        // "not in scope" reads as a bug in the checker rather than as the rule it is.
+        if self.pending_envelope.as_deref() == Some(name) {
+            return self
+                .err(
+                    Code::NotInScope,
+                    format!("`{name}` is not in scope in a filter"),
+                    span,
+                )
+                .with_hint(
+                    "a filter resolves once, before the fold runs, and the envelope belongs to each event the fold reads; narrow on a field the event declares and read the envelope in the arm's value",
+                );
+        }
         let later = self.later_let(name);
         let (message, hint) = match (later, self.prologue) {
             (Some(_), true) => (
@@ -836,6 +941,7 @@ impl Parser {
             events,
             commands: bodies.commands,
             guards: bodies.guards,
+            folds: bodies.folds,
             projectors,
             effects: bodies.effects,
             // Cloned rather than taken: pass E below resolves a test's values against the
@@ -852,6 +958,8 @@ impl Parser {
         };
         self.check_recursion(&program)?;
         self.check_guards(&program)?;
+        self.check_duplicate_folds()?;
+        self.check_query_only(&program)?;
         self.check_cycles(&program)?;
         self.check_zeros(&program)?;
         self.check_max(&program)?;
@@ -944,6 +1052,8 @@ impl Parser {
             errors: _,
             commands: _,
             guards: _,
+            folds: _,
+            inline_folds: _,
             refusals: _,
             functions: _,
             module_enums: _,
@@ -954,10 +1064,15 @@ impl Parser {
             pending_absent: _,
             secrets: _,
             declared: _,
+            // A cache of the finished program's read model, which no declaration owns.
+            derived: _,
             // The declaration now being given up on. All of it goes.
             prologue,
             folding,
             fold_arm,
+            arm_envelope,
+            envelope_read,
+            pending_envelope,
             command_end,
             kind,
             local_fns,
@@ -981,6 +1096,9 @@ impl Parser {
         *prologue = false;
         *folding = false;
         *fold_arm = false;
+        *arm_envelope = false;
+        *envelope_read = false;
+        *pending_envelope = None;
         *command_end = 0;
         *kind = Kind::Command;
         *in_effect = None;
@@ -1144,6 +1262,7 @@ impl Parser {
             }
             Token::Word(Keyword::Command) => self.command_signature()?,
             Token::Word(Keyword::Guard) => self.guard_signature()?,
+            Token::Word(Keyword::Fold) => self.fold_signature()?,
             Token::Word(Keyword::Refusal) => self.refusal_decl()?,
             Token::Word(Keyword::Fn) => self.fn_signature()?,
             Token::Word(Keyword::Effect) | Token::Word(Keyword::Test) => self.skip_item()?,
@@ -1175,6 +1294,10 @@ impl Parser {
             Token::Word(Keyword::Guard) => {
                 let guard = self.guard_item(events)?;
                 out.guards.push(guard);
+            }
+            Token::Word(Keyword::Fold) => {
+                let fold = self.fold_item(events)?;
+                out.folds.push(fold);
             }
             Token::Word(Keyword::Fn) => out.functions.push(self.fn_decl(events, Kind::Function)?),
             Token::Word(Keyword::Projector) => {
@@ -1261,6 +1384,158 @@ impl Parser {
             ret: None,
         });
         self.skip_braced()
+    }
+
+    /// The same, for a named fold. Unlike a guard it declares a result, which is the one
+    /// thing pass D cannot wait for: a caller's body is lowered before this body is
+    /// parsed, so the local it binds takes its type from here. See `docs/folds.md`
+    /// rule 5.
+    fn fold_signature(&mut self) -> Result<(), Diagnostic> {
+        self.expect_word(Keyword::Fold)?;
+        let named = self.pos;
+        let at = self.span_here();
+        let name = self.expect_ident()?;
+        if self.folds.iter().any(|other| other.name == name) {
+            return Err(self.declared_twice(
+                "fold",
+                &name,
+                format!("fold `{name}` is declared twice"),
+                at,
+            ));
+        }
+        self.declare("fold", &name, named);
+
+        // The second name in heklang whose spelling leaves the program, for the same
+        // reason a refusal's does: a named fold is a stored column and the column's name
+        // is `snake_case` of this one (`crate::tables`). The two rules a refusal is held
+        // to make that derivation reversible, so two folds can never arrive as one
+        // column and the check for that is unnecessary rather than merely unlikely.
+        // Without them `fold Sum` beside `fold sum` derives one `sum` column twice, and
+        // a runtime building the real table keys both folds to it.
+        if !name.starts_with(|ch: char| ch.is_ascii_uppercase()) {
+            return Err(self
+                .err(
+                    Code::FoldRestriction,
+                    format!("a named fold is named like a type, so `{name}` starts with a capital"),
+                    at,
+                )
+                .with_hint(format!(
+                    "the stored column's name is derived from this one, and `{}` is `{}`",
+                    upper_first(&name),
+                    snake_case(&upper_first(&name))
+                )));
+        }
+        if name.contains('_') {
+            return Err(self
+                .err(
+                    Code::FoldRestriction,
+                    format!("a named fold's name has no `_`, and `{name}` has one"),
+                    at,
+                )
+                .with_hint(
+                    "the underscores go in the derived column rather than the name: \
+                     `LifetimeSpend` is `lifetime_spend`",
+                ));
+        }
+
+        let params = self.param_list(None)?;
+
+        // A third rule from the same derivation, and the one that needed the parameters in
+        // hand. A column sits in the table its key is kept for, and a part of that key is
+        // named for a parameter, so `fold Shop(shop_id: Shop)` asks for a table whose key
+        // column and whose only value column are both called `shop`. Nothing can create
+        // that, and `--tables` printed it without complaint.
+        let column = snake_case(&name);
+        let parts = tables::part_names(params.iter().map(|(param, ty)| (param, ty)));
+        if let Some(at_part) = parts.iter().position(|part| *part == column) {
+            let param = &params[at_part].0;
+            return Err(self
+                .err(
+                    Code::FoldRestriction,
+                    format!(
+                        "fold `{name}` derives a column called `{column}`, and its key already has a part of that name"
+                    ),
+                    at,
+                )
+                .with_hint(format!(
+                    "the part is named for `{param}` and the column for the fold, so the table would need two columns called `{column}`: name the fold for what the value is rather than for what it is keyed by, the way `ShopInstalled` is `shop_installed`"
+                )));
+        }
+
+        let (_, ret) = self.fold_result()?;
+        self.folds.push(Signature {
+            name,
+            params,
+            ret: Some(ret),
+        });
+        // Not `skip_braced`, which stops at the first `{` it finds: a fold's seed is
+        // written *before* the body, so a record literal there would be mistaken for it
+        // and the body would be read as declarations. `skip_value` tracks depth and stops
+        // at the next item, which is what `const` already relies on.
+        self.skip_value();
+        Ok(())
+    }
+
+    /// `-> [acc:] Type`, the half of a fold's header that both passes read. The optional
+    /// name is the accumulator, written only when an arm reads the running value
+    /// (`docs/folds.md` rule 3); the seed after it belongs to whichever pass has a frame
+    /// to evaluate it in.
+    ///
+    /// `Sealed(T, Subject)` is spellable here and nowhere else. It sits above `type_ref`
+    /// for the reason `Secret` does in [`Parser::fn_type`]: `List(Sealed(..))` stays
+    /// rejected, so a seal never appears under a constructor. It creates no seal either,
+    /// since only `@subject` on an event field does that; this names one that came out of
+    /// the log. See `docs/folds.md` rule 7.
+    fn fold_result(&mut self) -> Result<(Option<Ident>, Type), Diagnostic> {
+        self.expect_sym(Sym::To)?;
+        // `acc: T` against a bare `T`, told apart by the colon. A type is never followed
+        // by one here, so a single token of lookahead settles it.
+        let next_is_colon = matches!(
+            self.tokens.get(self.pos + 1).map(|spanned| &spanned.token),
+            Some(Token::Sym(Sym::Colon))
+        );
+        let acc = if matches!(self.peek(), Token::Ident(_)) && next_is_colon {
+            let name = self.expect_ident()?;
+            self.expect_sym(Sym::Colon)?;
+            Some(name)
+        } else {
+            None
+        };
+        let ty = self.sealed_type()?;
+        Ok((acc, ty))
+    }
+
+    /// `Sealed(T, Subject)`, or anything [`Parser::type_ref`] takes. Only a fold's return
+    /// position reaches this.
+    fn sealed_type(&mut self) -> Result<Type, Diagnostic> {
+        if !matches!(self.peek(), Token::Ident(name) if name == "Sealed") {
+            return self.type_ref();
+        }
+        let at = self.span_here();
+        self.bump();
+        self.expect_sym(Sym::LParen)?;
+        let inner = self.type_ref()?;
+        self.expect_sym(Sym::Comma)?;
+        let subject = self.expect_ident()?;
+        if !self.subjects.iter().any(|def| def.name == subject) {
+            return Err(self.err(
+                Code::UnknownType,
+                format!("`{subject}` is not a declared subject"),
+                at,
+            ));
+        }
+        self.expect_sym(Sym::RParen)?;
+        // **`Opt` stays outermost, whichever side of the parenthesis it was written on.**
+        // Building `Type::Sealed` directly honoured a trailing `?` and inverted an inner
+        // one, so `Sealed(String?, Shop)` became `Sealed(Opt(String), Shop)`: a type no
+        // other position can write, which then made its own diagnostics contradict
+        // themselves. `types::seal` is the one place that nesting is decided, and the
+        // three spellings mean one thing.
+        let mut ty = types::seal(inner, subject);
+        if self.eat_sym(Sym::Question) && !matches!(ty, Type::Opt(_)) {
+            ty = Type::opt(ty);
+        }
+        Ok(ty)
     }
 
     /// Pass C. A refusal is a name, the fields its message needs, and the message.
@@ -1756,7 +2031,7 @@ impl Parser {
 
     fn expected_item(found: &Token) -> String {
         format!(
-            "expected `enum`, `record`, `const`, `secret`, `fn`, `event`, `refusal`, `command`, `guard`, `projector`, `effect` or `test`, found {found}"
+            "expected `enum`, `record`, `const`, `secret`, `fn`, `event`, `refusal`, `command`, `guard`, `fold`, `projector`, `effect` or `test`, found {found}"
         )
     }
 
@@ -2570,6 +2845,15 @@ impl Parser {
         if self.at_word(Keyword::Refusal) {
             return self.skip_refusal();
         }
+        // A named fold has a braced body *and* a value before it, so looking for a brace
+        // can stop inside a record-literal seed and leave the body to be read as
+        // declarations. Depth-tracking to the next item is right for the same reason it
+        // is right for a `const`.
+        if self.at_word(Keyword::Fold) {
+            self.bump();
+            self.skip_value();
+            return Ok(());
+        }
         // A third: `secret NAME` has no body either, and it is two or three tokens.
         if self.at_secret_item() {
             self.bump();
@@ -2719,7 +3003,7 @@ impl Parser {
         let mut fields: Vec<EntityField> = Vec::new();
         let mut field_at: Vec<Span> = Vec::new();
         let mut indexes: Vec<Index> = Vec::new();
-        let mut key: Option<usize> = None;
+        let mut keys: Vec<usize> = Vec::new();
 
         while !self.at_sym(Sym::RBrace) {
             if self.at_index_clause() {
@@ -2796,13 +3080,6 @@ impl Parser {
             }
 
             if is_key {
-                if key.is_some() {
-                    return Err(self.err(
-                        Code::BadAnnotation,
-                        format!("entity `{name}` has more than one `@key`"),
-                        at,
-                    ));
-                }
                 if !value::can_key(&ty) {
                     return Err(self.err(
                         Code::EntityShape,
@@ -2813,7 +3090,11 @@ impl Parser {
                         at,
                     ));
                 }
-                key = Some(fields.len());
+                // Rule 11: written order, so the columns are the key in the order they
+                // are declared in. No check that they are adjacent or first: where a
+                // column is declared says nothing about what it means, and forcing an
+                // order would move the key's own order out of the author's hands.
+                keys.push(fields.len());
             }
 
             fields.push(field);
@@ -2823,12 +3104,12 @@ impl Parser {
         }
         self.expect_sym(Sym::RBrace)?;
 
-        let Some(key) = key else {
+        if keys.is_empty() {
             return self.fail(
                 Code::EntityShape,
                 format!("entity `{name}` has no `@key` field"),
             );
-        };
+        }
 
         for index in &indexes {
             for column in &index.fields {
@@ -2844,7 +3125,7 @@ impl Parser {
         Ok(EntityDef {
             name,
             fields,
-            key,
+            keys,
             indexes,
         })
     }
@@ -3326,7 +3607,10 @@ impl Parser {
         // The trigger does not advance as the fold runs, so an arm naming it would read
         // as though it did. Rejected whole rather than per field: `e.id` and a payload
         // field reached through `e` carry the same misreading `e.at` does.
-        if self.fold_arm {
+        if self.arm_envelope {
+            self.envelope_read = true;
+        }
+        if self.fold_arm && !self.arm_envelope {
             return Err(self
                 .err(
                     Code::FoldRestriction,
@@ -3355,6 +3639,24 @@ impl Parser {
         if let Some(env) = EnvField::lookup(&field) {
             let slot = lower.b.envelope(env);
             return Ok(lower.b.read(slot));
+        }
+
+        // Everything below binds a payload field on demand, which only a handler can do:
+        // a fold arm's fields come from its own `{ }`, and a fold has no `self.event` to
+        // read a declaration out of. `docs/folds.md` rule 12's binding is three fields and
+        // not a second way to reach the record.
+        if self.arm_envelope {
+            return Err(self
+                .err(
+                    Code::UnknownMember,
+                    format!(
+                        "`{name}.{field}` is not an envelope field, and an arm's `as` binding carries only `at`, `id` and `position`"
+                    ),
+                    at,
+                )
+                .with_hint(format!(
+                    "a fold arm binds the event's own fields in `{{ }}`, which is where `{field}` belongs: `on @path(..) {{ {field} }} => {field}`"
+                )));
         }
 
         let def = self.event.as_ref().expect("only called inside a handler");
@@ -3720,6 +4022,126 @@ impl Parser {
         Ok(lower.b.finish_guard(at))
     }
 
+    /// A named fold declaration: a guard's shape with a declared result and no way to
+    /// refuse. See `docs/folds.md`.
+    fn fold_item(&mut self, events: &[EventDef]) -> Result<Fold, Diagnostic> {
+        let module = self.module_at(self.pos).map(str::to_string);
+        self.expect_word(Keyword::Fold)?;
+        let at = self.span_here();
+        let name = self.expect_ident()?;
+        let mut lower = Lower {
+            b: Builder::new(&name),
+            defaults: HashMap::new(),
+            subjects: HashMap::new(),
+        };
+        lower.b.in_module(module.as_deref());
+
+        // Params, then `-> [acc:] T`, then the seed, then the body's brace. A guard's
+        // `decl_params` stops at the brace, so this does its own tail.
+        //
+        // Through `param_list`, which is what `fold_signature` reads the *same* header
+        // with in pass C. Two loops would have to agree or a caller would be checked
+        // against one parameter list while the splice copied another.
+        for (param, ty) in self.param_list(None)? {
+            lower.b.param(&param, ty);
+        }
+        let (acc, ret) = self.fold_result()?;
+        self.expect_sym(Sym::Assign)?;
+        // What `decl_params` sets after its own brace. A fold's body holds no `let`, so
+        // its one consumer cannot fire in here, but leaving it at whatever the previous
+        // declaration left it at is a stale value rather than a decision.
+        self.command_end = self.command_end();
+
+        self.kind = Kind::Fold;
+        let parsed = self.fold_body(&mut lower, events, &name, &acc, &ret, at);
+        self.kind = Kind::Command;
+        let slot = parsed?;
+
+        // A fold that reads no log is a `fn`, for the reason a guard that folds nothing
+        // is one: the whole point of the declaration is that its slice joins its caller's
+        // conflict boundary.
+        if lower.b.folds_nothing() {
+            return Err(self
+                .err(
+                    Code::EmptyDeclaration,
+                    format!("fold `{name}` folds nothing"),
+                    at,
+                )
+                .with_hint(
+                    "a named fold declares a slice of the log, so it needs an arm; a value computed from arguments alone is a `fn`",
+                ));
+        }
+        Ok(lower.b.finish_fold(ret, slot, at))
+    }
+
+    /// The seed, the accumulator and the arms. Split out so [`Parser::fold_item`] can
+    /// restore `self.kind` before any `?` of its own runs, which is what keeps a failed
+    /// fold from reporting the next declaration as one.
+    fn fold_body(
+        &mut self,
+        lower: &mut Lower,
+        events: &[EventDef],
+        name: &str,
+        acc: &Option<Ident>,
+        ret: &Type,
+        at: Span,
+    ) -> Result<Slot, Diagnostic> {
+        let before_seed = self.errors.borrow().len();
+        self.folding = true;
+        let init = self.expr(lower, Some(ret.clone()))?;
+        self.folding = false;
+        self.expect_sym(Sym::LBrace)?;
+
+        // The accumulator is allocated under the name the author wrote, or under one no
+        // source token can spell when they wrote none. The second is what makes rule 3's
+        // check structural: with no name bound, an arm reading the running value is an
+        // ordinary "not in scope", and the shadowing an inline fold suffers from (a bind
+        // and an accumulator sharing a field's name) cannot arise at all.
+        let bound = match acc {
+            Some(acc) => acc.clone(),
+            None => format!("@acc:{name}"),
+        };
+        let slot = lower.b.fold(&bound, ret.clone(), init);
+
+        self.fold_arms(
+            lower,
+            events,
+            name,
+            &bound,
+            ret,
+            slot,
+            at,
+            before_seed,
+            true,
+        )?;
+        // The filters of the one stage a fold is, checked against what it declares. A
+        // command gets this from `decl_body`, which a fold's body does not go through:
+        // its body is arms only, so there is no statement to close a stage and nothing
+        // was calling it. Without it `on @a.b(id: acc)` passed `hek check` and died at
+        // run time with "slot read before it was set", which is the one shape
+        // `Builder::fold_call` calls the thing a checker must not allow.
+        self.stage_check(lower)?;
+        self.expect_sym(Sym::RBrace)?;
+
+        // Rule 3: a name no arm reads is a synonym for the declaration's own, so there is
+        // one legal spelling and this is the half the parser has to say out loud. The
+        // other half an ordinary scope error already covers.
+        if let Some(acc) = acc
+            && !lower.b.reads_slot(slot)
+        {
+            return Err(self
+                .err(
+                    Code::UnusedAccumulator,
+                    format!("fold `{name}` names `{acc}` and no arm reads it"),
+                    at,
+                )
+                .with_hint(format!(
+                    "a fold's value is its declaration's name, so drop the `{acc}:` and leave the type; a name is for an arm that reads the running value, which none here does. If an arm looks like it reads `{acc}`, it is reading the event field of that name, which shadows the accumulator"
+                )));
+        }
+        Ok(slot)
+    }
+
     /// `(name: Type, ...)`, shared by a command and a guard because their inputs are
     /// the same thing: values the caller supplies before anything is read.
     fn decl_params(&mut self, lower: &mut Lower) -> Result<(), Diagnostic> {
@@ -3911,12 +4333,13 @@ impl Parser {
             }
             let expected = declared.clone();
             let value = if self.eat_sym(Sym::Colon) {
-                self.expr(lower, Some(expected))?
+                self.expr(lower, Some(expected.clone()))?
             } else if lower.b.lookup(&field).is_none() {
                 return Err(self.not_in_scope(&field, at));
             } else {
                 self.shorthand(lower, &field, &expected, at)
             };
+            let value = self.lifted(lower, value, &expected, at);
             // An argument becomes a prologue assignment, which runs before any fold, so
             // this would read the other fold's seed rather than what it folds to. The
             // same mistake a seed makes, rejected the same way.
@@ -3924,11 +4347,15 @@ impl Parser {
                 return Err(self
                     .err(
                         Code::StageShape,
-                        format!("`{field}` is taken from `{read}`, which has not folded yet"),
+                        format!(
+                            "`{field}` is taken from `{}`, which has not folded yet",
+                            read.name()
+                        ),
                         at,
                     )
                     .with_hint(format!(
-                        "a guard's arguments are evaluated before any fold runs, so this reads `{read}`'s own seed; pass a parameter, or a `let` above the declarations"
+                        "a guard's arguments are evaluated before any fold runs, so {}; pass a parameter, or a `let` above the declarations",
+                        read.answers()
                     )));
             }
             args.push((field, value));
@@ -3976,10 +4403,131 @@ impl Parser {
         Ok(())
     }
 
+    /// `fold <local> = <Name> { <args> }`. The arguments are checked exactly as a guard's
+    /// are, because they are the same thing: values the callee's filters and seed resolve
+    /// against, assigned above the declaration run they sit in. See `docs/folds.md`
+    /// rule 2.
+    fn fold_use(&mut self, lower: &mut Lower, local: &str, decl: Span) -> Result<(), Diagnostic> {
+        self.expect_sym(Sym::Assign)?;
+        let at = self.span_here();
+        let name = self.expect_ident()?;
+        let Some(signature) = self.folds.iter().find(|other| other.name == name).cloned() else {
+            // A guard here is the likely slip, since the two read alike at a call site
+            // and only one of them hands a value back.
+            let hint = match self.guards.iter().any(|other| other.name == name) {
+                true => Some(format!(
+                    "`{name}` is a guard, which decides rather than computing: write `guard {name} {{ .. }}` and drop the binding"
+                )),
+                false => None,
+            };
+            let error = self.err(
+                Code::NotDeclared,
+                format!("fold `{name}` is not declared"),
+                at,
+            );
+            return Err(match hint {
+                Some(hint) => error.with_hint(hint),
+                None => error,
+            });
+        };
+        // Always `Some`: `fold_signature` is the only thing that fills this table and it
+        // parses a return type unconditionally. Said here rather than re-reported as "not
+        // declared", which would be a wrong message for a fold that is.
+        let ret = signature
+            .ret
+            .clone()
+            .expect("a fold's signature always declares a result");
+
+        let mut args: Vec<(Ident, ExprId)> = Vec::new();
+        self.expect_sym(Sym::LBrace)?;
+        while !self.at_sym(Sym::RBrace) {
+            let at = self.span_here();
+            let field = self.expect_ident()?;
+            let Some((_, declared)) = signature.params.iter().find(|(param, _)| param == &field)
+            else {
+                return Err(self.err(
+                    Code::UnknownMember,
+                    format!("fold `{name}` has no parameter `{field}`"),
+                    at,
+                ));
+            };
+            if args.iter().any(|(seen, _)| seen == &field) {
+                return Err(self.err(
+                    Code::DuplicateField,
+                    format!("`{field}` is given twice"),
+                    at,
+                ));
+            }
+            let expected = declared.clone();
+            let value = if self.eat_sym(Sym::Colon) {
+                self.expr(lower, Some(expected.clone()))?
+            } else if lower.b.lookup(&field).is_none() {
+                return Err(self.not_in_scope(&field, at));
+            } else {
+                self.shorthand(lower, &field, &expected, at)
+            };
+            let value = self.lifted(lower, value, &expected, at);
+            if let Some((read, at)) = lower.b.fold_read(value) {
+                return Err(self
+                    .err(
+                        Code::StageShape,
+                        format!(
+                            "`{field}` is taken from `{}`, which has not folded yet",
+                            read.name()
+                        ),
+                        at,
+                    )
+                    .with_hint(format!(
+                        "a fold's arguments are evaluated before any fold runs, so {}; pass a parameter, or a `let` above the declarations",
+                        read.answers()
+                    )));
+            }
+            args.push((field, value));
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RBrace)?;
+        for (param, _) in &signature.params {
+            if !args.iter().any(|(field, _)| field == param) {
+                return Err(self.err(
+                    Code::MissingField,
+                    format!("fold `{name}` needs `{param}`"),
+                    at,
+                ));
+            }
+        }
+
+        // There is no twice-on-the-same-arguments check, and the asymmetry with a guard
+        // is the point. A second `guard G { x }` decides what the first decided and does
+        // nothing; a second read binds a second name, which is an ordinary two names for
+        // one value and the author's business.
+        //
+        // What it costs is an accumulator **and a duplicate slice**: `at()` inserts the
+        // callee's whole slice list once per read with no dedup, so two reads of one fold
+        // put the same predicate in the append condition twice. That is waste rather than
+        // a change of meaning, since the predicate is the same one, and it is the same
+        // trade `docs/guards.md` rule 4 describes for guarding one proposition through
+        // two paths.
+        //
+        // The local is allocated *after* the arguments, so `fold x = F { n: x }` is a
+        // plain "not in scope" rather than a read of a slot that is about to be written.
+        let dest = lower.b.alloc(local, Some(ret));
+        lower.b.fold_call(&name, local, args, dest, decl);
+        Ok(())
+    }
+
     fn fold_decl(&mut self, lower: &mut Lower, events: &[EventDef]) -> Result<(), Diagnostic> {
         let decl = self.span_here();
+        let opened = self.pos;
         self.expect_word(Keyword::Fold)?;
         let name = self.expect_ident()?;
+        // `fold x: T = seed` declares one here; `fold x = Name { .. }` reads one declared
+        // at module scope. One token of lookahead, the same way `guard` tells its two
+        // shapes apart by the token after the keyword.
+        if self.at_sym(Sym::Assign) {
+            return self.fold_use(lower, &name, decl);
+        }
         self.expect_sym(Sym::Colon)?;
         let ty = self.type_ref()?;
         self.expect_sym(Sym::Assign)?;
@@ -3997,15 +4545,71 @@ impl Parser {
             return Err(self
                 .err(
                     Code::StageShape,
-                    format!("`{name}` is seeded from `{read}`, which has not folded yet"),
+                    format!(
+                        "`{name}` is seeded from `{}`, which has not folded yet",
+                        read.name()
+                    ),
                     at,
                 )
                 .with_hint(format!(
-                    "every seed is evaluated before any fold runs, so this reads `{read}`'s own seed rather than what it folds to; to compute from a folded value, write a `let` below the declarations"
+                    "every seed is evaluated before any fold runs, so {}; to compute from a folded value, write a `let` below the declarations",
+                    read.answers()
                 )));
         }
         let slot = lower.b.fold(&name, ty.clone(), init);
+        self.fold_arms(
+            lower,
+            events,
+            &name,
+            &name,
+            &ty,
+            slot,
+            decl,
+            before_seed,
+            false,
+        )?;
+        // Rule 9, recorded rather than decided here: whether this is a duplicate is a
+        // question about the whole program, and the second copy is often in another
+        // module that has not been read yet.
+        self.inline_folds.push(InlineFold {
+            written: self.tokens[opened..self.pos]
+                .iter()
+                .map(|spanned| spanned.token.clone())
+                .collect(),
+            pos: opened,
+            module: self.module_at(opened).map(str::to_string),
+            span: decl,
+        });
+        Ok(())
+    }
 
+    /// The `on <event>(<filters>) [{ <binds> }] => <expr>` run beneath a fold, and the two
+    /// checks that are properties of the whole run rather than of any one arm.
+    ///
+    /// Shared by the inline `fold` and the named one, which is the point: the arms are the
+    /// same syntax in both positions, so promoting an inline fold to a named one is a
+    /// header edit and the arms are untouched. See `docs/folds.md` rule 9.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "every one is a different half of the \
+             declaration this parses, and grouping them into a struct would be a struct \
+             with one use"
+    )]
+    fn fold_arms(
+        &mut self,
+        lower: &mut Lower,
+        events: &[EventDef],
+        name: &str,
+        acc: &str,
+        ty: &Type,
+        slot: Slot,
+        decl: Span,
+        before_seed: usize,
+        // Whether this is a module-scope declaration, which is the only place an arm may
+        // bind the envelope: doing so makes the fold query-only, and an inline fold is
+        // already inside the command that could not then read it.
+        named: bool,
+    ) -> Result<(), Diagnostic> {
         // Rule 12: whether the variable is subject-bound is a property of every arm
         // agreeing, so it is settled across the declaration rather than at any one arm.
         // The seed is never subject-bound, which is allowed and is why `plain` records
@@ -4013,6 +4617,8 @@ impl Parser {
         let mut bound: Option<(Ident, EventPath)> = None;
         let mut plain: Option<(EventPath, Span)> = None;
         let mut any_arm = false;
+        // Where an arm binds a field named like the accumulator, if one does.
+        let mut shadow: Option<Span> = None;
 
         while self.at_word(Keyword::On) {
             any_arm = true;
@@ -4023,8 +4629,35 @@ impl Parser {
                 "a fold arm reads the log rather than being delivered",
             )?;
             let at = self.span_here();
-            let (path, filters) = self.slice_ref(lower, events)?;
-            let def = self.event_def(events, &path, at)?;
+            let path = self.expect_path()?;
+            let def = self.event_def(events, &path, at)?.clone();
+            // `docs/folds.md` rule 12, written here rather than after the filters because that is
+            // where a projector handler writes it and the two should read alike.
+            let binding = self.fold_envelope(lower, named, slot)?;
+            self.pending_envelope = binding.clone();
+            let filters = self.slice_filters(
+                lower,
+                &path,
+                &def,
+                match named {
+                    true => KeySite::Fold,
+                    false => KeySite::Inline,
+                },
+            )?;
+            self.pending_envelope = None;
+            // Only now, so a filter naming the binding is "not in scope" rather than a
+            // read of a slot nothing has filled: a filter resolves once for the whole
+            // slice and the envelope belongs to each event in it.
+            //
+            // Set only when this arm bound one. An inline fold inside an effect arm must
+            // keep the trigger's binding in scope, so that reading it there stays the
+            // sharp refusal in `envelope_access` rather than a bare "not in scope".
+            let outer = self.envelope.clone();
+            if binding.is_some() {
+                self.envelope = binding.clone();
+                self.arm_envelope = true;
+                self.envelope_read = false;
+            }
 
             lower.b.push_scope();
             let mut binds = Vec::new();
@@ -4059,6 +4692,30 @@ impl Parser {
                                 "a fold arm binds the declared fields of the record it folds, and the envelope's `at`, `id` and `position` are not among them: {fix}"
                             )));
                     };
+                    // A bind of the accumulator's own name hides it for this arm. Only
+                    // recorded here: whether that is a defect is a property of the whole
+                    // declaration, settled below for the reason rule 12's subject is.
+                    if field == acc && shadow.is_none() {
+                        shadow = Some(bind);
+                    }
+                    // The other half of `fold_envelope`'s shadow check, and it has to be
+                    // here: that one runs before this scope exists, so a bind of the
+                    // binding's own name is the one spelling it cannot see. Refused
+                    // rather than recorded, because resolution puts the envelope ahead of
+                    // the scopes, so the bind would be unreachable for this arm.
+                    if let Some(bound) = &binding
+                        && &field == bound
+                    {
+                        return Err(self
+                            .err(
+                                Code::DeclaredTwice,
+                                format!("`{field}` is this arm's envelope binding"),
+                                bind,
+                            )
+                            .with_hint(
+                                "an envelope binding is the event being folded, and a name cannot mean that and one of its fields in one arm; give the binding a name of its own",
+                            ));
+                    }
                     binds.push(lower.b.bind(&field, Some(declared.ty.clone())));
                     if !self.eat_sym(Sym::Comma) {
                         break;
@@ -4073,6 +4730,24 @@ impl Parser {
             let value = self.expr(lower, Some(ty.clone()))?;
             self.fold_arm = false;
             self.folding = false;
+            self.envelope = outer;
+            self.arm_envelope = false;
+            // Rule 3's rule for the accumulator, applied to the other name an arm can
+            // bind: a binding no arm reads is a word with no meaning, and here it would
+            // silently decide that the whole fold is query-only.
+            if let Some(binding) = &binding
+                && !mem::take(&mut self.envelope_read)
+            {
+                return Err(self
+                    .err(
+                        Code::UnusedAccumulator,
+                        format!("this arm binds `{binding}` and does not read it"),
+                        arm,
+                    )
+                    .with_hint(
+                        "an envelope binding is written where the arm reads the event's `at`, `id` or `position`; drop the `as` and the fold stays readable by a command",
+                    ));
+            }
 
             // Rule 12: whether this arm folds sealed content is a property of the
             // value's type, so a transformed arm drops the seal by construction rather
@@ -4099,7 +4774,7 @@ impl Parser {
                     if let Some((first, at)) = &plain {
                         return Err(self.advised(
                             Code::StageShape,
-                            self.mixed_fold(&name, &field, first),
+                            self.mixed_fold(name, &field, first),
                             *at,
                         ));
                     }
@@ -4107,7 +4782,7 @@ impl Parser {
                 }
                 None => {
                     if let Some((have, _)) = &bound {
-                        let message = self.mixed_fold(&name, have, &path);
+                        let message = self.mixed_fold(name, have, &path);
                         return Err(self.advised(Code::StageShape, message, arm));
                     }
                     plain.get_or_insert((path.clone(), arm));
@@ -4133,6 +4808,10 @@ impl Parser {
             // edit that ends the error rather than trading it for the next one.
             let fix = match self.kind {
                 Kind::Guard => "give it an arm; a guard decides from what it folds, and one that folds nothing is a `fn`".to_string(),
+                // Same shape as a guard's, and for the same reason: a named fold exists to
+                // put a slice in its caller's boundary, so there is no `let` to fall back
+                // to. One that folds nothing is a `fn` too.
+                Kind::Fold => "give it an arm; a named fold exists to declare a slice, and one that declares none is a `fn`".to_string(),
                 _ => format!("write `let {name} = <seed>`"),
             };
             return Err(self
@@ -4146,10 +4825,96 @@ impl Parser {
                 )));
         }
 
-        // The declared type is what the author wrote; the seal propagates onto it, the
-        // same way it propagates onto an entity column. That is what `reveal` reads.
-        if let Some((field, _)) = bound {
-            lower.b.seal_fold(slot, field);
+        // One name cannot mean the running value in one arm and an event field in
+        // another. A bind hides the accumulator for its own arm, which is *harmless* when
+        // no arm reads the running value: every arm then replaces it, and
+        // `on @shop.connected { token } => token` is the ordinary latest-value-wins fold.
+        // It is a defect exactly when some arm does read it, because then one spelling has
+        // two meanings and the arm that gets the field silently discards the total.
+        //
+        // Rule 3's `unused-accumulator` cannot stand in for this: it asks whether *any*
+        // arm reads the slot, so the arm that reads it is what satisfies the check while
+        // the arm beside it drops the total. A `let` is refused the same way
+        // (`reused_name`), and for the same reason.
+        if let Some(at) = shadow
+            && lower.b.reads_slot(slot)
+        {
+            // An inline fold's declaration name *is* its accumulator's, so naming the
+            // fold there would read "`spend` is `spend`'s".
+            let whose = match name == acc {
+                true => "this fold's".to_string(),
+                false => format!("`{name}`'s"),
+            };
+            return Err(self
+                .err(
+                    Code::DeclaredTwice,
+                    format!(
+                        "`{acc}` is {whose} accumulator and another arm reads it, so this arm cannot bind a field of that name"
+                    ),
+                    at,
+                )
+                .with_hint(format!(
+                    "the bind hides the running value for this arm only, so `=> {acc} + ..` here folds the event's `{acc}` rather than the total; rename the accumulator, which is a name the author chooses, or bind nothing and let every arm replace the value"
+                )));
+        }
+
+        // The seal propagates onto the declared type, the same way it propagates onto an
+        // entity column. That is what `reveal` reads.
+        //
+        // **Unless the type already carries one**, which only a named fold's return
+        // position can spell (rule 7). `build::seal` is not idempotent, so sealing twice
+        // built `Opt(Sealed(Sealed(String, Customer), Customer))`: a type no source can
+        // write, disagreeing with the `Update::ty` of its own arms, and hashed into the
+        // digest. There the declaration has already said it and this has nothing to add,
+        // so what is left is to check the two agree.
+        if let Some((field, path)) = bound {
+            match ty.subject() {
+                Some(declared) if declared != &field => {
+                    return Err(self
+                        .err(
+                            Code::SealBoundary,
+                            format!(
+                                "`{name}` declares content sealed under `{declared}` and the arm on {path} folds content sealed under `{field}`"
+                            ),
+                            decl,
+                        )
+                        .with_hint(
+                            "one variable holds one subject, because `reveal` names the key by it; the return type and the field the arm folds have to name the same one",
+                        ));
+                }
+                Some(_) => {}
+                // **A named fold's declared type is the contract, so silence here is a
+                // leak rather than something to patch up.** Sealing the slot is right for
+                // an inline fold, whose value lives in that slot in the declaration that
+                // reads it, so the seal is what every check downstream then sees. A named
+                // fold publishes `ret` instead: the caller's local, the IR and the
+                // signature all come from the declared type, and `crate::tables` types
+                // the stored column from it too. Sealing the slot and leaving `ret` plain
+                // therefore handed the plaintext to a plain position with nothing static
+                // to say so, and typed the column as plaintext so nothing would ever
+                // shred it. Rule 7 exists to be written.
+                None if named => {
+                    // Spelled the way rule 7 is written rather than rendered through
+                    // `Display`, which gives an event field's `String @subject(Shop)?`
+                    // and is not what an author can type in a return position.
+                    let sealed = match ty {
+                        Type::Opt(inner) => format!("Sealed({inner}, {field})?"),
+                        plain => format!("Sealed({plain}, {field})"),
+                    };
+                    return Err(self
+                        .err(
+                            Code::SealBoundary,
+                            format!(
+                                "`{name}` folds content sealed under `{field}` on {path}, and its return type does not say so"
+                            ),
+                            decl,
+                        )
+                        .with_hint(format!(
+                            "a named fold's return type is what its caller and the stored column are typed from, so declare it: `-> {sealed}`. The caller `reveal`s it (rule 7)"
+                        )));
+                }
+                None => lower.b.seal_fold(slot, field),
+            }
         }
 
         Ok(())
@@ -4182,18 +4947,115 @@ impl Parser {
         let at = self.span_here();
         let path = self.expect_path()?;
         let def = self.event_def(events, &path, at)?;
+        let filters = self.slice_filters(lower, &path, def, KeySite::Guard)?;
+        Ok((path, filters))
+    }
+
+    /// The `as e` of `docs/folds.md` rule 12, or `None` where the arm did not write one.
+    ///
+    /// Refused on an inline fold rather than quietly ignored. An inline fold lives in the
+    /// command, guard or effect arm that reads it, and binding the envelope makes a fold
+    /// query-only, so the two together are a contradiction rather than a restriction: the
+    /// author has to move the fold out before the envelope can mean anything.
+    fn fold_envelope(
+        &mut self,
+        lower: &Lower,
+        named: bool,
+        accumulator: Slot,
+    ) -> Result<Option<Ident>, Diagnostic> {
+        let at = self.span_here();
+        if !self.eat_word(Keyword::As) {
+            return Ok(None);
+        }
+        let binding = self.expect_ident()?;
+        // The same rule a `let` is held to, and here for a sharper reason: resolution
+        // checks the envelope binding before the scopes, so a name that is both wins as
+        // the envelope and the thing it hid is simply unreachable for that arm. An
+        // accumulator called `last` beside `as last` read as the running value in one arm
+        // and the record being folded in the next, and checked clean.
+        if let Some(slot) = lower.b.lookup(&binding) {
+            let what = match slot == accumulator {
+                true => "the accumulator",
+                false => "already in scope",
+            };
+            return Err(self
+                .err(
+                    Code::DeclaredTwice,
+                    format!("`{binding}` is {what}"),
+                    at,
+                )
+                .with_hint(
+                    "an envelope binding is the event being folded, and a name cannot mean that and something else in one arm; give the binding a name of its own",
+                ));
+        }
+        if !named {
+            return Err(self
+                .err(
+                    Code::FoldRestriction,
+                    "an inline fold cannot bind the envelope",
+                    at,
+                )
+                .with_hint(
+                    "binding it makes a fold query-only, and this one is read by the declaration it is written in; declare it at module scope and store it, or fold a `Timestamp` the event declares",
+                ));
+        }
+        Ok(Some(binding))
+    }
+
+    /// The `(field, field: value, param == value)` list a slice narrows by.
+    ///
+    /// Split out of [`Parser::slice_ref`] because a fold arm writes `as e` between the
+    /// path and this, and the envelope binding has to be in scope for what follows it and
+    /// not for this: a filter resolves once per invocation and the envelope is a property
+    /// of each event folded, so the two cannot be the same value.
+    ///
+    /// `site` says which construct the slice belongs to, because the `param ==` form
+    /// means something in exactly one of them: rule 13's conjunct names a key part, and
+    /// only a module-scope fold has a key.
+    fn slice_filters(
+        &mut self,
+        lower: &mut Lower,
+        path: &EventPath,
+        def: &EventDef,
+        site: KeySite,
+    ) -> Result<Vec<Filter>, Diagnostic> {
         self.expect_sym(Sym::LParen)?;
+        let key = site == KeySite::Fold;
 
         let mut filters = Vec::new();
         while !self.at_sym(Sym::RParen) {
             let at = self.span_here();
-            let field = self.expect_ident()?;
-            let Some(declared) = def.field(&field) else {
-                return Err(self.err(
-                    Code::UnknownMember,
-                    format!("{path} has no field `{field}`"),
-                    at,
-                ));
+            let name = self.expect_ident()?;
+            // One token of lookahead tells the two forms apart, the way `fold` already
+            // tells its own two shapes apart: `:` and the shorthand name a field of the
+            // event, `==` names a parameter of the fold.
+            if self.at_sym(Sym::Eq) {
+                // Two conjuncts on one part cannot both hold unless they are the same
+                // value, so the arm folds nothing and `--tables` still calls the column
+                // storable. An arm that can never fire is a mistake rather than a
+                // narrowing, and this is the one place to say so.
+                if filters
+                    .iter()
+                    .any(|filter| matches!(filter, Filter::Key { param, .. } if param == &name))
+                {
+                    return Err(self
+                        .err(
+                            Code::DuplicateField,
+                            format!("`{name}` is matched twice in this arm"),
+                            at,
+                        )
+                        .with_hint(
+                            "a key part is one value per arm, so two conjuncts on it leave the arm folding nothing at all; one of them belongs on an arm of its own",
+                        ));
+                }
+                filters.push(self.key_filter(lower, &name, site, at)?);
+                if !self.eat_sym(Sym::Comma) {
+                    break;
+                }
+                continue;
+            }
+            let Some(declared) = def.field(&name) else {
+                return Err(self.unknown_filter(lower, path, &name, key, at));
             };
             let expected = declared.ty.clone();
             // A filter is lowered once per invocation, before the fold, so it is held
@@ -4202,21 +5064,119 @@ impl Parser {
             let value = if self.eat_sym(Sym::Colon) {
                 self.expr(lower, Some(expected))?
             } else {
-                if lower.b.lookup(&field).is_none() {
+                if lower.b.lookup(&name).is_none() {
                     self.folding = false;
-                    return Err(self.not_in_scope(&field, at));
+                    return Err(self.not_in_scope(&name, at));
                 }
-                self.shorthand(lower, &field, &expected, at)
+                self.shorthand(lower, &name, &expected, at)
             };
             self.folding = false;
-            filters.push(Filter::new(field, value));
+            filters.push(Filter::new(name, value));
             if !self.eat_sym(Sym::Comma) {
                 break;
             }
         }
 
         self.expect_sym(Sym::RParen)?;
-        Ok((path, filters))
+        Ok(filters)
+    }
+
+    /// `param == value`, rule 13: the key part this arm writes.
+    ///
+    /// The left side is resolved against the fold's **parameters** rather than against
+    /// everything in scope, because that is what it means. `lookup` would answer just as
+    /// readily for the accumulator, and an accumulator on the left would be a key that
+    /// depends on what has been folded so far.
+    fn key_filter(
+        &mut self,
+        lower: &mut Lower,
+        name: &str,
+        site: KeySite,
+        at: Span,
+    ) -> Result<Filter, Diagnostic> {
+        self.expect_sym(Sym::Eq)?;
+        if let Some((what, fix)) = site.no_key() {
+            return Err(self
+                .err(
+                    Code::FoldRestriction,
+                    format!("`{name} ==` names a key part, and {what} has no key"),
+                    at,
+                )
+                .with_hint(format!(
+                    "a key part is a parameter of a stored fold, and {fix}"
+                )));
+        }
+        let Some(param) = lower
+            .b
+            .params()
+            .iter()
+            .find(|param| param.name == name)
+            .cloned()
+        else {
+            return Err(self
+                .err(
+                    Code::UnknownMember,
+                    format!("this fold has no parameter `{name}`"),
+                    at,
+                )
+                .with_hint(
+                    "`==` matches a parameter, which is a part of the key, and `:` matches a field of the event; a key part no event carries is written with `==`",
+                ));
+        };
+        // Held to the fold's own rule, as a field filter is, and for the same reason: this
+        // resolves once before anything is folded.
+        self.folding = true;
+        let value = self.expr(lower, Some(param.ty.clone()));
+        self.folding = false;
+        let value = value?;
+
+        // **The right side is a value, not a value of the row.** Whatever writes the row
+        // holds an event and the key it is writing, and no frame, so a conjunct reading a
+        // slot is a key that depends on the key. `kind == kind` is the degenerate case
+        // and `hek check --tables` would call the column storable on the strength of a
+        // tautology; `kind == order_id` is the same hole with a value that is not one.
+        if let Some((slot, at)) = lower.b.slot_read(value) {
+            let read = lower.b.slot_name(slot).unwrap_or("a value").to_string();
+            return Err(self
+                .err(
+                    Code::FoldRestriction,
+                    format!("a key part cannot be matched against `{read}`"),
+                    at,
+                )
+                .with_hint(
+                    "the row is written by something holding the event and the key and nothing else, so this side is a literal, a `const`, or a `fn` of those; a part that varies with the row is the part itself",
+                ));
+        }
+        Ok(Filter::Key {
+            param: param.name,
+            slot: param.slot,
+            ty: param.ty,
+            value,
+        })
+    }
+
+    /// A filter naming something that is not a field of the event. In a fold's arm the
+    /// likely slip is reaching for a key part with `:`, so the message says which sigil
+    /// the other form takes.
+    fn unknown_filter(
+        &self,
+        lower: &Lower,
+        path: &EventPath,
+        name: &str,
+        key: bool,
+        at: Span,
+    ) -> Diagnostic {
+        let error = self.err(
+            Code::UnknownMember,
+            format!("{path} has no field `{name}`"),
+            at,
+        );
+        match key && lower.b.params().iter().any(|param| param.name == name) {
+            true => error.with_hint(format!(
+                "`{name}` is a parameter rather than a field of {path}, so this arm pins it with `==`: `{name} == <value>`"
+            )),
+            false => error,
+        }
     }
 
     /// The span is the caller's, because every caller has just consumed the path and
@@ -4430,7 +5390,27 @@ impl Parser {
 
         let mut expect = Vec::new();
         while !self.at_sym(Sym::RBrace) && !matches!(self.peek(), Token::End) {
+            // A fold has one accumulator, so a second expectation is a second answer to
+            // one question. Every other action produces a sequence and takes as many
+            // expectations as it wrote members.
+            if let Action::Fold { fold, .. } = &action
+                && !expect.is_empty()
+            {
+                return self.fail_hint(
+                    Code::TestShape,
+                    format!("`fold {fold}` folds to one value, and this expects a second"),
+                    "one accumulator, one answer; a second value is a second fold and its own test",
+                );
+            }
             expect.push(self.expect_decl(&mut lower, program, &action)?);
+        }
+        if let Action::Fold { fold, .. } = &action
+            && expect.is_empty()
+        {
+            return self.fail(
+                Code::TestShape,
+                format!("`fold {fold}` folds to a value, and this test does not say which"),
+            );
         }
         self.expect_sym(Sym::RBrace)?;
         self.kind = outer;
@@ -4848,6 +5828,28 @@ impl Parser {
             }
             return Ok(Action::Deliver { effect, span });
         }
+        // `fold`, not a soft word, so this is the keyword a declaration starts with. A
+        // test body has nothing else that could begin with it, and the arguments are
+        // written exactly as a command's read is, minus the binding.
+        if self.eat_word(Keyword::Fold) {
+            let at = self.span_here();
+            let fold = self.expect_ident()?;
+            let Some(def) = program.fold(&fold) else {
+                return Err(self.err(
+                    Code::NotDeclared,
+                    format!("fold `{fold}` is not declared"),
+                    at,
+                ));
+            };
+            let params = def.params.clone();
+            let args = self.named_args(lower, &params, &fold)?;
+            return Ok(Action::Fold { fold, args, span });
+        }
+        // No name, because nothing declares what it fills: there is one derived read
+        // model and `layout` derives all of it from the folds.
+        if self.eat_soft("fill") {
+            return Ok(Action::Fill { span });
+        }
         if self.at_word(Keyword::Emit) {
             return self.fail(
                 Code::TestShape,
@@ -4857,10 +5859,16 @@ impl Parser {
         self.fail(
             Code::TestShape,
             format!(
-                "a test does one thing: `run`, `project` or `deliver`, found {}",
+                "a test does one thing: `run`, `project`, `deliver`, `fold` or `fill`, found {}",
                 self.peek()
             ),
         )
+    }
+
+    /// The derived read model, computed once per program rather than once per
+    /// expectation.
+    fn derived(&mut self, program: &Program) -> &tables::Layout {
+        self.derived.get_or_insert_with(|| tables::layout(program))
     }
 
     /// `{ name: value, ... }` against a command's declared parameters, the same braces
@@ -4937,7 +5945,13 @@ impl Parser {
 
         if self.eat_soft("nothing") {
             return match action {
-                Action::Project { .. } => self.wrong_expectation(action, "`expect nothing`"),
+                // A fold always folded to something: `expect nothing` would be asking
+                // whether the seed is absent, which `expect none` already says. A fill
+                // always filled something too, and `expect no <table>[key]` is how a
+                // test says a key was never minted.
+                Action::Project { .. } | Action::Fold { .. } | Action::Fill { .. } => {
+                    self.wrong_expectation(action, "`expect nothing`")
+                }
                 _ => Ok(Expect::Nothing { span }),
             };
         }
@@ -4951,6 +5965,13 @@ impl Parser {
                 self.row_expectation(lower, def, span)
             }
             Action::Deliver { .. } => self.effect_expectation(lower, program, span),
+            Action::Fold { fold, .. } => {
+                let def = program.fold(fold).expect("resolved by the action");
+                let ret = def.ret.clone();
+                let value = self.expr(lower, Some(ret))?;
+                Ok(Expect::Folded { value, span })
+            }
+            Action::Fill { .. } => self.table_expectation(lower, program, span),
         }
     }
 
@@ -4959,10 +5980,14 @@ impl Parser {
             Action::Run { command, .. } => ("run", command.as_str()),
             Action::Project { projector, .. } => ("project", projector.as_str()),
             Action::Deliver { effect, .. } => ("deliver", effect.as_str()),
+            Action::Fold { fold, .. } => ("fold", fold.as_str()),
+            // The one action with nothing to name, so the action is the whole of it.
+            Action::Fill { .. } => ("fill", ""),
         };
+        let action = format!("{word} {name}").trim_end().to_string();
         self.fail_hint(
             Code::TestShape,
-            format!("{what} is not something `{word} {name}` produces"),
+            format!("{what} is not something `{action}` produces"),
             "the action decides which expectations a test can write",
         )
     }
@@ -5041,12 +6066,10 @@ impl Parser {
                 at,
             ));
         };
-        self.expect_sym(Sym::LBracket)?;
-        let key = self.expr(lower, Some(def.key_field().ty.clone()))?;
-        self.expect_sym(Sym::RBracket)?;
+        let keys = self.subscript(lower, &def)?;
 
         if absent {
-            return Ok(Expect::NoRow { entity, key, span });
+            return Ok(Expect::NoRow { entity, keys, span });
         }
         self.expect_sym(Sym::LBrace)?;
         let mut fields: Vec<(Ident, ExprId)> = Vec::new();
@@ -5073,10 +6096,159 @@ impl Parser {
         self.expect_sym(Sym::RBrace)?;
         Ok(Expect::Row {
             entity,
-            key,
+            keys,
             fields,
             span,
         })
+    }
+
+    /// A row of the derived read model: `expect shop__order[42, 9001] { total: 10.00 }`.
+    ///
+    /// The same shape a projector's row expectation takes and deliberately so, because
+    /// these are the same assertions: retiring a projector turned a row of N columns into
+    /// N `fold` tests, and this turns them back. The listed columns only, for the reason
+    /// section 6 gives, which a derived table makes sharper rather than weaker: one of
+    /// them is 97 columns wide.
+    ///
+    /// The table is named by `layout`, which is where `hek check --tables` prints it, and
+    /// a column is the `snake_case` of its fold's name. Both are checked here, so a typo
+    /// is a `hek check` error rather than a test that fails at run time.
+    fn table_expectation(
+        &mut self,
+        lower: &mut Lower,
+        program: &Program,
+        span: Span,
+    ) -> Result<Expect, Diagnostic> {
+        let absent = self.eat_soft("no");
+        let at = self.span_here();
+        let name = self.expect_ident()?;
+        let Some(table) = self
+            .derived(program)
+            .tables
+            .iter()
+            .find(|table| table.name == name)
+            .cloned()
+        else {
+            let mut err = self.err(
+                Code::UnknownMember,
+                format!("no derived table is called `{name}`"),
+                at,
+            );
+            // A fold whose key no event supplies is not kept, and naming its table is the
+            // likeliest way to get here, so the listing says which tables there are.
+            let known: Vec<&str> = self
+                .derived(program)
+                .tables
+                .iter()
+                .map(|table| table.name.as_str())
+                .collect();
+            if !known.is_empty() {
+                err = err.with_hint(format!(
+                    "`hek check --tables` prints the read model; it holds {}",
+                    known.join(", ")
+                ));
+            }
+            return Err(err);
+        };
+
+        // **The single-row table is a value, so it is asserted as one.** A fold with no
+        // parameters folds to one thing, and `fold Name {}` with `expect <value>` already
+        // says it exactly; a row expectation over it would be a subscript with nothing in
+        // it. Refused rather than spelled `global[]`, and the grammar agrees: a bare name
+        // followed by a block is a record literal, so an optional subscript would make
+        // one input derivable two ways.
+        if table.key.is_empty() {
+            return Err(self
+                .err(
+                    Code::TestShape,
+                    format!("`{name}` holds one row, so there is no row to name"),
+                    at,
+                )
+                .with_hint(
+                    "a fold with no parameters is a value rather than a table: assert it with the \
+                     `fold` action, as `fold Name {}` and `expect <value>`",
+                ));
+        }
+
+        let keys = self.table_subscript(lower, &table)?;
+        if absent {
+            return Ok(Expect::NoRow {
+                entity: name,
+                keys,
+                span,
+            });
+        }
+        self.expect_sym(Sym::LBrace)?;
+        let mut fields: Vec<(Ident, ExprId)> = Vec::new();
+        while !self.at_sym(Sym::RBrace) {
+            let at = self.span_here();
+            let column = self.expect_ident()?;
+            let Some(declared) = table.columns.iter().find(|held| held.name == column) else {
+                return Err(self.err(
+                    Code::UnknownMember,
+                    format!("table `{name}` has no column `{column}`"),
+                    at,
+                ));
+            };
+            if fields.iter().any(|(seen, _)| seen == &column) {
+                return Err(self.err(
+                    Code::DuplicateField,
+                    format!("`{column}` is given twice"),
+                    at,
+                ));
+            }
+            self.expect_sym(Sym::Colon)?;
+            let value = self.expr(lower, Some(declared.ty.clone()))?;
+            fields.push((column, value));
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RBrace)?;
+        Ok(Expect::Row {
+            entity: name,
+            keys,
+            fields,
+            span,
+        })
+    }
+
+    /// The whole key in the table's key order, which is what `--tables` prints beside the
+    /// name. `subscript` is the same thing over an entity's `@key` columns.
+    fn table_subscript(
+        &mut self,
+        lower: &mut Lower,
+        table: &tables::Table,
+    ) -> Result<Vec<ExprId>, Diagnostic> {
+        let bracket = self.span_here();
+        let mut keys: Vec<ExprId> = Vec::new();
+        self.expect_sym(Sym::LBracket)?;
+        while !self.at_sym(Sym::RBracket) {
+            let expected = table.key.get(keys.len()).map(|part| part.ty.clone());
+            keys.push(self.expr(lower, expected)?);
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RBracket)?;
+        if keys.len() != table.key.len() {
+            let parts: Vec<&str> = table.key.iter().map(|part| part.name.as_str()).collect();
+            let wanted = parts.len();
+            let found = keys.len();
+            let plural = if wanted == 1 { "" } else { "s" };
+            return Err(self
+                .err(
+                    Code::Arity,
+                    format!(
+                        "`{}` has a {wanted}-part key, so a subscript takes {wanted} \
+                         value{plural}, found {found}",
+                        table.name
+                    ),
+                    bracket,
+                )
+                .with_hint(format!("write `{}[{}]`", table.name, parts.join(", "))));
+        }
+        Ok(keys)
     }
 
     /// Rule 7: one entry of the effect's trace.
@@ -5189,10 +6361,60 @@ impl Parser {
     /// the block itself, since both callers do the same thing after.
     /// `whole` is where the block began, for a `put`, which writes every column. A
     /// `patch` and an `update` pass `None`: writing some of a row is what they are for.
+    /// `[a, b]`: one expression per `@key` column, in key order, each typed from the
+    /// column it addresses. Rule 11, and the only place a row is named.
+    ///
+    /// The arity is checked after the loop rather than during it, because the expected
+    /// type comes from the arity: a value written at a position the key does not have
+    /// has no column to resolve a literal against, so it is parsed untyped and the
+    /// count is what gets reported.
+    fn subscript(&mut self, lower: &mut Lower, def: &EntityDef) -> Result<Vec<ExprId>, Diagnostic> {
+        let bracket = self.span_here();
+        self.expect_sym(Sym::LBracket)?;
+        let mut keys: Vec<ExprId> = Vec::new();
+        while !self.at_sym(Sym::RBracket) {
+            let expected = def
+                .keys
+                .get(keys.len())
+                .map(|&column| def.fields[column].ty.clone());
+            keys.push(self.expr(lower, expected)?);
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RBracket)?;
+        if keys.len() != def.keys.len() {
+            let columns: Vec<&str> = def.key_fields().map(|field| field.name.as_str()).collect();
+            let wanted = columns.len();
+            let found = keys.len();
+            // The same shape `call_args` uses for a wrong argument count, including its
+            // plural, because it is the same mistake about the same kind of list.
+            let plural = if wanted == 1 { "" } else { "s" };
+            return Err(self
+                .err(
+                    Code::Arity,
+                    format!(
+                        "`{}` has a {wanted}-column key, so a subscript takes {wanted} \
+                         value{plural}, found {found}",
+                        def.name
+                    ),
+                    bracket,
+                )
+                // A wrong count is almost always a compound key addressed as if it were
+                // one column, so the fix is the columns in order rather than the number.
+                .with_hint(format!("write `{}[{}]`", def.name, columns.join(", "))));
+        }
+        Ok(keys)
+    }
+
+    /// `whole` is the opening brace of a `put`, and `None` for a `patch` or an
+    /// `update`: the two differ in whether a column may be left out and in whether a
+    /// key column may be written at all. `writer` is the keyword, for the messages.
     fn write_fields(
         &mut self,
         lower: &mut Lower,
         def: &EntityDef,
+        writer: &str,
         whole: Option<Pos>,
     ) -> Result<Vec<(Ident, ExprId)>, Diagnostic> {
         let mut fields: Vec<(Ident, ExprId)> = Vec::new();
@@ -5216,6 +6438,27 @@ impl Parser {
             let twice = fields.iter().any(|(seen, _)| seen == &name);
             if twice {
                 self.note(self.err(Code::DuplicateField, format!("`{name}` is given twice"), at));
+            }
+            // Rule 11: the subscript is a key column's only writer here. Without this a
+            // `patch Order[order_id] { order_id: order_id + 1 }` checked clean and filed
+            // a row under one id holding another, which is the same row disagreeing with
+            // itself about which row it is. A `put` has no subscript and writes them
+            // like any other column.
+            if whole.is_none() && def.is_key(&name) {
+                self.note(
+                    self.err(
+                        Code::EntityShape,
+                        format!(
+                            "`{name}` is a key column of `{}`, so `{writer}` may not write it",
+                            def.name
+                        ),
+                        at,
+                    )
+                    .with_hint(
+                        "the subscript already says which row this is, and a row's key \
+                         cannot change; take it out of the body",
+                    ),
+                );
             }
             let expected = declared.ty.clone();
             let outer = mem::replace(&mut self.propagating, true);
@@ -5452,6 +6695,13 @@ impl Parser {
                             "emit from the command that names this guard",
                         );
                     }
+                    Kind::Fold => {
+                        return self.fail_hint(
+                            Code::WrongContext,
+                            "a fold reads the log, so it appends nothing",
+                            "emit from the command that reads this fold",
+                        );
+                    }
                 }
                 let span = self.span_here();
                 self.bump();
@@ -5565,14 +6815,14 @@ impl Parser {
                             self.through_brackets(),
                         )
                         .with_hint(
-                            "the key is the column marked `@key`, which a `put` fills like \
-                             any other field; `patch` and `update` are the statements that \
-                             address a row already there",
+                            "a `put` fills every `@key` column like any other field; `patch` \
+                             and `update` are the statements that address a row already \
+                             there",
                         ));
                 }
                 let brace = self.here();
                 self.expect_sym(Sym::LBrace)?;
-                let fields = self.write_fields(lower, &def, Some(brace))?;
+                let fields = self.write_fields(lower, &def, "put", Some(brace))?;
                 Ok(Stmt::Put {
                     entity: name,
                     fields,
@@ -5615,9 +6865,7 @@ impl Parser {
                              whole row and takes no key"
                         )));
                 }
-                self.expect_sym(Sym::LBracket)?;
-                let key = self.expr(lower, Some(def.key_field().ty.clone()))?;
-                self.expect_sym(Sym::RBracket)?;
+                let keys = self.subscript(lower, &def)?;
 
                 self.expect_sym(Sym::LBrace)?;
                 self.stored = Some(Stored {
@@ -5625,12 +6873,12 @@ impl Parser {
                     loads: Vec::new(),
                     slots: HashMap::new(),
                 });
-                let fields = self.write_fields(lower, &def, None)?;
+                let fields = self.write_fields(lower, &def, text, None)?;
                 let stored = self.stored.take().expect("set just above");
 
                 Ok(Stmt::Patch {
                     entity: name,
-                    key,
+                    keys,
                     absent,
                     loads: stored.loads,
                     fields,
@@ -5647,10 +6895,8 @@ impl Parser {
                 }
                 self.bump();
                 let (name, def) = self.entity_ref()?;
-                self.expect_sym(Sym::LBracket)?;
-                let key = self.expr(lower, Some(def.key_field().ty.clone()))?;
-                self.expect_sym(Sym::RBracket)?;
-                Ok(Stmt::Delete { entity: name, key })
+                let keys = self.subscript(lower, &def)?;
+                Ok(Stmt::Delete { entity: name, keys })
             }
             Token::Word(Keyword::Let) => {
                 self.bump();
@@ -6242,12 +7488,27 @@ impl Parser {
             Token::Word(Keyword::If) => {
                 let cond = self.header_expr(lower, Some(Type::Bool))?;
                 self.expect_sym(Sym::LBrace)?;
+                let then_at = self.span_here();
                 let then = self.expr(lower, expect.clone())?;
                 self.expect_sym(Sym::RBrace)?;
                 self.expect_word(Keyword::Else)?;
                 self.expect_sym(Sym::LBrace)?;
-                let otherwise = self.expr(lower, expect)?;
+                let else_at = self.span_here();
+                let otherwise = self.expr(lower, expect.clone())?;
                 self.expect_sym(Sym::RBrace)?;
+                // **Each arm is its own declared position**, which is what the comment
+                // below already says, so each is lifted on its own where the target is an
+                // optional and the arm wrote the bare value. Without it an `if` is the one
+                // position `docs/optionals.md`'s rule does not reach: both arms pass their
+                // own check, and then disagree with each other only because neither was
+                // wrapped.
+                let (then, otherwise) = match &expect {
+                    Some(want) => (
+                        self.lifted(lower, then, want, then_at),
+                        self.lifted(lower, otherwise, want, else_at),
+                    ),
+                    None => (then, otherwise),
+                };
                 // Both arms are the value, so two known types that disagree is a value
                 // with no type at all. Where a target declared one this has already
                 // been said twice, once per arm; where nothing did, this is the only
@@ -6689,11 +7950,22 @@ impl Parser {
             } => method_sig(&self.type_of(lower, *receiver)?, method).map(|sig| sig.ret),
             // Both arms, because both are the value. Reading only the `then` arm
             // reported a type the `else` arm may not produce.
+            //
+            // `fills` either way rather than equality, for the same reason the arm in
+            // `primary_inner` lifts: two arms differing only by an optional agree, and
+            // the wider one is the type. Equality here would answer `None` for a nested
+            // `if`, which would make the enclosing lift silently skip and the fix half
+            // work.
             Expr::If {
                 then, otherwise, ..
             } => {
                 let then = self.type_of(lower, *then)?;
-                (self.type_of(lower, *otherwise)? == then).then_some(then)
+                let otherwise = self.type_of(lower, *otherwise)?;
+                match (fills(&then, &otherwise), fills(&otherwise, &then)) {
+                    (true, _) => Some(otherwise),
+                    (_, true) => Some(then),
+                    _ => None,
+                }
             }
             Expr::Field { receiver, name } => match self.type_of(lower, *receiver)? {
                 Type::Record(ty) => self.record_def(&ty)?.field(name).map(|f| f.ty.clone()),
@@ -7626,6 +8898,36 @@ impl Parser {
         self.note(self.advised(Code::TypeMismatch, mismatch(&found, want), at));
     }
 
+    /// A spliced call's argument, lifted into the optional its parameter declares.
+    ///
+    /// Every other declared position coerces at run time, where the type is in hand: an
+    /// `emit`'s field through `coerce`, a command's or a named fold's argument through
+    /// `bind_params`, a seed and an arm through `fitted_at`. A **spliced** call has no
+    /// such position. `inline::at` assigns the caller's argument straight into the
+    /// callee's parameter slot and a `Stmt::Assign` carries no declared type, so the lift
+    /// has to be written here, at the one place that knows both types.
+    ///
+    /// Without it `fold s = Sum { bias: 5 }` put a bare `Int` in a `bias: Int?` slot and
+    /// the callee's `bias.is_none()` died at run time on a clean `hek check`. It is also
+    /// what keeps one declaration answering one way: `Interpreter::fold` reads the same
+    /// fold through `bind_params`, which does coerce, so a test could otherwise pass on a
+    /// fold no command could run.
+    fn lifted(&self, lower: &mut Lower, value: ExprId, want: &Type, at: Span) -> ExprId {
+        let Type::Opt(inner) = want else {
+            return value;
+        };
+        // `None` is a value whose type the parser could not settle, and a mismatch there
+        // is `check_type`'s to report rather than this one's to guess at.
+        let Some(found) = self.type_of(lower, value) else {
+            return value;
+        };
+        if &found != inner.as_ref() {
+            return value;
+        }
+        lower.b.at(at);
+        lower.b.wrap(value, found)
+    }
+
     /// The bare-name shorthand `{ order_id }`, which is `{ order_id: order_id }` and has
     /// to be checked as one.
     ///
@@ -7790,7 +9092,12 @@ impl Parser {
             Kind::Effect | Kind::EffectFn => Ok(()),
             // A guard is spliced into a command, so it inherits the command's answer.
             // Its own restriction is narrower and lives in `guard_only`.
-            Kind::Command | Kind::Guard => Err(self.advised(Code::WrongContext, command, span)),
+            // A fold is spliced into whatever reads it, and a command is the narrower of
+            // the two callers, so it answers as one. A fold readable from an effect arm
+            // but not from a command would be a signature nothing could place.
+            Kind::Command | Kind::Guard | Kind::Fold => {
+                Err(self.advised(Code::WrongContext, command, span))
+            }
             Kind::Projector => Err(self.advised(Code::WrongContext, projector, span)),
             Kind::Function => Err(self.purity_error(what, span)),
             Kind::Test => Err(self.err(
@@ -7999,6 +9306,22 @@ impl Parser {
         optional: bool,
         span: Span,
     ) -> Result<ExprId, Diagnostic> {
+        // Before the gate, because a fold is the narrower answer and `gate` reads a fold
+        // as a command (it is spliced into one). Gating first meant a fold arm inside an
+        // *effect* was told "a command decides from state without reaching personal
+        // data", which is a rule about a declaration the author is not in, under a code
+        // `docs/folds.md` rule 10 does not list for it.
+        if self.folding {
+            return Err(self
+                .err(
+                    Code::FoldRestriction,
+                    format!("a `fold` cannot read `{name}`"),
+                    span,
+                )
+                .with_hint(
+                    "a fold is a pure function of the log prefix, and a secret is not in the log, so rotating one would make this fold answer differently on a replay",
+                ));
+        }
         self.gate(
             (
                 "only an effect reads a deployment secret",
@@ -8011,22 +9334,15 @@ impl Parser {
             "read a secret",
             span,
         )?;
-        if self.folding {
-            return Err(self
-                .err(
-                    Code::FoldRestriction,
-                    format!("a `fold` cannot read `{name}`"),
-                    span,
-                )
-                .with_hint(
-                    "a fold is a pure function of the log prefix, and a secret is not in the log, so rotating one would make this fold answer differently on a replay",
-                ));
-        }
         lower.b.at(span);
         Ok(lower.b.expr(Expr::Secret { name, optional }))
     }
 
     fn reveal_call(&mut self, lower: &mut Lower, span: Span) -> Result<ExprId, Diagnostic> {
+        // Before the gate, for the reason `secret_read` gives: a fold is the narrower
+        // answer, and `gate` answers for a fold as though it were the command it is
+        // spliced into.
+        self.not_in_fold("decrypt", span)?;
         self.gate(
             (
                 "only an effect crosses the decrypt boundary",
@@ -8040,7 +9356,6 @@ impl Parser {
             span,
         )?;
         self.arm_only("decrypt", "pass the revealed value in as a parameter", span)?;
-        self.not_in_fold("decrypt", span)?;
         self.expect_sym(Sym::LParen)?;
         let at = self.span_here();
         let value = self.expr(lower, None)?;
@@ -8718,6 +10033,11 @@ impl Parser {
         // terminal outcome is `fail`, so declaring one must not buy its way past that.
         match self.kind {
             Kind::Command | Kind::Guard => return None,
+            // Rule 4. The one capability that tells a fold and a guard apart, and the
+            // reason they do not overlap: a `fold` line at a call site is never an exit.
+            Kind::Fold => {
+                return Some("a fold computes a value, so it cannot refuse");
+            }
             Kind::Effect | Kind::EffectFn => {
                 return Some("an effect's terminal outcome is `fail`");
             }
@@ -9222,9 +10542,9 @@ impl Parser {
                     continue;
                 };
                 for (position, field) in def.fields.iter().enumerate() {
-                    // The subscript supplies the key, and a default is the zero the
-                    // author chose.
-                    if position == def.key || field.default.is_some() {
+                    // The subscript supplies every key column, and a default is the zero
+                    // the author chose.
+                    if def.keys.contains(&position) || field.default.is_some() {
                         continue;
                     }
                     if value::zero(&field.ty, defs).is_some() {
@@ -9274,26 +10594,52 @@ impl Parser {
                 let Some(event) = program.event(&handler.event) else {
                     continue;
                 };
-                let mut writes: Vec<(&Ident, &[(Ident, ExprId)])> = Vec::new();
+                // `keys` is empty for everything but a materializing `patch`, which
+                // fills each key column from the subscript: those are writes with a
+                // column of their own and the same two declarations behind them. An
+                // `update` never materializes, so its subscript stores nothing and only
+                // addresses a row that is already there.
+                //
+                // Borrowed rather than collected: this runs over every write statement
+                // of every handler on every `hek check`, whether or not any column has
+                // a bound.
+                let mut writes: Vec<Write<'_>> = Vec::new();
                 walk_stmts(&handler.body, &mut |stmt| match stmt {
-                    Stmt::Put { entity, fields, .. } | Stmt::Patch { entity, fields, .. } => {
-                        writes.push((entity, fields))
-                    }
+                    Stmt::Put { entity, fields, .. } => writes.push((entity, fields, &[])),
+                    Stmt::Patch {
+                        entity,
+                        keys,
+                        absent,
+                        fields,
+                        ..
+                    } => writes.push((
+                        entity,
+                        fields,
+                        match absent {
+                            Absent::Materialize => keys,
+                            Absent::Skip => &[],
+                        },
+                    )),
                     _ => {}
                 });
 
-                for (entity, fields) in writes {
+                for (entity, fields, keys) in writes {
                     let Some(def) = projector.entity(entity) else {
                         continue;
                     };
-                    for (column, value) in fields {
+                    let columns = fields.iter().map(|(column, value)| (column, *value)).chain(
+                        def.key_fields()
+                            .map(|field| &field.name)
+                            .zip(keys.iter().copied()),
+                    );
+                    for (column, value) in columns {
                         let Some(bound) = def.field(column).and_then(|field| field.max_len) else {
                             continue;
                         };
                         // Only a plain read of an event field. Anything computed is not
                         // two declarations disagreeing, and the runtime backstop keeps
                         // covering it.
-                        let Some(from) = loaded_field(handler, *value) else {
+                        let Some(from) = loaded_field(handler, value) else {
                             continue;
                         };
                         let Some(source) = event.field(from) else {
@@ -9320,7 +10666,7 @@ impl Parser {
                                 "this write narrows `{from}`: {} declares {declared} and `{entity}.{column}` is `@max({bound})`",
                                 event.path
                             ),
-                            handler.exprs.span(*value),
+                            handler.exprs.span(value),
                         )
                         .with_hint(format!(
                             "an over-length value is `invalid` at `emit`, so a projector meets one only when these two disagree, and it has no channel to report it; {fix}"
@@ -9467,6 +10813,114 @@ impl Parser {
             Some(module) => error.in_file(module),
             None => error,
         })
+    }
+
+    /// `docs/folds.md` rule 12: a fold that binds the envelope is query-only, so nothing
+    /// may fold it.
+    ///
+    /// Checked here rather than at the call site because a fold's signature carries no
+    /// body: pass C reads `fold Name(..) -> T` and the `as` is in an arm, so the answer
+    /// does not exist until every body is parsed. Before the splice, so the error is
+    /// about the read the author wrote rather than about a slot nothing filled.
+    fn check_query_only(&self, program: &Program) -> Result<(), Diagnostic> {
+        // Every place a named fold can be read: `docs/effects.md` rule 1 gives an arm no
+        // guard, so an arm's reads are its own and a guard's are reached through whatever
+        // names the guard.
+        let commands = program
+            .commands
+            .iter()
+            .map(|at| (&at.reads, &at.module, "a command"));
+        let guards = program
+            .guards
+            .iter()
+            .map(|at| (&at.reads, &at.module, "a guard"));
+        let arms = program.effects.iter().flat_map(|effect| {
+            effect
+                .arms
+                .iter()
+                .map(move |arm| (&arm.reads, &effect.module, "an effect"))
+        });
+
+        for (reads, module, holder) in commands.chain(guards).chain(arms) {
+            for call in reads {
+                let Some(fold) = program.fold(&call.fold) else {
+                    continue;
+                };
+                if !fold.query_only() {
+                    continue;
+                }
+                let related = Related::new(format!("`{}` binds it here", fold.name), fold.span);
+                let error = self
+                    .err(
+                        Code::FoldRestriction,
+                        format!(
+                            "`{}` binds the envelope (`as`), so it can be queried but not folded by {holder}",
+                            fold.name
+                        ),
+                        call.span,
+                    )
+                    .with_hint(
+                        "an event's append time is not a decision's to read: a test cannot pin it, and a backfilled event's is when it was imported rather than when it happened; fold a `Timestamp` the event declares, or read this one as a stored value",
+                    )
+                    .with_related(match &fold.module {
+                        Some(module) => related.in_file(module),
+                        None => related,
+                    });
+                return Err(match module {
+                    Some(module) => error.in_file(module),
+                    None => error,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Rule 9: one inline fold written the same way in two places.
+    ///
+    /// **The whole point is the append condition.** A fold declares the slice its caller
+    /// conflicts on, so two copies that fall out of step give two commands two different
+    /// boundaries for one question, and `docs/testing.md` §10 keeps the condition out of a
+    /// test on purpose. A port measured 167 byte-identical copies among 425 folds, and the
+    /// failure mode is a command deciding on a stale value and appending anyway.
+    ///
+    /// An error rather than a warning, because a rule about the append condition that an
+    /// author may ignore is not a rule. There is no reverse check: a named fold with one
+    /// caller is not a diagnostic (rule 9).
+    ///
+    /// Compared **as written**, including the accumulator's own name. That is what makes
+    /// the trigger free of false positives rather than nearly so: normalising the name
+    /// would equate `fold a: Bool = false on @x(..) { a } => a` with the same shape over a
+    /// field called `b`, which folds a different field of the same event. The cost is a
+    /// pair that differs only in its local name going unreported, which is the safe half
+    /// of the trade.
+    fn check_duplicate_folds(&self) -> Result<(), Diagnostic> {
+        for (index, fold) in self.inline_folds.iter().enumerate() {
+            let Some(first) = self.inline_folds[..index]
+                .iter()
+                .find(|other| other.written == fold.written)
+            else {
+                continue;
+            };
+            // The location of the first copy goes in the related line and not in the
+            // message, the way `declared_twice` and every other two-place diagnostic
+            // here does it: a message that carries one prints it twice in `hek check`
+            // and is the only one in the crate that does.
+            let error = self
+                .err(
+                    Code::DuplicateFold,
+                    "this fold is written the same way in two places; name it, so the two cannot drift apart",
+                    fold.span,
+                )
+                .with_hint(
+                    "a fold declares the slice its caller conflicts on, so two copies that fall out of step give two commands two different boundaries for one question, and no test can see it; declare it once with `fold <Name>(..) -> <T> = <seed> { .. }` and read it by name",
+                )
+                .with_related(self.elsewhere("first declared here", first.span, first.pos));
+            return Err(match &fold.module {
+                Some(module) => error.in_file(module),
+                None => error,
+            });
+        }
+        Ok(())
     }
 
     fn check_cycles(&self, program: &Program) -> Result<(), Diagnostic> {
@@ -9826,6 +11280,11 @@ fn collect<T>(
     }
 }
 
+/// One write statement as the `@max` invariant reads it: the entity, the columns the
+/// body names, and the key columns a materializing `patch` fills from its subscript.
+/// Empty for everything else, since nothing else stores a key.
+type Write<'a> = (&'a Ident, &'a [(Ident, ExprId)], &'a [ExprId]);
+
 /// The expressions one statement owns, not counting the bodies of a nested `if`, whose
 /// statements the caller walks separately.
 fn roots(stmt: &Stmt) -> Vec<ExprId> {
@@ -9836,12 +11295,12 @@ fn roots(stmt: &Stmt) -> Vec<ExprId> {
         Stmt::Emit { fields, .. } | Stmt::Put { fields, .. } => {
             fields.iter().map(|(_, id)| *id).collect()
         }
-        Stmt::Patch { key, fields, .. } => {
-            let mut ids = vec![*key];
+        Stmt::Patch { keys, fields, .. } => {
+            let mut ids = keys.clone();
             ids.extend(fields.iter().map(|(_, id)| *id));
             ids
         }
-        Stmt::Delete { key, .. } => vec![*key],
+        Stmt::Delete { keys, .. } => keys.clone(),
         Stmt::Fail { message, .. } | Stmt::Log { message } => vec![*message],
         Stmt::Erase { value, .. } | Stmt::Discard(value) => vec![*value],
         Stmt::Call { args, .. } => args.clone(),
@@ -9922,9 +11381,22 @@ fn upper_first(name: &str) -> String {
 /// a second spelling is a second thing to keep in step; every code in the two
 /// applications ported so far is already exactly this.
 fn refusal_code(name: &str) -> String {
+    snake_case(name)
+}
+
+/// A declared name in snake_case, which is how every name heklang derives rather than
+/// reads comes out: a refusal's code, and a stored fold's column (`src/tables.rs`).
+/// The derivation a refusal's code and a stored fold's column name both take.
+///
+/// **It breaks on any uppercase, not only ASCII**, because it lowercases any uppercase.
+/// Splitting on `is_ascii_uppercase` while lowercasing with Unicode made the derivation
+/// lossy exactly where the two disagree: `FÄb` and `Fäb` both gave `fäb`, so two folds
+/// derived one column and two refusals one code, which is the collision the naming rules
+/// on both are written to make impossible.
+pub(crate) fn snake_case(name: &str) -> String {
     let mut code = String::with_capacity(name.len() + 4);
     for (index, ch) in name.char_indices() {
-        if index > 0 && ch.is_ascii_uppercase() {
+        if index > 0 && ch.is_uppercase() {
             code.push('_');
         }
         code.extend(ch.to_lowercase());
@@ -9933,6 +11405,12 @@ fn refusal_code(name: &str) -> String {
 }
 
 /// The keywords a top-level declaration begins with.
+///
+/// `Keyword::Fold` is here and is also a statement keyword, which is safe for one reason:
+/// the two callers of [`Parser::at_item`] consult it only at brace depth 0, and an inline
+/// `fold` is always inside a declaration's braces. A declaration missing from this list is
+/// not an error at its own position, it goes missing from the program *silently*, which is
+/// what `a_const_above_a_fold_does_not_swallow_it` is for.
 fn starts_item(word: Keyword) -> bool {
     matches!(
         word,
@@ -9943,6 +11421,7 @@ fn starts_item(word: Keyword) -> bool {
             | Keyword::Event
             | Keyword::Command
             | Keyword::Guard
+            | Keyword::Fold
             | Keyword::Refusal
             | Keyword::Projector
             | Keyword::Effect

@@ -73,6 +73,9 @@ impl<'a> Printer<'a> {
             "function_declaration" => self.function(node),
             "command_declaration" => self.callable("command", node),
             "guard_definition" => self.callable("guard", node),
+            "fold_definition" => self.fold_definition(node),
+            "fold_body" => self.fold_body(node),
+            "fold_type" => self.fold_type(node),
             "parameters" | "arguments" | "annotation_arguments" => {
                 self.list("(", ")", false, &self.kids(node))
             }
@@ -92,11 +95,17 @@ impl<'a> Printer<'a> {
             "run_clause" => self.keyed("run", node),
             "project_clause" => self.keyed("project", node),
             "deliver_clause" => self.keyed("deliver", node),
+            "fold_clause" => self.keyed("fold", node),
+            // One word and no children: the action with nothing to name.
+            "fill_clause" => Doc::text("fill"),
             "erased_clause" => self.keyed("erased", node),
             "respond_clause" => self.respond(node),
             "expect_clause" => self.expect(node),
             "event_expectation" | "fixture_expectation" => self.spaced(node),
             "row_expectation" => self.row(node),
+            // `[a, b]`, which breaks like every other comma list and keeps a comment
+            // among the keys where it was written.
+            "subscript" => self.list("[", "]", false, &self.kids(node)),
 
             // -------------------------------------------------------- statements
             "block" => self.body(&self.kids(node)),
@@ -104,7 +113,8 @@ impl<'a> Printer<'a> {
             "fold_declaration" => self.fold(node),
             "fold_arm" => self.fold_arm(node),
             "slice_reference" => self.slice(node),
-            "filter" | "field_initializer" => self.optional_value(node),
+            "filter" => self.filter(node),
+            "field_initializer" => self.optional_value(node),
             "let_statement" => self.assignment("let", node),
             "if_statement" => self.if_statement(node),
             "for_statement" => self.keyed("for", node),
@@ -555,9 +565,10 @@ impl<'a> Printer<'a> {
             parts.push(Doc::text("no "));
         }
         parts.push(self.node(kids[0]));
-        parts.push(Doc::text("["));
+        // The subscript prints its own brackets and sits against the name with no space,
+        // so it goes through `node` like any other child rather than being assembled
+        // here. That is also what keeps a comment written among the keys inside them.
         parts.push(self.node(kids[1]));
-        parts.push(Doc::text("]"));
         for &kid in &kids[2..] {
             parts.push(Doc::text(" "));
             parts.push(self.node(kid));
@@ -600,7 +611,109 @@ impl<'a> Printer<'a> {
     }
 
     /// `fold x: T = seed` with its arms indented under it.
+    /// A named fold declaration: `fold N(p) -> [acc:] T = seed { arms }`.
+    ///
+    /// `callable` cannot serve, for the reason `refusal` gives: it indexes exactly three
+    /// children and the accumulator name here is optional, so the count varies. The arms
+    /// go through `body`, which makes them a sequence that always breaks and keeps the
+    /// author's blank lines, as a `projector`'s handlers are.
+    fn fold_definition(&self, node: Node<'a>) -> Doc<'a> {
+        // `parted` and not `headed_by`, because every child of this node is positional:
+        // the accumulator is optional, so the type and the seed are found by counting.
+        // `headed_by` leaves comments past its head *in* the list, and a comment anywhere
+        // in the header then shifts that count and the printer emits a different child in
+        // each slot. That deleted the return type and the seed outright and produced
+        // source that no longer parses, which `hek fmt` then wrote over the original.
+        //
+        // An arm's comment is unaffected either way: the arms are children of `fold_body`,
+        // so a comment against one is that node's and never reaches here.
+        let (leading, kids) = self.parted(node);
+        let body = kids[kids.len() - 1];
+        let middle = &kids[2..kids.len() - 1];
+        // `-> acc: T = seed` against `-> T = seed`: three children or two.
+        let (acc, ty, seed) = match middle.len() {
+            3 => (Some(middle[0]), middle[1], middle[2]),
+            _ => (None, middle[0], middle[1]),
+        };
+        let mut parts = vec![
+            Doc::text("fold "),
+            self.node(kids[0]),
+            self.node(kids[1]),
+            Doc::text(" -> "),
+        ];
+        if let Some(acc) = acc {
+            parts.push(self.node(acc));
+            parts.push(Doc::text(": "));
+        }
+        parts.push(self.node(ty));
+        parts.push(Doc::text(" = "));
+        parts.push(self.node(seed));
+        parts.push(Doc::text(" "));
+        parts.push(self.node(body));
+        Self::led(leading, Doc::concat(parts))
+    }
+
+    /// The braced arm run. A sequence, so it always breaks: a fold with one arm on one
+    /// line would read as the inline form, which is a different construct.
+    fn fold_body(&self, node: Node<'a>) -> Doc<'a> {
+        self.body(&self.kids(node))
+    }
+
+    /// `Sealed(T, Subject)`, or an ordinary type.
+    ///
+    /// The children are positional here too, so the comments come out first for the same
+    /// reason they do in `fold_definition`: one inside the parens shifted the count and
+    /// the subject was printed as the content type and then dropped. A type sits mid-line,
+    /// so they trail rather than lead.
+    fn fold_type(&self, node: Node<'a>) -> Doc<'a> {
+        let (trailing, kids) = self.split(node);
+        if kids.len() == 1 {
+            return self.trailed(&trailing, self.node(kids[0]));
+        }
+        // The `?` is an anonymous token, so it is not among the named children, and
+        // `has_token` is the question to ask: it looks at this node's own anonymous
+        // children only, so a `?` written *inside* the content type belongs to that
+        // `type` node and is not counted. Reading it off the last child was equally
+        // correct about that and wrong the moment a comment is the final child, which
+        // would silently drop a declared `?`.
+        let optional = self.has_token(node, "?");
+        self.trailed(
+            &trailing,
+            Doc::concat([
+                Doc::text("Sealed("),
+                self.node(kids[0]),
+                Doc::text(", "),
+                self.node(kids[1]),
+                Doc::text(")"),
+                match optional {
+                    true => Doc::text("?"),
+                    false => Doc::nil(),
+                },
+            ]),
+        )
+    }
+
     fn fold(&self, node: Node<'a>) -> Doc<'a> {
+        // The use form binds a local to a declared fold and has no type, seed or arms.
+        // `parted` again: three positional children, so a comment between any two of them
+        // shifts the count. `headed_by(node, 1)` dropped one written after the local
+        // outright, because nothing below printed the children it left in the list.
+        if node.child_by_field_name("fold").is_some() {
+            let (leading, kids) = self.parted(node);
+            return Self::led(
+                leading,
+                Doc::concat([
+                    Doc::text("fold "),
+                    self.node(kids[0]),
+                    Doc::text(" = "),
+                    self.node(kids[1]),
+                    Doc::text(" "),
+                    // The initializer list is a node of its own and prints its own braces,
+                    // so wrapping it in `list` again gives `Name{ { a, b } }`.
+                    self.node(kids[2]),
+                ]),
+            );
+        }
         let (leading, kids) = self.headed_by(node, 3);
         let mut parts = vec![
             Doc::text("fold "),
@@ -643,9 +756,54 @@ impl<'a> Printer<'a> {
     /// comment written against one filter up to the slice.
     fn slice(&self, node: Node<'a>) -> Doc<'a> {
         let (leading, kids) = self.headed_by(node, 1);
+        // `on @path as e (..)`: the binding is a named child exactly as the filters are,
+        // so what separates the two is where the `(` falls and not how many children came
+        // first. Counting them put the binding inside the parentheses as a filter of its
+        // own the moment a comment sat between the path and the `as`, and dropped the
+        // comment: `hek fmt` wrote out a slice that no longer parsed.
+        let mut cursor = node.walk();
+        let paren = node
+            .children(&mut cursor)
+            .find(|kid| !kid.is_named() && kid.kind() == "(")
+            .map_or(usize::MAX, |kid| kid.start_byte());
+        let (before, filters): (Vec<Node<'a>>, Vec<Node<'a>>) =
+            kids[1..].iter().partition(|kid| kid.start_byte() < paren);
+
+        // A line of its own for a comment and a space for the binding, which is what an
+        // `event_handler` does with the same two things in the same position.
+        let mut bound = Vec::new();
+        let mut fresh = false;
+        for kid in before {
+            match kid.kind() {
+                "comment" => {
+                    bound.push(Doc::Hardline);
+                    bound.push(Doc::text(self.text(kid)));
+                    fresh = true;
+                }
+                _ => {
+                    bound.push(match fresh {
+                        true => Doc::Hardline,
+                        false => Doc::text(" "),
+                    });
+                    bound.push(Doc::concat([
+                        Doc::text("as "),
+                        self.node(kid),
+                        Doc::text(" "),
+                    ]));
+                    fresh = false;
+                }
+            }
+        }
+        if fresh {
+            bound.push(Doc::Hardline);
+        }
         Self::led(
             leading,
-            Doc::concat([self.node(kids[0]), self.list("(", ")", false, &kids[1..])]),
+            Doc::concat([
+                self.node(kids[0]),
+                Doc::indent(Doc::concat(bound)),
+                self.list("(", ")", false, &filters),
+            ]),
         )
     }
 
@@ -700,9 +858,7 @@ impl<'a> Printer<'a> {
             Doc::text(keyword),
             Doc::text(" "),
             self.node(kids[0]),
-            Doc::text("["),
             self.node(kids[1]),
-            Doc::text("]"),
         ];
         for &kid in &kids[2..] {
             parts.push(Doc::text(" "));
@@ -1070,6 +1226,17 @@ impl<'a> Printer<'a> {
     /// and a field initializer, and writing `{ order_id }` is writing every name.
     fn optional_value(&self, node: Node<'a>) -> Doc<'a> {
         self.joined(node, ": ")
+    }
+
+    /// A filter's two forms, which differ only in the separator: `field: value` or the
+    /// bare shorthand, and `param == value` for the key part an arm writes
+    /// (`docs/folds.md` rule 13). Asked of the node rather than counted, because the
+    /// separator is an anonymous child and the named ones are the same either way.
+    fn filter(&self, node: Node<'a>) -> Doc<'a> {
+        match self.has_token(node, "==") {
+            true => self.joined(node, " == "),
+            false => self.joined(node, ": "),
+        }
     }
 
     /// Children separated by a single space, which is most of the language.

@@ -16,7 +16,9 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use heklang::{Diagnostic, Digest, Program, Severity, Span, TestOutcome, check_files, run_tests};
+use heklang::{
+    Diagnostic, Digest, EventPath, Program, Severity, Span, TestOutcome, check_files, run_tests,
+};
 
 /// Where a `= ` line wraps. Wide enough for a long sentence to stay one or two lines,
 /// narrow enough to read beside the source it is about.
@@ -26,7 +28,7 @@ const USAGE: &str = "\
 hek: check heklang sources, run their tests, format them and digest them
 
 usage:
-  hek [check|test|fmt|digest] [--boundaries] [--check]
+  hek [check|test|fmt|digest] [--boundaries] [--tables] [--check]
       [--packed|--hash|--json] [--tests] [path|-]
 
   check   parse every `.hk` file under `path` as one program
@@ -35,6 +37,7 @@ usage:
   digest  print what that program does, with everything else taken away
 
   --boundaries  print what each command guards, transitively
+  --tables      print the read model the named folds imply
   --check       with `fmt`, name what would change and write nothing
   --packed      with `digest`, print the canonical form the hash covers
   --hash        with `digest`, print only the hash
@@ -63,13 +66,14 @@ fn main() -> ExitCode {
 }
 
 /// `Ok(false)` is a program that was read fine and did not pass; `Err` is not being
-/// able to look at all. Same cut `docs/testing.md` rule 9 makes between a failed test
+/// able to look at all. Same cut `docs/testing.md` rule 10 makes between a failed test
 /// and an errored one, for the same reason.
 fn run() -> Result<bool, String> {
     let mut args = env::args().skip(1);
     let mut command = Command::Both;
     let mut root: Option<PathBuf> = None;
     let mut asked_for_boundaries = false;
+    let mut asked_for_tables = false;
     let mut checking = false;
     let mut reading_stdin = false;
     let mut view = View::Expanded;
@@ -83,6 +87,7 @@ fn run() -> Result<bool, String> {
                 return Ok(true);
             }
             "--boundaries" => asked_for_boundaries = true,
+            "--tables" => asked_for_tables = true,
             "--check" => checking = true,
             "--json" => {
                 view = View::Json;
@@ -198,6 +203,9 @@ fn run() -> Result<bool, String> {
     println!("  {}", counts(&program));
     if asked_for_boundaries {
         boundaries(&program);
+    }
+    if asked_for_tables {
+        tables(&program);
     }
 
     if command == Command::Check {
@@ -382,7 +390,7 @@ fn suite(program: &Program) -> bool {
 /// names it, so once guards compose the append condition is a closure rather than
 /// something a reader can take off the page. This is how to see it: two commands meant to
 /// conflict on the same events can be compared here, which is the one question
-/// `docs/testing.md` §8 deliberately keeps out of a test.
+/// `docs/testing.md` §10 deliberately keeps out of a test.
 ///
 /// **Asked for, not printed by default.** `check` is a pass/fail gate, and this is one
 /// line per command rather than a summary, so a 26-command program pays 26 lines on every
@@ -392,33 +400,135 @@ fn boundaries(program: &Program) {
     let named: Vec<&heklang::Command> = program
         .commands
         .iter()
-        .filter(|command| !command.calls.is_empty())
+        .filter(|command| !command.calls.is_empty() || !command.reads.is_empty())
         .collect();
     if named.is_empty() {
         return;
     }
     println!();
     for command in named {
-        let mut reached: Vec<String> = Vec::new();
-        for call in &command.calls {
-            through(program, &call.guard, &mut reached);
+        // Two lines rather than one list, because the two are different claims: a guard
+        // can refuse the command and a fold cannot, which is the one thing a reader of
+        // this listing wants to know that the names alone do not say.
+        let mut guarded: Vec<String> = Vec::new();
+        let mut read: Vec<String> = Vec::new();
+        // In the order they were written, which is what "first named first" below means
+        // and what the page a reader has open says. Walking the guards and then the reads
+        // put every fold reached *through* a guard ahead of one the command names itself,
+        // however the two were written. `inline::source_order` merges the same two lists
+        // the same way, and for the same reason.
+        let mut named: Vec<(_, Option<&str>, &str)> = command
+            .calls
+            .iter()
+            .map(|call| (call.span.start, Some(call.guard.as_str()), ""))
+            .chain(
+                command
+                    .reads
+                    .iter()
+                    .map(|call| (call.span.start, None, call.fold.as_str())),
+            )
+            .collect();
+        named.sort_by_key(|(at, _, _)| *at);
+        for (_, guard, fold) in named {
+            match guard {
+                Some(guard) => through(program, guard, &mut guarded, &mut read),
+                None => {
+                    push_once(fold, &mut read);
+                }
+            }
         }
-        println!("  {} guards {}", command.name, reached.join(", "));
+        if !guarded.is_empty() {
+            println!("  {} guards {}", command.name, guarded.join(", "));
+        }
+        if !read.is_empty() {
+            // Both lists start in the same column. `" guards "` is eight characters and
+            // `" reads "` is seven, so the continuation pads by one more than the name:
+            // counting them by eye put the second list one column left of the first.
+            let label = match guarded.is_empty() {
+                true => format!("  {} reads ", command.name),
+                false => format!("  {:width$}  reads ", "", width = command.name.len()),
+            };
+            println!("{label}{}", read.join(", "));
+        }
     }
 }
 
-/// A guard and everything it guards, first named first, each once however many paths
-/// reach it.
-fn through(program: &Program, name: &str, out: &mut Vec<String>) {
-    if out.iter().any(|seen| seen == name) {
+/// A guard and everything it reaches, first named first, each once however many paths
+/// reach it. A fold reached *through* a guard lands in `read`, because that is what it is:
+/// the guard is where the refusal lives and the fold is only a slice in the boundary.
+fn through(program: &Program, name: &str, guarded: &mut Vec<String>, read: &mut Vec<String>) {
+    if !push_once(name, guarded) {
         return;
     }
-    out.push(name.to_string());
     let Some(guard) = program.guard(name) else {
         return;
     };
     for call in &guard.calls {
-        through(program, &call.guard, out);
+        through(program, &call.guard, guarded, read);
+    }
+    for call in &guard.reads {
+        push_once(&call.fold, read);
+    }
+}
+
+/// Whether it was new. A command guarding one proposition through two paths names it once,
+/// which is `docs/guards.md` rule 5's "each one shown once".
+fn push_once(name: &str, out: &mut Vec<String>) -> bool {
+    if out.iter().any(|seen| seen == name) {
+        return false;
+    }
+    out.push(name.to_string());
+    true
+}
+
+/// The read model the named folds imply: one table per distinct key, one column per fold
+/// kept for it, and the folds that cannot be kept at all.
+///
+/// A fold says what a value is, which events change it and what it is keyed by, so the
+/// tables are derived rather than declared and this is the only place to read them off.
+/// `src/tables.rs` works them out; this prints them.
+///
+/// **Asked for, not printed by default**, for the reason [`boundaries`] is. And a listing
+/// rather than a diagnostic: a fold that cannot be kept is a perfectly good fold, since
+/// nothing yet says every fold has to be storable.
+fn tables(program: &Program) {
+    let layout = heklang::layout(program);
+    if layout.tables.is_empty() && layout.unstored.is_empty() {
+        return;
+    }
+    for table in &layout.tables {
+        let key = match table.key.is_empty() {
+            true => "no key".to_string(),
+            false => table
+                .key
+                .iter()
+                .map(|part| format!("{}: {}", part.name, part.ty))
+                .collect::<Vec<_>>()
+                .join(", "),
+        };
+        let n = table.columns.len();
+        let s = if n == 1 { "" } else { "s" };
+        println!("\n  TABLE {}  ({key})  {n} column{s}", table.name);
+        // One column, so the event lists start together however long the names are. The
+        // events are what a reader scans for, and a ragged left edge on them is the one
+        // thing that made the same listing hard to read before.
+        let width = table
+            .columns
+            .iter()
+            .map(|column| column.name.len() + column.ty.to_string().len() + 2)
+            .max()
+            .unwrap_or(0);
+        for column in &table.columns {
+            let named = format!("{}: {}", column.name, column.ty);
+            let events: Vec<String> = column.events.iter().map(EventPath::to_string).collect();
+            println!("    {named:width$}  <- {}", events.join(", "));
+        }
+    }
+    if !layout.unstored.is_empty() {
+        println!("\n  not stored, because no event supplies the key:");
+        for fold in &layout.unstored {
+            println!("    {}  ({})", fold.fold, fold.unmatched.join(", "));
+        }
     }
 }
 
@@ -433,6 +543,7 @@ fn counts(program: &Program) -> String {
     count(program.events.len(), "event", "events");
     count(program.commands.len(), "command", "commands");
     count(program.guards.len(), "guard", "guards");
+    count(program.folds.len(), "fold", "folds");
     count(program.refusals.len(), "refusal", "refusals");
     count(program.projectors.len(), "projector", "projectors");
     count(program.effects.len(), "effect", "effects");

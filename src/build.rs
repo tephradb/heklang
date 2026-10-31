@@ -3,10 +3,41 @@ use std::mem;
 
 use crate::ir::{
     Arm, BinOp, Bind, Command, Delivery, EnvBind, EnvField, EventPath, Expr, ExprId, Exprs, Filter,
-    FoldVar, Function, Guard, GuardCall, Handler, Ident, Literal, Number, Param, Slice, SliceId,
-    Slot, Span, Stage, Stmt, Type, UnOp, Update,
+    Fold, FoldCall, FoldVar, Function, Guard, GuardCall, Handler, Ident, Literal, Number, Param,
+    Slice, SliceId, Slot, Span, Stage, Stmt, Type, UnOp, Update,
 };
 use crate::scaled::Rounding;
+
+/// What a too-early read of a fold turned out to be reading, because the two have
+/// different fixes and only one of them has a seed.
+///
+/// An **accumulator** is a `fold n: T = seed` in the same stage, and a read of it before
+/// it folds answers with that seed. A **named** read is a `fold x = F { .. }`, whose
+/// destination the splice assigns *after* the stage: nothing seeds it, so a message about
+/// "its own seed" sent the author looking for one that does not exist.
+#[derive(Debug, Clone)]
+pub enum Read {
+    Accumulator(Ident),
+    Named(Ident),
+}
+
+impl Read {
+    pub fn name(&self) -> &str {
+        match self {
+            Read::Accumulator(name) | Read::Named(name) => name,
+        }
+    }
+
+    /// What reading it too early actually answers with.
+    pub fn answers(&self) -> String {
+        match self {
+            Read::Accumulator(name) => {
+                format!("this reads `{name}`'s own seed rather than what it folds to")
+            }
+            Read::Named(name) => format!("this reads `{name}` before it has folded"),
+        }
+    }
+}
 
 pub struct Builder {
     name: Ident,
@@ -32,6 +63,22 @@ pub struct Builder {
     /// The slots a branch has proved present. A load of one lowers to an `Unwrap`.
     narrowed: HashSet<Slot>,
     calls: Vec<GuardCall>,
+    reads: Vec<FoldCall>,
+    /// The local each named read binds, by slot, so a diagnostic can name one. A read's
+    /// destination is pending like a `fold`'s accumulator but is not a [`FoldVar`], so
+    /// `fold_of` cannot find it and `fold_read` would otherwise report nothing.
+    read_names: Vec<(Slot, Ident)>,
+    /// Whether the open stage has named a guard or a fold. Neither declares its slices
+    /// here: both arrive at splice time, so without this the stage looks empty and a
+    /// statement written *below* one lands in `pre`, which runs before the stage folds.
+    ///
+    /// That is `docs/guards.md` rule 3's first sentence, which says the guards run "each
+    /// before the statements below them". It was true of a guard that also declared a
+    /// slice inline and false of one that did not: a bare `return` under `guard G { .. }`
+    /// answered before `G` decided, and the guard was skipped with nothing reported. For a
+    /// fold the same gap was sharper still, because the statement below a read is usually
+    /// the one that uses it, and it read a slot the splice assigns afterwards.
+    named_here: bool,
 }
 
 impl Builder {
@@ -53,6 +100,9 @@ impl Builder {
             now: None,
             narrowed: HashSet::new(),
             calls: Vec::new(),
+            reads: Vec::new(),
+            read_names: Vec::new(),
+            named_here: false,
         }
     }
 
@@ -123,6 +173,13 @@ impl Builder {
             slot,
         });
         slot
+    }
+
+    /// What has been declared, for a position that has to resolve a **parameter** rather
+    /// than any name in scope: `docs/folds.md` rule 13's `param == value` names one, and
+    /// `lookup` would answer for a `let` or the accumulator just as readily.
+    pub fn params(&self) -> &[Param] {
+        &self.params
     }
 
     pub fn opt_param(&mut self, name: &str, inner: Type) -> Slot {
@@ -222,8 +279,8 @@ impl Builder {
             .iter()
             .flat_map(|slice| &slice.filters)
             .find_map(|filter| {
-                self.reads_pending(filter.value)
-                    .then(|| (filter.field.clone(), self.exprs.span(filter.value)))
+                self.reads_pending(filter.value())
+                    .then(|| (filter.name().clone(), self.exprs.span(filter.value())))
             })
     }
 
@@ -234,14 +291,67 @@ impl Builder {
         self.unset_read(value).is_some()
     }
 
+    /// The first slot an expression loads, with the span to point at.
+    ///
+    /// `docs/folds.md` rule 13's right side asks it. A key conjunct has to be computable
+    /// by whatever **writes** the row, which holds an event and the key it is writing and
+    /// no frame at all, so a value reading any slot makes the key depend on the key.
+    /// `kind == kind` is the degenerate case and it is a tautology; `kind == order_id` is
+    /// the same hole with a value that is not.
+    pub fn slot_read(&self, value: ExprId) -> Option<(Slot, Span)> {
+        let mut stack = vec![value];
+        while let Some(id) = stack.pop() {
+            let Some(expr) = self.exprs.get(id) else {
+                continue;
+            };
+            if let Expr::Load(slot) = expr {
+                return Some((*slot, self.exprs.span(id)));
+            }
+            stack.extend(crate::parse::children(expr));
+        }
+        None
+    }
+
+    /// The name a slot was declared under, for a diagnostic about one. A parameter or an
+    /// accumulator, which between them are everything a fold's arm can reach.
+    pub fn slot_name(&self, slot: Slot) -> Option<&str> {
+        self.params
+            .iter()
+            .find(|param| param.slot == slot)
+            .map(|param| param.name.as_str())
+            .or_else(|| self.fold_of(slot).map(|var| var.name.as_str()))
+    }
+
+    /// Whether anything in this declaration loads `slot`. A named fold's accumulator asks
+    /// it, for rule 3: a name no arm reads is a second spelling of the declaration's own
+    /// name, so there is one legal form and this is what decides which it is.
+    ///
+    /// The whole arena rather than the arms alone, because `Expr::Load` is the only node
+    /// carrying a slot and a seed cannot load the accumulator it seeds: `fold_read`
+    /// already refuses that, and with a sharper message than this one would give.
+    pub fn reads_slot(&self, slot: Slot) -> bool {
+        self.exprs
+            .entries()
+            .any(|(expr, _)| matches!(expr, Expr::Load(found) if *found == slot))
+    }
+
     /// The unfolded `fold` an expression reads, with the span of the read. A seed asks
     /// this, because a seed is evaluated before its own stage folds and so sees another
     /// `fold`'s seed rather than what it folds to: an answer that is wrong rather than
     /// late. A `fold` an earlier stage folded is not one of these.
-    pub fn fold_read(&self, value: ExprId) -> Option<(Ident, Span)> {
+    pub fn fold_read(&self, value: ExprId) -> Option<(Read, Span)> {
         let (slot, at) = self.unset_read(value)?;
-        let var = self.fold_of(slot)?;
-        Some((var.name.clone(), self.exprs.span(at)))
+        let read = match self.fold_of(slot) {
+            Some(var) => Read::Accumulator(var.name.clone()),
+            // A named read's destination, which is pending but is no `FoldVar`.
+            None => Read::Named(
+                self.read_names
+                    .iter()
+                    .find(|(found, _)| *found == slot)
+                    .map(|(_, name)| name.clone())?,
+            ),
+        };
+        Some((read, self.exprs.span(at)))
     }
 
     /// The first read of a `fold` the open stage declares, as the slot and the load
@@ -424,7 +534,7 @@ impl Builder {
     /// has none, below them once it has. This is the whole of what makes a stage a
     /// stage, so nothing else may push onto `pre` or `post`.
     pub fn stmt(&mut self, stmt: Stmt) {
-        if self.open.slices.is_empty() && self.open.folds.is_empty() {
+        if self.open.slices.is_empty() && self.open.folds.is_empty() && !self.named_here {
             self.open.pre.push(stmt);
         } else {
             self.open.post.push(stmt);
@@ -446,6 +556,8 @@ impl Builder {
         }
         self.stages.push(mem::take(&mut self.open));
         self.pending.clear();
+        self.read_names.clear();
+        self.named_here = false;
     }
 
     /// Closes the open stage behind the others. Every finisher starts here, so a
@@ -471,6 +583,7 @@ impl Builder {
             now: self.now,
             stages: self.stages,
             calls: self.calls,
+            reads: self.reads,
         }
     }
 
@@ -488,6 +601,26 @@ impl Builder {
             exprs: self.exprs,
             stage: self.stages.pop().unwrap_or_default(),
             calls: self.calls,
+            reads: self.reads,
+            span,
+        }
+    }
+
+    /// A guard's shape plus the accumulator's slot and a return type, and minus any way
+    /// to refuse. One stage for the reason a guard has one. See `docs/folds.md`.
+    pub fn finish_fold(mut self, ret: Type, slot: Slot, span: Span) -> Fold {
+        self.seal();
+        debug_assert_eq!(self.stages.len(), 1, "a fold is one stage");
+        Fold {
+            name: self.name,
+            module: self.module,
+            params: self.params,
+            ret,
+            slot,
+            frame: self.frame as usize,
+            exprs: self.exprs,
+            stage: self.stages.pop().unwrap_or_default(),
+            envelope: self.envelope,
             span,
         }
     }
@@ -503,15 +636,53 @@ impl Builder {
             at_fold: self.open.folds.len(),
             span,
         });
+        self.named_here = true;
+    }
+
+    /// One `fold local = Name { args }`, recorded the same way. `dest` is the caller's
+    /// local, which the splice assigns the callee's accumulator into.
+    pub fn fold_call(
+        &mut self,
+        fold: &str,
+        local: &str,
+        args: Vec<(Ident, ExprId)>,
+        dest: Slot,
+        span: Span,
+    ) {
+        self.reads.push(FoldCall {
+            fold: fold.into(),
+            args,
+            dest,
+            at_stage: self.stages.len(),
+            at_slice: self.open.slices.len(),
+            at_fold: self.open.folds.len(),
+            span,
+        });
+        // Pending for exactly the reason an accumulator is: the splice assigns this in the
+        // stage's second half, so anything resolved in the first half -- another read's
+        // argument, a guard's argument, a seed, a filter -- would read it unset. Without
+        // this, all four passed `hek check` and died at run time with "slot read before it
+        // was set", which is the one thing a checker must not allow.
+        self.pending.insert(dest);
+        self.read_names.push((dest, local.into()));
+        self.named_here = true;
     }
 
     /// Whether anything has been folded yet, in any stage. A guard that folds nothing
     /// is a `fn`.
+    ///
+    /// A named guard or a named fold counts, even though neither has contributed a slice
+    /// yet: both bring one at splice time, so a guard whose whole body is
+    /// `fold ok = SomeFold { .. }` and a refusal does read the log. Checking the slices
+    /// alone called that a `fn` and refused the shape `docs/folds.md` rule 4 recommends.
     pub fn folds_nothing(&self) -> bool {
-        self.stages
-            .iter()
-            .chain([&self.open])
-            .all(|stage| stage.slices.is_empty())
+        self.calls.is_empty()
+            && self.reads.is_empty()
+            && self
+                .stages
+                .iter()
+                .chain([&self.open])
+                .all(|stage| stage.slices.is_empty())
     }
 }
 
@@ -555,9 +726,12 @@ impl Builder {
 
     /// An expression lifted into the optional of `inner`, which is `Literal::Some` for a
     /// value the parser had not already resolved. Named for the node rather than for
-    /// `none` above it, because it is not that function's pair: `Expr::Wrap` is only ever
-    /// an operand of the comparison that made it, and `Parser::lift` is the only caller
-    /// that keeps it one. See `docs/optionals.md`.
+    /// `none` above it, because it is not that function's pair.
+    ///
+    /// Its two callers are `Parser::lift` and `Parser::lifted`, and each keeps the node
+    /// out of receiver and root position: the first makes it an operand of the comparison
+    /// that made it, the second the value of a spliced call's parameter assignment. See
+    /// `Expr::Wrap` and `docs/optionals.md`.
     pub fn wrap(&mut self, value: ExprId, inner: Type) -> ExprId {
         self.expr(Expr::Wrap { value, inner })
     }
@@ -594,6 +768,7 @@ impl Builder {
             exprs: self.exprs,
             now: self.now,
             stages: self.stages,
+            reads: self.reads,
             span,
         }
     }

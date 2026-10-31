@@ -312,6 +312,8 @@ pub struct Program {
     pub commands: Vec<Command>,
     /// Named propositions, in declaration order. See `docs/guards.md`.
     pub guards: Vec<Guard>,
+    /// Named folds, in declaration order. See `docs/folds.md`.
+    pub folds: Vec<Fold>,
     /// Named refusals, in declaration order. See `docs/refusals.md`.
     pub refusals: Vec<RefusalDef>,
     pub projectors: Vec<Projector>,
@@ -342,6 +344,10 @@ impl Program {
 
     pub fn guard(&self, name: &str) -> Option<&Guard> {
         self.guards.iter().find(|guard| guard.name == name)
+    }
+
+    pub fn fold(&self, name: &str) -> Option<&Fold> {
+        self.folds.iter().find(|fold| fold.name == name)
     }
 
     pub fn refusal(&self, name: &str) -> Option<&RefusalDef> {
@@ -695,7 +701,14 @@ impl EnumDef {
 pub struct EntityDef {
     pub name: Ident,
     pub fields: Vec<EntityField>,
-    pub key: usize,
+    /// The columns marked `@key`, as positions into `fields`, **in written order**: a
+    /// compound key is a sequence, so `(shop_id, period)` and `(period, shop_id)` are
+    /// two different keys. Never empty, because an entity with no `@key` is rejected.
+    ///
+    /// Written order rather than declaration order, for the reason `Arm::keys` keeps it
+    /// (`docs/effects.md` rule 15): the order decides which prefixes the key can be
+    /// filtered and paged on, exactly as a compound index's column order does.
+    pub keys: Vec<usize>,
     pub indexes: Vec<Index>,
 }
 
@@ -704,8 +717,16 @@ impl EntityDef {
         self.fields.iter().find(|field| field.name == name)
     }
 
-    pub fn key_field(&self) -> &EntityField {
-        &self.fields[self.key]
+    /// The key columns, in key order.
+    pub fn key_fields(&self) -> impl Iterator<Item = &EntityField> {
+        self.keys.iter().map(|&at| &self.fields[at])
+    }
+
+    /// Whether this column is part of the key, which is what makes the subscript its
+    /// only writer: `put` fills it like any other column, and `patch`/`update` may
+    /// not, because the subscript has already said it.
+    pub fn is_key(&self, name: &str) -> bool {
+        self.key_fields().any(|field| field.name == name)
     }
 }
 
@@ -864,6 +885,10 @@ pub struct Arm {
     /// position rather than to the head (`docs/effects.md` rule 3), so a second stage
     /// reads the same prefix the first did and there is no condition to build.
     pub stages: Vec<Stage>,
+    /// The named folds this arm reads. An arm has no `guard` (`docs/effects.md` rule 1)
+    /// so there is no call list beside this one, but it folds exactly as a command does
+    /// and 178 of the 425 folds in the port that motivated `docs/folds.md` are in one.
+    pub reads: Vec<FoldCall>,
     pub span: Span,
 }
 
@@ -884,6 +909,11 @@ pub struct Command {
     /// The guards this command names, in the order written. Kept after they are spliced
     /// in, so tooling can say what a command guards without re-deriving it.
     pub calls: Vec<GuardCall>,
+    /// The named folds this command reads, in the order written. Kept for the same
+    /// reason the guards are: `hek check --boundaries` is the only place a command's
+    /// whole read set is nameable, and after the splice the IR no longer says which
+    /// slices came from where.
+    pub reads: Vec<FoldCall>,
 }
 
 /// A named proposition about the log: folds, and one refusal when they do not hold.
@@ -902,8 +932,73 @@ pub struct Guard {
     pub stage: Stage,
     /// Its own guards, spliced into it before it is spliced anywhere.
     pub calls: Vec<GuardCall>,
+    /// The named folds it reads, spliced in the same way.
+    pub reads: Vec<FoldCall>,
     /// Where the guard is declared, so the cycle check can point at one. It runs after
     /// every pass, by which time the cursor is at the end of the last module.
+    pub span: Span,
+}
+
+/// A named fold: a slice of the log and the value it folds to. A guard's body with no
+/// refusal and one accumulator, which is what lets it hand a value back where a guard
+/// cannot. See `docs/folds.md`.
+#[derive(Debug, Clone)]
+pub struct Fold {
+    pub name: Ident,
+    pub module: Option<Ident>,
+    pub params: Vec<Param>,
+    /// The declared return type. Explicit because the splice runs after parsing, so a
+    /// caller's body is lowered before this body exists and the parser needs the type to
+    /// give the caller's local one. The same reason a `fn` declares its return type.
+    pub ret: Type,
+    /// The accumulator's slot, which is what a caller's local is assigned from. The
+    /// accumulator's *name* is not kept: it is written only when an arm reads it
+    /// (`docs/folds.md` rule 3) and is invisible outside this body either way.
+    pub slot: Slot,
+    pub frame: usize,
+    pub exprs: Exprs,
+    /// One stage, because a fold is one read, for the reason a guard is.
+    pub stage: Stage,
+    /// The envelope fields the arms bind with `as`, deduplicated, or empty for a fold
+    /// that binds none. One list for the whole fold rather than one per arm: the slots
+    /// are filled from the event being folded, so every arm sees the same ones and the
+    /// arms that do not read them do not care.
+    ///
+    /// **Non-empty makes the fold query-only**, which is what [`Fold::query_only`] is
+    /// for. See `docs/folds.md` rule 12.
+    pub envelope: Vec<EnvBind>,
+    pub span: Span,
+}
+
+impl Fold {
+    /// Whether this fold may be stored and queried but not folded by a command.
+    ///
+    /// An event's append time is not a thing a decision may read: a backfilled event's
+    /// is when it was imported rather than when it happened, so a decision over it is
+    /// wrong about the world and nothing in the event says so. A read model is reporting
+    /// what the log holds rather than deciding on it, so the envelope is open to a fold
+    /// that only ever feeds one.
+    ///
+    /// A test may still read one, through the `fold` action: it runs no decision, and
+    /// the harness's clock is exactly predictable (`docs/testing.md` section 8).
+    pub fn query_only(&self) -> bool {
+        !self.envelope.is_empty()
+    }
+}
+
+/// One `fold local = Name { args }`. The arguments are expressions in the *caller's*
+/// arena, for the reason a [`GuardCall`]'s are.
+#[derive(Debug, Clone)]
+pub struct FoldCall {
+    pub fold: Ident,
+    pub args: Vec<(Ident, ExprId)>,
+    /// The caller's local, assigned from the callee's accumulator once the splice has
+    /// shifted it. This one field is the whole difference from a [`GuardCall`]: a guard
+    /// discards what it folded, and a fold hands it back.
+    pub dest: Slot,
+    pub at_stage: usize,
+    pub at_slice: usize,
+    pub at_fold: usize,
     pub span: Span,
 }
 
@@ -979,17 +1074,58 @@ pub struct Slice {
     pub updates: Vec<Update>,
 }
 
+/// One conjunct of a slice. Both forms resolve **once**, in the frame of whatever reads
+/// the fold, before any event is folded.
 #[derive(Debug, Clone)]
-pub struct Filter {
-    pub field: Ident,
-    pub value: ExprId,
+pub enum Filter {
+    /// `field: value`, or `(field)` for the shorthand: the event's `field` equals
+    /// `value`. This is what reaches a host as a [`crate::host::Predicate`] pair.
+    Field { field: Ident, value: ExprId },
+    /// `param == value`: the fold's parameter equals `value`, which is the key part this
+    /// arm writes. See `docs/folds.md` rule 13.
+    ///
+    /// **It is not a predicate on the event**, so it has no representation in a
+    /// `Predicate` and a host never sees it. `param` is not a field of the event, often
+    /// not a field of any event, and asking a store for one would make it answer `false`
+    /// for every record. What it decides is whether the slice participates at all: the
+    /// conjunct is resolved once against the argument the caller passed, and a slice
+    /// whose conjunct fails folds nothing and joins no append condition.
+    ///
+    /// `slot` is the parameter's, carried because [`crate::interp`]'s `resolve` has only
+    /// the slices and no [`Fold`] to look a name up in. The splice shifts it the way an
+    /// [`Update`]'s is shifted, and `ty` rides along for the reason an `Update`'s does:
+    /// the value is fitted to it, and the declaration is not in reach at that point.
+    Key {
+        param: Ident,
+        slot: Slot,
+        ty: Type,
+        value: ExprId,
+    },
 }
 
 impl Filter {
     pub fn new(field: impl Into<Ident>, value: ExprId) -> Self {
-        Self {
+        Self::Field {
             field: field.into(),
             value,
+        }
+    }
+
+    /// The expression the conjunct compares against, which both forms have and which is
+    /// resolved the same way. Named rather than matched at each site, because what the
+    /// splice shifts and what `filter_past_fold` inspects is the same thing either way.
+    pub fn value(&self) -> ExprId {
+        match self {
+            Filter::Field { value, .. } | Filter::Key { value, .. } => *value,
+        }
+    }
+
+    /// The name on the left, for a diagnostic. A field of the event, or a parameter of
+    /// the fold, and a message that says which belongs to the site rather than here.
+    pub fn name(&self) -> &Ident {
+        match self {
+            Filter::Field { field, .. } => field,
+            Filter::Key { param, .. } => param,
         }
     }
 }
@@ -1144,17 +1280,22 @@ pub enum Expr {
     /// nothing else: no source token spells it, so an absent value here is malformed
     /// IR rather than a runtime case. See `docs/optionals.md`.
     Unwrap(ExprId),
-    /// The bare side of an `==` or `!=` whose other side is a `T?`, lifted to the
-    /// optional it is being compared against. The mirror of `Unwrap`, and synthesised by
-    /// the comparison and by nothing else: no source token spells it, and it is an
-    /// operand of the `Binary` built in the same breath, never a receiver or a root. So
-    /// what runs is the `Opt` against `Opt` the interpreter already had, and its type
-    /// test stays exact.
+    /// A bare value lifted to the optional it has to fill. The mirror of `Unwrap`, and
+    /// synthesised rather than written: no source token spells it.
+    ///
+    /// **Two synthesisers, and both put it where it cannot be a receiver or a root.**
+    /// `Parser::lift` builds it for the bare side of an `==` or `!=` whose other side is
+    /// a `T?`, as an operand of the `Binary` built in the same breath, so what runs is
+    /// the `Opt` against `Opt` the interpreter already had and its type test stays exact.
+    /// `Parser::lifted` builds it for an argument of a **spliced** call, a `guard` or a
+    /// named `fold`, whose parameter declares the optional: the splice turns that
+    /// argument into a `Stmt::Assign`, which carries no declared type, so it is the one
+    /// declared position with nothing downstream to coerce it.
     ///
     /// `inner` is the type it is an optional **of**, taken from the static type the
-    /// comparison just checked rather than from the value, for the reason `Comp` carries
-    /// one: an empty comprehension holds a `List(Json)` at run time and the comparison
-    /// was written against what it declared. See `docs/optionals.md`.
+    /// parser just checked rather than from the value, for the reason `Comp` carries one:
+    /// an empty comprehension holds a `List(Json)` at run time and the comparison was
+    /// written against what it declared. See `docs/optionals.md`.
     Wrap {
         value: ExprId,
         inner: Type,
@@ -1438,7 +1579,9 @@ pub enum Stmt {
     /// loads, rule 9's subject propagation and the `@max` check, treats them alike.
     Patch {
         entity: Ident,
-        key: ExprId,
+        /// One expression per key column, in key order. Its length is the entity's key
+        /// arity, which the parser checks, so a reader may zip the two.
+        keys: Vec<ExprId>,
         absent: Absent,
         loads: Vec<Bind>,
         fields: Vec<(Ident, ExprId)>,
@@ -1446,7 +1589,7 @@ pub enum Stmt {
     },
     Delete {
         entity: Ident,
-        key: ExprId,
+        keys: Vec<ExprId>,
     },
     /// Rule 4: the author's terminal outcome, and the only one.
     Fail {
@@ -1654,6 +1797,27 @@ pub enum Action {
         effect: Ident,
         span: Span,
     },
+    /// `fold Name { args }`: fold a named fold over the whole log and hand its value
+    /// back.
+    ///
+    /// The only action that runs no handler. A read model is a named fold kept for every
+    /// key (see [`crate::tables`]), and this is how a test pins one of those values. It
+    /// is written as a command reads a fold, minus the binding.
+    Fold {
+        fold: Ident,
+        args: Vec<(Ident, ExprId)>,
+        span: Span,
+    },
+    /// `fill`: follow the whole given log into the derived read model, and assert rows of
+    /// it.
+    ///
+    /// Takes no name because nothing declares what it fills. A read model is a named fold
+    /// kept for every key, so [`crate::tables::layout`] derives the whole of it from the
+    /// program's folds and there is one of them. That is the difference from `project`,
+    /// which names one projector out of several.
+    Fill {
+        span: Span,
+    },
 }
 
 /// Rules 5 to 7. Which variants may appear is decided by the action, at parse time.
@@ -1683,13 +1847,13 @@ pub enum Expect {
     /// carried through untouched by the handler under test.
     Row {
         entity: Ident,
-        key: ExprId,
+        keys: Vec<ExprId>,
         fields: Vec<(Ident, ExprId)>,
         span: Span,
     },
     NoRow {
         entity: Ident,
-        key: ExprId,
+        keys: Vec<ExprId>,
         span: Span,
     },
     Http {
@@ -1717,6 +1881,15 @@ pub enum Expect {
         span: Span,
     },
     Skipped {
+        span: Span,
+    },
+    /// `expect <value>` under a `fold` action: the value the fold folded to.
+    ///
+    /// A bare value is safe only because the action gates it. Under `run`, `project` and
+    /// `deliver` this variant is unreachable, which is what keeps a free-standing
+    /// `assert <expr>` out of the language.
+    Folded {
+        value: ExprId,
         span: Span,
     },
 }

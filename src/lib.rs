@@ -9,6 +9,7 @@ pub mod ir;
 pub mod lex;
 pub mod parse;
 pub mod scaled;
+pub mod tables;
 pub mod testing;
 pub mod types;
 pub mod value;
@@ -18,21 +19,25 @@ pub use diagnostic::{Code, Diagnostic, Related, Severity};
 pub use digest::{Digest, Entry, Hash, Kind, Sexp, SexpError};
 pub use harness::{Harness, Journal, Keyring, Models, Reply, Sandbox};
 pub use host::{
-    AppendCondition, Attempt, Calls, Clock, Host, Http, Keys, Log, Parts, Predicate, Query,
-    Recorded, Request, Rows, Secrets,
+    AppendCondition, Attempt, Calls, Clock, Columns, Host, Http, Keys, Log, Parts, Predicate,
+    Query, Recorded, Request, Rows, Secrets,
 };
 pub use interp::{
-    Counts, Effectful, Error, ErrorKind, Execution, Interpreter, Invocation, Outcome, Projection,
-    Row, Store, partition_key,
+    Cells, Counts, Effectful, Error, ErrorKind, Execution, Interpreter, Invocation, Outcome,
+    Projection, Row, Store, Tables, partition_key,
 };
 pub use ir::{
     Absent, Action, Arm, BinOp, Bind, Builtin, Command, ConstDef, Delivery, Effect, EntityDef,
     EntityField, EnumDef, EnvBind, EnvField, EventDef, EventPath, Expr, ExprId, Exprs, FieldDef,
-    Filter, FoldVar, Function, Guard, GuardCall, Handler, Ident, Index, Iter, Literal, MessagePart,
-    Number, NumberError, Param, Pos, Program, Projector, RecordDef, RecordField, RefusalDef,
-    RefusalParam, Return, SecretDef, Slice, SliceId, Slot, Span, Stage, Stmt, Type, UnOp, Update,
+    Filter, Fold, FoldCall, FoldVar, Function, Guard, GuardCall, Handler, Ident, Index, Iter,
+    Literal, MessagePart, Number, NumberError, Param, Pos, Program, Projector, RecordDef,
+    RecordField, RefusalDef, RefusalParam, Return, SecretDef, Slice, SliceId, Slot, Span, Stage,
+    Stmt, Type, UnOp, Update,
 };
 pub use parse::{check_files, parse, parse_files};
+pub use tables::{
+    ArmMatch, Column, ColumnArm, KeyPart, Layout, Table, Unstored, fixed, layout, part_names,
+};
 pub use testing::{TestOutcome, TestResult, World, run_tests, run_tests_in};
 pub use value::{Defs, Event, Invoked, Json, Key, Mismatch, Record, Value};
 

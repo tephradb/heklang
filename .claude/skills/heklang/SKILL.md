@@ -6,13 +6,16 @@ description: Write, review and debug heklang (.hk) modules, the total event-sour
 # heklang
 
 heklang is a small, **total** language for event-sourced application logic, and the module
-language for [hekla](https://git.tqwewe.com/tephra/hekla). Five declaration kinds do the work:
+language for [hekla](https://git.tqwewe.com/tephra/hekla). Six declaration kinds do the work:
 
 - a **command** replays the history its decision depends on and appends events;
 - a **projector** consumes events into a read model;
 - an **effect** reacts to appended events with durable side effects, and is the only kind that
   reaches the network;
 - a **guard** is a named proposition about the log that several commands share;
+- a **fold** is a named slice of the log and the value it folds to, read by name by several
+  commands, guards and effect arms, and **also the read model**: one table per key signature, a row
+  per key, a column per fold;
 - a **refusal** is a named reason one said no.
 
 **The restrictions are the point.** A command cannot call out, read a clock in a fold, or decrypt.
@@ -33,7 +36,8 @@ hek check path/      # parse every .hk file under path as one program
 hek test  path/      # the same, then run every `test` declaration
 hek                  # both, on the current directory
 hek fmt   path/      # rewrite canonically; --check makes it a gate
-hek check --boundaries   # one line per command naming what it guards, transitively
+hek check --boundaries   # per command, what it guards and what it reads, transitively
+hek check --tables       # the read model the program's named folds imply
 hek digest --hash path/  # a hash of what the program does, for "did this meaningfully change?"
 ```
 
@@ -60,7 +64,8 @@ the readable one.
 
 Every `.hk` file under the path is one program. There is no import syntax, no manifest, no header
 item, and **declaration order does not matter** anywhere, across files or within one. Event paths,
-command, projector, effect, guard, refusal, record, enum, const, secret, `fn` and test names are all
+command, projector, effect, guard, fold, refusal, record, enum, const, secret, `fn` and test
+names are all
 global.
 A module name is a label for diagnostics, not a namespace.
 
@@ -76,6 +81,7 @@ Directories beginning with `.` and any `target` directory are skipped.
 | record a fact that happened | `event` |
 | decide from history whether a fact may be recorded, then record it | `command` |
 | share one proposition-plus-refusal across commands | `guard` |
+| share one folded **value** across commands, guards or effect arms | `fold` at module scope |
 | name a reason a command refuses | `refusal` |
 | maintain a queryable shape from the log | `projector` |
 | call an HTTP service, invoke a command, or crypto-shred, in reaction to an event | `effect` |
@@ -92,6 +98,7 @@ Directories beginning with `.` and any `target` directory are skipped.
 | | command | guard | projector | effect arm | effect-local `fn` | module `fn` | fold arm |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `fold` / `guard` decls | yes | yes (one read) | no | yes | no | no | n/a |
+| `fold x = Name { .. }` | yes | yes | no | yes | no | no | n/a |
 | `emit` | yes | no | no | no | no | no | no |
 | `put`/`patch`/`update`/`delete` | no | no | yes | no | no | no | no |
 | `http.*`, `invoke` | no | no | no | yes | yes | no | no |
@@ -244,7 +251,8 @@ Annotations, exhaustively: an **event field** takes `@subject(field)` (naming a 
 type is a declared subject; the annotated field may be **any declared type**, so a record, a list or
 a map seals whole and `reveal` hands the record back), `@max(n)`, `@absent(<literal>)` and
 `@no_index`; an **entity field** takes `@key`, `@index` and `@max(n)`, plus `= <literal>` for a
-default and an entity-level `index (a, b)`; a **record field** takes `@max(n)` and
+default and an entity-level `index (a, b)`. `@key` may be on **several** columns, and the order they
+are written in is the key's order; a **record field** takes `@max(n)` and
 `@absent(<literal>)`; an **enum variant** takes `@default`; an **effect arm's trigger destructure**
 takes `@key`. `@max` applies to `String` and `String?` and nothing else. **`@max` never truncates on
 its own**: `text.truncate(n)` is how a value from outside is made to satisfy one, written last in its
@@ -284,6 +292,7 @@ for key, value in map { .. }            // or index, item over a list
 return / return <expr> / reject Name / reject Name { field } / invalid "msg"
 emit @path { field, other: value }
 put Entity { .. } / patch Entity[key] { .. } / update Entity[key] { .. } / delete Entity[key]
+patch Entity[a, b] { .. }               // a compound key names every column, in key order
 log("...") / fail "..." / erase(value)          // the value's type names the subject
 invoke Command { field: value }
 helper(args)                            // a call to a void effect-local fn is a statement
@@ -385,7 +394,8 @@ specification in `docs/` of the heklang repository, which carries the reasoning 
 | File | Covers |
 | --- | --- |
 | `reference/language.md` | types, literals and inference, optionals and narrowing, money, strings, containers, `fn`, `const`, `record`, `enum`, modules |
-| `reference/commands.md` | commands, folds, stages, the append condition, guards, refusals |
+| `reference/commands.md` | commands, inline folds, stages, the append condition, guards, refusals |
+| `reference/folds.md` | named folds, the read model they are, `--tables`, storability, sealed return types |
 | `reference/projectors.md` | projectors, entities, `put`/`patch`/`update`/`delete`, zeros, indexes |
 | `reference/effects.md` | effect arms, the journal, `http`, `Json`, `invoke`, sealing, `reveal`, `erase` |
 | `reference/stdlib.md` | every method and builtin, and where each may be called |
@@ -395,3 +405,93 @@ specification in `docs/` of the heklang repository, which carries the reasoning 
 `example/` is a complete seven-file program (events, refusals, guards, commands, projector, effect,
 tests) that passes `hek check`, `hek test` and `hek fmt --check`. Read it for the shape of an
 application before writing a new one.
+
+## Named folds
+
+A fold can be declared once and read by name, which is what `guard` does for a proposition applied
+to a value. Parens declare and braces use.
+
+```
+fold LifetimeSpend(customer_id: Customer) -> spend: Money(2) = 0 {
+  on @order.placed(customer_id) { total } => spend + total
+  on @order.cancelled(customer_id) { refund } => spend - refund
+}
+
+command GrantTier(customer_id: Customer, tier: String) {
+  fold spend = LifetimeSpend { customer_id }
+  ...
+}
+```
+
+**A named fold is also the read model.** Nothing declares a table: a fold says what a value is,
+which events change it and what it is keyed by, so its **parameters are the key**, the fold is **one
+column**, and folds sharing one key signature are **one table** with a row per key. That is why the
+read side of an application is folds rather than projectors, and why `hek check --tables` is the
+command to run after adding or renaming one:
+
+```
+  TABLE shop__order  (shop: Shop, order: Int)  3 columns
+    order_email: String @subject(Customer)?  <- @order.contact.recorded
+    order_seen_at: Timestamp?                <- @order.placed
+    order_total: Money(2)                    <- @order.placed
+
+  not stored, because no event supplies the key:
+    OrdersSince  (at)
+```
+
+A column is the fold's name in `snake_case`; a key part is named for its **subject**, or for its
+parameter with one trailing `_id` dropped; a table is its parts joined with `__`, or **`global`**
+for a fold with no parameters. A fold whose key no event supplies is listed rather than refused.
+
+Rules that carry their weight:
+
+- **One accumulator, no `return`**, and its name is written only where an arm reads the running
+  value. `-> spend: Money(2) = 0` because `=> spend + total` reads it; `-> Bool = false` when the
+  arm only replaces the value. Writing a name no arm reads is `unused-accumulator`.
+- **Spelled like a type: an initial capital, and no `_`.** The underscores go in the derived column.
+  Both are refusals, and they are what keeps `snake_case` reversible so two folds cannot arrive as
+  one column.
+- **Named for the VALUE, never the entity.** `OrderName`, `ShopAccessToken`, `OpenProposal`. Not
+  `Order`, not `Shop`. One value out, so two facts about an order are two folds and the command
+  conflicts on exactly the two slices it read. Naming one after a part of its own key is refused
+  outright, since the table would need two columns of one name.
+- **A fold may not refuse.** It computes; a guard refuses. A fold's body is arms only, so a
+  `reject` in one is unwritable rather than reported.
+- **An arm binding the envelope with `as` makes the fold query-only**: stored and readable by a
+  test, never folded by a command, because an append time is not a decision's to read.
+- **Inline folds are unchanged and still the default.** Name one when a second declaration wants it.
+
+`Sealed(T, Subject)` is spellable in a fold's return type and nowhere else, so a fold can hand back
+sealed content for its caller to `reveal`. The subject need not be in the key and usually is not.
+
+`reference/folds.md` has all of this; `docs/folds.md` is the contract. For what a deployment serves
+the tables over, use the **hekla** skill rather than guessing from here.
+
+## Compound keys
+
+An entity's key may be several columns. `@key` goes on each, written order is the key's order, and
+every statement that names a row names all of it:
+
+```
+entity Period {
+  shop_id: Shop @key,
+  period: String @max(7) @key,
+  counted: Int,
+}
+
+patch Period[shop_id, period] { counted: .counted + 1 }
+delete Period[shop_id, period]
+expect Period[42, "2026-10"] { counted: 2 }
+```
+
+- **A one-column key is the same rule with one column**, so nothing about an existing entity
+  changes. There is no second spelling and no `key (a, b)` clause.
+- **A key column needs no zero**, because the subscript supplies it. That is the reason to reach for
+  this: a subject id beside a period is usually half the row's identity, and declaring it `Shop?`
+  only to satisfy a materializing `patch` is the workaround it replaces.
+- **A `patch` or an `update` may not write a key column.** The subscript already said which row it
+  is, and a row's key cannot change. `put` fills them like any other column.
+- **The test is "are both halves known at the lookup?"** If yes, it is a key read. If a question
+  knows only one half, that is an index (and an `@index` on a prefix of the key is redundant).
+
+`docs/projectors.md` rule 11 is the contract.

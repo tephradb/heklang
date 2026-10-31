@@ -75,7 +75,7 @@ are in scope in the body.
 
 | Statement | Meaning |
 | --- | --- |
-| `put Entity { ... }` | writes all fields; takes **no** key, because the key is a column it fills |
+| `put Entity { ... }` | writes all fields; takes **no** key, because a key column is one it fills |
 | `patch Entity[key] { ... }` | writes the listed fields, **materializing** the row if it is absent |
 | `update Entity[key] { ... }` | writes the listed fields, **dropping** the write if the row is absent |
 | `delete Entity[key]` | removes the row |
@@ -84,7 +84,9 @@ All four are unconditional write instructions. They return nothing and cannot fa
 program observes. `put Entity[key]` does not parse, and neither does `patch Entity { .. }`.
 
 `put` requires every declared field to be present, including a field that has a default, because a
-`put` writes the whole row and never reads a default. `patch` and `update` write only what is listed.
+`put` writes the whole row and never reads a default. `patch` and `update` write only what is
+listed, and may **not** list a key column: the subscript has already said which row it is, and a
+row's key cannot change.
 
 A bare `T` written into a `T?` column wraps, so a destructured `String` satisfies a `String?` column
 and `e.at` satisfies a `Timestamp?` one.
@@ -145,7 +147,9 @@ mistaken for data. Both are writable as a `= <literal>` default (a string in eac
 
 `= <literal>` on a field overrides the zero. An **optional field takes no default of `none`**,
 because it already has one, though a present default (`note: String? = "x"`) is ordinary. `@key`
-fields need no default, because the subscript supplies them.
+fields need no default, because the subscript supplies them, and that holds for every column of a
+compound key (section 11): moving a column into the key is often the right answer to "this has no
+zero" for a subject id.
 
 **The demand is on the write, not the declaration.** An entity that some `patch` can materialize
 needs a zero or a default for every column; an entity written only by `put`, `update` and `delete`
@@ -184,6 +188,9 @@ type; a variant the target's enum does not declare is an error naming the enum.
 Field-level `@index` with no name declares a single-column index. Entity-level `index (a, b)`
 declares a compound one, and the order is significant. Every index column must name a declared field.
 Index names are a storage concern and are not authored.
+
+An `@index` on a prefix of the key is redundant, since the key already orders on it. Not an error,
+but the only index worth declaring on a compound-keyed entity is one the key cannot serve.
 
 ## 8. Sealed columns
 
@@ -240,3 +247,35 @@ No `now()`, no `http.*`, no `invoke`, no `log`, no `fail`, no `reveal`, no `eras
 `fold`, no `guard`. A projector has no clock and no network because a rebuild has to reproduce every
 value it wrote, and no failure channel at all because a write returns nothing. It may call a module
 `fn`, which is pure.
+
+## 11. Compound keys
+
+An entity's key may be several columns. `@key` goes on each one, and written order is the key's
+order:
+
+```hek
+entity Period {
+  shop_id: Shop @key,
+  period: String @max(7) @key,
+  counted: Int,
+}
+
+patch Period[shop_id, period] { counted: .counted + 1 }
+delete Period[shop_id, period]
+```
+
+A one-column key is the same rule with one column, so nothing about an existing entity changes.
+There is no `key (a, b)` clause beside the annotation. The columns need not be adjacent or first.
+
+The sequence orders lexicographically, so a prefix of the key is a range: `(shop_id, period)`
+answers "this shop's months" with no index. `(period, shop_id)` is a different key.
+
+A subscript takes exactly one value per key column, checked against the declaration, and each
+position is typed from the column it addresses. The wrong count is an `arity` error whose hint lists
+the columns.
+
+**Choose it when both halves are known at the lookup.** That makes it a key read rather than a scan;
+a question that knows only one half is an index question. The alternative is a derived key column
+(`"{shop_id}:{period}"` from a helper `fn`) which says the same thing three times, forces a subject
+column to be optional so a materializing `patch` can find a zero for it, and can drift when one
+handler computes the key one way and the columns another.

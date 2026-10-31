@@ -474,11 +474,46 @@ test \"a case\" {
   project P
   expect no // in an expectation
     Row[1]
+  expect Pair[1, // in a compound key
+    \"x\"] { n: 1 }
 }
 projector P {
   entity Row { id: Int @key, n: Int }
+  entity Pair {
+    a: Int @key,
+    b: String @key,
+    n: Int,
+  }
   on @a.b { id, n } {
     put Row { id, n }
+    patch Pair[id, // the first key
+      \"x\"] { n: .n + 1 }
+    update Pair[id, \"x\"] // after the subscript
+      { n: 1 }
+    delete Pair[ // before the first key
+      id, \"x\"]
+  }
+}
+subject Buyer(Int)
+event @a.d { id: Int, buyer: Buyer, note: String @subject(buyer) }
+fold Noted(id: Int) // after the parameters
+  -> // before the accumulator
+  seen // after it
+  : Int = 0
+{
+  on @a.b(id) => seen + 1
+}
+fold Sealed1(buyer: Buyer) -> Sealed( // inside a seal
+  String, Buyer)? = none {
+  on @a.d(buyer) { note } => note
+}
+command D(order_id: Int) {
+  fold a // in a read
+    = Noted { id: order_id }
+  fold b = Noted // after the fold's name
+    { id: order_id }
+  if a > b {
+    return
   }
 }
 ";

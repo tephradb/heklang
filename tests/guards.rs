@@ -699,3 +699,39 @@ fn an_emit_above_a_guard_appends_unconditionally() {
     assert_eq!(execution.condition.after, 0);
     assert_eq!(interpreter.log().len(), 1, "and it committed");
 }
+
+// ---------------------------------------------------------------------------------
+// Rule 3, the half that was not enforced: "each before the statements below them".
+
+/// A statement below a `guard` is in the stage's second half, so the guard decides
+/// first. It used to land in the prologue, which runs before the stage folds, and a
+/// bare `return` there skipped the guard with nothing reported.
+#[test]
+fn a_statement_below_a_guard_runs_after_it_decides() {
+    let program = program(&format!(
+        "{EVENTS}guard CourseIsDefined(course: String) {{\n  fold defined: Bool = false\n    on @course.defined(course) => true\n  if !defined {{ reject UndefinedCourse }}\n}}\n\ncommand Bare(course: String) {{\n  guard CourseIsDefined {{ course }}\n  return\n}}\n"
+    ));
+    let mut interpreter = Interpreter::new(&program);
+    let outcome = interpreter
+        .run("Bare", [("course".to_string(), Value::str("c1"))])
+        .expect("ran")
+        .outcome;
+    assert!(
+        matches!(outcome, Outcome::Reject { ref code, .. } if code == "undefined_course"),
+        "the guard answers before the `return` below it, got {outcome:?}"
+    );
+}
+
+/// The same for a declaration run that is only a named guard: the statement below it
+/// still closes the stage, so a later declaration run is a second read.
+#[test]
+fn a_statement_below_a_guard_closes_the_stage() {
+    let program = program(&format!(
+        "{EVENTS}guard CourseIsDefined(course: String) {{\n  fold defined: Bool = false\n    on @course.defined(course) => true\n  if !defined {{ reject UndefinedCourse }}\n}}\n\ncommand Two(course: String, student: String) {{\n  guard CourseIsDefined {{ course }}\n  let who = student\n  fold seats: Int = 0\n    on @student.subscribed(course) => seats + 1\n  if seats > 0 {{ return }}\n  emit @student.subscribed {{ course, student: who }}\n}}\n"
+    ));
+    assert_eq!(
+        program.command("Two").expect("declared").stages.len(),
+        2,
+        "the `let` between the two declaration runs closes the first"
+    );
+}

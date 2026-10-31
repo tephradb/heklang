@@ -35,6 +35,9 @@ and it holds at **every** position that declares a type:
 | an `emit` field | `emit @order.shipped { tracking }` where the field is `String?` |
 | an entity field in `put`, `patch` and `update` | `put Order { tracking }` into a `String?` column |
 | a fold seed and every fold arm | `fold token: String? = none` with a `String`-valued arm |
+| a `guard`'s or a named `fold`'s argument | `fold s = Sum { bias: 5 }` where `bias` is `Int?` |
+| a slice filter | `on @hold.failed(fulfillment_order_id)` where the field is `Int?` |
+| each arm of an `if` **expression** at a declared position | `if c { e.at } else { held }` into a `Timestamp?` |
 | a record literal field | `Facts { note }` where `note` is declared `String?` |
 | a list or map element | `xs.push(name)` where `xs` is a `List(String?)` |
 | a test's `given` field and expected value | `expect Order[id] { tracking: "TRK-1" }` against a `String?` column |
@@ -46,7 +49,28 @@ and a `List(String)` still does not fill a `List(String?)`: the wrap is one leve
 the declared type, not a conversion that recurses.
 
 **Why the list is exhaustive rather than illustrative.** Each of these is a separate site in the
-interpreter, and the rule is only worth anything if it holds at all of them. It has three times not:
+interpreter, and the rule is only worth anything if it holds at all of them. It has six times not,
+and the last three rows above are the fourth, fifth and sixth. A **slice filter** resolved its value
+with no declared type to fit it to, so a bare `Int` was compared against the `Int?` the event holds
+and the slice matched nothing at all. A **spliced call's argument**, a `guard`'s or a named `fold`'s,
+became a `Stmt::Assign`, which carries no declared type, so nothing downstream could coerce it and
+the callee's `.is_none()` died at run time on a clean `hek check`; that one is wrapped in the parser
+instead, at the call site, which is the only place that knows both types. Both were silent in the
+worst way: the first changed what a decision was made on and reported nothing at all.
+
+**An `if` expression's arms failed differently from all five, and the difference is the point.**
+The others were positions the rule had never reached. Here it reached both arms and worked: each
+was checked against the target and each accepted the bare value. What refused the program was the
+*comparison between the arms*, which used equality where everything around it used `fills`, so two
+arms that each satisfied the target did not satisfy each other. The fix is that each arm is lifted
+on its own, which is what the position already claimed to be. It is also why an `if` **statement**
+was never affected: it produces no value, so there is nothing to compare.
+
+Where nothing declares a type, the arms are still compared and still have to agree, because then
+the `if` is the only place the disagreement can be said. `let x = if c { 1 } else { "two" }` is
+refused as it always was.
+
+The three before them:
 a fold seed and a fold arm each stored a bare value into an optional slot until they were fixed;
 the record and container positions did the same until the sweep that produced this table; and the
 last two rows failed differently again, by rejecting the write outright, so that an optional-typed

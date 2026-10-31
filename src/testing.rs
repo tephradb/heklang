@@ -7,9 +7,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::harness::{Reply, Sandbox};
-use crate::host::{Host, Rows};
+use crate::host::{Host, Keys, Log, Rows};
 use crate::interp::{
-    Effectful, Error, ErrorKind, Interpreter, Outcome, Row, check_field, coerce, subject_id,
+    Cells, Effectful, Error, ErrorKind, Interpreter, Outcome, Row, Tables, check_field, coerce,
+    opened, subject_id,
 };
 use crate::ir::{
     Action, Expect, ExprId, Exprs, Ident, Program, ReplySpec, Setup, Span, Test, Type,
@@ -110,7 +111,7 @@ pub fn run_tests(program: &Program) -> Vec<TestResult> {
 
 /// The same run, against a world the crate does not own.
 ///
-/// A fresh world per test rather than one reused, because rule 9's "only its own `given`
+/// A fresh world per test rather than one reused, because rule 10's "only its own `given`
 /// log" is a property of the world and not of the interpreter.
 pub fn run_tests_in<W: World>(
     program: &Program,
@@ -339,7 +340,13 @@ fn check<W: World>(program: &Program, test: &Test, mut world: W) -> Result<Optio
             interpreter
                 .project_into(projector, &mut rows)
                 .map_err(|err: Error| err.to_string())?;
-            check_project(&mut values, projector, &test.expect, &rows)
+            check_project(
+                &mut values,
+                interpreter.host(),
+                projector,
+                &test.expect,
+                &rows,
+            )
         }
         Action::Deliver { effect, .. } => {
             let counts = interpreter
@@ -349,6 +356,29 @@ fn check<W: World>(program: &Program, test: &Test, mut world: W) -> Result<Optio
                 return Err(format!("{effect} wedged at position {position}: {err}"));
             }
             check_deliver(&mut values, &test.expect, interpreter.trace())
+        }
+        Action::Fold { fold, args, .. } => {
+            let mut bound = Vec::new();
+            for (name, value) in args {
+                bound.push((name.clone(), values.eval(*value)?));
+            }
+            let folded = interpreter
+                .fold(fold, bound)
+                .map_err(|err: Error| err.to_string())?;
+            check_fold(&mut values, fold, &test.expect, &folded)
+        }
+        Action::Fill { .. } => {
+            let tables = Tables::new(program);
+            let mut cells = Cells::default();
+            // Through the subscription rather than off the log directly, so a test
+            // exercises the query a host would follow with and not only the arms.
+            interpreter
+                .host()
+                .read(&tables.query(), &mut |record| {
+                    tables.apply(record, &mut cells)
+                })
+                .map_err(|err: Error| err.to_string())?;
+            check_fill(&mut values, &tables, &interpreter, &cells, &test.expect)
         }
     }
 }
@@ -465,6 +495,7 @@ fn check_run(
 /// Rule 6: the listed columns of each named row, or its absence.
 fn check_project(
     values: &mut Values<'_>,
+    store: &dyn Keys,
     projector: &str,
     expect: &[Expect],
     rows: &dyn Rows,
@@ -473,23 +504,23 @@ fn check_project(
         match wanted {
             Expect::Row {
                 entity,
-                key,
+                keys,
                 fields,
                 ..
             } => {
-                let key = key_of(values.eval(*key)?)?;
+                let key = subscript(values, keys)?;
                 let found = rows
                     .row(entity, &key)
                     .map_err(|err: Error| err.to_string())?;
                 let Some(row) = found else {
                     return Ok(Some(format!("{entity}[{}] is absent", show(&key))));
                 };
-                if let Some(why) = mismatch(values, projector, entity, &key, &row, fields)? {
+                if let Some(why) = mismatch(values, store, projector, entity, &key, &row, fields)? {
                     return Ok(Some(why));
                 }
             }
-            Expect::NoRow { entity, key, .. } => {
-                let key = key_of(values.eval(*key)?)?;
+            Expect::NoRow { entity, keys, .. } => {
+                let key = subscript(values, keys)?;
                 let found = rows
                     .row(entity, &key)
                     .map_err(|err: Error| err.to_string())?;
@@ -508,11 +539,99 @@ fn check_project(
     Ok(None)
 }
 
+/// The listed columns of each named row of the derived read model, or its absence.
+///
+/// The same assertions `check_project` makes and against the same `Value::same`, because
+/// a derived table's row is the thing a projector's row was. What differs is the absent
+/// column: an entity has no field it was never given, while a **fold** over no matching
+/// events folds to its seed, so a column nothing wrote still has a value and a test may
+/// assert it. `fold_stored` at a head of zero is that seed, which keeps the answer the
+/// fold's own rather than a second reading of the declaration.
+fn check_fill<H: Host>(
+    values: &mut Values<'_>,
+    tables: &Tables<'_>,
+    interpreter: &Interpreter<'_, H>,
+    cells: &Cells,
+    expect: &[Expect],
+) -> Result<Option<String>, String> {
+    for wanted in expect {
+        let (entity, keys) = match wanted {
+            Expect::Row { entity, keys, .. } | Expect::NoRow { entity, keys, .. } => (entity, keys),
+            other => {
+                return Ok(Some(format!(
+                    "a fill produces rows of the derived read model, not {}",
+                    describe(other)
+                )));
+            }
+        };
+        let key = subscript(values, keys)?;
+        // Always found: the parser resolved the name against the same layout.
+        let table = tables
+            .layout()
+            .tables
+            .iter()
+            .find(|table| &table.name == entity)
+            .ok_or_else(|| format!("no derived table `{entity}`"))?;
+        let present = cells.rows(entity).any(|held| held == key.as_slice());
+
+        if let Expect::NoRow { .. } = wanted {
+            if present {
+                return Ok(Some(format!("{entity}[{}] is present", show(&key))));
+            }
+            continue;
+        }
+        if !present {
+            return Ok(Some(format!("{entity}[{}] is absent", show(&key))));
+        }
+        let Expect::Row { fields, .. } = wanted else {
+            continue;
+        };
+        for (name, value) in fields {
+            let column = table
+                .columns
+                .iter()
+                .find(|column| &column.name == name)
+                .ok_or_else(|| format!("table `{entity}` has no column `{name}`"))?;
+            let wanted = values.at(*value, Some(&column.ty))?;
+            let held = match cells.get(entity, &key, name) {
+                Some(held) => held.clone(),
+                None => {
+                    let args: Vec<(Ident, Value)> = column
+                        .args
+                        .iter()
+                        .cloned()
+                        .zip(key.iter().map(crate::interp::key_as_value))
+                        .collect();
+                    interpreter
+                        .fold_stored(&column.fold, args, 0)
+                        .map_err(|err: Error| err.to_string())?
+                }
+            };
+            // Opened before comparing, because a stored sealed column holds the log's own
+            // ciphertext and the test wrote the plaintext. Under the harness the two are
+            // already the same string; against a world that really encrypts they are not,
+            // and that is the only place this shows.
+            let mut held = held;
+            opened(interpreter.host(), &mut held, || format!("{entity}.{name}"))
+                .map_err(|err: Error| err.to_string())?;
+            if !held.same(&wanted) {
+                let held = shown(&held);
+                return Ok(Some(format!(
+                    "{entity}[{}].{name}: expected {wanted}, got {held}",
+                    show(&key)
+                )));
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn mismatch(
     values: &mut Values<'_>,
+    keys: &dyn Keys,
     projector: &str,
     entity: &str,
-    key: &Key,
+    key: &[Key],
     row: &Row,
     fields: &[(Ident, ExprId)],
 ) -> Result<Option<String>, String> {
@@ -530,18 +649,54 @@ fn mismatch(
         });
         let wanted = values.at(*value, ty.as_ref())?;
         match row.field(name) {
-            Some(found) if found.same(&wanted) => {}
             Some(found) => {
-                let found = shown(found);
-                return Ok(Some(format!(
-                    "{entity}[{}].{name}: expected {wanted}, got {found}",
-                    show(key)
-                )));
+                // The same opening a derived column's comparison makes, for the same
+                // reason: a sealed column holds what the key store stored.
+                let mut found = found.clone();
+                opened(keys, &mut found, || format!("{entity}.{name}"))
+                    .map_err(|err: Error| err.to_string())?;
+                if !found.same(&wanted) {
+                    let found = shown(&found);
+                    return Ok(Some(format!(
+                        "{entity}[{}].{name}: expected {wanted}, got {found}",
+                        show(key)
+                    )));
+                }
             }
             None => return Ok(Some(format!("{entity} has no `{name}`"))),
         }
     }
     Ok(None)
+}
+
+/// The one value a named fold folded to.
+///
+/// Exactly one expectation, unlike every other action: a fold has one accumulator, so a
+/// second `expect` would be a second answer to the same question. The parser refuses both
+/// a second one and none at all, so the two branches below are the same kind of backstop
+/// `check_project`'s last arm is.
+fn check_fold(
+    values: &mut Values<'_>,
+    fold: &str,
+    expect: &[Expect],
+    folded: &Value,
+) -> Result<Option<String>, String> {
+    let ty = values.program.fold(fold).map(|def| def.ret.clone());
+    if expect.len() != 1 {
+        return Ok(Some(format!(
+            "a fold folds to one value, and this test expects {}",
+            expect.len()
+        )));
+    }
+    let Expect::Folded { value, .. } = &expect[0] else {
+        return Ok(Some(format!(
+            "a fold produces a value, not {}",
+            describe(&expect[0])
+        )));
+    };
+    let wanted = values.at(*value, ty.as_ref())?;
+    Ok((!folded.same(&wanted))
+        .then(|| format!("{fold}: expected {}, got {}", shown(&wanted), shown(folded))))
 }
 
 /// Rule 7: the trace, one for one and in order.
@@ -762,8 +917,20 @@ fn key_of(value: Value) -> Result<Key, String> {
     Key::from_value(&value).ok_or_else(|| format!("`{value}` cannot be an entity key"))
 }
 
-fn show(key: &Key) -> String {
-    crate::value::text(&crate::interp::key_as_value(key))
+/// A whole key as a message shows it: `7` for one column, `1, "2026-10"` for two, which
+/// is what the author wrote inside the brackets.
+fn show(key: &[Key]) -> String {
+    key.iter()
+        .map(|one| crate::value::text(&crate::interp::key_as_value(one)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One key per `@key` column, from the expressions the subscript holds.
+fn subscript(values: &mut Values<'_>, keys: &[ExprId]) -> Result<Vec<Key>, String> {
+    keys.iter()
+        .map(|&id| key_of(values.eval(id)?))
+        .collect::<Result<Vec<_>, _>>()
 }
 
 /// What a mismatch shows for a value that may be sealed.
@@ -824,5 +991,6 @@ fn describe(expect: &Expect) -> String {
         Expect::Log { .. } => "log".to_string(),
         Expect::Failed { .. } => "failed".to_string(),
         Expect::Skipped { .. } => "skipped".to_string(),
+        Expect::Folded { .. } => "a value".to_string(),
     }
 }

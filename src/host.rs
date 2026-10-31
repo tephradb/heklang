@@ -5,8 +5,9 @@
 //! makes: reading the log is redone on every attempt and must be, while a side effect
 //! or an unrepeatable observation is done once and remembered.
 //!
-//! [`Calls`] and [`Rows`] sit beside the bundle rather than inside it, because a journal
-//! is per invocation and a read model is per projector, while a [`Host`] is per world.
+//! [`Calls`], [`Rows`] and [`Columns`] sit beside the bundle rather than inside it,
+//! because a journal is per invocation and a read model is per projector or per program,
+//! while a [`Host`] is per world.
 
 use std::sync::Arc;
 
@@ -275,11 +276,55 @@ pub trait Calls {
 /// is not lost, since `Stmt::Patch` still holds it, but it is deliberately not what
 /// crosses: a host taking a delta while [`Store`](crate::Store) took a whole row would
 /// be two write paths with nothing comparing them against each other.
+///
+/// **A row's address is a sequence**: one [`Key`] per `@key` column, in the order the entity declared
+/// them. A single-column key is a one-element slice rather than a special case, and the
+/// sequence orders lexicographically, which is what keeps a prefix of a compound key a
+/// range the read API can page on. See `docs/projectors.md` rule 11.
 pub trait Rows {
     /// The current row, including writes this projector has already made.
-    fn row(&self, entity: &str, key: &Key) -> Result<Option<Row>, Error>;
-    fn put(&mut self, entity: &Ident, key: Key, row: Row) -> Result<(), Error>;
-    fn delete(&mut self, entity: &Ident, key: &Key) -> Result<(), Error>;
+    fn row(&self, entity: &str, key: &[Key]) -> Result<Option<Row>, Error>;
+    fn put(&mut self, entity: &Ident, key: Vec<Key>, row: Row) -> Result<(), Error>;
+    fn delete(&mut self, entity: &Ident, key: &[Key]) -> Result<(), Error>;
+}
+
+/// The derived read model a program's named folds imply, as the host stores it.
+///
+/// Per program rather than per projector, because nothing declares it: a read model is a
+/// named fold kept for every key, so [`crate::tables::layout`] derives the whole of it
+/// from the folds and [`crate::Tables`] writes through this. It is to that what [`Rows`]
+/// is to [`crate::Projection`].
+///
+/// **It reads as well as writes for a sharper reason than [`Rows`] has.** A projector's
+/// `patch` reads the row to fill its stored loads; a fold's accumulator *is* the stored
+/// column, so without [`value`](Columns::value) there is nothing to fold onto and every
+/// record would start from the seed.
+///
+/// A column is addressed by three things, and two of them are strings a store did not
+/// choose: `table` and `column` are [`layout`](crate::tables::layout)'s own names, which
+/// is what keeps `hek check --tables` and the real tables from disagreeing about what an
+/// author is looking at. A key is a sequence, one [`Key`] per part in the table's key
+/// order, exactly as a row's address is.
+///
+/// **An absent value and an absent key are one thing, deliberately.** `value` answering
+/// `None` means the column is at its seed, which is what a fold over no matching events
+/// folds to, so a store holds only the keys something has written and a key nothing
+/// minted needs no row. That is also the boundary on [`keys`](Columns::keys): a range
+/// update covers the keys the table holds, so a fold whose value at some never-minted key
+/// would differ from its seed reads as the seed there. `docs/folds.md` section 11 states
+/// it, and it is the one place a stored column and a refold can disagree.
+pub trait Columns {
+    /// The column as it stands, including writes this record has already made.
+    fn value(&self, table: &str, key: &[Key], column: &str) -> Result<Option<Value>, Error>;
+    fn set(&mut self, table: &str, key: Vec<Key>, column: &str, value: Value) -> Result<(), Error>;
+    /// Every key of `table` carrying `pinned`, for an arm that left a part open.
+    ///
+    /// `pinned` is a position in the table's key order and the value the arm fixed it to,
+    /// and the parts it does not name are the range. Over-delivering here is a cost and
+    /// under-delivering is a bug, the same cut [`Log::read`] is held to: a key handed back
+    /// that the arm does not actually write is re-checked and skipped, while one withheld
+    /// is a column that silently stops following its log.
+    fn keys(&self, table: &str, pinned: &[(usize, Key)]) -> Result<Vec<Vec<Key>>, Error>;
 }
 
 /// Everything the interpreter needs from the world outside it, apart from the journal:

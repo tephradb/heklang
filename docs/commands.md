@@ -81,6 +81,11 @@ pub fn guard(&mut self, event: EventPath, filters: Vec<Filter>) -> SliceId {
 
 `docs/guards.md` has both, and "`guard` names a proposition" below has when to reach for which.
 
+**A fold written here may instead be declared once and read by name**, which is the value half of
+what a guard does for a proposition: `fold spend = LifetimeSpend { customer_id }` puts the same
+slices in the same condition. Inline is still the default and nothing here changes; see
+`docs/folds.md`, whose rule 9 is the choice between them.
+
 **Rejected: `let name = fold ...`.** It hides the append condition inside the same syntax as
 arithmetic. A reader scanning for what a command conflicts on would have to read every binding in
 the body and know which right-hand sides were folds.

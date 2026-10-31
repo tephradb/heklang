@@ -70,7 +70,7 @@ The set is closed: every diagnostic heklang can produce is one of these.
 | `bad-type` | a type spelled wrong | a scale above 18, or a `Map` key that does not order (`Bool`, `Money(n)`, `Decimal(n)`) |
 | `needs-target-type` | a value whose type nothing decides | `[]`, `Map.empty`, `Money.parse` and `Decimal.parse` take their type from the target; a `let` is not one |
 | `not-a-value` | a statement written where a value was wanted | a call to a void effect-local `fn` is a statement, so it cannot be bound with `let` |
-| `arity` | a call with the wrong number of arguments, or a refusal's fields written with the wrong delimiter | a third positional argument to `http.*` is a timeout, which is configuration; `reject Gone` takes no `{ }`, and parens declare while braces use, so a refusal with fields is `reject SkuTaken { sku, item }` and never `reject SkuTaken(sku, item)` |
+| `arity` | a call with the wrong number of arguments, a subscript with the wrong number of key values, or a refusal's fields written with the wrong delimiter | a third positional argument to `http.*` is a timeout, which is configuration; `reject Gone` takes no `{ }`, and parens declare while braces use, so a refusal with fields is `reject SkuTaken { sku, item }` and never `reject SkuTaken(sku, item)` |
 | `missing-field` | a field, parameter or argument that has to be given and was not | `emit`, `put`, `given`, `invoke`, a record literal, `reject` with fields and `guard Name { .. }` are all written whole |
 | `duplicate-field` | one given twice | |
 
@@ -78,11 +78,11 @@ The set is closed: every diagnostic heklang can produce is one of these.
 
 | Code | Means | Fix |
 | --- | --- | --- |
-| `unknown-annotation` | `@nope` | events take `@subject`, `@max`, `@absent`, `@no_index`; entities `@key`, `@index`, `@max`; records `@max`, `@absent`; enum variants `@default`; an effect arm's trigger destructure `@key` |
+| `unknown-annotation` | `@nope` | events take `@subject`, `@max`, `@absent`, `@no_index`; entities `@key` (on one column or several), `@index`, `@max`; records `@max`, `@absent`; enum variants `@default`; an effect arm's trigger destructure `@key` |
 | `bad-annotation` | a known annotation in a place or shape it does not take | `@max` bounds a `String`; a field *inside* a `record` declaration cannot be `@subject`, though an event field whose *type* is a record is fine and seals it whole; a `@subject` id must be a declared subject, and may not be optional or itself sealed; an optional column may not default to `none`; an optional or `@subject` field takes no `@absent`, nor does one whose value is past its own `@max`; `@key` goes on an effect arm's trigger destructure and nowhere else |
 | `empty-declaration` | a declaration whose body would be empty | |
 | `arm-shape` | an effect arm with no `@key` | every arm names the trigger field that identifies its lane: `{ @key shop_id }` |
-| `entity-shape` | an entity with no `@key`, more than one, an unorderable key, or an index on a field it has not got | |
+| `entity-shape` | an entity with no `@key`, an unorderable key column, an index on a field it has not got, or a `patch`/`update` writing a key column | `@key` on several columns is a compound key, in written order; the subscript then names every column and is the only writer of any of them, so take a key column out of the body |
 | `event-shape` | a multi-path arm over event types with nothing in common | a field is shared only when its type, its `@subject` and its `@absent` match on every listed path |
 | `refusal-shape` | a refusal named or written so its derived code could not survive | start with a capital, use no `_`, and let the message name every field and nothing else |
 | `stage-shape` | a `fold` or `guard` written where or how it does not go | declarations come before the first statement of their stage, never inside an `if` or a `for`; a seed or filter may not read a `fold` beside it; a guard is one read |
@@ -94,7 +94,7 @@ The set is closed: every diagnostic heklang can produce is one of these.
 | --- | --- | --- |
 | `wrong-context` | a statement in a declaration kind, or an arm, that does not have it | see the matrix in `stdlib.md`: `emit` is a command's, the four writes are a projector's, `http`/`invoke`/`log`/`fail` are an effect's; an `on latest` arm may not `invoke`, and a projector handler has no `latest` or `live` |
 | `impure-fn` | a module `fn` doing something a pure function cannot | move the call to the caller and pass the result in, or make it an effect-local `fn` |
-| `fold-restriction` | a `fold` calling out, invoking, decrypting or reading a clock | a fold has to reproduce without a journal; do it in the body and pass it in |
+| `fold-restriction` | a `fold` calling out, invoking, decrypting or reading a clock; a named fold misspelled, named after a part of its own key, or a query-only one folded by a command | a fold has to reproduce without a journal; do it in the body and pass it in. A named fold takes an initial capital and no `_`, is named for the value and not the entity, and an arm binding the envelope with `as` makes it readable only as a stored value |
 | `arm-only` | an effect-local `fn` doing what stays in the arm | `reveal`, `erase`, `now()` and `fold` stay in the arm; pass the revealed value or the moment in as a parameter |
 | `return-shape` | a `return` that does not match the signature it is in, an answer written with a `return` or with parens, or an answer's message written as a value rather than a string | a guard has no `return`: it answers with `reject <Name>` or `invalid "<message>"`, both bare. `return reject X`, `invalid("x")` and `fail("x")` are the removed spellings. `invalid` and `fail` take a written message, so a value reaches one through a hole: `invalid "{err}"`, never `invalid err`. A module `fn` must declare a return type and return on every path; `reject`/`invalid` need `-> Outcome` or `-> Outcome?` |
 | `unreachable` | a statement after the declaration's answer | saying the answer ends the declaration, so nothing below `reject`, `invalid`, `fail` or `return` runs. Delete it, or move it above the answer |
@@ -103,7 +103,7 @@ The set is closed: every diagnostic heklang can produce is one of these.
 
 | Code | Means | Fix |
 | --- | --- | --- |
-| `seal-boundary` | sealed content leaving without `reveal` | move it, ask `.is_some()`/`.is_none()`, or `reveal` it in an effect arm; a `fn` parameter, an interpolation, a comparison, a body and `unwrap_or` all take it out; a sealed field cannot be an arm's `@key` either |
+| `seal-boundary` | sealed content leaving without `reveal` | move it, ask `.is_some()`/`.is_none()`, or `reveal` it in an effect arm; a `fn` parameter, an interpolation, a comparison, a body and `unwrap_or` all take it out; a sealed field cannot be an arm's `@key` either; a named fold folding sealed content must declare it, `-> Sealed(T, Subject)` |
 | `erase-subject` | an `erase` whose value is not a subject id | `erase` takes one argument and the value's type is the namespace, so give the id a declared subject type; a `Uuid`, a bare literal and a plain `Int` are all refused, and so is an id learned by revealing |
 | `erase-order` | a `reveal` reachable from an `erase` | move the reveal above the erase, or into a branch the erase cannot reach; inside a `for` body, any erase reaches every reveal |
 | `secret-boundary` | a deployment credential reaching something that observes it | send it instead: a url, a header value, a body member, or an interpolation that becomes one. `log`, `fail`, `emit`, `invoke`, a comparison, a list, a record, `Json.encode` and every method are all out; a `fold` reading one is `fold-restriction`, and reading one outside an effect is `wrong-context` |
@@ -122,7 +122,7 @@ The set is closed: every diagnostic heklang can produce is one of these.
 
 | Code | Means | Fix |
 | --- | --- | --- |
-| `test-shape` | a test body out of order, or an expectation its action cannot produce | order is `given`, then `respond`/`erased`, then exactly one action, then `expect`; `run` expects events and outcomes, `project` expects rows, `deliver` expects a trace |
+| `test-shape` | a test body out of order, or an expectation its action cannot produce | order is `given`, then `respond`/`erased`, then exactly one action, then `expect`; `run` expects events and outcomes, `project` and `fill` expect rows, `deliver` expects a trace, `fold` expects exactly one value |
 | `test-shape` | a `given` or `expect` naming a `fn` that does not return an event, or an empty `{}` after one | declare the helper `-> @some.event`; an override names at least one field, so write the call alone to change nothing |
 | `not-a-value` | an event used as a value: bound with `let`, compared, interpolated, put in a list or a body | an event is only ever handed to a `given` or an `expect`; pass the helper the fields it needs instead |
 

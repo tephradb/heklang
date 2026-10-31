@@ -499,7 +499,7 @@ fn a_long_hint_wraps_under_itself() {
 /// A guard's slices join the boundary of whatever names it, transitively, so the append
 /// condition stops being something a reader can take off the page. `check` prints the
 /// closure, which is what makes two commands' boundaries comparable at all: a test
-/// cannot ask (`docs/testing.md` §8).
+/// cannot ask (`docs/testing.md` §10).
 #[test]
 fn check_names_what_a_command_guards() {
     let source = "\
@@ -545,6 +545,56 @@ command ArchivePlan(plan_id: Int, shop_id: Int) {
     );
 }
 
+/// The `reads` list is in the order the declarations were written, which is the only
+/// order a reader can check against the page. Walking the guards and then the command's
+/// own reads put every fold reached *through* a guard first, however the two were
+/// written: here `Direct` is above the guard and `Nested` is inside it.
+#[test]
+fn boundaries_name_reads_in_the_order_they_were_written() {
+    let source = "\
+event @shop.connected { shop_id: Int }
+event @plan.created { plan_id: Int, shop_id: Int }
+event @plan.archived { plan_id: Int, shop_id: Int }
+refusal ShopNotFound \"shop does not exist\"
+
+fold Nested(shop_id: Int) -> Bool = false {
+  on @shop.connected(shop_id) => true
+}
+
+fold Direct(plan_id: Int) -> n: Int = 0 {
+  on @plan.created(plan_id) => n + 1
+}
+
+guard ShopIsConnected(shop_id: Int) {
+  fold connected = Nested { shop_id }
+  if !connected {
+    reject ShopNotFound
+  }
+}
+
+command ArchivePlan(plan_id: Int, shop_id: Int) {
+  fold plans = Direct { plan_id }
+  guard ShopIsConnected { shop_id }
+  if plans > 0 {
+    emit @plan.archived { plan_id, shop_id }
+  }
+}
+";
+    let root = project("ordered", &[("app.hk", source)]);
+    let output = hek(&[
+        "check",
+        "--boundaries",
+        root.to_str().expect("a utf-8 path"),
+    ]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.contains("reads Direct, Nested"),
+        "the read written above the guard comes first: {text}"
+    );
+}
+
 /// `check` is a pass/fail gate, so the listing is asked for. Without the flag it prints
 /// the counts and nothing per command, however many guards the program has.
 #[test]
@@ -574,6 +624,122 @@ command RenameShop(shop_id: Int) {
     let text = stdout(&output);
     assert!(text.contains("1 guard"), "{text}");
     assert!(!text.contains("RenameShop guards"), "{text}");
+}
+
+/// The read model a program's folds imply, which nothing in the source declares: one
+/// table per key, one column per fold, each column saying what feeds it.
+const TABLES: &str = "\
+subject Shop(Int)
+
+event @shop.installed { shop_id: Shop }
+event @shop.uninstalled { shop_id: Shop }
+event @order.placed { shop_id: Shop, order_id: Int, total: Money(2) }
+
+fold ShopInstalled(shop_id: Shop) -> Bool = false {
+  on @shop.installed(shop_id) => true
+  on @shop.uninstalled(shop_id) => false
+}
+
+fold OrderTotal(shop_id: Shop, order_id: Int) -> sum: Money(2) = 0.00 {
+  on @order.placed(shop_id, order_id) { total } => sum + total
+}
+";
+
+#[test]
+fn check_prints_the_table_layout_when_asked() {
+    let root = project("tables", &[("app.hk", TABLES)]);
+    let output = hek(&["check", "--tables", root.to_str().expect("a utf-8 path")]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.contains("TABLE shop  (shop: Shop)  1 column"),
+        "the key renders with its types and the count is singular: {text}"
+    );
+    assert!(
+        text.contains("shop_installed: Bool"),
+        "a column is the fold's name in snake_case: {text}"
+    );
+    assert!(
+        text.contains("<- @shop.installed, @shop.uninstalled"),
+        "and what feeds it, first written first: {text}"
+    );
+    assert!(
+        text.contains("TABLE shop__order  (shop: Shop, order: Int)  1 column"),
+        "a key sorts below the key it extends: {text}"
+    );
+    assert!(
+        text.find("TABLE shop ").expect("the shop table")
+            < text.find("TABLE shop__order").expect("the order table"),
+        "{text}"
+    );
+}
+
+/// A column asserted the way a user does: `hek test` over a `fold` action. The same
+/// folds the listing above derives, read back by name through the built binary.
+#[test]
+fn a_fold_action_asserts_a_column_end_to_end() {
+    let root = project(
+        "fold-action",
+        &[
+            ("app.hk", TABLES),
+            (
+                "tests.hk",
+                "test \"one shop's orders add up\" {
+  given @order.placed { shop_id: 1, order_id: 9, total: 10.00 }
+  given @order.placed { shop_id: 1, order_id: 9, total: 2.50 }
+  given @order.placed { shop_id: 2, order_id: 9, total: 99.00 }
+  fold OrderTotal { shop_id: 1, order_id: 9 }
+  expect 12.50
+}
+",
+            ),
+        ],
+    );
+    let output = run(&root, &[]);
+
+    assert!(output.status.success(), "{}", stdout(&output));
+    let text = stdout(&output);
+    assert!(text.contains("pass   one shop's orders add up"), "{text}");
+    assert!(text.contains("1 passed, 0 failed"), "{text}");
+}
+
+/// `check` is a pass/fail gate, so this listing is asked for too.
+#[test]
+fn check_says_nothing_about_tables_unless_asked() {
+    let root = project("quiet-tables", &[("app.hk", TABLES)]);
+    let output = hek(&["check", root.to_str().expect("a utf-8 path")]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("2 folds"), "{text}");
+    assert!(!text.contains("TABLE"), "{text}");
+}
+
+/// **A listing, not a diagnostic.** A fold no event supplies a key for is a perfectly
+/// good fold that a command can read; nothing says every fold has to be storable. And
+/// heklang has no warning channel to say it in (`docs/diagnostics.md` §11), so it is a
+/// line here and the run still passes. This is the test that fails if someone later
+/// makes it an error.
+#[test]
+fn a_fold_that_cannot_be_stored_is_a_line_and_not_an_error() {
+    let source = "\
+subject Shop(Int)
+
+event @order.placed { shop_id: Shop, order_id: Int }
+
+fold OrdersSince(at: Int, shop_id: Shop) -> count: Int = at {
+  on @order.placed(shop_id) => count + 1
+}
+";
+    let root = project("unstored", &[("app.hk", source)]);
+    let output = hek(&["check", "--tables", root.to_str().expect("a utf-8 path")]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("not stored"), "{text}");
+    assert!(text.contains("OrdersSince  (at)"), "{text}");
+    assert!(!text.contains("TABLE"), "{text}");
 }
 
 /// `hek fmt` writes the file back, and says which ones it touched.
@@ -810,7 +976,7 @@ fn digest_prints_the_form_and_nothing_else() {
     assert!(output.status.success(), "{}", stderr(&output));
 
     let form = stdout(&output);
-    assert!(form.starts_with("hek-digest 4\n"), "{form}");
+    assert!(form.starts_with("hek-digest 6\n"), "{form}");
     assert!(
         form.contains("(event @order.placed (f order_id Int) (f total (Money 2)))"),
         "{form}"
@@ -836,7 +1002,7 @@ fn digest_packed_is_one_line_per_declaration() {
     let packed = stdout(&run(&root, &["digest", "--packed"]));
 
     let lines: Vec<&str> = packed.trim_end().lines().collect();
-    assert_eq!(lines[0], "hek-digest 4");
+    assert_eq!(lines[0], "hek-digest 6");
     assert_eq!(
         lines.len(),
         3,
@@ -921,7 +1087,7 @@ fn digest_json_carries_every_entry() {
         json.starts_with('{') && json.trim_end().ends_with('}'),
         "{json}"
     );
-    assert!(json.contains("\"version\":\"hek-digest 4\""), "{json}");
+    assert!(json.contains("\"version\":\"hek-digest 6\""), "{json}");
     assert!(json.contains("\"kind\":\"command\""), "{json}");
     assert!(json.contains("\"name\":\"Place\""), "{json}");
     assert!(json.contains("\"entries\":["), "{json}");
@@ -953,7 +1119,7 @@ fn digest_from_stdin_reads_one_module() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(
         stdout(&output),
-        "hek-digest 4\n(event @order.placed (f order_id Int))\n"
+        "hek-digest 6\n(event @order.placed (f order_id Int))\n"
     );
 }
 
