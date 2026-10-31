@@ -6,9 +6,12 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use std::sync::Arc;
+
 use heklang::{
-    Error, Event, Harness, Ident, Key, Reply, Row, Rows, TestOutcome, TestResult, World, parse,
-    run_tests, run_tests_in,
+    AppendCondition, Attempt, Clock, Error, Event, Harness, Http, Ident, Key, Keys, Log, Query,
+    Record, Reply, Row, Rows, Secrets, Store, TestOutcome, TestResult, World, parse, run_tests,
+    run_tests_in,
 };
 
 const PRELUDE: &str = "event @plan.created { plan_id: Int, title: String, price: Money(2) }
@@ -1992,5 +1995,223 @@ test \"two sales\" {{
     assert!(
         message.contains("`fold Name {}` and `expect <value>`"),
         "the hint points at the action that does say it: {message}"
+    );
+}
+
+// ------------------------------- a world whose key store really is a key store
+
+/// A key store that is not the identity function, which is the only thing that tells a
+/// comparison through the key store from a comparison against what is on disk.
+///
+/// `Keys::decrypt` is the whole of it, and `given` writes the **stored** form: heklang
+/// seals by copying a field's text into a `Value::Sealed` and never encrypts
+/// (`docs/host.md` section 9, "nothing writes a seal"), so a world that encrypts is one
+/// whose log holds ciphertext and whose `decrypt` says what it means. Here the ciphertext
+/// is the plaintext spelled backwards, which is invertible, visibly not the identity, and
+/// short enough to write in an expectation.
+struct Vault {
+    harness: Harness,
+}
+
+fn flipped(text: &str) -> String {
+    text.chars().rev().collect()
+}
+
+impl Log for Vault {
+    fn head(&self) -> Result<u64, Error> {
+        self.harness.head()
+    }
+
+    fn record(&self, position: u64) -> Result<Option<Record>, Error> {
+        self.harness.record(position)
+    }
+
+    fn read(
+        &self,
+        query: &Query,
+        visit: &mut dyn FnMut(&Record) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        self.harness.read(query, visit)
+    }
+
+    fn append(&mut self, events: &[Event], condition: &AppendCondition) -> Result<(), Error> {
+        self.harness.append(events, condition)
+    }
+}
+
+impl Clock for Vault {
+    fn now(&self) -> i64 {
+        self.harness.now()
+    }
+}
+
+impl Keys for Vault {
+    fn decrypt(
+        &self,
+        subject: &str,
+        id: &str,
+        field: &str,
+        content: &str,
+    ) -> Result<Option<String>, Error> {
+        // The erasure half stays the harness's, so a key that is gone is gone here too.
+        Ok(self
+            .harness
+            .decrypt(subject, id, field, content)?
+            .map(|held| flipped(&held)))
+    }
+
+    fn erase(&mut self, subject: &str, id: &str) -> Result<(), Error> {
+        self.harness.erase(subject, id)
+    }
+}
+
+impl Http for Vault {
+    fn send(&mut self, request: &heklang::Request) -> Attempt {
+        self.harness.send(request)
+    }
+}
+
+impl Secrets for Vault {
+    fn secret(&self, name: &str) -> Option<Arc<str>> {
+        self.harness.secret(name)
+    }
+}
+
+#[derive(Default)]
+struct Encrypting {
+    harness: Harness,
+}
+
+impl World for Encrypting {
+    type Host = Vault;
+    type Rows = Store;
+
+    fn given(&mut self, event: Event) -> Result<(), Error> {
+        self.harness.push(event);
+        Ok(())
+    }
+
+    fn respond(&mut self, url: &str, reply: Reply) -> Result<(), Error> {
+        self.harness.script(url, [reply]);
+        Ok(())
+    }
+
+    fn erased(&mut self, subject: &str, id: &str) -> Result<(), Error> {
+        self.harness.erase_subject(subject, id);
+        Ok(())
+    }
+
+    fn open(self) -> Result<(Vault, Store), Error> {
+        Ok((
+            Vault {
+                harness: self.harness,
+            },
+            Store::default(),
+        ))
+    }
+}
+
+const VAULTED: &str = "subject Customer(Int)
+
+event @contact.recorded { customer_id: Customer, city: String @subject(customer_id) }
+
+fold LatestCity(customer_id: Customer) -> Sealed(String, Customer)? = none {
+  on @contact.recorded(customer_id) { city } => city
+}
+
+projector Contacts {
+  entity Contact { customer_id: Customer @key, city: String }
+
+  on @contact.recorded { customer_id, city } { put Contact { customer_id, city } }
+}
+";
+
+fn vaulted(body: &str) -> Vec<TestResult> {
+    let source = format!("{VAULTED}\n{body}");
+    let program = parse(&source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+    run_tests_in(&program, &mut || Ok(Encrypting::default()))
+}
+
+/// **A sealed column is compared through the key store, not against what is stored.**
+/// A derived column holds the log's own ciphertext, because that is what lets a store keep
+/// one unopened and what makes an erasure observable without refolding; a test writes the
+/// plaintext. Under the harness the two are the same string and this proves nothing, which
+/// is exactly why `Vault` exists: here the stored form is `"lotsirB"` and the plaintext is
+/// `"Bristol"`.
+#[test]
+fn a_filled_sealed_column_is_matched_on_its_plaintext() {
+    let results = vaulted(
+        "test \"the city comes back readable\" {
+  given @contact.recorded { customer_id: 7, city: \"lotsirB\" }
+
+  fill
+
+  expect customer[7] { latest_city: \"Bristol\" }
+}",
+    );
+    assert!(
+        matches!(only(&results).outcome, TestOutcome::Passed),
+        "{:?}",
+        only(&results).outcome
+    );
+}
+
+/// The same rule for a projector's row, which had the same defect for the same reason:
+/// `docs/testing.md` section 6 argued that a test has no key, and a runner driving a real
+/// world has whatever that world has.
+#[test]
+fn a_projector_row_is_matched_on_its_plaintext_too() {
+    let results = vaulted(
+        "test \"the row's city comes back readable\" {
+  given @contact.recorded { customer_id: 7, city: \"lotsirB\" }
+
+  project Contacts
+
+  expect Contact[7] { city: \"Bristol\" }
+}",
+    );
+    assert!(
+        matches!(only(&results).outcome, TestOutcome::Passed),
+        "{:?}",
+        only(&results).outcome
+    );
+}
+
+/// An erased subject reads as absent, which is the value rule 12 gives it and the one
+/// `shred` writes on every other path.
+#[test]
+fn an_erased_subject_leaves_a_filled_sealed_column_absent() {
+    let results = vaulted(
+        "test \"an erased customer has no city\" {
+  given @contact.recorded { customer_id: 7, city: \"lotsirB\" }
+  erased Customer \"7\"
+
+  fill
+
+  expect customer[7] { latest_city: none }
+}",
+    );
+    assert!(
+        matches!(only(&results).outcome, TestOutcome::Passed),
+        "{:?}",
+        only(&results).outcome
+    );
+}
+
+/// And a wrong plaintext still fails, so the opening is not swallowing the comparison.
+#[test]
+fn the_plaintext_still_has_to_match() {
+    let results = vaulted(
+        "test \"the wrong city\" {
+  given @contact.recorded { customer_id: 7, city: \"lotsirB\" }
+
+  fill
+
+  expect customer[7] { latest_city: \"Bath\" }
+}",
+    );
+    assert_eq!(
+        why(only(&results)),
+        "customer[7].latest_city: expected \"Bath\", got \"Bristol\""
     );
 }

@@ -671,6 +671,83 @@ fn shred(keys: &dyn Keys, value: &mut Value, column: impl FnOnce() -> String) ->
     }
 }
 
+/// One column with its sealed content **opened**, which is what a test's comparison needs
+/// and nothing else does.
+///
+/// A stored sealed column holds the log's own ciphertext under the field, subject and id
+/// it was sealed with, because that is what lets a store hold one without opening it and
+/// what makes an erasure observable without refolding. A test writes the plaintext, so the
+/// two meet only once this has run: it is the same `decrypt` call `reveal` makes, with the
+/// same argument list, and `docs/testing.md` section 6 is the rule it serves.
+///
+/// **This is a comparison and not a read**, which is why it is here rather than on any
+/// path a program can reach. Rule 12's boundary is about what a *program* may read and is
+/// enforced at parse time; a test states an input and asks whether that is what came out.
+///
+/// The two outcomes for a key that is gone are [`shred`]'s, for its reasons: an optional
+/// reads back absent, and a column with no absent value says so loudly rather than
+/// comparing against a ciphertext nobody can check.
+pub(crate) fn opened(
+    keys: &dyn Keys,
+    value: &mut Value,
+    column: impl FnOnce() -> String,
+) -> Result<(), Error> {
+    // Decided under an immutable borrow and acted on after it, exactly as `shred` is, so
+    // that the erased arms can rewrite the value they inspected.
+    let plaintext = {
+        let sealed = match &*value {
+            held @ Value::Sealed { .. } => held,
+            Value::Opt {
+                value: Some(held), ..
+            } => &**held,
+            _ => return Ok(()),
+        };
+        let Value::Sealed {
+            field,
+            subject,
+            id,
+            content,
+        } = sealed
+        else {
+            return Ok(());
+        };
+        match keys.decrypt(subject, id, field, content)? {
+            Some(plaintext) => Ok(plaintext),
+            None => Err((subject.clone(), id.clone())),
+        }
+    };
+    let (subject, id) = match plaintext {
+        Ok(plaintext) => {
+            let held = match value {
+                Value::Opt {
+                    value: Some(held), ..
+                } => &mut **held,
+                held => held,
+            };
+            if let Value::Sealed { content, .. } = held {
+                *content = plaintext.into();
+            }
+            return Ok(());
+        }
+        Err(gone) => gone,
+    };
+    match value {
+        Value::Opt { inner, .. } => {
+            *value = Value::Opt {
+                inner: inner.clone(),
+                value: None,
+            };
+            Ok(())
+        }
+        _ => Err(ErrorKind::ShreddedColumn {
+            column: column(),
+            subject,
+            id,
+        }
+        .into()),
+    }
+}
+
 /// One projector, ready to be applied to records a host supplies.
 ///
 /// Holds no [`Host`]: `docs/projectors.md` rule 4 gives a projector no general read, and

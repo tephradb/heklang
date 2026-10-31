@@ -177,6 +177,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fold's own rule: a column no arm wrote is at **its seed**, so `expect plan[7] { plan_revenue: 0 }`
   is an assertion rather than a missing field. A fold with no parameters has no row to name and says
   so, pointing at the `fold` action.
+- A test compares a sealed column **through the world's key store** rather than against what is
+  stored, for both a derived column and a projector's row. The runner opens the value first, with
+  the same `Keys::decrypt` call `reveal` makes; an erased subject reads as the absent optional and a
+  column with no absent value says so loudly. `fold_stored` still hands the seal back untouched,
+  because a store depends on that.
+
+  `docs/testing.md` section 6 used to argue the other way, that *a test has no key* so the stored
+  form was all there was to compare and a real host answering false was correct. The premise stopped
+  holding when the runner started taking a `World`: a runner driving a real world has that world's
+  key store. Left alone it made every sealed-column expectation fail against a real deployment,
+  which is what hekla's run of the ported corpus found, 313 of 314 with `shop__order[42,
+  9001].order_ship_to` comparing ciphertext against the plaintext the test wrote. The harness hid it
+  for the reason it hides nothing else: its key store is the identity function, so `tests/testing.rs`
+  now drives these four cases through a world whose is not.
 - `tables::Column` carries `args`, the parameter each key part came from in the table's key order,
   which is what `fold_stored` and `Tables::apply` take. A part is named for its subject or for its
   parameter with one trailing `_id` off, so the part's name is usually not callable, and a reader

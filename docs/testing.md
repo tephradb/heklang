@@ -319,17 +319,28 @@ the seal stores:
 expect Shop[1] { shop_name: "Test Shop" }
 ```
 
-**Which works because the harness stores content as it was given.** A seal is opaque and a test has
-no key, so its stored form is the only thing available to compare, and under the harness that is
-exactly what the test wrote. Against a host that really encrypts, this comparison answers false,
-which is the right answer there: a test asserting on content it cannot read would be asserting on
-nothing. `docs/host.md` is where the harness's key store is described.
+**The comparison goes through the key store, not against what is stored.** A sealed column holds
+whatever the world put there, which under the harness is the text the test wrote and against a host
+that really encrypts is ciphertext, so the runner opens it first: the same `Keys::decrypt` call
+`reveal` makes, under the field, subject and id the value carries. An erased subject then reads as
+the absent optional, which is the value rule 12 gives it, and a column with no absent value says so
+loudly rather than comparing against a ciphertext nobody can check. `docs/host.md` is where the
+harness's key store is described.
+
+**This replaces an argument that was true once.** It used to read that a seal is opaque and *a test
+has no key*, so the stored form was the only thing available to compare, and that a real host
+answering false was the right answer there. The premise stopped holding when the runner started
+taking a `World`: a runner driving a real world has whatever that world has, including its key
+store. Left alone it made every sealed-column expectation fail against a real deployment, which is
+the opposite of section 10's claim that a suite runs against a real log without a second definition
+of what `expect` means. It is one rule for both, so a derived column (section 9) and a projector's
+row compare a seal the same way.
 
 **This is not a hole in rule 12's boundary.** That rule is about what a *program* may read, and it is
 a parse-time rule enforced on programs. A test states an input and asks whether that is what came
-out, which is a question about content and never about the key; and it sees nothing an embedder does
-not, since `Row::field` hands back the value either way. A mismatch reports the stored form rather
-than `got <sealed under shop_id>`, because the latter describes a question nobody asked.
+out; and it sees nothing an embedder does not, since the key store it reads through is the world's
+own and `Row::field` hands back the value either way. A mismatch reports the plaintext rather than
+`got <sealed under shop_id>`, because the latter describes a question nobody asked.
 
 The absent optional is the case that made this necessary rather than merely nice. An optional carries
 its element type; sealing one seals that type and leaves the value absent, because there was never a
@@ -482,6 +493,12 @@ ways.
 **A query-only fold is readable here**, for the reason section 8 gives: a test is not a decision,
 and the harness's envelope is one minute per event from 2020-01-01T00:00:00Z.
 
+**A sealed column is compared on its plaintext**, through the world's own key store, exactly as
+section 6 has it for a projector's row. A derived sealed column holds the log's own ciphertext,
+because that is what lets a store keep one unopened and what makes an erasure observable without
+refolding, so the opening is the comparison's and never the read's: `fold_stored` still hands the
+seal back untouched.
+
 **What this runs is the sink, not a refold.** `Tables::apply` applies each record to whatever
 columns its arms name, carrying the accumulator in the store, which is what a host follows a log
 with (`docs/folds.md` section 11). The records arrive through `Tables::query`, so a test exercises
@@ -512,10 +529,11 @@ Everything the runner asserts goes through the same public API an embedder has, 
 this list honest: a test cannot see anything a program cannot.
 
 **That is also what lets the runner take a world rather than own one.** An outcome and an effect
-trace come from the interpreter, and the one thing left that a world supplies is a row, read through
-`Rows::row` (`docs/host.md` section 7) which is the read a `patch` already makes. So a suite can run
-against a real log and real read models without anything on the list above becoming visible, and
-without a second definition of what `expect` means.
+trace come from the interpreter, and what a world supplies is a row, read through `Rows::row`
+(`docs/host.md` section 7) which is the read a `patch` already makes, plus the key store a sealed
+column is compared through (section 6). So a suite can run against a real log and real read models
+without anything on the list above becoming visible, and without a second definition of what
+`expect` means.
 
 ## 11. Running
 

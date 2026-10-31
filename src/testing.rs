@@ -7,10 +7,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::harness::{Reply, Sandbox};
-use crate::host::{Host, Log, Rows};
+use crate::host::{Host, Keys, Log, Rows};
 use crate::interp::{
     Cells, Effectful, Error, ErrorKind, Interpreter, Outcome, Row, Tables, check_field, coerce,
-    subject_id,
+    opened, subject_id,
 };
 use crate::ir::{
     Action, Expect, ExprId, Exprs, Ident, Program, ReplySpec, Setup, Span, Test, Type,
@@ -340,7 +340,13 @@ fn check<W: World>(program: &Program, test: &Test, mut world: W) -> Result<Optio
             interpreter
                 .project_into(projector, &mut rows)
                 .map_err(|err: Error| err.to_string())?;
-            check_project(&mut values, projector, &test.expect, &rows)
+            check_project(
+                &mut values,
+                interpreter.host(),
+                projector,
+                &test.expect,
+                &rows,
+            )
         }
         Action::Deliver { effect, .. } => {
             let counts = interpreter
@@ -489,6 +495,7 @@ fn check_run(
 /// Rule 6: the listed columns of each named row, or its absence.
 fn check_project(
     values: &mut Values<'_>,
+    store: &dyn Keys,
     projector: &str,
     expect: &[Expect],
     rows: &dyn Rows,
@@ -508,7 +515,7 @@ fn check_project(
                 let Some(row) = found else {
                     return Ok(Some(format!("{entity}[{}] is absent", show(&key))));
                 };
-                if let Some(why) = mismatch(values, projector, entity, &key, &row, fields)? {
+                if let Some(why) = mismatch(values, store, projector, entity, &key, &row, fields)? {
                     return Ok(Some(why));
                 }
             }
@@ -600,6 +607,13 @@ fn check_fill<H: Host>(
                         .map_err(|err: Error| err.to_string())?
                 }
             };
+            // Opened before comparing, because a stored sealed column holds the log's own
+            // ciphertext and the test wrote the plaintext. Under the harness the two are
+            // already the same string; against a world that really encrypts they are not,
+            // and that is the only place this shows.
+            let mut held = held;
+            opened(interpreter.host(), &mut held, || format!("{entity}.{name}"))
+                .map_err(|err: Error| err.to_string())?;
             if !held.same(&wanted) {
                 let held = shown(&held);
                 return Ok(Some(format!(
@@ -614,6 +628,7 @@ fn check_fill<H: Host>(
 
 fn mismatch(
     values: &mut Values<'_>,
+    keys: &dyn Keys,
     projector: &str,
     entity: &str,
     key: &[Key],
@@ -634,13 +649,19 @@ fn mismatch(
         });
         let wanted = values.at(*value, ty.as_ref())?;
         match row.field(name) {
-            Some(found) if found.same(&wanted) => {}
             Some(found) => {
-                let found = shown(found);
-                return Ok(Some(format!(
-                    "{entity}[{}].{name}: expected {wanted}, got {found}",
-                    show(key)
-                )));
+                // The same opening a derived column's comparison makes, for the same
+                // reason: a sealed column holds what the key store stored.
+                let mut found = found.clone();
+                opened(keys, &mut found, || format!("{entity}.{name}"))
+                    .map_err(|err: Error| err.to_string())?;
+                if !found.same(&wanted) {
+                    let found = shown(&found);
+                    return Ok(Some(format!(
+                        "{entity}[{}].{name}: expected {wanted}, got {found}",
+                        show(key)
+                    )));
+                }
             }
             None => return Ok(Some(format!("{entity} has no `{name}`"))),
         }
