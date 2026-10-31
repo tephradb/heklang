@@ -186,6 +186,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   computed, the frame-free ones can be resolved first. A by-key read skips a record its predicate
   rejects and never runs the expression, so `key rate = 100 / units` under `(kind: "paid")` failed
   the whole replay on a free record with no units where the same fold read by key answered.
+
+  **The digest sorts a `key` clause list**, as it sorts a slice's field filters, key conjuncts and
+  binds, so reordering the comma list is no longer a breaking change: nothing means an order there,
+  since the parts are found by name, all of them must agree, and none may read another.
+  `hek-digest 6` stands and needs no bump, because the clause itself is unreleased.
 - **A per-record sink for the derived read model**: `Tables` and the `Columns` seam, which are to
   `fold_stored` what `Projection` and `Rows` are to a projector rebuild. `Tables::apply(record,
   columns)` applies one record to whatever columns its arms name, carrying the accumulator in the

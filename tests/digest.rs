@@ -1805,3 +1805,43 @@ fn a_key_filter_packs_after_the_field_filters() {
     );
     assert!(!plain.packed().contains("keyed"), "{}", plain.packed());
 }
+
+/// Rule 14's clause is a set, so the order it was written in is not part of the form.
+///
+/// Reordering the comma list is no change at all: `tables::layout` finds each part by
+/// name, `interp::fold` requires every one of them to agree, and the parser refuses a
+/// part that reads another, so there is no dependency between two of them to preserve.
+/// Written order would have made `hek digest` report a breaking change for a reordering,
+/// which is the false positive the field filters and the binds are sorted to avoid.
+#[test]
+fn the_order_two_computed_key_parts_are_written_in_is_not_the_form() {
+    let events = "\
+event @usage.recorded { shop_id: Int, tag: String, at: Timestamp, units: Int }
+";
+    let fold = |keys: &str| {
+        format!(
+            "\
+{events}
+fold Counted(shop_id: Int, month: String, label: String) -> n: Int = 0 {{
+  on @usage.recorded(shop_id) {{ at, tag, units }} key {keys} => n + units
+}}
+"
+        )
+    };
+    let one = digest(&fold("month = \"{at.year()}\", label = tag.upper()"));
+    let two = digest(&fold("label = tag.upper(), month = \"{at.year()}\""));
+    assert_eq!(
+        one.packed(),
+        two.packed(),
+        "two spellings of one clause pack alike"
+    );
+
+    // Sorted by parameter, and the binds they read are numbered in that order rather than
+    // in the order the clauses were written: that is what `Frame::sorted` building after
+    // the sort buys, and without it the numbering lets the written order back in.
+    let form = entry(&one, "Counted").form.packed();
+    assert!(
+        form.find("(computed label").unwrap() < form.find("(computed month").unwrap(),
+        "sorted by parameter, not written: {form}"
+    );
+}

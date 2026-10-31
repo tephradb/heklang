@@ -94,7 +94,16 @@ them is not a normalisation that needs defending.
 
 **Sorted:** the entries themselves, by kind and then by name; an event's, a record's and an entity's
 fields; an enum's variants; an entity's indexes; a projector's entities, enums and handlers; an
-effect's helpers and arms, and the event paths one arm lists.
+effect's helpers and arms, and the event paths one arm lists. A slice's field filters, its rule 13
+key conjuncts, its rule 14 `key` clauses and its binds are each sorted within their own kind, which
+is what lets a slice itself stay written (below) without the comma order inside it leaking in.
+
+A `key` clause list earns that for a reason worth writing down, because it looked like a sequence:
+`tables::layout` finds each part by name, `Interpreter::fold` requires every part to agree, and the
+parser refuses a part that reads another one, so there is nothing for an order to mean. Sorting is
+also what makes it safe to sort, since `Frame::sorted` builds the expressions *after* the sort: a
+computed part reads the slice's binds and hands out their slot numbers, so building first would let
+the written order back in through the numbering.
 
 An entity's `@key` columns and an enum's `@default` variant are carried **by name**, because both
 are stored as indexes into a list this rule just sorted.

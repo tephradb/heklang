@@ -1010,13 +1010,17 @@ impl<'a> Frame<'a> {
         for (param, value) in self.sorted(&key_filters(slice)) {
             parts.push(node("keyed", [atom(param), value]));
         }
-        // In written order and not sorted, unlike the two above: a computed part reads
-        // this slice's binds, so the expressions hand out slot numbers and a sort would
-        // make the numbering depend on the parameter names. Appended after `keyed`, so a
-        // slice that computes nothing packs byte for byte as it did.
-        for key in &slice.keys {
-            let value = self.expr(key.value);
-            parts.push(node("computed", [atom(key.param.clone()), value]));
+        // Sorted by parameter, exactly as the two above are sorted and for the same
+        // reason: reordering the comma list is no change at all, since `tables::layout`
+        // finds each part by name and `interp::fold` requires every one of them to agree,
+        // and written order would have made `hek digest` call it a breaking change.
+        //
+        // `sorted` is what makes that safe: it sorts before it builds the expressions, so
+        // the slot numbers a computed part hands out to this slice's binds follow the
+        // sorted order rather than letting the written order back in. Appended after
+        // `keyed`, so a slice that computes nothing packs byte for byte as it did.
+        for (param, value) in self.sorted(&computed_keys(slice)) {
+            parts.push(node("computed", [atom(param), value]));
         }
         for bind in sorted_binds(&slice.binds) {
             let slot = self.slot(bind.slot);
@@ -1478,6 +1482,18 @@ fn key_filters(slice: &Slice) -> Vec<(Ident, ExprId)> {
             Filter::Key { param, value, .. } => Some((param.clone(), *value)),
             Filter::Field { .. } => None,
         })
+        .collect()
+}
+
+/// The `key param = value` clauses (`docs/folds.md` rule 14), in the shape `sorted`
+/// consumes. The slot is left out for [`key_filters`]'s reason, one of which does not
+/// apply (a fold with one is query-only, so nothing splices it) and one of which does:
+/// the parameter's name is what identifies the key part.
+fn computed_keys(slice: &Slice) -> Vec<(Ident, ExprId)> {
+    slice
+        .keys
+        .iter()
+        .map(|key| (key.param.clone(), key.value))
         .collect()
 }
 
