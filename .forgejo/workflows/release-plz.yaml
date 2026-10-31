@@ -37,15 +37,18 @@ jobs:
       #
       # The runner already moves `CARGO_HOME` and `SCCACHE_DIR` to its state directory for
       # related reasons; `TMPDIR` was the one heavy path left pointing at the private tmpfs.
-      # The workspace is on disk, so putting the scratch tree beside the checkout is enough.
-      # The proper fix is `TMPDIR` beside `SCCACHE_DIR` in the runner's own config, which
-      # would cover every repo rather than this one.
-      TMPDIR: ${{ github.workspace }}/.release-plz-tmp
+      # The step below sets it, because it has to be on disk **and outside the checkout**:
+      # the first attempt put it in the workspace and cargo then read the workspace root
+      # above the scratch crate, "current package believes it's in a workspace when it's
+      # not". The proper fix is `TMPDIR` beside `SCCACHE_DIR` in the runner's own config,
+      # which would cover every repo rather than this one.
+      #
       # No sccache here either, and deliberately still off. It failed in the same place for
-      # what is probably the same reason, so it may well work once the line above lands, but
-      # nothing has shown that yet. Restore it once a release run is green, and take the
-      # cold build until then: semver-checks is what turns a breaking change into a minor
-      # bump on a 0.x crate, and without it a `feat` alone cuts 0.11.2 where 0.12.0 is owed.
+      # what is probably the same reason, so it may well work once the scratch tree is off
+      # the tmpfs, but nothing has shown that yet. Restore it once a release run is green,
+      # and take the cold build until then: semver-checks is what turns a breaking change
+      # into a minor bump on a 0.x crate, and without it a `feat` alone cuts 0.11.2 where
+      # 0.12.0 is owed.
       RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@v4
@@ -55,15 +58,22 @@ jobs:
           token: ${{ secrets.FORGE_TOKEN }}
 
       # release-plz commits the version bumps and changelog onto the release branch, and git
-      # refuses to commit without an identity. The scratch directory is made here because
-      # `TMPDIR` naming one that does not exist is its own `No such file or directory`, and
-      # it is cleared because the workspace is reused between runs.
+      # refuses to commit without an identity.
+      #
+      # `TMPDIR` is computed here rather than declared above, because it needs a fallback:
+      # it must be a real directory on disk (`TMPDIR` naming a missing one is its own `No
+      # such file or directory`) and outside `$GITHUB_WORKSPACE`, or cargo finds the
+      # workspace root above the scratch crate. `RUNNER_TEMP` is both when the runner sets
+      # it; the checkout's parent is the act run directory, which is both either way.
       - name: Configure git identity and the scratch directory
         run: |
           git config user.name "release-plz"
           git config user.email "dev@tqwewe.com"
-          rm -rf "$TMPDIR"
-          mkdir -p "$TMPDIR"
+          scratch="${RUNNER_TEMP:-$(dirname "$GITHUB_WORKSPACE")}/release-plz-scratch"
+          rm -rf "$scratch"
+          mkdir -p "$scratch"
+          echo "TMPDIR=$scratch" >> "$GITHUB_ENV"
+          echo "scratch tree: $scratch"
 
       # Publish + tag + Forgejo release for any crate whose version is unpublished.
       - name: Publish and tag
