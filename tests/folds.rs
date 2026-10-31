@@ -2285,17 +2285,32 @@ fold ByEmail(email: String) -> n: Int = 0 {
 }
 
 #[test]
-fn a_lookup_is_only_a_lookup_inside_a_key_clause() {
-    // Everywhere else `Name { .. }` is the record literal it has always been, which is
-    // what keeps the spelling free: the parser claims it in one position.
-    let source = format!(
+fn a_lookup_is_only_a_lookup_where_a_record_is_in_hand() {
+    // A **filter** stays refused, and structurally: a filter resolves once for the whole
+    // slice and is parsed before the list that collects a lookup exists, so the name is
+    // not a value there at all. Everywhere outside a fold arm the same silence keeps
+    // `Name { .. }` the record literal it has always been.
+    let filter = format!(
         "{KEYED}
 fold Odd(game_id: Int) -> n: Int = 0 {{
-  on @game.purchased(game_id) => n + GameGenre {{ game_id }}
+  on @game.purchased(game_id, receipt_id: GameGenre {{ game_id }}) => n + 1
 }}
 "
     );
-    assert_eq!(error(&source), "`GameGenre` is not in scope");
+    assert_eq!(error(&filter), "`GameGenre` is not in scope");
+
+    // An **inline fold's arm** too, for the reason rule 14 refuses a `key` clause there:
+    // it is not stored, so it is inside the command that could not then read it.
+    let inline = format!(
+        "{KEYED}
+command C(game_id: Int) {{
+  fold total: Int = 0
+    on @game.purchased(game_id) => total + GameGenre {{ game_id }}.len()
+  emit @game.refunded {{ receipt_id: total }}
+}}
+"
+    );
+    assert_eq!(error(&inline), "`GameGenre` is not in scope");
 
     // And its arguments are checked as a command's read of the same fold is.
     let wrong = format!(
@@ -2348,7 +2363,7 @@ fold GenreUnits(shop_id: Int, genre: String) -> n: Int = 0 {{
     };
     assert_eq!(
         error(&source("game_id")),
-        "`shop_id` is a part of the key this arm is computing, so a computed key part cannot read it"
+        "`shop_id` is a part of this fold's key, so `GameGenre` cannot be looked up by it"
     );
 
     // And the fix the hint names: destructure the field, so the lookup reads the record.
@@ -2392,4 +2407,122 @@ fold Counted(p: Int) -> n: Int = 0 {
 }
 ";
     program(outside);
+}
+
+/// Rule 16: a **sealed** result is allowed in an arm's value, where rule 15 refuses one in
+/// a key.
+///
+/// A key is plaintext and an erase cannot reach one; an arm's value lands in a column,
+/// which `docs/projectors.md` rule 9 makes an erase empty. So a looked-up seal is ordinary
+/// sealed content and rule 7 takes it from there, with no code of its own: the slot carries
+/// the declared `Sealed(..)`, so the arm's value has that type and the fold has to declare
+/// it. That rule 7's refusal is the one that fires is the argument for allowing it at all.
+#[test]
+fn a_looked_up_seal_may_be_a_value_if_the_fold_declares_it() {
+    let source = |ret: &str| {
+        format!(
+            "\
+subject Customer(Int)
+
+event @order.placed {{ order_id: Int, customer_id: Customer, email: String @subject(customer_id) }}
+event @order.shipped {{ order_id: Int, customer_id: Customer }}
+
+fold LatestEmail(customer_id: Customer) -> Sealed(String, Customer)? = none {{
+  on @order.placed(customer_id) {{ email }} => email
+}}
+
+fold ShippedTo(order_id: Int) -> {ret} = none {{
+  on @order.shipped(order_id) {{ customer_id }} => LatestEmail {{ customer_id }}
+}}
+"
+        )
+    };
+    assert_eq!(
+        error(&source("String?")),
+        "`ShippedTo` folds content sealed under `Customer` on @order.shipped, and its return type does not say so"
+    );
+
+    // Declared, it is a sealed column like any other, and the key it is filed under names
+    // no subject: rule 7's usual shape.
+    let program = program(&source("Sealed(String, Customer)?"));
+    let layout = heklang::layout(&program);
+    let (table, column) = layout.column("ShippedTo").expect("kept");
+    assert_eq!(table.name, "order");
+    assert_eq!(column.reads, vec!["LatestEmail".to_string()]);
+    assert_eq!(
+        column.ty,
+        Type::opt(Type::sealed(Type::String, "Customer")),
+        "the column carries the seal, so an erase can empty it"
+    );
+}
+
+/// **Rule 16's gate widened the sink's, so it had to widen the parser's too.**
+///
+/// The sink checks an arm's narrowing before it evaluates a computed part *or* a lookup,
+/// and it may check the whole predicate only because the parser has refused the conjuncts
+/// it could not resolve. That refusal ran for a `key` clause alone, so an arm with a value
+/// lookup and a filter reading an unpinned parameter slipped past it: `hek check --tables`
+/// called the column storable and the fill aborted with `slot read before it was set`,
+/// which is the two-drivers-disagree failure these rules exist to prevent.
+#[test]
+fn an_arm_that_reads_a_fold_is_held_to_the_filter_rule_too() {
+    let source = "\
+subject Shop(Int)
+
+event @order.placed { shop_id: Shop, order_id: Int }
+event @shop.swept { shop_id: Shop, mark: Int }
+
+fold Flag(shop_id: Shop, order_id: Int) -> Bool = false {
+  on @order.placed(shop_id, order_id) => true
+}
+
+fold Counter(shop_id: Shop, order_id: Int) -> n: Int = 0 {
+  on @order.placed(shop_id, order_id) => n + 1
+  on @shop.swept(shop_id, mark: order_id + 0) { shop_id, mark }
+    => if (Flag { shop_id, order_id: mark }) { n } else { n + 1 }
+}
+";
+    assert_eq!(
+        error(source),
+        "the filter on `mark` reads `order_id`, which no conjunct of this arm pins"
+    );
+
+    // Without the lookup the same arm is fine, because `folded` resolves that conjunct
+    // per ranged key and the sink never has to get ahead of it.
+    let plain = source.replace(
+        "if (Flag { shop_id, order_id: mark }) { n } else { n + 1 }",
+        "if (mark > 0) { n } else { n + 1 }",
+    );
+    program(&plain);
+}
+
+/// A named fold is spelled like a type, so it resolves like one: `Name { .. }` reads the
+/// fold inside a fold arm and builds the record everywhere else, and one name meaning both
+/// would make one declaration read two ways. Refused where it is declared, because a use
+/// site is not where the author can fix it.
+#[test]
+fn a_named_fold_cannot_share_a_name_with_a_record_or_an_enum() {
+    let shape = |kind: &str| {
+        format!(
+            "\
+subject Shop(Int)
+
+{kind}
+
+event @order.placed {{ shop_id: Shop, order_id: Int }}
+
+fold Tally(shop_id: Shop, order_id: Int) -> Int = 0 {{
+  on @order.placed(shop_id, order_id) => 1
+}}
+"
+        )
+    };
+    assert_eq!(
+        error(&shape("record Tally { n: Int, m: Int }")),
+        "`Tally` is already the name of a record"
+    );
+    assert_eq!(
+        error(&shape("enum Tally { @default One, Two }")),
+        "`Tally` is already the name of an enum"
+    );
 }

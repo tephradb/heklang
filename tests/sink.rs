@@ -1431,3 +1431,151 @@ fn a_lookup_reads_the_log_strictly_before_the_record() {
         "the second reads what the first left"
     );
 }
+
+// ---------------------------------------------------------------------------
+
+/// Rule 16: the lookup is in the arm's **value** rather than its key, which is what lets a
+/// counter read a fact about another key instead of carrying a copy of it.
+///
+/// `EditsRequested` counts edits and leaves test orders out. Before this, "is this a test
+/// order?" had to be a membership set on the counter's own row, written by every event
+/// that could place one, because a fold is one value out and could not read a sibling.
+/// Now it is its own fold, looked up.
+const GATED: &str = "subject Shop(Int)
+
+event @order.placed { shop_id: Shop, order_id: Int, test_order: Bool }
+event @edit.requested { shop_id: Shop, order_id: Int }
+
+fold TestOrder(shop_id: Shop, order_id: Int) -> Bool = false {
+  on @order.placed(shop_id, order_id) { test_order } => test_order
+}
+
+fold EditsRequested(shop_id: Shop) -> n: Int = 0 {
+  on @edit.requested(shop_id) { shop_id, order_id }
+    => if (TestOrder { shop_id, order_id }) { n } else { n + 1 }
+}
+";
+
+#[test]
+fn a_value_read_through_another_fold_agrees_with_a_refold() {
+    let program = program(GATED);
+    let mut interpreter = Interpreter::new(&program);
+    for (order, test) in [(7, false), (8, true)] {
+        given(
+            &mut interpreter,
+            "order.placed",
+            [
+                ("shop_id", Value::Int(1)),
+                ("order_id", Value::Int(order)),
+                ("test_order", Value::Bool(test)),
+            ],
+        );
+    }
+    for order in [7, 8] {
+        given(
+            &mut interpreter,
+            "edit.requested",
+            [("shop_id", Value::Int(1)), ("order_id", Value::Int(order))],
+        );
+    }
+
+    let cells = agrees(&program, &interpreter);
+    assert_eq!(
+        cells.get("shop", &[Key::Int(1)], "edits_requested"),
+        Some(&Value::Int(1)),
+        "the real order's edit, and not the test order's"
+    );
+    // The counter is keyed by shop alone: nothing about the gate reached its key.
+    assert_eq!(
+        heklang::layout(&program)
+            .column("EditsRequested")
+            .expect("kept")
+            .1
+            .reads,
+        vec!["TestOrder".to_string()],
+        "a value lookup is a dependency like a key lookup"
+    );
+}
+
+/// **As of the record, in the value position too**, which is the same rule and the same
+/// reason: `Tables::arm` reads every lookup for a record before anything is written for
+/// it, so a record that moves the looked-up fold reads what it held before.
+#[test]
+fn a_value_lookup_reads_the_log_strictly_before_the_record() {
+    let source = "event @a.happened { x: Int, flag: Bool }
+
+fold Flag(x: Int) -> Bool = false {
+  on @a.happened(x) { flag } => flag
+}
+
+fold Counted(x: Int) -> n: Int = 0 {
+  on @a.happened(x) { x } => if (Flag { x }) { n + 10 } else { n + 1 }
+}
+";
+    let program = program(source);
+    let mut interpreter = Interpreter::new(&program);
+    for _ in 0..2 {
+        given(
+            &mut interpreter,
+            "a.happened",
+            [("x", Value::Int(1)), ("flag", Value::Bool(true))],
+        );
+    }
+
+    let cells = agrees(&program, &interpreter);
+    assert_eq!(
+        cells.get("x", &[Key::Int(1)], "counted"),
+        Some(&Value::Int(11)),
+        "the first record sets the flag and is counted before it: 1, then 10"
+    );
+}
+
+/// **A ranged arm's lookups are read once, not once per key**, which is what lets the
+/// values be carried as one list per arm.
+///
+/// It is sound because a lookup's arguments read the record and never the key (rules 15
+/// and 16 both), so every key the range covers would compute the same value. An arm that
+/// wanted a lookup per key would be asking for one whose argument came from the key, and
+/// that is the thing those rules refuse.
+#[test]
+fn a_ranged_arms_lookup_is_read_once_for_every_key_it_covers() {
+    let source = "subject Shop(Int)
+
+event @order.placed { shop_id: Shop, order_id: Int }
+event @shop.swept { shop_id: Shop, swept: Bool }
+
+fold Swept(shop_id: Shop) -> Bool = false {
+  on @shop.swept(shop_id) { swept } => swept
+}
+
+fold Counted(shop_id: Shop, order_id: Int) -> n: Int = 0 {
+  on @order.placed(shop_id, order_id) => n + 1
+  on @shop.swept(shop_id) { shop_id } => if (Swept { shop_id }) { n + 100 } else { n + 10 }
+}
+";
+    let program = program(source);
+    let mut interpreter = Interpreter::new(&program);
+    for order in [7, 8] {
+        given(
+            &mut interpreter,
+            "order.placed",
+            [("shop_id", Value::Int(1)), ("order_id", Value::Int(order))],
+        );
+    }
+    given(
+        &mut interpreter,
+        "shop.swept",
+        [("shop_id", Value::Int(1)), ("swept", Value::Bool(true))],
+    );
+
+    let cells = agrees(&program, &interpreter);
+    // The sweep ranges over both orders and reads `Swept` as of itself, which is `false`
+    // because it is the record setting it: `+ 10` at each, not `+ 100`.
+    for order in [7, 8] {
+        assert_eq!(
+            cells.get("shop__order", &[Key::Int(1), Key::Int(order)], "counted"),
+            Some(&Value::Int(11)),
+            "one placement and one sweep, at order {order}"
+        );
+    }
+}

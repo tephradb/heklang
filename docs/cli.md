@@ -94,14 +94,16 @@ it, and gets `missing argument` for every fold the first time it is slightly wro
 column and not per table, because one key signature is reached by parameters of different
 names: `(shop_id: Shop)` and `(shop: Shop)` are one key.
 
-**A column keyed through another says so**, which is `docs/folds.md` rule 15:
+**A column that reads another says so**, which is `docs/folds.md` rules 15 and 16:
 
 ```
-    genre_units: Int  <- @game.purchased, @game.refunded  (keyed through game_genre, receipt_game)
+    genre_units: Int  <- @game.purchased, @game.refunded  (reads game_genre, receipt_game)
 ```
 
 Named as **columns** because that is what the rest of the listing is, and transitive, so a chain
-shows every link rather than the one the arm wrote. It is the answer to "why does editing `GameGenre`
+shows every link rather than the one the arm wrote. "reads" rather than "keyed through", because a
+fold may be read for a key part (rule 15) or for a value (rule 16) and the dependency is the same
+either way. It is the answer to "why does editing `GameGenre`
 refold `genre_units`", and the same list is `Column::reads`: what the digest records so the
 dependent's hash moves, and what `Layout::closure` adds to a rebuild.
 

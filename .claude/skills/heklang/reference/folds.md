@@ -240,12 +240,48 @@ expression and a comprehension's name does not exist where it lands.
 column refolds another:
 
 ```
-    genre_units: Int  <- @game.purchased, @game.refunded  (keyed through game_genre, receipt_game)
+    genre_units: Int  <- @game.purchased, @game.refunded  (reads game_genre, receipt_game)
 ```
 
 That list is also what moves the dependent's digest `hash` when a looked-up fold changes, and what a
 rebuild replays alongside. A by-key read of one is quadratic and that is accepted: hekla serves it
 from the table.
+
+## 5c. And an arm's value may read a fold too
+
+Rule 16: the same construct in the other half of the arm, which is what lets a fold ask about
+another key at all.
+
+```hek
+fold TestOrder(shop_id: Shop, order_id: Int) -> Bool = false {
+  on @order.placed(shop_id, order_id) { test_order } => test_order
+}
+
+fold EditsRequested(shop_id: Shop) -> n: Int = 0 {
+  on @edit.requested(shop_id) { shop_id, order_id }
+    => if (TestOrder { shop_id, order_id }) { n } else { n + 1 }
+}
+```
+
+A fold is one value out (section 1), so a counter that has to leave some records out had no way to
+know which: the ported application kept a `Map(Int, Bool)` membership set on the counter's own row,
+written by every event that could place a test order, purely so twenty counters could read a sibling
+column. Now the fact is its own fold and they look it up.
+
+**Everything in 5b holds unchanged.** What differs is two things:
+
+- **A sealed result is allowed**, where a key refuses one: an arm's value lands in a column, which an
+  erase empties, rather than in a key an erase cannot reach. It is then ordinary sealed content and
+  section 6 applies, so the fold has to **declare** `Sealed(T, Subject)` and the refusal if it does
+  not is section 6's own.
+- **The positions are where a record is in hand**: an arm's value and a `key` clause. A slice filter,
+  a seed and an inline fold's arm are refused, the first two because they resolve with no record and
+  the third because it is inside the command that could not then read it.
+
+**An `if` header still reads `Name {` as a block**, so `if (TestOrder { .. })` takes parentheses,
+exactly as a record literal there does. And a named fold may not share a name with a record or an
+enum, because `Name { .. }` reads the fold in a fold arm and builds the record everywhere else; it
+is refused where the fold is declared.
 
 ## 6. Sealed return types
 

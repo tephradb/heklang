@@ -52,18 +52,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through; and the result's type has to fit the part.
 
   **`Column::reads` is the dependency, transitively**, and three things read it. `hek check --tables`
-  prints `(keyed through game_genre, receipt_game)` against the column. The digest puts a hash of
+  prints `(reads game_genre, receipt_game)` against the column. The digest puts a hash of
   each reached fold into the dependent's form, so editing a looked-up fold moves the dependent's
   `hash` while leaving its `signature_hash` alone: a column to refold in place, not to rebuild
   differently. And `Layout::closure` adds them to a rebuild, for the same reason it adds a range's
   minters, because a lookup wants its dependencies' values as of each past record.
 
-  **The arguments are held to rule 14's rule**, so they read the record and nothing of the key, and
-  they are asked for separately because the lookup keeps them off the expression tree: without that
-  the hole rule 14 exists to close was open through the most natural shape there is, passing the key
-  part the arm already pins. Destructuring the field is the fix, and the hint says so. **And a
-  lookup may not be written under a binder**, since it is hoisted out of the expression and
-  evaluated once per record, so a comprehension's name does not exist yet at that point.
+  **The arguments read the record and nothing of the key or the accumulator**, which is rule 14's
+  rule held by the lookup rather than by the position it is written in, and they are checked
+  separately because the lookup keeps them off the expression tree: without that the hole rule 14
+  exists to close was open through the most natural shape there is, passing the key part the arm
+  already pins. Destructuring the field is the fix, and the hint says so. **And a lookup may not be
+  written under a binder**, since it is hoisted out of the expression and evaluated once per record,
+  so a comprehension's name does not exist yet at that point.
+
+  **An arm's value may read a fold too** (rule 16), which is the other half of the same construct
+  and what lets a fold ask about another key at all. A fold is one value out, so a counter that has
+  to leave some records out had no way to know which: the ported application kept a `Map(Int, Bool)`
+  membership set on the counter's own row, written by every event that could place a test order,
+  purely so twenty counters could read a sibling column in a value position. Now the fact is its own
+  fold and they look it up, which is why that projector was the last one the port could not convert.
+
+  Everything about rule 15 holds there unchanged, and two things differ. **A sealed result is
+  allowed**, where a key refuses one: an arm's value lands in a column, which an erase empties,
+  rather than in a key an erase cannot reach, so it is ordinary sealed content and rule 7 takes it
+  from there — the fold has to declare `Sealed(T, Subject)` and rule 7's existing refusal names the
+  type, with no code added for the case. And the **positions** are where a record is in hand: an
+  arm's value and a `key` clause. A slice filter and a seed resolve with no record, and an inline
+  fold's arm is inside the command that could not then read it; all three are refused structurally,
+  by there being no list to collect a lookup into. An `if` header still reads `Name {` as a block, so
+  `if (TestOrder { .. })` takes parentheses exactly as a record literal there does.
+
+  Two refusals widened with it. A named fold may no longer share a name with a **record or an enum**:
+  `Name { .. }` reads the fold in a fold arm and builds the record everywhere else, so one name
+  meaning both would make one declaration read two ways, and it is refused where the fold is declared
+  rather than at a use site. And the rule that every filter of such an arm resolve from the record
+  alone now covers an arm with a **lookup** and not only one with a `key` clause: the sink checks the
+  narrowing before it evaluates either, and widening its gate without widening the parser's let an arm
+  with a value lookup and a filter on an unpinned parameter check clean and then abort the fill.
+
+  Inside the sink the two differ in one place: a key lookup is read and used in the phase before any
+  write, while a value lookup is read there and **carried** to the phase that writes, because by
+  then the looked-up column may be one of the things this record has written and reading it again
+  would be reading it after the record rather than before it.
 
   What it costs is the by-key read: `Interpreter::fold` evaluates the lookup at every candidate
   record's position, which is a fold of the looked-up fold per record. Quadratic and accepted, since

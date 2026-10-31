@@ -71,7 +71,7 @@ fold WorkshopTitle(workshop_id: Uuid) -> String = "untitled" {
 
 // Strictly before the record, so a seat booked before the workshop was opened counts
 // under `"untitled"` rather than under a title it did not have yet. `hek check --tables`
-// prints `(keyed through workshop_title)` against this column, which is how a reader sees
+// prints `(reads workshop_title)` against this column, which is how a reader sees
 // why editing `WorkshopTitle` refolds this one.
 fold TitleRevenue(title: String) -> taken: Money(2) = 0 {
   on @seat.booked() { workshop_id, paid } key title = WorkshopTitle { workshop_id } =>

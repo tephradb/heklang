@@ -1476,6 +1476,27 @@ impl Parser {
                      `LifetimeSpend` is `lifetime_spend`",
                 ));
         }
+        // **A fold is spelled like a type, so it resolves like one**: `Name { .. }` reads
+        // the fold in a fold arm (rules 15 and 16) and builds the record everywhere else,
+        // so one name meaning both would make one declaration read two ways. The same
+        // argument a subject is held to for the same two kinds, and refused here rather
+        // than at a use site, because a use site is not where the author can fix it.
+        for (kind, taken) in [
+            ("a record", self.record_def(&name).is_some()),
+            ("an enum", self.enum_def(&name).is_some()),
+        ] {
+            if taken {
+                return Err(self
+                    .err(
+                        Code::DeclaredTwice,
+                        format!("`{name}` is already the name of {kind}"),
+                        at,
+                    )
+                    .with_hint(
+                        "a named fold is spelled like a type, and a type name resolves to one declaration: in a fold arm `Name { .. }` reads the fold and everywhere else it builds the record, so one of the two has to be renamed",
+                    ));
+            }
+        }
 
         let params = self.param_list(None)?;
 
@@ -4772,9 +4793,36 @@ impl Parser {
             self.expect_sym(Sym::Arrow)?;
             self.folding = true;
             self.fold_arm = true;
-            let value = self.expr(lower, Some(ty.clone()))?;
+            // **Rule 16: the arm's value may read a fold too**, and it is the same list.
+            // Armed with the `key` clause's lookups already in it, so the slice holds one
+            // list in evaluation order and a driver fills every slot before either
+            // expression runs. `named` is the gate, which is what refuses one in an inline
+            // fold: a slice filter and a seed are refused by having no list at all, since
+            // both are parsed while this is `None`.
+            //
+            // `keying` is deliberately *not* set here. A key is plaintext and an arm's
+            // value is not, so a looked-up seal is refused there and declared here, which
+            // is rule 7 doing the work rather than a rule of this one's.
+            let outer_lookups = match named {
+                true => Some(self.lookups.replace(lookups)),
+                false => None,
+            };
+            let value = self.expr(lower, Some(ty.clone()));
+            let lookups = match outer_lookups {
+                Some(outer) => mem::replace(&mut self.lookups, outer).unwrap_or_default(),
+                None => Vec::new(),
+            };
+            let value = value?;
             self.fold_arm = false;
             self.folding = false;
+            // **Here rather than in `computed_keys`, because a lookup is collected by the
+            // line above.** The sink checks an arm's narrowing before it evaluates either a
+            // computed part or a lookup, and `arm_filters` is what makes that possible; it
+            // ran for a `key` clause alone, so rule 16's arm slipped past it and the fill
+            // aborted on a filter the sink could not resolve.
+            if !keys.is_empty() || !lookups.is_empty() {
+                self.arm_filters(lower, &filters, &keys)?;
+            }
             self.envelope = outer;
             self.arm_envelope = false;
             // Rule 3's rule for the accumulator, applied to the other name an arm can
@@ -5329,20 +5377,11 @@ impl Parser {
             // the check is narrower than `slot_read`'s rather than absent: the record's
             // names are in, and the key's own and the accumulator are out.
             //
-            // **A rule 15 lookup's arguments are checked here too**, and they have to be
-            // asked for separately: `fold_lookup` leaves an `Expr::Load` of the slot
-            // behind and keeps the arguments on the `Lookup`, off the expression tree, so
-            // the walk below sees nothing of them. Without this the hole rule 14 exists to
-            // close was open one level down, and through the most natural shape there is:
-            // `key genre = GameGenre { shop_id, game_id }` passing the key part the arm
-            // already pins checked clean and failed the fill.
-            let through = self
-                .lookups
-                .iter()
-                .flatten()
-                .flat_map(|lookup| &lookup.args)
-                .find_map(|(_, value)| lower.b.key_read(*value));
-            if let Some((slot, at)) = lower.b.key_read(value).or(through) {
+            // A rule 15 lookup's arguments are held to this same rule and `fold_lookup`
+            // checks them itself, because they are off the expression tree this walks and
+            // because the rule is the lookup's rather than this position's: an arm's value
+            // may read the accumulator and an argument inside it may not.
+            if let Some((slot, at)) = lower.b.key_read(value) {
                 let name = lower.b.slot_name(slot).unwrap_or_default().to_string();
                 let what = match lower.b.params().iter().any(|other| other.slot == slot) {
                     true => "a part of the key this arm is computing",
@@ -5370,6 +5409,35 @@ impl Parser {
             }
         }
 
+        // In the order they were pushed, which is the order they have to be evaluated in:
+        // `fold_lookup` pushes after its arguments are parsed, so an inner link of a chain
+        // lands before the outer one that reads it.
+        let lookups = mem::replace(&mut self.lookups, outer).unwrap_or_default();
+        Ok((lookups, keys))
+    }
+
+    /// **Every filter of an arm that reads the log has to resolve from the record alone**,
+    /// and the two refusals below are the two ways one would not.
+    ///
+    /// Called for an arm with a `key` clause (rule 14) *or* a lookup (rules 15 and 16),
+    /// which is what makes `Tables::narrowed`'s precondition true: the sink checks the
+    /// arm's narrowing before it evaluates either, because a by-key read skips a record
+    /// its predicate rejects and never runs the expression at all. What it has at that
+    /// point is the record and the parts the arm pins from it, so a conjunct reading
+    /// anything else cannot be resolved there and the expression would run for a record
+    /// the arm was never going to fold.
+    ///
+    /// **Both conditions, which took a review to get right.** It ran for a `key` clause
+    /// only, and then rule 16 widened the sink's gate to cover a lookup without widening
+    /// this: an arm with a value lookup and a filter reading an unpinned parameter checked
+    /// clean and aborted the whole fill with `slot read before it was set`, which is the
+    /// two-drivers-disagree failure these rules exist to prevent.
+    fn arm_filters(
+        &self,
+        lower: &Lower,
+        filters: &[Filter],
+        keys: &[ComputedKey],
+    ) -> Result<(), Diagnostic> {
         // **Every filter of this arm has to resolve from the record alone**, and the two
         // refusals below are the two ways one would not.
         //
@@ -5430,16 +5498,12 @@ impl Parser {
                             at,
                         )
                         .with_hint(
-                            "an unpinned parameter is a range over every key the table holds, so this conjunct has one value per key, and an arm that computes a key part is checked before those keys are asked for; pin it with the parameter alone (`<field>: <param>`) or on an arm with no `key` clause",
+                            "an unpinned parameter is a range over every key the table holds, so this conjunct has one value per key, and an arm that computes a key part or reads a fold is checked before those keys are asked for; pin it with the parameter alone (`<field>: <param>`), or put the conjunct on an arm that neither computes a part nor reads a fold",
                         ));
                 }
             }
         }
-        // In the order they were pushed, which is the order they have to be evaluated in:
-        // `fold_lookup` pushes after its arguments are parsed, so an inner link of a chain
-        // lands before the outer one that reads it.
-        let lookups = mem::replace(&mut self.lookups, outer).unwrap_or_default();
-        Ok((lookups, keys))
+        Ok(())
     }
 
     /// A filter naming something that is not a field of the event. In a fold's arm the
@@ -10192,10 +10256,15 @@ impl Parser {
             .clone()
             .expect("a fold's signature always declares a result");
         // **A key is plaintext and an erase cannot reach one**, which is the argument rule
-        // 14 makes for a computed part and this is the same position. Refused on the
-        // declared return type, which is where a fold publishes its seal (rule 7), so the
-        // `fn`-laundering hole a computed part had cannot open here.
-        if let Some(subject) = ret.subject() {
+        // 14 makes for a computed part and a `key` clause is the same position. Refused on
+        // the declared return type, which is where a fold publishes its seal (rule 7), so
+        // the `fn`-laundering hole a computed part had cannot open here.
+        //
+        // **In an arm's value it is allowed**, because that lands in a column erasure can
+        // reach rather than in a primary key. Nothing special happens for it either: the
+        // slot carries the declared `Sealed(..)`, so the arm's value has that type and the
+        // fold has to declare it, which is rule 7's existing check rather than a new one.
+        if let Some(subject) = ret.subject().filter(|_| self.keying) {
             return Err(self
                 .err(
                     Code::SealBoundary,
@@ -10206,17 +10275,6 @@ impl Parser {
                 )
                 .with_hint(
                     "a key is plaintext and an erase cannot reach one, so a row filed under sealed content would hold personal data nothing could erase; look up a fold whose value is not sealed, or key on something the subject is not in",
-                ));
-        }
-        if self.record_def(&name).is_some() {
-            return Err(self
-                .err(
-                    Code::DeclaredTwice,
-                    format!("`{name}` is the name of a fold and of a record"),
-                    span,
-                )
-                .with_hint(
-                    "inside a `key` clause `Name { .. }` reads the fold, and everywhere else it builds the record, so one of the two has to be renamed before either can be written here",
                 ));
         }
 
@@ -10262,6 +10320,32 @@ impl Parser {
                     span,
                 ));
             }
+        }
+
+        // **The arguments read the record and nothing of the key or the accumulator**,
+        // which is rule 14's rule and is checked here rather than at either call site
+        // because it is a property of the lookup and not of where it was written: the sink
+        // evaluates every lookup for a record before it writes anything, so what it has
+        // at that point is the record. An arm's *value* may read the accumulator freely;
+        // an argument to a lookup inside that value may not.
+        for (_, given) in &args {
+            let Some((slot, at)) = lower.b.key_read(*given) else {
+                continue;
+            };
+            let read = lower.b.slot_name(slot).unwrap_or_default().to_string();
+            let what = match lower.b.params().iter().any(|other| other.slot == slot) {
+                true => "a part of this fold's key",
+                false => "the accumulator",
+            };
+            return Err(self
+                .err(
+                    Code::FoldRestriction,
+                    format!("`{read}` is {what}, so `{name}` cannot be looked up by it"),
+                    at,
+                )
+                .with_hint(
+                    "a lookup is evaluated for the record before anything is written for it, so what it may read is the record: the destructure's binds, the envelope binding, consts and pure `fn`s of those; destructure the field and read that",
+                ));
         }
 
         // Allocated under a name no source token can spell, as `hidden_bind` does and for

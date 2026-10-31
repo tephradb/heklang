@@ -968,6 +968,10 @@ impl<'a> Tables<'a> {
         // value from *before* it, so a listing that set a game's genre counted under the
         // genre it was setting.
         let mut writes: BTreeMap<(usize, usize, Vec<Key>), Vec<usize>> = BTreeMap::new();
+        // Rules 15 and 16: what each arm's lookups read, by (table, column, arm), carried
+        // from the phase that ran before any write to the phase that does the writing.
+        // Empty for every program that looks nothing up, which is almost all of them.
+        let mut looked_up: HashMap<(usize, usize), HashMap<usize, Vec<Value>>> = HashMap::new();
         for (whose, table) in self.layout.tables.iter().enumerate() {
             // Per table, because a key belongs to one: a range over this table covers the
             // keys this table holds.
@@ -986,7 +990,14 @@ impl<'a> Tables<'a> {
                         if arm.fields.iter().all(ArmMatch::pinned) != pinned_only {
                             continue;
                         }
-                        for key in self.arm(record, table, column, at, &minted, columns)? {
+                        let (keys, read) = self.arm(record, table, column, at, &minted, columns)?;
+                        if !read.is_empty() {
+                            looked_up
+                                .entry((whose, which))
+                                .or_default()
+                                .insert(at, read);
+                        }
+                        for key in keys {
                             if pinned_only {
                                 minted.insert(key.clone());
                             }
@@ -1003,10 +1014,19 @@ impl<'a> Tables<'a> {
         // them the wrong way round: the pinned arm counted and the ranged arm then
         // overwrote it, where a refold resets and then counts. It is also one store read
         // and one write per row rather than per arm.
+        let empty: HashMap<usize, Vec<Value>> = HashMap::new();
         for ((whose, which, key), mut arms) in writes {
             let table = &self.layout.tables[whose];
             arms.sort_unstable();
-            self.fold_into(record, table, &table.columns[which], &arms, key, columns)?;
+            self.fold_into(
+                record,
+                table,
+                &table.columns[which],
+                &arms,
+                key,
+                looked_up.get(&(whose, which)).unwrap_or(&empty),
+                columns,
+            )?;
         }
         Ok(())
     }
@@ -1019,6 +1039,12 @@ impl<'a> Tables<'a> {
     /// [`Columns::keys`] for a range and nothing else, so every key the record writes is
     /// known before the first `set`, and the arms of one row can then be applied in the
     /// order they were written.
+    ///
+    /// It also hands back what the arm's **lookups** evaluated to (rules 15 and 16), which
+    /// is why they come back rather than being read again where they are used: this is the
+    /// phase that runs before any write, so it is the only place the looked-up column
+    /// still holds the value from before this record. One list per arm and not per key,
+    /// because a lookup's arguments read the record and never the key.
     #[allow(clippy::too_many_arguments)]
     fn arm(
         &self,
@@ -1028,7 +1054,7 @@ impl<'a> Tables<'a> {
         at: usize,
         minted: &BTreeSet<Vec<Key>>,
         columns: &dyn Columns,
-    ) -> Result<Vec<Vec<Key>>, Error> {
+    ) -> Result<(Vec<Vec<Key>>, Vec<Value>), Error> {
         let arm = &column.arms[at];
         // **Once per arm per record, and passed down from here.** `Program::fold` is a
         // scan of every fold by name, and the per-key work below asks the same question:
@@ -1044,16 +1070,40 @@ impl<'a> Tables<'a> {
         // sealing every bound field.
         let mut computed: Option<Frame> = None;
 
-        // The arm's own narrowing, before a computed part is evaluated. `matching` checks
-        // it again per key, and has to: a ranged arm has one key per row rather than the
-        // one this resolved against.
-        if !def.stage.slices[at].keys.is_empty()
+        // The arm's own narrowing, before a lookup is read or a computed part evaluated.
+        // `matching` checks it again per key, and has to: a ranged arm has one key per row
+        // rather than the one this resolved against.
+        let slice = &def.stage.slices[at];
+        if (!slice.keys.is_empty() || !slice.lookups.is_empty())
             && !self
                 .narrowed(record, table, column, at, def)
                 .map_err(|err| err.in_module(module))?
         {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
+
+        // The lookups, read here because this is the phase that runs before any write, so
+        // the looked-up column still holds the value from before this record. A computed
+        // part below reads the slots they fill, and so does the arm's value, which is in
+        // `folded` on the other side of the writes and is why these are handed back.
+        let read = match slice.lookups.is_empty() {
+            true => Vec::new(),
+            false => {
+                let frame = match computed {
+                    Some(ref mut frame) => frame,
+                    None => computed.insert(
+                        self.record_frame(record, def, slice, columns)
+                            .map_err(|err| err.in_module(module))?,
+                    ),
+                };
+                slice
+                    .lookups
+                    .iter()
+                    .map(|lookup| frame.get(lookup.slot).cloned())
+                    .collect::<Result<Vec<Value>, ErrorKind>>()
+                    .map_err(|err| Error::new(err).in_module(module))?
+            }
+        };
 
         // The key, part by part, in the table's order. A part the arm pinned is known
         // from the record or from the arm itself; one it left open is a range, and the
@@ -1072,7 +1122,6 @@ impl<'a> Tables<'a> {
                 // evaluates to over this record is the key the row is written at, and
                 // `fold_into` binds the parameter from it below.
                 ArmMatch::Computed(id) => {
-                    let slice = &def.stage.slices[at];
                     let frame = match computed {
                         Some(ref mut frame) => frame,
                         None => computed.insert(
@@ -1141,7 +1190,7 @@ impl<'a> Tables<'a> {
                 writes.push(key);
             }
         }
-        Ok(writes)
+        Ok((writes, read))
     }
 
     /// Whether this arm's predicate holds for this record, checked **before** a computed
@@ -1310,6 +1359,7 @@ impl<'a> Tables<'a> {
 
     /// One arm of one column at one key: the fold's own body, with the accumulator read
     /// from the store and written back to it.
+    #[allow(clippy::too_many_arguments)]
     fn fold_into(
         &self,
         record: &Record,
@@ -1317,6 +1367,10 @@ impl<'a> Tables<'a> {
         column: &Column,
         arms: &[usize],
         key: Vec<Key>,
+        // What each of this column's arms looked up, from the phase that ran before any
+        // write: see `Tables::arm`. Keyed by arm index, since the values are per arm and
+        // not per key.
+        read: &HashMap<usize, Vec<Value>>,
         columns: &mut dyn Columns,
     ) -> Result<(), Error> {
         let def = self
@@ -1327,7 +1381,7 @@ impl<'a> Tables<'a> {
         // Stamped once here, which is the boundary that knows which module the fold came
         // from, exactly as `run` and `project` are the boundary for a handler's.
         let folded = self
-            .folded(record, table, column, arms, &key, def, columns)
+            .folded(record, table, column, arms, &key, def, read, columns)
             .map_err(|err| err.in_module(module))?;
         // Not shredded. This is the fill path, so it behaves as `fold_stored` does and
         // hands a `Value::Sealed` through for the store to hold and shred on its own
@@ -1351,6 +1405,7 @@ impl<'a> Tables<'a> {
         arms: &[usize],
         key: &[Key],
         def: &Fold,
+        read: &HashMap<usize, Vec<Value>>,
         columns: &dyn Columns,
     ) -> Result<Option<Value>, Error> {
         if arms.is_empty() {
@@ -1391,6 +1446,16 @@ impl<'a> Tables<'a> {
         // applied in source order to one accumulator, and so is this.
         for &at in arms {
             let slice = &def.stage.slices[at];
+            // Rules 15 and 16: what this arm's lookups read, which `Tables::arm` evaluated
+            // before anything was written for this record. Put back rather than read
+            // again, because by now the writing has started and the looked-up column may
+            // be one of the things written: reading it here would be reading it "after"
+            // the record rather than before it.
+            if let Some(values) = read.get(&at) {
+                for (lookup, value) in slice.lookups.iter().zip(values) {
+                    frame.set(lookup.slot, value.clone())?;
+                }
+            }
             for bind in &slice.binds {
                 let value = field(&record.event, &bind.field)?.clone();
                 let value = seal(self.program, &record.event, &bind.field, value)?;

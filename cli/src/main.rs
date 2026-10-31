@@ -521,16 +521,18 @@ fn tables(program: &Program) {
         for column in &table.columns {
             let named = format!("{}: {}", column.name, column.ty);
             let events: Vec<String> = column.events.iter().map(EventPath::to_string).collect();
-            // Rule 15's dependencies, named as **columns** because that is what the rest
-            // of this listing is: a reader looking at `genre_units` and wondering why
-            // editing `GameGenre` refolds it is looking for `game_genre` here. Transitive,
-            // so a chain shows every link rather than only the one the arm wrote.
+            // The folds this column reads (rules 15 and 16), named as **columns** because
+            // that is what the rest of this listing is: a reader looking at `genre_units`
+            // and wondering why editing `GameGenre` refolds it is looking for `game_genre`
+            // here. Transitive, so a chain shows every link rather than only the one the
+            // arm wrote, and "reads" rather than "keyed through" because a fold may be
+            // read for a key part or for a value and the dependency is the same either way.
             // Looked up through the layout rather than derived again here, so the name
             // printed is the one the column above it was printed under.
             let through = match column.reads.is_empty() {
                 true => String::new(),
                 false => format!(
-                    "  (keyed through {})",
+                    "  (reads {})",
                     column
                         .reads
                         .iter()

@@ -1233,7 +1233,7 @@ another:
 
 ```
   TABLE genre  (genre: Genre)  1 column
-    genre_units: Int  <- @game.purchased, @game.refunded  (keyed through game_genre, receipt_game)
+    genre_units: Int  <- @game.purchased, @game.refunded  (reads game_genre, receipt_game)
 ```
 
 Transitive, so a chain shows every link. `Column::reads` is that list, and three things read it:
@@ -1253,10 +1253,81 @@ fold by evaluating the lookup at every candidate record's position, which is a f
 looked-up fold per record: quadratic, and accepted. A deployment serves these from the table and
 never takes that path on a request, and a test is a handful of records.
 
-**Only a `key` clause, for now.** A lookup in an arm's **value** expression has the same mechanics
-and the same rules, and the evidence for it is already measured: the one projector the ported
-application has left, twenty counters of it, is not reached by this rule, because what it reads is a
-sibling column rather than a key. That is the next rule rather than this one.
+## 16. An arm's value may read a fold too
+
+Rule 15 reads a fold for a **key part**. This reads one for the **value**, which is the other half
+of the same construct and is written the same way:
+
+```hek
+fold TestOrder(shop_id: Shop, order_id: Int) -> Bool = false {
+  on @order.placed(shop_id, order_id) { test_order } => test_order
+}
+
+fold EditsRequested(shop_id: Shop) -> n: Int = 0 {
+  on @edit.requested(shop_id) { shop_id, order_id }
+    => if (TestOrder { shop_id, order_id }) { n } else { n + 1 }
+}
+```
+
+**What it buys is a fold that can ask about another key, which rule 1 otherwise forbids.** A fold is
+one value out, so a counter that has to leave some records out had no way to know which: the ported
+application's statistics kept a `Map(Int, Bool)` **membership set** on the counter's own row, written
+by every event that could place a test order, purely so twenty counters could read it in a value
+position. That is a sibling column, and rule 1's "one value out" is exactly what stopped a fold
+reading one. With this the per-order fact is its own fold and the counters look it up, which is why
+that projector was the last one the port could not convert.
+
+**Everything about rule 15 holds unchanged**: as of the record and strictly before it, query-only,
+only a stored fold, cycles refused, the result typed by the looked-up fold's declared return type,
+transitive in `Column::reads` and in the digest, and replayed alongside by `Tables::only`. The two
+rules are one feature with one list of lookups per arm, and the only question this one settles is
+*where* the value may be read.
+
+### What differs, and it is two things
+
+**A sealed result is allowed here**, where rule 15 refuses one. A key is plaintext and an erase
+cannot reach one; an arm's value lands in a **column**, which `docs/projectors.md` rule 9 makes an
+erase empty. So a looked-up seal is ordinary sealed content and rule 7 takes it from there: the
+slot carries the declared `Sealed(T, Subject)`, so the arm's value has that type and the fold has to
+declare it:
+
+> `ShippedTo` folds content sealed under `Customer` on @order.shipped, and its return type does not
+> say so
+
+That is rule 7's existing refusal, naming the type to write. Nothing was added for this case, which
+is the argument for it: a looked-up seal is a seal like any other once it is not a key.
+
+**And the positions are decided by where a record is in hand.** An arm's value and a `key` clause
+both have one. These do not:
+
+- **a slice filter**, which resolves once for the whole slice against the key its caller asked for,
+  and has no record at all. Refused structurally: a filter is parsed before the list that collects a
+  lookup exists, so the name is not a value there.
+- **a seed**, for the same reason one place further out.
+- **an inline fold's arm**, which rule 14 refuses a `key` clause in for the reason that applies here
+  too: it is not stored, so it is inside the very command that could not then read it.
+
+**An `if` header still reads `Name {` as a block**, which is `no_record_literal`'s existing rule and
+not this one's: `if (TestOrder { .. })` takes parentheses exactly as a record literal there does.
+
+**And a named fold may not share a name with a record or an enum.** A fold is spelled like a type
+(rule 1), so it resolves like one: `Name { .. }` reads the fold inside a fold arm and builds the
+record everywhere else, and one name meaning both would make one declaration read two ways, with its
+seed a record literal and its arm a lookup. Refused where the fold is declared, which is the same
+argument a `subject` is already held to for the same two kinds, and refused there rather than at a
+use site because a use site is not where the author can fix it.
+
+### Seen from the read side
+
+Nothing new. `--tables` prints `(reads test_order)` against the column, which is why it says *reads*
+rather than *keyed through*: a fold may be read for a key part or for a value, and the dependency a
+digest records and a rebuild replays is the same either way.
+
+The one place the two differ inside the sink is **where the value is used**. A key lookup is read and
+used in the same phase, the one before any write; a value lookup is read there and used in the phase
+that writes, so its value is carried across rather than read again. Reading it again would be reading
+it *after* the record, since by then the looked-up column may be one of the things this record has
+written, and `tests/sink.rs` fails on exactly that if the carrying is removed.
 
 ## Seen from the read side
 
