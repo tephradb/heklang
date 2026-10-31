@@ -24,7 +24,7 @@ pub use host::{
 };
 pub use interp::{
     Cells, Counts, Effectful, Error, ErrorKind, Execution, Interpreter, Invocation, Outcome,
-    Projection, Row, Store, Tables, partition_key,
+    Projection, Rebuild, Row, Store, Tables, partition_key,
 };
 pub use ir::{
     Absent, Action, Arm, BinOp, Bind, Builtin, Command, ConstDef, Delivery, Effect, EntityDef,

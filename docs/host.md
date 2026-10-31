@@ -336,6 +336,9 @@ pub trait Columns {
 let tables = Tables::new(&program);
 let query = tables.query();                 // every event any column folds, each once
 tables.apply(&record, &mut my_columns)?;    // one record, pinned arms then ranges
+let rebuild = tables.only(&folds);          // the same sink, for these columns
+rebuild.folds();                            // what it will write, which is wider
+rebuild.apply(&record, &mut my_columns)?;
 ```
 
 `Columns` is to `Tables` what `Rows` is to `Projection`, and the shapes rhyme on purpose: not part
@@ -361,6 +364,39 @@ that costs and why it is safe.
 **`keys` is held to `read`'s cut, not to `row`'s.** Over-delivering is a cost and under-delivering is
 a bug: a key handed back that the arm does not write is re-checked and skipped, while one withheld is
 a column that silently stops following its log.
+
+**`Tables::only` is for a rebuild, and `apply` is wrong for one twice over.** A column is rebuilt by
+replaying the log into it, and `apply` runs every arm of every column over that replay: the columns
+that are already correct do the work again for nothing, and a body that can `fail` or overflow fails
+the rebuild of a column it has nothing to do with. Handing those columns a seed instead of their
+held value avoids the overflow and leaves the rest, because the body still runs. The set is named by
+the **fold** rather than by the column, because the column's name is `snake_case` of it and a caller
+spelling that derivation out to name a column is a second copy of it; a name no column is kept for
+is ignored, so an unstored fold and a typo both mean "nothing to apply".
+
+**What it runs is `Layout::closure` of the set, and a range arm is why that is not the set itself.**
+An arm leaving a key part open ranges over *the keys the table holds*, and those keys are minted by
+the pinned arms of that table's columns, this one's and the others'. A replay restricted to a ranged
+column alone mints none of them, so the range covers nothing and the column comes out at its seed
+with nothing to say so. The closure adds the columns of that table that **mint**, which is the ones
+with a fully pinned arm and not the table: a column no arm of which pins the whole key asks `keys`
+and writes at what comes back, so it mints nothing and is no use to anyone else's range. A column
+whose every arm pins the whole key, the ordinary case, closes over itself.
+
+**That is why it is a handle and not an argument, and both halves are the same reason.** The closure
+costs a walk of the layout and a replay applies one record at a time, so computing it per call would
+put a sort and an allocation per record into the one API whose purpose is to make a rebuild cheaper.
+And because it is **wider than what was asked for**, `Rebuild::folds` has to be reachable: the sink
+carries the accumulator in the store rather than re-deriving it, so replaying the log onto a column
+that already holds its value folds every record into it a second time. A store rebuilding
+`order_closed` against its live tables gets `order_total` applied beside it and silently doubled, so
+`folds` is the set it resets or shadows first, and it is not the set it passed in. The ones it did
+not ask for are the ones it discards at the end, because withholding their writes as it goes is
+dropping the key the ranged column was added for.
+
+So the closure buys correctness and spends the second thing `only` is for: the bodies it adds run
+over the whole replay, and one of them that can `fail` can still fail a rebuild of the ranged column
+beside it.
 
 **A sealed column is nullable whatever its declared type says.** Rule 9 of `docs/projectors.md`
 makes an erase empty the column and only an optional has an empty value, so a store deciding

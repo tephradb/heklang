@@ -549,3 +549,335 @@ fn a_computed_part_is_pinned_so_the_table_is_keyed_by_it() {
             .all(|arm| arm.fields.iter().all(heklang::ArmMatch::pinned))
     );
 }
+
+// ---------------------------------------------------------------------------
+
+/// `Tables::only`: the restricted sink a rebuild replays through.
+///
+/// A column is rebuilt by replaying the log into it, and `apply` runs every arm of every
+/// column over that replay. The columns that are already correct pay for it twice: the
+/// work, and the chance that a body which can `fail` from any value fails the rebuild of
+/// a column it has nothing to do with. `FRAGILE` below is that second half made concrete.
+const FRAGILE: &str = "event @tick.counted { box_id: Int, n: Int }
+
+fold TickCount(box_id: Int) -> n: Int = 0 {
+  on @tick.counted(box_id) => n + 1
+}
+
+fold TickDoubled(box_id: Int) -> n: Int = 1 {
+  on @tick.counted(box_id) => n * 2
+}
+";
+
+#[test]
+fn a_restricted_apply_leaves_a_column_outside_its_closure_untouched() {
+    let program = program(FRAGILE);
+    let mut interpreter = Interpreter::new(&program);
+    for _ in 0..3 {
+        given(
+            &mut interpreter,
+            "tick.counted",
+            [("box_id", Value::Int(1)), ("n", Value::Int(0))],
+        );
+    }
+
+    let tables = Tables::new(&program);
+    let mut cells = Cells::default();
+    // Built once rather than per record, which is the whole reason it is a handle.
+    let rebuild = tables.only(&["TickCount".to_string()]);
+    assert_eq!(
+        rebuild.folds(),
+        ["TickCount".to_string()],
+        "every arm pins the whole key, so the closure is what was asked for"
+    );
+    interpreter
+        .host()
+        .read(&tables.query(), &mut |record| {
+            rebuild.apply(record, &mut cells)
+        })
+        .expect("the sink applies every record it is given");
+
+    assert_eq!(
+        cells.get("box", &[Key::Int(1)], "tick_count"),
+        Some(&Value::Int(3))
+    );
+    // Not its seed and not its value: the arm never ran, so the cell was never written.
+    // That is the whole of what a rebuild of one column asks for.
+    assert_eq!(cells.get("box", &[Key::Int(1)], "tick_doubled"), None);
+}
+
+#[test]
+fn a_restricted_apply_over_every_fold_is_the_unrestricted_one() {
+    let program = program(SHOP);
+    let mut interpreter = Interpreter::new(&program);
+    shop_log(&mut interpreter);
+
+    let tables = Tables::new(&program);
+    let every: Vec<String> = tables
+        .layout()
+        .tables
+        .iter()
+        .flat_map(|table| &table.columns)
+        .map(|column| column.fold.clone())
+        .collect();
+    let mut restricted = Cells::default();
+    let rebuild = tables.only(&every);
+    interpreter
+        .host()
+        .read(&tables.query(), &mut |record| {
+            rebuild.apply(record, &mut restricted)
+        })
+        .expect("the sink applies every record it is given");
+
+    // `agrees` has already checked the unrestricted run against a refold, so equality
+    // with it carries that over rather than asserting the values again. Every arm shape
+    // `layout` derives is in `SHOP`, the range arm included, which is the one that reads
+    // the store back and so the one a skipped column could corrupt.
+    let whole = agrees(&program, &interpreter);
+    for table in &tables.layout().tables {
+        let keys: Vec<Vec<Key>> = whole.rows(&table.name).map(<[Key]>::to_vec).collect();
+        assert_eq!(
+            restricted.len(&table.name),
+            keys.len(),
+            "{} holds a different number of rows",
+            table.name
+        );
+        for key in &keys {
+            for column in &table.columns {
+                assert_eq!(
+                    restricted.get(&table.name, key, &column.name),
+                    whole.get(&table.name, key, &column.name),
+                    "{}[{key:?}].{}",
+                    table.name,
+                    column.name
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_restricted_apply_ignores_a_fold_no_column_is_kept_for() {
+    // An unstored fold and a misspelling are one case: there is no column, so there is
+    // nothing to apply. Raising instead would make a caller build the listing of what is
+    // storable before it could ask, which is the derivation this module owns.
+    let source = "event @tick.counted { box_id: Int, n: Int }
+
+fold TickCount(box_id: Int) -> n: Int = 0 {
+  on @tick.counted(box_id) => n + 1
+}
+
+fold TicksSince(at: Timestamp) -> n: Int = 0 {
+  on @tick.counted() => n + 1
+}
+";
+    let program = program(source);
+    let mut interpreter = Interpreter::new(&program);
+    given(
+        &mut interpreter,
+        "tick.counted",
+        [("box_id", Value::Int(1)), ("n", Value::Int(0))],
+    );
+
+    let tables = Tables::new(&program);
+    assert_eq!(
+        tables.layout().unstored.len(),
+        1,
+        "`TicksSince` is not kept"
+    );
+    let mut cells = Cells::default();
+    let rebuild = tables.only(&["TicksSince".to_string(), "TickCounted".to_string()]);
+    assert!(rebuild.folds().is_empty(), "neither names a column");
+    interpreter
+        .host()
+        .read(&tables.query(), &mut |record| {
+            rebuild.apply(record, &mut cells)
+        })
+        .expect("a fold with no column is nothing to apply");
+    assert!(cells.is_empty("box"), "`TickCount` was not among them");
+}
+
+#[test]
+fn the_layout_names_the_table_and_column_one_fold_is_kept_in() {
+    let program = program(SHOP);
+    let layout = heklang::layout(&program);
+    let (table, column) = layout.column("HoldsOfKind").expect("it is kept");
+    assert_eq!(table.name, "shop__kind__order");
+    assert_eq!(column.name, "holds_of_kind");
+    assert!(
+        layout.column("holds_of_kind").is_none(),
+        "named by the fold, not by the column it derives"
+    );
+    assert!(layout.column("Nothing").is_none());
+}
+
+/// A range arm reads **the keys the table holds**, and other columns are what mint them,
+/// so a column set is not the whole of what a restricted apply has to run.
+///
+/// `OrderClosed`'s arm on `@shop.uninstalled(shop_id)` leaves `order` open, which is a
+/// range over every order of that shop, and the orders exist because `OrderTotal`'s arm
+/// wrote a row at each. Restrict the apply to `OrderClosed` alone and the keys are never
+/// minted, so the range covers nothing and the column stays at its seed: a rebuild that
+/// quietly answers `false` for every order of an uninstalled shop.
+///
+/// `Layout::closure` is what keeps that from being the caller's problem to know about.
+const RANGED: &str = "event @order.placed { shop_id: Int, order_id: Int }
+event @order.cancelled { shop_id: Int, order_id: Int }
+event @shop.uninstalled { shop_id: Int }
+
+fold OrderTotal(shop_id: Int, order_id: Int) -> n: Int = 0 {
+  on @order.placed(shop_id, order_id) => n + 1
+}
+
+fold OrderClosed(shop_id: Int, order_id: Int) -> Bool = false {
+  on @order.cancelled(shop_id, order_id) => true
+  on @shop.uninstalled(shop_id) => true
+}
+";
+
+#[test]
+fn a_restricted_apply_still_mints_the_keys_a_range_arm_covers() {
+    let program = program(RANGED);
+    let mut interpreter = Interpreter::new(&program);
+    given(
+        &mut interpreter,
+        "order.placed",
+        [("shop_id", Value::Int(1)), ("order_id", Value::Int(7))],
+    );
+    given(
+        &mut interpreter,
+        "shop.uninstalled",
+        [("shop_id", Value::Int(1))],
+    );
+
+    let tables = Tables::new(&program);
+    let whole = agrees(&program, &interpreter);
+    let key = [Key::Int(7), Key::Int(1)];
+    assert_eq!(
+        whole.get("order__shop", &key, "order_closed"),
+        Some(&Value::Bool(true)),
+        "the order was minted before the shop was uninstalled, so the range covers it"
+    );
+
+    let mut part = Cells::default();
+    let rebuild = tables.only(&["OrderClosed".to_string()]);
+    interpreter
+        .host()
+        .read(&tables.query(), &mut |record| {
+            rebuild.apply(record, &mut part)
+        })
+        .expect("the sink applies every record it is given");
+    assert_eq!(
+        part.get("order__shop", &key, "order_closed"),
+        whole.get("order__shop", &key, "order_closed"),
+        "a restricted rebuild of a ranged column answers what the whole sink does"
+    );
+}
+
+/// What a rebuild has to be told, and the reason the closure is reachable rather than
+/// private: the handle applies **more columns than were asked for**, and the sink carries
+/// the accumulator in the store, so replaying onto a column that already holds its value
+/// folds every record into it twice.
+///
+/// A store rebuilding `order_closed` alone against its live tables gets `order_total`
+/// applied beside it and silently doubled. `Rebuild::folds` is the set it has to reset or
+/// shadow first, and it is not the one it passed in.
+#[test]
+fn the_closure_names_the_columns_a_rebuild_has_to_prepare() {
+    let program = program(RANGED);
+    let mut interpreter = Interpreter::new(&program);
+    given(
+        &mut interpreter,
+        "order.placed",
+        [("shop_id", Value::Int(1)), ("order_id", Value::Int(7))],
+    );
+    given(
+        &mut interpreter,
+        "shop.uninstalled",
+        [("shop_id", Value::Int(1))],
+    );
+
+    let tables = Tables::new(&program);
+    let rebuild = tables.only(&["OrderClosed".to_string()]);
+    assert!(
+        rebuild.folds().contains(&"OrderTotal".to_string()),
+        "the range needs the keys `OrderTotal` mints, so it is applied too"
+    );
+
+    // Already correct, which is the state a rebuild of another column starts from.
+    let mut live = agrees(&program, &interpreter);
+    let key = [Key::Int(7), Key::Int(1)];
+    assert_eq!(
+        live.get("order__shop", &key, "order_total"),
+        Some(&Value::Int(1))
+    );
+    interpreter
+        .host()
+        .read(&tables.query(), &mut |record| {
+            rebuild.apply(record, &mut live)
+        })
+        .expect("the sink applies every record it is given");
+    assert_eq!(
+        live.get("order__shop", &key, "order_total"),
+        Some(&Value::Int(2)),
+        "folded a second time onto what it already held, which is what `folds` warns about"
+    );
+}
+
+#[test]
+fn a_ranged_column_closes_over_the_columns_that_mint_its_keys() {
+    let layout = heklang::layout(&program(RANGED));
+    assert_eq!(
+        layout.closure(&["OrderClosed".to_string()]),
+        vec!["OrderClosed".to_string(), "OrderTotal".to_string()],
+        "a range needs the keys its table holds, and the other columns mint them"
+    );
+    // The common case restricts to itself: every arm of `OrderTotal` pins the whole key,
+    // so it reads no key set and nothing else has to run beside it.
+    assert_eq!(
+        layout.closure(&["OrderTotal".to_string()]),
+        vec!["OrderTotal".to_string()]
+    );
+    assert!(layout.closure(&["Nothing".to_string()]).is_empty());
+}
+
+#[test]
+fn the_closure_adds_the_columns_that_mint_and_not_the_table() {
+    // What a range needs beside it is the **minting**, so a column no arm of which pins
+    // the whole key is not added: it asks `Columns::keys` and writes at what comes back,
+    // so it mints nothing and is no use to anyone else's range. `ShopOrders` is in
+    // another table and is out either way; `OrderSeenAt` and `HoldsOfKind` are too.
+    //
+    // One pinned arm is enough to be added, which is why that is not the negation of
+    // having a ranged one: `OrderClosed` has both.
+    // Storable and yet minting nothing, which takes two arms: every part is pinned by
+    // *some* arm, which is what `layout` asks, and no arm pins the whole key.
+    let source = format!(
+        "{SHOP}
+fold OrderAnyHold(shop_id: Shop, order_id: Int) -> Bool = false {{
+  on @hold.placed(shop_id) => true
+  on @order.cancelled(order_id) => true
+}}
+"
+    );
+    let layout = heklang::layout(&program(&source));
+    assert_eq!(
+        layout.closure(&["OrderClosed".to_string()]),
+        vec![
+            "OrderClosed".to_string(),
+            "OrderSeenAt".to_string(),
+            "OrderTotal".to_string(),
+        ],
+        "`OrderAnyHold` ranges from every arm, so it mints nothing and is left out"
+    );
+    // Asked for directly it still runs, mints or not: it is what the caller is rebuilding.
+    assert_eq!(
+        layout.closure(&["OrderAnyHold".to_string()]),
+        vec![
+            "OrderAnyHold".to_string(),
+            "OrderClosed".to_string(),
+            "OrderSeenAt".to_string(),
+            "OrderTotal".to_string(),
+        ]
+    );
+}

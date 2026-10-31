@@ -914,9 +914,54 @@ impl<'a> Tables<'a> {
     /// earlier record is already in the store, so a host applying records in position
     /// order needs no batch-wide pass.
     pub fn apply(&self, record: &Record, columns: &mut dyn Columns) -> Result<(), Error> {
+        self.applying(record, None, columns)
+    }
+
+    /// The same sink, restricted to the columns a rebuild is replaying into.
+    ///
+    /// **What a rebuild wants, and `apply` is wrong for it twice over.** A column is
+    /// rebuilt by replaying the log into it, and `apply` runs every arm of every column
+    /// over that whole replay: the columns that are already correct do the work again for
+    /// nothing, and a body that can `fail` or overflow fails the rebuild of a column it
+    /// has nothing to do with. Handing those columns a seed instead of their held value
+    /// avoids the overflow and not the rest, because the body still runs.
+    ///
+    /// Named by the **fold** rather than by the column, because a fold is the thing a
+    /// caller knows: a column's name is `snake_case` of it, derived in
+    /// [`crate::tables`] rather than written anywhere, and a caller spelling that
+    /// derivation out to name a column is a second copy of it. A name no column is kept
+    /// for is ignored, so an unstored fold and a typo both mean "nothing to apply" rather
+    /// than an error about a listing the caller did not build.
+    ///
+    /// **A handle rather than an argument, for two reasons that are the same reason.**
+    /// What runs is [`Layout::closure`] of `folds` and not `folds`, which costs a walk of
+    /// the layout, and a replay calls the sink once per record: computing it there would
+    /// put a sort and an allocation per record into the one API whose purpose is to make
+    /// a rebuild cheaper. And because the closure is wider than what was asked for, a
+    /// caller has to be able to see it: [`Rebuild::folds`] is that set, and it is the one
+    /// a rebuild resets or shadows before the replay rather than the one it passed in.
+    pub fn only<'t>(&'t self, folds: &[Ident]) -> Rebuild<'t, 'a> {
+        Rebuild {
+            tables: self,
+            folds: self.layout.closure(folds),
+        }
+    }
+
+    /// `None` is every column, which is the one difference between the two doors above.
+    fn applying(
+        &self,
+        record: &Record,
+        folds: Option<&[Ident]>,
+        columns: &mut dyn Columns,
+    ) -> Result<(), Error> {
         for pinned_only in [true, false] {
             for table in &self.layout.tables {
                 for column in &table.columns {
+                    // Sorted by `Layout::closure`, so this is a search rather than the
+                    // scan per column per pass per record a `contains` would be.
+                    if folds.is_some_and(|folds| folds.binary_search(&column.fold).is_err()) {
+                        continue;
+                    }
                     for (at, arm) in column.arms.iter().enumerate() {
                         if arm.event != record.event.path {
                             continue;
@@ -1141,6 +1186,40 @@ impl<'a> Tables<'a> {
             frame.set(update.slot, value)?;
         }
         Ok(Some(frame.get(def.slot)?.clone()))
+    }
+}
+
+/// [`Tables`] restricted to the columns a rebuild is replaying into, with
+/// [`Layout::closure`] of them worked out once. See [`Tables::only`].
+pub struct Rebuild<'t, 'p> {
+    tables: &'t Tables<'p>,
+    folds: Vec<Ident>,
+}
+
+impl Rebuild<'_, '_> {
+    /// Every column this applies, named by fold and sorted: the closure of what was
+    /// asked for, which is **wider** where a ranged column is among them.
+    ///
+    /// **This is the set a rebuild has to prepare, and the reason the handle exists.** The
+    /// sink carries the accumulator in the store rather than re-deriving it, so replaying
+    /// the log onto a column that already holds its value folds every record into it a
+    /// second time. A rebuild therefore resets or shadows each of these before it starts,
+    /// and the ones it did not ask for are the ones it discards at the end: withholding
+    /// their writes as it goes is not an option, because dropping the write is dropping
+    /// the key the ranged column was added for.
+    ///
+    /// So the closure buys correctness and spends the second thing
+    /// [`Tables::only`] exists for: the bodies it adds run over the whole replay, and one
+    /// of them that can `fail` or overflow can still fail a rebuild of the ranged column
+    /// beside it. A column whose every arm pins the whole key closes over itself and pays
+    /// neither.
+    pub fn folds(&self) -> &[Ident] {
+        &self.folds
+    }
+
+    /// One record, into these columns. [`Tables::apply`]'s rules, unchanged.
+    pub fn apply(&self, record: &Record, columns: &mut dyn Columns) -> Result<(), Error> {
+        self.tables.applying(record, Some(&self.folds), columns)
     }
 }
 

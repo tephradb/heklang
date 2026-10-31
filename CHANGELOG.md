@@ -190,6 +190,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it differently. A store that built its own from `EventPath`'s `Display` kept the `@` that an event
   type does not have, matched nothing, and advanced its checkpoint over every batch while its status
   endpoint reported nothing behind.
+- **`Tables::only(folds)`**: the same sink, restricted to the columns a rebuild is replaying into.
+  `apply` runs every arm of every column, so a store replaying the log to rebuild one column pays
+  for every other column over the whole of history, and a body that can `fail` or overflow fails the
+  rebuild of a column it has nothing to do with. Handing the others a seed instead of their held
+  value avoids the overflow case and not the rest, because the body still runs. The set is named by
+  the **fold**, since a column's name is `snake_case` of it and a caller spelling that derivation out
+  is a second copy of it; a fold no column is kept for is nothing to apply rather than an error.
+  `Layout::column(fold)` names the table and column one fold is kept in, which is the pair anything
+  reading a stored fold needs.
+
+  **What it runs is `Layout::closure` of the set**, because a column is not a closed system. An arm
+  leaving a key part open ranges over the keys its table holds, and those keys are minted by the
+  pinned arms of that table's columns, so a replay of a ranged column alone mints none of them: the
+  range covers nothing and the column comes out at its seed with nothing to say so. What the closure
+  adds is the columns of that table that **mint**, the ones with a fully pinned arm, since a column
+  no arm of which pins the whole key writes only at keys that already exist. A column whose every arm
+  pins the whole key, which is the ordinary case, closes over itself.
+
+  **It is a handle rather than an argument, and both halves are the same reason.** The closure costs
+  a walk of the layout and a replay applies one record at a time, so computing it per call would put
+  a sort and an allocation per record into the one API whose purpose is to make a rebuild cheaper.
+  And because the closure is wider than what was asked for, `Rebuild::folds` has to be readable: the
+  sink carries the accumulator in the store, so replaying onto a column that already holds its value
+  folds every record into it twice. A store rebuilding `order_closed` against its live tables gets
+  `order_total` applied beside it and silently doubled, so `folds` is the set it resets or shadows
+  first and the extra columns are the ones it discards at the end, because withholding their writes
+  as it goes is dropping the key the ranged column was added for.
 - **`fill` is a fifth test action**, and `expect <table>[key] { column: value }` a row expectation
   over the derived read model. It takes no name, because nothing declares what it fills: a program
   has one read model and `layout` derives all of it from the folds. This is `docs/testing.md`

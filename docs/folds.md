@@ -658,6 +658,30 @@ Two obligations are the sink's own, and both were learned from a store that got 
   log and folded none of it, and the checkpoint advanced over every batch while the status endpoint
   reported nothing behind. A silently empty subscription is indistinguishable from being caught up.
 
+**`Tables::only(folds)` is the same sink for a column set**, and a rebuild wants it because `apply`
+is wrong for one twice over. A column is rebuilt by replaying the log into it, and `apply` runs every
+arm of every column over the replay: the columns that are already correct pay for the work again,
+and a body that can `fail` or overflow fails the rebuild of a column it has nothing to do with.
+Handing the others a seed instead of their held value avoids the overflow case and leaves the rest,
+because the body still runs. The set is named by the **fold**, since a column's name is derived from
+it and nothing writes the derivation down; a fold no column is kept for is nothing to apply.
+
+**What it runs is `Layout::closure` of that set**, which is a third obligation of the same kind as
+the two above and was found the same way. A range arm covers the keys the table holds, and those
+keys are minted by the pinned arms of the table's columns rather than by the ranged one, so a replay
+of a ranged column alone mints none of them: the range covers nothing, the column comes out at its
+seed, and nothing says so. `OrderClosed`'s `@shop.uninstalled(shop_id)` arm above is exactly that
+shape, and the orders it ranges over exist because `OrderTotal` wrote a row at each. What the
+closure adds is the columns of that table that **mint**, the ones with a fully pinned arm, since a
+column no arm of which pins the whole key writes only at keys that already exist.
+
+So the restricted sink is a **handle** and the closure is **readable off it**, which is `docs/host.md`
+section 7a's half of this and matters to anyone writing a rebuild: the sink carries the accumulator
+in the store, so replaying onto a column that already holds its value folds every record into it
+twice. `Rebuild::folds` is the set a rebuild resets or shadows before it starts, and it is wider than
+the set it asked for. The extra columns are discarded at the end rather than withheld as they go,
+because dropping the write is dropping the key.
+
 **A stored column is defined over the keys the table holds**, and that is a real boundary rather
 than an implementation detail. A fold is a total function of a key and a log, so `OrderClosed(shop,
 order)` with an arm on `@shop.uninstalled(shop_id)` is `true` under `Interpreter::fold` for *any*

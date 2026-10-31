@@ -24,6 +24,89 @@ pub struct Layout {
     pub unstored: Vec<Unstored>,
 }
 
+impl Layout {
+    /// The table and column one named fold is kept in, or `None` for a fold that is not
+    /// kept at all.
+    ///
+    /// A fold is one column, so this is a lookup rather than a search with a choice in
+    /// it. Here rather than at each caller because the pair is what anything reading a
+    /// stored fold needs: the table names the row and the column names the cell, and a
+    /// caller holding only one of the two cannot ask [`crate::Columns`] for anything.
+    pub fn column(&self, fold: &str) -> Option<(&Table, &Column)> {
+        self.tables.iter().find_map(|table| {
+            table
+                .columns
+                .iter()
+                .find(|column| column.fold == fold)
+                .map(|column| (table, column))
+        })
+    }
+
+    /// Every column that has to be applied for `folds` to come out right, named by fold
+    /// and sorted: what [`crate::Tables::only`] actually applies.
+    ///
+    /// **A column is not a closed system, and a range arm is why.** An arm leaving a key
+    /// part open is a range update over *the keys the table holds*, and the keys are
+    /// minted by the fully pinned arms of that table's columns, this one's and the
+    /// others'. So a replay restricted to a ranged column alone never mints the keys its
+    /// range covers: the range finds nothing, the column stays at its seed, and the
+    /// answer is wrong with nothing to say so. Restricting to a column whose every arm
+    /// pins the whole key, which is the ordinary case, restricts to that column.
+    ///
+    /// **What the range needs added is the minting**, so what is added is the columns of
+    /// that table with a fully pinned arm, and not the table. A column *no* arm of which
+    /// pins the whole key writes only at keys that already exist, since
+    /// [`Columns::keys`] is the only thing it asks, so it mints nothing and is no use to
+    /// anyone else's range. One pinned arm is enough to be added, which is why the test
+    /// is not the negation of the one above: a column can have a pinning arm and a
+    /// ranging one, and `OrderClosed` is that shape.
+    ///
+    /// [`Columns::keys`]: crate::Columns::keys
+    ///
+    /// A name no column is kept for contributes nothing, so an unstored fold and a typo
+    /// both drop out here rather than at the apply.
+    ///
+    /// **The columns this adds are written through.** A caller rebuilding one column has
+    /// to let the additions land somewhere the replay can read back, which is what mints
+    /// the keys, and discard them at the end rather than withhold them as it goes:
+    /// dropping the write is dropping the key.
+    pub fn closure(&self, folds: &[Ident]) -> Vec<Ident> {
+        let ranges = |column: &&Column| {
+            column
+                .arms
+                .iter()
+                .any(|arm| arm.fields.iter().any(|field| !field.pinned()))
+        };
+        let mints = |column: &&Column| {
+            column
+                .arms
+                .iter()
+                .any(|arm| arm.fields.iter().all(ArmMatch::pinned))
+        };
+        let mut out: Vec<Ident> = Vec::new();
+        for table in &self.tables {
+            let wanted: Vec<&Column> = table
+                .columns
+                .iter()
+                .filter(|column| folds.contains(&column.fold))
+                .collect();
+            if wanted.iter().any(ranges) {
+                out.extend(
+                    table
+                        .columns
+                        .iter()
+                        .filter(mints)
+                        .map(|column| column.fold.clone()),
+                );
+            }
+            out.extend(wanted.iter().map(|column| column.fold.clone()));
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+}
+
 /// One key signature and every fold kept for it.
 #[derive(Debug, Clone)]
 pub struct Table {
