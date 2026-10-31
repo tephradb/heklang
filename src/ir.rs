@@ -981,8 +981,21 @@ impl Fold {
     ///
     /// A test may still read one, through the `fold` action: it runs no decision, and
     /// the harness's clock is exactly predictable (`docs/testing.md` section 8).
+    ///
+    /// A computed key part ([`ComputedKey`]) is the second way in, and the objection is
+    /// the same shape: it has no predicate form, so a command could neither narrow the
+    /// log to the events it writes nor conflict on them. [`Self::computes`] names the
+    /// part, so the refusal can say which of the two this is.
     pub fn query_only(&self) -> bool {
-        !self.envelope.is_empty()
+        !self.envelope.is_empty() || self.computes().is_some()
+    }
+
+    /// The first key part any arm computes, for a diagnostic that names it.
+    pub fn computes(&self) -> Option<&ComputedKey> {
+        self.stage
+            .slices
+            .iter()
+            .find_map(|slice| slice.keys.first())
     }
 }
 
@@ -1071,7 +1084,37 @@ pub struct Slice {
     pub event: EventPath,
     pub filters: Vec<Filter>,
     pub binds: Vec<Bind>,
+    /// `key <param> = <expr>`: key parts this arm computes from the record it folds.
+    /// Empty for every arm that does not write one, which is almost all of them.
+    pub keys: Vec<ComputedKey>,
     pub updates: Vec<Update>,
+}
+
+/// One key part an arm computes from the record, rather than taking from a field.
+///
+/// **Not a [`Filter`], and the difference is when it resolves.** Every conjunct in a
+/// slice's filter list resolves *once*, before any event is folded, which is what lets
+/// the field ones become a [`crate::host::Predicate`] and the key ones a gate. This is
+/// evaluated *per record*, against that record's binds and envelope, so it has no
+/// predicate form at all. That is why a fold with one is query-only: a command reading
+/// it could neither narrow the log to those events nor detect a conflicting write.
+///
+/// **The two drivers read it in opposite directions**, which is [`Filter::Key`]'s story
+/// one level down. A by-key read has the caller's argument in `slot` and *compares*,
+/// skipping a record whose computed key is not the one asked for. The sink has no
+/// argument, so the computed value *is* the key it writes at, and it binds `slot` from
+/// that, which makes the same comparison hold.
+///
+/// `slot`, `ty` and the arena id ride along for [`Filter::Key`]'s reasons: the splice
+/// shifts the first and the last, and the declaration is out of reach where the value
+/// is fitted.
+#[derive(Debug, Clone)]
+pub struct ComputedKey {
+    pub param: Ident,
+    pub slot: Slot,
+    pub ty: Type,
+    pub value: ExprId,
+    pub span: Span,
 }
 
 /// One conjunct of a slice. Both forms resolve **once**, in the frame of whatever reads

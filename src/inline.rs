@@ -22,8 +22,8 @@ use std::collections::{HashMap, HashSet};
 use std::mem;
 
 use crate::ir::{
-    Arm, Bind, Command, Expr, ExprId, Exprs, Filter, Fold, FoldCall, FoldVar, Guard, GuardCall,
-    Ident, Iter, Param, Program, Return, Slice, Slot, Span, Stage, Stmt, Update,
+    Arm, Bind, Command, ComputedKey, Expr, ExprId, Exprs, Filter, Fold, FoldCall, FoldVar, Guard,
+    GuardCall, Ident, Iter, Param, Program, Return, Slice, Slot, Span, Stage, Stmt, Update,
 };
 
 /// The guards a name reaches through, first to last, when they form a cycle. `None`
@@ -429,6 +429,21 @@ fn at(site: &mut Site<'_>, callee: &Copied<'_>, call: &Placed<'_>, grown: &mut G
                 .binds
                 .iter()
                 .map(|b| shift_bind(b, slot_off))
+                .collect(),
+            // Always empty in practice: a fold with a computed key part is query-only, so
+            // no caller reaches the splice at all. Shifted rather than asserted away,
+            // because the shape of this map is "every field moves" and an exception would
+            // be the thing that rots.
+            keys: slice
+                .keys
+                .iter()
+                .map(|key| ComputedKey {
+                    param: key.param.clone(),
+                    slot: shift_slot(key.slot, slot_off),
+                    ty: key.ty.clone(),
+                    value: shift_expr_id(key.value, expr_off),
+                    span: key.span,
+                })
                 .collect(),
             updates: slice
                 .updates

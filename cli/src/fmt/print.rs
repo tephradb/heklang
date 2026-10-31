@@ -95,6 +95,12 @@ impl<'a> Printer<'a> {
             "run_clause" => self.keyed("run", node),
             "project_clause" => self.keyed("project", node),
             "deliver_clause" => self.keyed("deliver", node),
+            // `key month = ..`. A comma list with no delimiter of its own, so it takes no
+            // trailing comma for the reason an `on` header's path list does not, and each
+            // part is a node so that the `=` survives: `kids` is the named children and
+            // every piece of punctuation in this grammar is anonymous.
+            "computed_keys" => self.commas("key", node),
+            "computed_key" => self.joined(node, " = "),
             "fold_clause" => self.keyed("fold", node),
             // One word and no children: the action with nothing to name.
             "fill_clause" => Doc::text("fill"),
@@ -1169,6 +1175,20 @@ impl<'a> Printer<'a> {
                 Doc::text(keyword),
                 Doc::text(" "),
                 Doc::join(Doc::text(" "), self.docs_of(&kids)),
+            ]),
+        )
+    }
+
+    /// `keyword a, b, c`: [`keyed`](Self::keyed) with commas between the children, for a
+    /// list whose only delimiter is the keyword in front of it.
+    fn commas(&self, keyword: &'a str, node: Node<'a>) -> Doc<'a> {
+        let (comments, kids) = self.split(node);
+        Self::led(
+            self.docs_of(&comments),
+            Doc::concat([
+                Doc::text(keyword),
+                Doc::text(" "),
+                Doc::join(Doc::text(", "), self.docs_of(&kids)),
             ]),
         )
     }

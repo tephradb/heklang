@@ -142,6 +142,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   position like any other, so a store filling a column before its first event would have folded that
   event into a row recorded as holding none of it. `fold_stored(.., 0)` is a column at its seed and
   `fold_stored(.., 1)` is the first event alone.
+- **A key part an arm computes from the record**, written `key <param> = <expr>` after the
+  destructure (`docs/folds.md` rule 14). A read model can now key by a month bucket, a lowercased
+  email or a combination of fields, none of which any event carries. Rule 13 writes a part the
+  event does not carry from a value fixed before anything is read; this writes one that is a
+  function of the record, so it may read the arm's binds and its envelope binding.
+
+  **It is a clause rather than a filter because of when it resolves.** Everything in the filter
+  list resolves once, before any event is folded, which is what lets a field conjunct become a
+  `Predicate` and a rule 13 conjunct a gate; this is evaluated per record. Spelling them alike and
+  telling them apart by whether the right side happened to touch a field is not a distinction to
+  rest a key on. `key` is soft, so no name is lost anywhere else.
+
+  **A fold with one is query-only**, as rule 12's envelope binding makes one, and the refusal names
+  the part. `month_of(e.at) == m` has no predicate form, so a command could narrow the log to
+  neither those events nor conflict on them; the sink has no such problem, because it walks the log
+  forward and evaluates the expression per record. The two directions are one expression read two
+  ways: a by-key read compares and skips, while the sink writes the row at whatever it computes.
+
+  Seen from the layout it is `ArmMatch::Computed`, and it counts as **pinned**, so a host deriving
+  range indexes needs to know nothing about the new state. A subject-typed parameter is refused,
+  because a subject's ids are minted and filed by the key store rather than derived. No new builtin
+  was needed for the motivating case: `Timestamp.year()`/`month()` and `Int.pad(width)` compose
+  into `month_of` in a pure `fn`.
 - **A per-record sink for the derived read model**: `Tables` and the `Columns` seam, which are to
   `fold_stored` what `Projection` and `Rows` are to a projector rebuild. `Tables::apply(record,
   columns)` applies one record to whatever columns its arms name, carrying the accumulator in the

@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::mem;
 
 use crate::ir::{
-    Arm, BinOp, Bind, Command, Delivery, EnvBind, EnvField, EventPath, Expr, ExprId, Exprs, Filter,
-    Fold, FoldCall, FoldVar, Function, Guard, GuardCall, Handler, Ident, Literal, Number, Param,
-    Slice, SliceId, Slot, Span, Stage, Stmt, Type, UnOp, Update,
+    Arm, BinOp, Bind, Command, ComputedKey, Delivery, EnvBind, EnvField, EventPath, Expr, ExprId,
+    Exprs, Filter, Fold, FoldCall, FoldVar, Function, Guard, GuardCall, Handler, Ident, Literal,
+    Number, Param, Slice, SliceId, Slot, Span, Stage, Stmt, Type, UnOp, Update,
 };
 use crate::scaled::Rounding;
 
@@ -253,6 +253,7 @@ impl Builder {
         event: EventPath,
         filters: Vec<Filter>,
         binds: Vec<Bind>,
+        keys: Vec<ComputedKey>,
         updates: Vec<Update>,
     ) -> SliceId {
         let id = SliceId(self.open.slices.len() as u32);
@@ -260,13 +261,14 @@ impl Builder {
             event,
             filters,
             binds,
+            keys,
             updates,
         });
         id
     }
 
     pub fn guard(&mut self, event: EventPath, filters: Vec<Filter>) -> SliceId {
-        self.slice(event, filters, Vec::new(), Vec::new())
+        self.slice(event, filters, Vec::new(), Vec::new(), Vec::new())
     }
 
     /// The first filter in the open stage reading a `fold` that stage itself declares,

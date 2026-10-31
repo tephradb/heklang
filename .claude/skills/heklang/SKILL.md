@@ -459,6 +459,10 @@ Rules that carry their weight:
   `reject` in one is unwritable rather than reported.
 - **An arm binding the envelope with `as` makes the fold query-only**: stored and readable by a
   test, never folded by a command, because an append time is not a decision's to read.
+- **An arm may compute a key part from the record**, written `key month = month_of(at)` after the
+  destructure, which is how a read model keys by a month bucket or a normalised value that no event
+  carries. It makes the fold query-only for the same reason the envelope does: a computed key has
+  no predicate form. `reference/folds.md` section 5a.
 - **Inline folds are unchanged and still the default.** Name one when a second declaration wants it.
 
 `Sealed(T, Subject)` is spellable in a fold's return type and nowhere else, so a fold can hand back

@@ -427,6 +427,11 @@ about the seed and the reason there is no `expect nothing` here.
 comparison a row's column goes through in section 6, so a `Money(2)` is matched on its scale and a
 subject-bound value on its content. The failure names the fold and both sides.
 
+**A fold that computes a key part is read here by its computed key** (`docs/folds.md` rule 14).
+`fold UsageCounted { shop_id: 1, month: "2026-03" }` scans the fold's events and keeps the records
+whose computed part equals the key asked for, which is the same expression the stored side
+evaluates to decide where a row goes.
+
 **A query-only fold is readable here, and nowhere else** (`docs/folds.md` rule 12). An arm that binds
 the envelope with `as` makes the fold unreadable by a command, because an append time is not a thing
 a decision may be built on. A test is not a decision, and under the default world the envelope is
@@ -504,6 +509,13 @@ columns its arms name, carrying the accumulator in the store, which is what a ho
 with (`docs/folds.md` section 11). The records arrive through `Tables::query`, so a test exercises
 the subscription too: a query that selects nothing would otherwise look exactly like a read model
 with nothing to do.
+
+**A computed key part is a key part like any other here**, and this is the clearest place to see
+rule 14: the subscript names the computed value, because the sink put the row there by evaluating
+the arm's expression against each record. `expect shop__month[1, "2026-03"] { usage_counted: 7 }`
+asserts a bucket no event carries. It is also the pair of assertions worth writing together, since
+section 8's `fold` reads the same column by scanning and comparing while this one reads what the
+sink wrote, and the two agreeing is the whole of that rule's correctness.
 
 ## 10. What a test cannot assert
 

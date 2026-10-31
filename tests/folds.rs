@@ -1796,3 +1796,105 @@ fn filling_a_non_optional_sealed_column_survives_an_erasure_that_precedes_it() {
         "a column filled after its subject was erased holds what is on disk"
     );
 }
+
+/// Rule 14: a key part computed from the record, which is the third way an arm can write
+/// one and the second way a fold becomes query-only.
+#[test]
+fn an_arm_can_compute_a_key_part_from_the_record() {
+    let source = "\
+event @usage.recorded { shop_id: Int, at: Timestamp, units: Int }
+
+fold UsageCounted(shop_id: Int, month: String) -> n: Int = 0 {
+  on @usage.recorded(shop_id) { at, units } key month = \"{at.year()}\" => n + units
+}
+";
+    program(source);
+
+    // It makes the fold query-only, for the reason the envelope binding does: a computed
+    // key is per record and a slice is narrowed once, so a command has no query to read
+    // it with and nothing to conflict on. The message names the part.
+    let read = format!(
+        "{source}
+command C(shop_id: Int, month: String) {{
+  fold n = UsageCounted {{ shop_id, month }}
+  emit @usage.recorded {{ shop_id, at: \"2026-01-01T00:00:00Z\", units: n }}
+}}
+"
+    );
+    assert_eq!(
+        error(&read),
+        "`UsageCounted` computes the key part `month`, so it can be queried but not folded by a command"
+    );
+}
+
+#[test]
+fn a_computed_key_part_is_refused_where_there_is_no_key() {
+    // An inline fold is not stored, so it has no key to write a part of. A guard's slice
+    // has no destructure and no `=>`, so the clause cannot be written there at all.
+    let inline = "\
+event @a.one { id: Int, n: Int }
+
+command C(id: Int) {
+  fold total: Int = 0
+    on @a.one(id) { n } key id = n => total + n
+  emit @a.one { id, n: total }
+}
+";
+    assert_eq!(
+        error(inline),
+        "`key` names a key part, and an inline fold has no key"
+    );
+}
+
+#[test]
+fn a_computed_key_part_names_a_parameter_and_not_a_subject() {
+    let missing = "\
+event @a.one { id: Int, n: Int }
+
+fold F(id: Int) -> Int = 0 {
+  on @a.one(id) { n } key bucket = n => n
+}
+";
+    assert_eq!(error(missing), "this fold has no parameter `bucket`");
+
+    // A subject's ids are minted and filed by the key store, so a computed one would
+    // address a row under a key nothing issued while `KeyPart::subject` reported it as
+    // that subject all the same.
+    let subject = "\
+subject Shop(Int)
+
+event @a.one { shop_id: Shop, n: Int }
+
+fold F(shop_id: Shop) -> Int = 0 {
+  on @a.one() { n } key shop_id = shop_id => n
+}
+";
+    assert_eq!(
+        error(subject),
+        "`shop_id` keys the subject `Shop`, so it cannot be computed"
+    );
+}
+
+/// One value per part per arm, whichever of the three ways it is written, for the reason
+/// two rule 13 conjuncts on one part are refused: both cannot hold, so the arm folds
+/// nothing while `--tables` still calls the column storable.
+#[test]
+fn a_key_part_is_written_once_per_arm_however_it_is_written() {
+    let source = "\
+event @a.one { id: Int, kind: String, n: Int }
+
+fold F(id: Int, kind: String) -> Int = 0 {
+  on @a.one(id, kind == \"x\") { n } key kind = \"y\" => n
+}
+";
+    assert_eq!(error(source), "`kind` is matched twice in this arm");
+
+    let field = "\
+event @a.one { id: Int, kind: String, n: Int }
+
+fold F(id: Int, kind: String) -> Int = 0 {
+  on @a.one(id, kind) { n } key kind = \"y\" => n
+}
+";
+    assert_eq!(error(field), "`kind` is matched twice in this arm");
+}

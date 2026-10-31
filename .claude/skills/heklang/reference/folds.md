@@ -82,6 +82,7 @@ Two refinements you will only meet by hitting them:
 ## 3. The naming rules this forces on you
 
 Three refusals, all `fold-restriction`, and all three are the derivation protecting itself.
+(Section 5a adds a fourth, for a computed part named after a subject.)
 
 **A named fold is spelled like a type: an initial capital, and no `_`.** `LifetimeSpend`, never
 `lifetimeSpend` or `Lifetime_Spend`. The underscores go in the derived column. Without these two
@@ -153,6 +154,35 @@ arm writes; the bare `kind` beside it is an ordinary field filter narrowing the 
 without the second half the arm still writes at `"fixed"` and now counts *every* hold into that row.
 The right side resolves once, in the caller's frame, so it is a literal, a `const` or a pure `fn` of
 those, and it may not read a slot.
+
+## 5a. A fold arm may compute a key part from the record
+
+The third way an arm writes a part, and the one for a key no event could carry: a month bucket, a
+lowercased email, a combination of fields.
+
+```hek
+fold UsageCounted(shop_id: Shop, month: String) -> n: Int = 0 {
+  on @usage.recorded(shop_id) { at, units } key month = month_of(at) => n + units
+}
+```
+
+**`key` is a clause of its own, after the destructure, and that placement is the rule.** Everything
+in the filter list resolves **once** before any event is folded, which is what lets a field conjunct
+become a predicate and a `==` conjunct a gate; this is evaluated **per record**, so it reads the
+destructure's binds and the envelope binding, which do not exist yet where the filters are parsed.
+`key` is soft, and several parts are a comma list.
+
+**A fold with one is query-only**, as an `as` binding makes one: a computed key has no predicate
+form, so a command could neither narrow the log to those events nor conflict on them. A test reads
+it with `fold` or `fill`, and a deployment serves it from the table. The refusal names the part.
+
+Four refusals: a subject-typed parameter (ids are minted by the key store, not derived), an inline
+fold's arm (not stored, so no key), a name that is not a parameter, and a part the arm already
+wrote some other way.
+
+**No builtin is needed for the usual case.** `Timestamp.year()`/`month()` and `Int.pad(width)` are
+all there, so `fn month_of(at: Timestamp) -> String { return "{at.year()}-{at.month().pad(2)}" }`
+is the month key; `at.year() * 100 + at.month()` is an `Int` bucket that sorts and pads nothing.
 
 ## 6. Sealed return types
 

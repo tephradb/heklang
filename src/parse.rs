@@ -6,12 +6,12 @@ use crate::build::Builder;
 use crate::diagnostic::{Code, Diagnostic, Related};
 use crate::inline;
 use crate::ir::{
-    Absent, Action, Arm, BinOp, Bind, Builtin, Command, ConstDef, Delivery, Effect, EntityDef,
-    EntityField, EnumDef, EnvField, EventDef, EventPath, Expect, Expr, ExprId, Exprs, FieldDef,
-    Filter, Fold, Function, Given, Guard, Handler, Ident, Index, Iter, Literal, MessagePart,
-    Number, Param, Pos, Program, Projector, RecordDef, RecordField, RefusalDef, RefusalParam,
-    ReplySpec, Return, SecretDef, Setup, Slot, Span, Stage, Stmt, SubjectDef, Test, Type, UnOp,
-    Update,
+    Absent, Action, Arm, BinOp, Bind, Builtin, Command, ComputedKey, ConstDef, Delivery, Effect,
+    EntityDef, EntityField, EnumDef, EnvField, EventDef, EventPath, Expect, Expr, ExprId, Exprs,
+    FieldDef, Filter, Fold, Function, Given, Guard, Handler, Ident, Index, Iter, Literal,
+    MessagePart, Number, Param, Pos, Program, Projector, RecordDef, RecordField, RefusalDef,
+    RefusalParam, ReplySpec, Return, SecretDef, Setup, Slot, Span, Stage, Stmt, SubjectDef, Test,
+    Type, UnOp, Update,
 };
 use crate::lex::{Keyword, Spanned, Sym, Token, lex};
 use crate::scaled::{self, MAX_SCALE, Rounding};
@@ -4724,6 +4724,12 @@ impl Parser {
                 self.expect_sym(Sym::RBrace)?;
             }
 
+            // `key month = <expr>`, after the destructure because that is where the
+            // record's names are in scope: the filter list above is parsed before the
+            // scope is pushed, and a conjunct there resolves once for the whole slice
+            // rather than per record.
+            let keys = self.computed_keys(lower, &filters, named)?;
+
             self.expect_sym(Sym::Arrow)?;
             self.folding = true;
             self.fold_arm = true;
@@ -4789,7 +4795,7 @@ impl Parser {
                 }
             }
 
-            lower.b.slice(path, filters, binds, updates);
+            lower.b.slice(path, filters, binds, keys, updates);
         }
 
         // With the keyword at the front the declaration line reads as a binding, and with
@@ -5153,6 +5159,120 @@ impl Parser {
             ty: param.ty,
             value,
         })
+    }
+
+    /// `key <param> = <expr>, ...`, the key parts an arm computes from the record.
+    ///
+    /// **Written after the destructure, which is the whole reason it is a clause of its
+    /// own.** A conjunct in the filter list resolves once for the slice, before the scope
+    /// holding the arm's binds exists; this is evaluated per record and reads them. Two
+    /// things in one bracket that resolve at different times would be told apart only by
+    /// whether the right side happened to touch a field, which is not a distinction to
+    /// rest a key on.
+    ///
+    /// `key` is soft: an ordinary identifier the parser consumes only here, so nothing
+    /// else in the language loses the name.
+    fn computed_keys(
+        &mut self,
+        lower: &mut Lower,
+        filters: &[Filter],
+        named: bool,
+    ) -> Result<Vec<ComputedKey>, Diagnostic> {
+        if !self.at_soft("key") {
+            return Ok(Vec::new());
+        }
+        let word = self.span_here();
+        self.bump();
+        // An inline fold and a guard slice are not stored, so neither has a key to write
+        // a part of. `KeySite` holds the same pair of phrases for rule 13's conjunct.
+        // A guard's slice has no destructure and no `=>`, so it cannot reach this at all;
+        // an inline fold is the one site that can and the one this has to refuse.
+        if !named {
+            let (what, fix) = KeySite::Inline.no_key().expect("only a fold has a key");
+            return Err(self
+                .err(
+                    Code::FoldRestriction,
+                    format!("`key` names a key part, and {what} has no key"),
+                    word,
+                )
+                .with_hint(format!(
+                    "a computed key part is a parameter of a stored fold, and {fix}"
+                )));
+        }
+
+        let mut keys: Vec<ComputedKey> = Vec::new();
+        loop {
+            let at = self.span_here();
+            let name = self.expect_ident()?;
+            let Some(param) = lower
+                .b
+                .params()
+                .iter()
+                .find(|param| param.name == name)
+                .cloned()
+            else {
+                return Err(self
+                    .err(
+                        Code::UnknownMember,
+                        format!("this fold has no parameter `{name}`"),
+                        at,
+                    )
+                    .with_hint(
+                        "`key` computes a parameter, which is a part of the key; a value the arm needs and the key does not is a `let` in the arm's expression",
+                    ));
+            };
+            // A subject id is minted by the key store and filed under, never derived: a
+            // computed one would address a row under a key nothing issued, and
+            // `KeyPart::subject` would report it as that subject all the same.
+            if let Some(subject) = tables::subject_of(&param.ty) {
+                return Err(self
+                    .err(
+                        Code::FoldRestriction,
+                        format!("`{name}` keys the subject `{subject}`, so it cannot be computed"),
+                        at,
+                    )
+                    .with_hint(
+                        "a subject's ids are minted and filed by the key store, so one is taken from the event that carries it; compute a part of a plain type beside it instead",
+                    ));
+            }
+            // One value per part per arm, whichever way it is written. Two of them cannot
+            // both hold, so the arm would fold nothing while `--tables` still called the
+            // column storable, which is the reason `slice_filters` refuses the pair of
+            // conjuncts it can see.
+            let matched = filters.iter().any(|filter| match filter {
+                Filter::Key { param, .. } => param == &name,
+                Filter::Field { field, .. } => field == &name,
+            }) || keys.iter().any(|key| key.param == name);
+            if matched {
+                return Err(self
+                    .err(
+                        Code::DuplicateField,
+                        format!("`{name}` is matched twice in this arm"),
+                        at,
+                    )
+                    .with_hint(
+                        "a key part is one value per arm, so a second one leaves the arm folding nothing at all; one of them belongs on an arm of its own",
+                    ));
+            }
+            self.expect_sym(Sym::Assign)?;
+            // The fold's own rule, as an arm's value is held to it: no clock, no call out.
+            // Unlike rule 13's conjunct this *may* read the record, which is the point, so
+            // there is no `slot_read` check here.
+            self.folding = true;
+            let value = self.expr(lower, Some(param.ty.clone()));
+            self.folding = false;
+            keys.push(ComputedKey {
+                param: param.name,
+                slot: param.slot,
+                ty: param.ty,
+                value: value?,
+                span: at,
+            });
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        Ok(keys)
     }
 
     /// A filter naming something that is not a field of the event. In a fold's arm the
@@ -10849,19 +10969,32 @@ impl Parser {
                 if !fold.query_only() {
                     continue;
                 }
-                let related = Related::new(format!("`{}` binds it here", fold.name), fold.span);
+                // Two ways in, and the message names which: the envelope has no predicate
+                // form and neither does a computed key part, so a command could narrow
+                // the log to neither and conflict on neither.
+                let (why, where_, hint) = match fold.computes() {
+                    Some(key) => (
+                        format!("computes the key part `{}`", key.param),
+                        Related::new(format!("`{}` computes it here", fold.name), key.span),
+                        "a computed key is per record and a slice is narrowed once, so there is no query for a command to read it with and nothing to conflict on; key on a field the event carries, or read this one as a stored value",
+                    ),
+                    None => (
+                        "binds the envelope (`as`)".to_string(),
+                        Related::new(format!("`{}` binds it here", fold.name), fold.span),
+                        "an event's append time is not a decision's to read: a test cannot pin it, and a backfilled event's is when it was imported rather than when it happened; fold a `Timestamp` the event declares, or read this one as a stored value",
+                    ),
+                };
+                let related = where_;
                 let error = self
                     .err(
                         Code::FoldRestriction,
                         format!(
-                            "`{}` binds the envelope (`as`), so it can be queried but not folded by {holder}",
+                            "`{}` {why}, so it can be queried but not folded by {holder}",
                             fold.name
                         ),
                         call.span,
                     )
-                    .with_hint(
-                        "an event's append time is not a decision's to read: a test cannot pin it, and a backfilled event's is when it was imported rather than when it happened; fold a `Timestamp` the event declares, or read this one as a stored value",
-                    )
+                    .with_hint(hint)
                     .with_related(match &fold.module {
                         Some(module) => related.in_file(module),
                         None => related,

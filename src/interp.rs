@@ -943,6 +943,15 @@ impl<'a> Tables<'a> {
         columns: &mut dyn Columns,
     ) -> Result<(), Error> {
         let arm = &column.arms[at];
+        let def = self
+            .program
+            .fold(&column.fold)
+            .ok_or_else(|| Error::new(ErrorKind::UnknownFold(column.fold.to_string())))?;
+        let module = def.module.as_deref();
+        // Built on demand and reused across parts, because almost no arm computes one and
+        // building it means reading and sealing every bound field.
+        let mut computed: Option<Frame> = None;
+
         // The key, part by part, in the table's order. A part the arm pinned is known
         // from the record or from the arm itself; one it left open is a range, and the
         // pinned parts are what narrows it.
@@ -955,6 +964,24 @@ impl<'a> Tables<'a> {
                 }
                 // Rule 13: not on the event at all, and resolved against an empty frame.
                 ArmMatch::Fixed(id) => tables::fixed(self.program, &column.fold, part, *id)?,
+                // **The inverse of what a by-key read does with the same expression.**
+                // There is no argument to compare against here, so whatever this
+                // evaluates to over this record is the key the row is written at, and
+                // `fold_into` binds the parameter from it below.
+                ArmMatch::Computed(id) => {
+                    let slice = &def.stage.slices[at];
+                    let frame = match computed {
+                        Some(ref mut frame) => frame,
+                        None => computed.insert(
+                            self.record_frame(record, def, slice)
+                                .map_err(|err| err.in_module(module))?,
+                        ),
+                    };
+                    let value = eval(self.program, &def.exprs, frame, *id, None)
+                        .map_err(|err| err.in_module(module))?;
+                    fitted_at(value, &part.ty, def.exprs.span(*id))
+                        .map_err(|err| err.in_module(module))?
+                }
                 ArmMatch::Open => {
                     key.push(None);
                     continue;
@@ -985,6 +1012,24 @@ impl<'a> Tables<'a> {
             self.fold_into(record, table, column, at, key, columns)?;
         }
         Ok(())
+    }
+
+    /// The frame a computed key part is evaluated in: this record's envelope and this
+    /// slice's binds, which is exactly what `key param = ...` is allowed to read.
+    ///
+    /// The same two loops `fold_into` runs, lifted here because a computed part is needed
+    /// before there is a key, and the key is what `fold_into` takes.
+    fn record_frame(&self, record: &Record, def: &Fold, slice: &Slice) -> Result<Frame, Error> {
+        let mut frame = Frame::new(def.frame);
+        for bind in &def.envelope {
+            frame.set(bind.slot, envelope_value(record, bind.field))?;
+        }
+        for bind in &slice.binds {
+            let value = field(&record.event, &bind.field)?.clone();
+            let value = seal(self.program, &record.event, &bind.field, value)?;
+            frame.set(bind.slot, value)?;
+        }
+        Ok(frame)
     }
 
     /// One arm of one column at one key: the fold's own body, with the accumulator read
@@ -2134,6 +2179,26 @@ fn fold(
                 let value = field(event, &bind.field)?.clone();
                 let value = seal(program, event, &bind.field, value)?;
                 frame.set(bind.slot, value)?;
+            }
+            // **A computed key part, compared rather than written.** This is a by-key
+            // read: the caller's argument is already in the slot, so a record whose
+            // computed part is some other key belongs to some other row and is skipped.
+            // `Tables::apply` takes the same expression the other way round, writing the
+            // row at whatever it evaluates to, which is why one of the two has to scan.
+            //
+            // After the binds, because the expression reads them, and before the updates,
+            // because a record that is not this key's must not reach the accumulator.
+            let mut mine = true;
+            for key in &slice.keys {
+                let value = eval(program, exprs, frame, key.value, None)?;
+                let value = fitted_at(value, &key.ty, exprs.span(key.value))?;
+                if frame.get(key.slot)? != &value {
+                    mine = false;
+                    break;
+                }
+            }
+            if !mine {
+                continue;
             }
             for update in &slice.updates {
                 let value = eval(program, exprs, frame, update.value, None)?;

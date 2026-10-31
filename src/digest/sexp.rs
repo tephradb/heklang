@@ -219,10 +219,10 @@ impl fmt::Display for Sexp {
 ///
 /// This list is read by [`Sexp::json`] and by nothing else, so adding to it moves no hash.
 const KEYWORDS: &[&str] = &[
-    "absent", "acc", "bind", "body", "col", "default", "delivery", "do", "else", "entity", "env",
-    "events", "expect", "f", "filter", "fold", "given", "index", "in", "item", "key", "keyed",
-    "load", "max", "now", "of", "on", "p", "params", "post", "pre", "rejects", "respond",
-    "returns", "slice", "stage", "status", "then", "variants", "when", "yield",
+    "absent", "acc", "bind", "body", "col", "computed", "default", "delivery", "do", "else",
+    "entity", "env", "events", "expect", "f", "filter", "fold", "given", "index", "in", "item",
+    "key", "keyed", "load", "max", "now", "of", "on", "p", "params", "post", "pre", "rejects",
+    "respond", "returns", "slice", "stage", "status", "then", "variants", "when", "yield",
 ];
 
 fn is_number(text: &str) -> bool {

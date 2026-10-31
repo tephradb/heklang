@@ -185,6 +185,20 @@ billing-period key or a bucket match that is silently wrong is worse than one th
 `"{y}-{mo.pad(2)}"` is the shape it is for, which is why the receiver is the number rather than the
 string: `"{mo}".pad_start(2, "0")` would make the common case a nested interpolation.
 
+**It is also what a computed key part is usually made of** (`docs/folds.md` rule 14), since a read
+model bucketed by month keys on exactly this:
+
+```hek
+fn month_of(at: Timestamp) -> String {
+  return "{at.year()}-{at.month().pad(2)}"
+}
+```
+
+No builtin was added for that, and none is owed: `Timestamp.year()` and `month()` are above, this
+is the padding, and a pure `fn` is what the calendar paragraph already says to compose them with.
+Where the bucket need not be read by a person, `at.year() * 100 + at.month()` is an `Int` that
+sorts correctly and pads nothing.
+
 The sign comes first and the zeros after it, because `0-5` is not a number, and `width` counts the
 whole rendering, so `pad(3)` answers three characters on either side of zero. A width at or below zero
 pads nothing, the same way `String.truncate` at or below zero keeps nothing. It is the pair of

@@ -794,8 +794,9 @@ two together are a contradiction rather than a restriction; the fold has to move
 before the envelope can mean anything.
 
 **The binding inside a filter.** A filter resolves once, before the fold runs, and the envelope
-belongs to each event the fold reads, so the two cannot be one value. This is where a computed key
-would go and there is no such thing yet, so the message says why rather than just no.
+belongs to each event the fold reads, so the two cannot be one value. A key computed from the
+record is what belongs here, and rule 14 is where it went: a clause of its own after the
+destructure, because that is the difference it rests on.
 
 **A binding no arm reads.** Rule 3's rule for the accumulator, and sharper here: an unread binding
 would decide on its own that the whole fold is query-only, so a word with no meaning would cost a
@@ -894,6 +895,81 @@ distinction is not cosmetic: `Open` means a writer ranges over that part, and an
 must not be told to. An arm doing both, narrowing the event's own field *and* fixing the part,
 records the fixed value, because that is what the row is written at and the field filter is already
 in the predicate that narrows to it.
+
+## 14. An arm may compute a key part from the record
+
+Rule 13 writes a key part the event does not carry, from a value fixed before anything is read.
+This writes one the event does not carry **and could not**, because it is a function of the record:
+
+```hek
+fn month_of(at: Timestamp) -> String {
+  return "{at.year()}-{at.month().pad(2)}"
+}
+
+fold UsageCounted(shop_id: Shop, month: String) -> n: Int = 0 {
+  on @usage.recorded(shop_id) { at, units } key month = month_of(at) => n + units
+}
+```
+
+That is a read model keyed by shop and month, from a log that records neither a month nor a bucket.
+The other cases are a normalised value (a lowercased email, a trimmed code) and a combination of
+fields, which is why two projectors of the ported application stayed projectors: they key on a
+concatenated string and nothing could express it.
+
+**It is a clause of its own, and the reason is when it resolves.** Everything in the filter list
+resolves **once**, before any event is folded, which is what lets a field conjunct become a
+`Predicate` and a rule 13 conjunct a gate. This is evaluated **per record**, so it reads the
+destructure's binds and the envelope binding, and the parser reaches the filter list before that
+scope exists. Spelling them alike and telling them apart by whether the right side happened to
+touch a field would be a distinction nobody could see.
+
+```
+on @usage.recorded(shop_id) { at, units } key month = month_of(at) => n + units
+                                          ^^^^^^^^^^^^^^^^^^^^^^^^
+```
+
+`key` is soft, an ordinary identifier the parser claims only in this position, so nothing else in
+the language loses the name. Several parts are a comma list.
+
+**A fold with one is query-only**, exactly as rule 12's envelope binding makes one, and for a
+sharper version of the same reason. A command reading a fold turns its slices into a log query and
+an append condition, and both are field equality on the event; `month_of(e.at) == m` has no
+predicate form at all, so a command could neither narrow the log to those events nor detect a
+conflicting write. A test reads one through `fold` or `fill`, and a deployment serves it from the
+table. The refusal names the part rather than the clause:
+
+> `UsageCounted` computes the key part `month`, so it can be queried but not folded by a command
+
+**The stored side has no such problem**, which is the whole asymmetry this rule rests on. The sink
+walks the log forward one record at a time, so it evaluates the expression against each record and
+writes the row at the answer. No predicate is needed because nothing is being narrowed.
+
+**The two directions are one expression read two ways**, which is rule 13's gate one level down. A
+read by key has the caller's argument in the parameter's slot, so it computes per record and
+**compares**, skipping a record that belongs to another row; the sink has no argument, so what it
+computes **is** the key, and it binds the parameter from that. One of the two therefore scans,
+which is what a by-key read of a fold already does.
+
+Four things are refused:
+
+**A part of a subject type.** A subject's ids are minted and filed by the key store, so a computed
+one would address a row under a key nothing issued while `KeyPart::subject` reported it as that
+subject all the same. Compute a part of a plain type beside it.
+
+**An inline fold's arm.** It is not stored, so there is no key to write a part of, which is rule
+13's reason. A guard's slice has no destructure and no `=>`, so the clause cannot be written there
+at all.
+
+**A name that is not a parameter.** `key` computes a key part; a value the arm wants and the key
+does not is an ordinary expression in the arm.
+
+**A part already written in that arm**, whichever of the three ways wrote it, for the reason two
+rule 13 conjuncts on one part are refused.
+
+**Seen from the read side**, the part is `ArmMatch::Computed` and it counts as **pinned**: one
+record writes one key, which is not a range, so a host deriving range indexes needs to know nothing
+about this state. A fan-out, one record writing every month between two dates, is a different
+feature and not this one.
 
 ## Seen from the read side
 

@@ -100,6 +100,14 @@ pub enum ArmMatch {
     /// A value the arm fixes, from `param == value`: not on the event, and resolved once
     /// in the frame of whatever reads the fold. The id indexes that fold's own arena.
     Fixed(ExprId),
+    /// A value the arm **computes** from the record, from `key param = expr`: evaluated
+    /// per record against that record's binds and envelope, so unlike [`Self::Fixed`] it
+    /// cannot be resolved without one. The id indexes the fold's own arena.
+    ///
+    /// Still [`pinned`](Self::pinned): one record writes one key, which is not a range.
+    /// That is what keeps a host's index derivation right without it knowing this state
+    /// exists.
+    Computed(ExprId),
     /// Not pinned by this arm, which is not a defect: an arm matching a subset of the key
     /// is a range update over the parts it leaves open.
     Open,
@@ -155,7 +163,17 @@ pub fn layout(program: &Program) -> Layout {
                             } => (named == &param.name).then_some(ArmMatch::Fixed(*value)),
                             Filter::Field { .. } => None,
                         });
-                        let found = fixed.or_else(|| {
+                        // Then a computed part, which is a key this arm writes just as a
+                        // fixed one is, and before the field search for the same reason:
+                        // it is the stronger statement about where the row goes.
+                        let computed = || {
+                            slice
+                                .keys
+                                .iter()
+                                .find(|key| key.param == param.name)
+                                .map(|key| ArmMatch::Computed(key.value))
+                        };
+                        let found = fixed.or_else(computed).or_else(|| {
                             slice.filters.iter().find_map(|filter| match filter {
                                 Filter::Field { field, value } => pins(fold, *value, param)
                                     .then(|| ArmMatch::Field(field.clone())),
@@ -398,7 +416,7 @@ fn path(program: &Program, subject: &str) -> Vec<String> {
 /// Neither `Type::as_scalar` nor `Type::subject` answers this: the first reads a subject
 /// through to the scalar its ids are and throws the name away, and the second reports the
 /// subject a *seal* files its content under.
-fn subject_of(ty: &Type) -> Option<&Ident> {
+pub(crate) fn subject_of(ty: &Type) -> Option<&Ident> {
     match ty {
         Type::Subject(sub) => Some(&sub.name),
         Type::Opt(inner) => subject_of(inner),

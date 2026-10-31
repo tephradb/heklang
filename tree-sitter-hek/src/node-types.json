@@ -767,6 +767,123 @@
     }
   },
   {
+    "type": "computed_key",
+    "named": true,
+    "fields": {
+      "param": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "boolean_literal",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "comprehension",
+            "named": true
+          },
+          {
+            "type": "decimal_literal",
+            "named": true
+          },
+          {
+            "type": "field_expression",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "if_expression",
+            "named": true
+          },
+          {
+            "type": "integer_literal",
+            "named": true
+          },
+          {
+            "type": "invoke_expression",
+            "named": true
+          },
+          {
+            "type": "list",
+            "named": true
+          },
+          {
+            "type": "method_call",
+            "named": true
+          },
+          {
+            "type": "none_literal",
+            "named": true
+          },
+          {
+            "type": "object_literal",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
+          },
+          {
+            "type": "raw_string",
+            "named": true
+          },
+          {
+            "type": "record_literal",
+            "named": true
+          },
+          {
+            "type": "stored_field",
+            "named": true
+          },
+          {
+            "type": "string",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "computed_keys",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "computed_key",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "const_declaration",
     "named": true,
     "fields": {
@@ -2002,6 +2119,16 @@
         "types": [
           {
             "type": "destructure",
+            "named": true
+          }
+        ]
+      },
+      "keys": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "computed_keys",
             "named": true
           }
         ]
@@ -5426,6 +5553,10 @@
   },
   {
     "type": "invoke",
+    "named": false
+  },
+  {
+    "type": "key",
     "named": false
   },
   {

@@ -1010,6 +1010,14 @@ impl<'a> Frame<'a> {
         for (param, value) in self.sorted(&key_filters(slice)) {
             parts.push(node("keyed", [atom(param), value]));
         }
+        // In written order and not sorted, unlike the two above: a computed part reads
+        // this slice's binds, so the expressions hand out slot numbers and a sort would
+        // make the numbering depend on the parameter names. Appended after `keyed`, so a
+        // slice that computes nothing packs byte for byte as it did.
+        for key in &slice.keys {
+            let value = self.expr(key.value);
+            parts.push(node("computed", [atom(key.param.clone()), value]));
+        }
         for bind in sorted_binds(&slice.binds) {
             let slot = self.slot(bind.slot);
             parts.push(node("bind", [atom(bind.field.clone()), slot]));

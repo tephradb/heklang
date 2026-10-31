@@ -439,3 +439,113 @@ fold Happenings() -> n: Int = 0 {
     assert_eq!(cells.get("global", &[], "happenings"), Some(&Value::Int(2)));
     assert_eq!(cells.len("global"), 1, "a keyless fold has one value");
 }
+
+// ---------------------------------------------------------------------------
+
+/// A key part computed from the record, which is the one shape where the sink and a
+/// by-key read run the *same expression in opposite directions*: the sink evaluates it
+/// and writes the row at the answer, while `fold_stored` has the asked key in the slot
+/// already and keeps only the records whose answer equals it. `agrees` is what proves
+/// the two meet, and a comparison written the wrong way round fails here and nowhere
+/// else.
+const BUCKETED: &str = "subject Shop(Int)
+
+event @usage.recorded { shop_id: Shop, at: Timestamp, units: Int }
+
+fn month_of(at: Timestamp) -> String {
+  return \"{at.year()}-{at.month().pad(2)}\"
+}
+
+fold UsageCounted(shop_id: Shop, month: String) -> n: Int = 0 {
+  on @usage.recorded(shop_id) { at, units } key month = month_of(at) => n + units
+}
+";
+
+#[test]
+fn a_computed_key_part_writes_the_row_the_record_belongs_to() {
+    let program = program(BUCKETED);
+    let mut interpreter = Interpreter::new(&program);
+    for (at, units) in [
+        ("2026-03-04T00:00:00Z", 3),
+        ("2026-03-20T00:00:00Z", 4),
+        ("2026-04-01T00:00:00Z", 9),
+    ] {
+        given(
+            &mut interpreter,
+            "usage.recorded",
+            [
+                ("shop_id", Value::Int(1)),
+                (
+                    "at",
+                    Value::Timestamp(value::timestamp(at).expect("rfc 3339")),
+                ),
+                ("units", Value::Int(units)),
+            ],
+        );
+    }
+    // A second shop, so a wrong key would show up as a merged row rather than only as a
+    // wrong total.
+    given(
+        &mut interpreter,
+        "usage.recorded",
+        [
+            ("shop_id", Value::Int(2)),
+            (
+                "at",
+                Value::Timestamp(value::timestamp("2026-03-09T00:00:00Z").expect("rfc 3339")),
+            ),
+            ("units", Value::Int(100)),
+        ],
+    );
+    let cells = agrees(&program, &interpreter);
+
+    let row = |shop, month: &str| vec![Key::Int(shop), Key::Str(month.into())];
+    assert_eq!(
+        cells.get("shop__month", &row(1, "2026-03"), "usage_counted"),
+        Some(&Value::Int(7)),
+        "both of March's records, and neither of April's or the other shop's"
+    );
+    assert_eq!(
+        cells.get("shop__month", &row(1, "2026-04"), "usage_counted"),
+        Some(&Value::Int(9))
+    );
+    assert_eq!(
+        cells.get("shop__month", &row(2, "2026-03"), "usage_counted"),
+        Some(&Value::Int(100))
+    );
+    assert_eq!(cells.len("shop__month"), 3, "three buckets, not one");
+}
+
+#[test]
+fn a_computed_part_is_pinned_so_the_table_is_keyed_by_it() {
+    let program = program(BUCKETED);
+    let tables = Tables::new(&program);
+    let table = tables
+        .layout()
+        .tables
+        .iter()
+        .find(|table| table.name == "shop__month")
+        .expect("the fold is storable");
+    assert_eq!(
+        table
+            .key
+            .iter()
+            .map(|part| part.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["shop", "month"],
+        "the subject part leads and the computed one follows"
+    );
+    assert!(
+        tables.layout().unstored.is_empty(),
+        "a computed part supplies its key, so nothing is unstored"
+    );
+    // One record writes one key, so the arm is fully pinned and a host derives no range
+    // index for it.
+    let column = &table.columns[0];
+    assert!(
+        column
+            .arms
+            .iter()
+            .all(|arm| arm.fields.iter().all(heklang::ArmMatch::pinned))
+    );
+}

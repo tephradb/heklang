@@ -212,3 +212,15 @@ test "a booked seat fills the row it is keyed by" {
   // derived row reads differently from a projector's.
   expect workshop[RUST] { workshop_seats_left: 1, workshop_revenue: 40.00 }
 }
+
+// The computed key part, read back by the bucket it computed. The harness stamps one
+// minute per event from 2020-01-01, so both bookings land in `"2020-01"`.
+test "a month's takings are bucketed by when the seat was booked" {
+  given @workshop.opened { workshop_id: RUST, title: "Rust", seats: 4, price: 40.00 }
+  given a_seat(BOOKING, 7)
+  given a_seat(SECOND, 8)
+
+  fold MonthlyRevenue { workshop_id: RUST, month: "2020-01" }
+
+  expect 80.00
+}

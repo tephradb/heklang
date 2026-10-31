@@ -489,9 +489,20 @@ module.exports = grammar({
         'on',
         $.slice_reference,
         optional(field('destructure', $.destructure)),
+        optional(field('keys', $.computed_keys)),
         '=>',
         field('value', $._expression),
       ),
+
+    // `key month = ..`, the key parts an arm computes from the record. After the
+    // destructure because that is where the record's names are in scope, and its own
+    // clause rather than a filter because a filter resolves once for the whole slice
+    // while this is per record (parse.rs `computed_keys`, `docs/folds.md` rule 14).
+    // `key` is soft: an identifier the parser claims only here.
+    computed_keys: ($) => seq('key', commaSep1($.computed_key)),
+
+    computed_key: ($) =>
+      seq(field('param', $.identifier), '=', field('value', $._expression)),
 
     // A slice always carries its parentheses, which is what tells a fold arm from a
     // handler when both begin `on @path` (parse.rs `slice_ref`).
