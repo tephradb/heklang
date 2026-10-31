@@ -25,6 +25,20 @@ on:
 jobs:
   release-plz:
     runs-on: native
+    env:
+      # **No sccache in this job**, which `ci.yaml` relies on happily. release-plz runs
+      # cargo-semver-checks to work out whether a bump is breaking, and that builds rustdoc
+      # for each crate in a temp tree of its own (`/tmp/.tmpXXXX/hostexecutor/target/
+      # semver-checks/local-hek-0_5_5-.../`). The runner's sccache cannot reach its cache
+      # from there and dies with `sccache: encountered fatal error` and exit status 254,
+      # which cargo reports as `failed to parse process output` and release-plz as
+      # `failed to determine next versions`. An empty wrapper is how cargo is told to call
+      # rustc directly, and it beats a `build.rustc-wrapper` in the runner's CARGO_HOME too.
+      #
+      # The cost is a cold build per release run, which is the right trade: semver-checks is
+      # what turns a breaking change into a minor bump on a 0.x crate, and without it a
+      # `feat` alone would have cut 0.11.2 where 0.12.0 was owed.
+      RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@v4
         with:
