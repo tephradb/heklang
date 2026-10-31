@@ -954,15 +954,24 @@ impl<'a> Tables<'a> {
         folds: Option<&[Ident]>,
         columns: &mut dyn Columns,
     ) -> Result<(), Error> {
-        for table in &self.layout.tables {
-            // **What this record writes, worked out before any of it is written.** The two
-            // passes are over *key discovery* and not over the writing, which is the whole
-            // of this shape: a pinned arm mints a key and a range has to cover it, so the
-            // pinned arms go first and `minted` is what a range unions in. Reading the
-            // store back for them, which is what this did, is the same set by a longer
-            // route and it put the writing in pass order.
+        // **What this record writes, worked out before any of it is written, and across
+        // every table.** The two passes are over *key discovery* and not over the writing,
+        // which is the whole of this shape: a pinned arm mints a key and a range has to
+        // cover it, so the pinned arms go first and `minted` is what a range unions in.
+        // Reading the store back for them, which is what this did, is the same set by a
+        // longer route and it put the writing in pass order.
+        //
+        // **The reads span the tables and the writes come after all of them**, which rule
+        // 15 is what forces: a lookup reads the looked-up fold's column, and that column is
+        // in another table. Discovering and writing one table at a time left a record's own
+        // write to `game_genre` visible to the `genre_units` lookup that had to see the
+        // value from *before* it, so a listing that set a game's genre counted under the
+        // genre it was setting.
+        let mut writes: BTreeMap<(usize, usize, Vec<Key>), Vec<usize>> = BTreeMap::new();
+        for (whose, table) in self.layout.tables.iter().enumerate() {
+            // Per table, because a key belongs to one: a range over this table covers the
+            // keys this table holds.
             let mut minted: BTreeSet<Vec<Key>> = BTreeSet::new();
-            let mut writes: BTreeMap<(usize, Vec<Key>), Vec<usize>> = BTreeMap::new();
             for pinned_only in [true, false] {
                 for (which, column) in table.columns.iter().enumerate() {
                     // Sorted by `Layout::closure`, so this is a search rather than the
@@ -981,22 +990,23 @@ impl<'a> Tables<'a> {
                             if pinned_only {
                                 minted.insert(key.clone());
                             }
-                            writes.entry((which, key)).or_default().push(at);
+                            writes.entry((whose, which, key)).or_default().push(at);
                         }
                     }
                 }
             }
+        }
 
-            // **One group per column and key, and its arms in written order.** A fold is
-            // its arms applied in source order to one accumulator, and the two passes
-            // above hand them out pinned-first, so a column with one arm of each kind on
-            // one event had them the wrong way round: the pinned arm counted and the
-            // ranged arm then overwrote it, where a refold resets and then counts. It is
-            // also one store read and one write per row rather than per arm.
-            for ((which, key), mut arms) in writes {
-                arms.sort_unstable();
-                self.fold_into(record, table, &table.columns[which], &arms, key, columns)?;
-            }
+        // **One group per column and key, and its arms in written order.** A fold is its
+        // arms applied in source order to one accumulator, and the two passes above hand
+        // them out pinned-first, so a column with one arm of each kind on one event had
+        // them the wrong way round: the pinned arm counted and the ranged arm then
+        // overwrote it, where a refold resets and then counts. It is also one store read
+        // and one write per row rather than per arm.
+        for ((whose, which, key), mut arms) in writes {
+            let table = &self.layout.tables[whose];
+            arms.sort_unstable();
+            self.fold_into(record, table, &table.columns[which], &arms, key, columns)?;
         }
         Ok(())
     }
@@ -1066,7 +1076,7 @@ impl<'a> Tables<'a> {
                     let frame = match computed {
                         Some(ref mut frame) => frame,
                         None => computed.insert(
-                            self.record_frame(record, def, slice)
+                            self.record_frame(record, def, slice, columns)
                                 .map_err(|err| err.in_module(module))?,
                         ),
                     };
@@ -1265,7 +1275,13 @@ impl<'a> Tables<'a> {
     ///
     /// The same two loops `fold_into` runs, lifted here because a computed part is needed
     /// before there is a key, and the key is what `fold_into` takes.
-    fn record_frame(&self, record: &Record, def: &Fold, slice: &Slice) -> Result<Frame, Error> {
+    fn record_frame(
+        &self,
+        record: &Record,
+        def: &Fold,
+        slice: &Slice,
+        columns: &dyn Columns,
+    ) -> Result<Frame, Error> {
         let mut frame = Frame::new(def.frame);
         for bind in &def.envelope {
             frame.set(bind.slot, envelope_value(record, bind.field))?;
@@ -1274,6 +1290,20 @@ impl<'a> Tables<'a> {
             let value = field(&record.event, &bind.field)?.clone();
             let value = seal(self.program, &record.event, &bind.field, value)?;
             frame.set(bind.slot, value)?;
+        }
+        // **Rule 15, read before this record has written anything.** `applying` works out
+        // every key before it writes any of them, so the store holds the looked-up column
+        // at exactly this record's position: records arrive in order and nothing for this
+        // one has landed. That is the handoff's "evaluate every lookup for the record
+        // before writing anything for that record", and it is structural here rather than
+        // a rule to keep, because the phase that reads is a different loop from the phase
+        // that writes.
+        if !slice.lookups.is_empty() {
+            let asof = Asof::Stored {
+                layout: &self.layout,
+                columns,
+            };
+            lookups(self.program, &def.exprs, slice, &mut frame, &asof)?;
         }
         Ok(frame)
     }
@@ -1928,52 +1958,7 @@ impl<'a, H: Host> Interpreter<'a, H> {
         args: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
         head: Option<u64>,
     ) -> Result<Value, Error> {
-        // A fold's body is arms only: `Builder::stmt` is the one path onto either half of
-        // a stage and a fold parser never reaches it, so an IR that grew statements here
-        // is a bug in the builder rather than something to quietly run.
-        debug_assert!(
-            def.stage.pre.is_empty() && def.stage.post.is_empty(),
-            "a fold's body is arms, so its stage has no statements"
-        );
-
-        let mut frame = Frame::new(def.frame);
-        let mut args: BTreeMap<Ident, Value> = args
-            .into_iter()
-            .map(|(name, value)| (name.into(), value))
-            .collect();
-        bind_params(&def.params, &mut args, &mut frame)?;
-
-        // Resolve before seeding, which is what both other drivers do and is safe for the
-        // same reason: a filter cannot read the accumulator (`Builder::filter_past_fold`).
-        let resolved = resolve(self.program, &def.exprs, &def.stage.slices, &mut frame)?;
-        for var in &def.stage.folds {
-            let value = eval(self.program, &def.exprs, &mut frame, var.init, None)?;
-            let value = fitted_at(value, &var.ty, def.exprs.span(var.init))?;
-            frame.set(var.slot, value)?;
-        }
-
-        let folding = Folding {
-            slices: &def.stage.slices,
-            resolved: &resolved,
-            envelope: &def.envelope,
-        };
-        // A head of zero is a log with nothing in it, and there is no inclusive bound that
-        // says so: `Some(0)` is position zero. A command's read takes the same two steps
-        // (`at > from`, then `at - 1`) for the same reason, since the number it pins
-        // itself to is a head too.
-        if head != Some(0) {
-            fold(
-                self.program,
-                &def.exprs,
-                &self.host,
-                &folding,
-                0,
-                head.map(|head| head - 1),
-                &mut frame,
-            )?;
-        }
-        // Always set, because the seed above wrote it.
-        Ok(frame.get(def.slot)?.clone())
+        folding(self.program, &self.host, def, args, head)
     }
 
     /// One attempt: a DCB conflict leaves as [`ErrorKind::Conflict`] for the host to do
@@ -2283,6 +2268,171 @@ fn bind_params(
     }
 }
 
+/// One named fold, folded by key over a log. The body of
+/// [`Interpreter::fold`](Interpreter::fold)'s two doors, free of the interpreter because
+/// a rule 15 lookup calls it again for the fold it reads.
+///
+/// `head` is a log length and not a position: `None` reads to whatever the log has
+/// reached, and `Some(n)` reads the first `n` events.
+fn folding(
+    program: &Program,
+    log: &dyn Log,
+    def: &Fold,
+    args: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
+    head: Option<u64>,
+) -> Result<Value, Error> {
+    // A fold's body is arms only: `Builder::stmt` is the one path onto either half of a
+    // stage and a fold parser never reaches it, so an IR that grew statements here is a
+    // bug in the builder rather than something to quietly run.
+    debug_assert!(
+        def.stage.pre.is_empty() && def.stage.post.is_empty(),
+        "a fold's body is arms, so its stage has no statements"
+    );
+
+    let mut frame = Frame::new(def.frame);
+    let mut args: BTreeMap<Ident, Value> = args
+        .into_iter()
+        .map(|(name, value)| (name.into(), value))
+        .collect();
+    bind_params(&def.params, &mut args, &mut frame)?;
+
+    // Resolve before seeding, which is what both other drivers do and is safe for the
+    // same reason: a filter cannot read the accumulator (`Builder::filter_past_fold`).
+    let resolved = resolve(program, &def.exprs, &def.stage.slices, &mut frame)?;
+    for var in &def.stage.folds {
+        let value = eval(program, &def.exprs, &mut frame, var.init, None)?;
+        let value = fitted_at(value, &var.ty, def.exprs.span(var.init))?;
+        frame.set(var.slot, value)?;
+    }
+
+    let folding = Folding {
+        slices: &def.stage.slices,
+        resolved: &resolved,
+        envelope: &def.envelope,
+    };
+    // A head of zero is a log with nothing in it, and there is no inclusive bound that
+    // says so: `Some(0)` is position zero. A command's read takes the same two steps
+    // (`at > from`, then `at - 1`) for the same reason, since the number it pins itself
+    // to is a head too.
+    if head != Some(0) {
+        fold(
+            program,
+            &def.exprs,
+            log,
+            &folding,
+            0,
+            head.map(|head| head - 1),
+            &mut frame,
+        )?;
+    }
+    // Always set, because the seed above wrote it.
+    Ok(frame.get(def.slot)?.clone())
+}
+
+/// Where a rule 15 lookup's value comes from: the two drivers answer it two ways, and
+/// both have to give what the fold held when the record being folded was appended.
+///
+/// **Strictly before the record**, which is what a command appending it would have read.
+/// Not the current value, so a replay is deterministic; not including the record, because
+/// one that both moves the looked-up fold and is counted through it would otherwise depend
+/// on the order the arms happen to be applied in.
+enum Asof<'a> {
+    /// Fold it again, over the log up to the record's own position. **Quadratic**, which
+    /// is what a by-key read of a lookup fold costs and is acknowledged rather than
+    /// hidden: a deployment serves these from the table and never takes this path on a
+    /// request, and a test is a handful of records.
+    Replay { log: &'a dyn Log, upto: u64 },
+    /// Read the looked-up column out of the store, which a host maintaining the dependency
+    /// in the same pass holds at exactly the record's position: records arrive in order
+    /// and nothing for this one has been written yet.
+    Stored {
+        layout: &'a Layout,
+        columns: &'a dyn Columns,
+    },
+}
+
+impl Asof<'_> {
+    fn value(
+        &self,
+        program: &Program,
+        name: &Ident,
+        args: &[(Ident, Value)],
+    ) -> Result<Value, Error> {
+        let def = program
+            .fold(name)
+            .ok_or_else(|| Error::new(ErrorKind::UnknownFold(name.to_string())))?;
+        match self {
+            Asof::Replay { log, upto } => {
+                folding(program, *log, def, args.iter().cloned(), Some(*upto))
+            }
+            Asof::Stored { layout, columns } => {
+                // Always found: the parser refuses a lookup of a fold `layout` keeps no
+                // column for, which is what makes this door answerable at all.
+                let Some((table, column)) = layout.column(name) else {
+                    return Err(ErrorKind::MalformedIr.into());
+                };
+                let mut key = Vec::with_capacity(column.args.len());
+                for param in &column.args {
+                    let Some((_, value)) = args.iter().find(|(given, _)| given == param) else {
+                        return Err(ErrorKind::MissingArgument(param.clone()).into());
+                    };
+                    let Some(declared) = def.params.iter().find(|at| &at.name == param) else {
+                        return Err(ErrorKind::MalformedIr.into());
+                    };
+                    let value = fitted_at(value.clone(), &declared.ty, def.span)?;
+                    let Some(part) = Key::from_value(&value) else {
+                        return Err(ErrorKind::MalformedIr.into());
+                    };
+                    key.push(part);
+                }
+                match columns.value(&table.name, &key, &column.name)? {
+                    Some(value) => Ok(value),
+                    // An absent row is the fold's seed, as it is everywhere else
+                    // (`docs/folds.md` section 11). Its parameters are bound first,
+                    // because a seed may read one.
+                    None => {
+                        let mut frame = Frame::new(def.frame);
+                        let mut bound: BTreeMap<Ident, Value> = args.iter().cloned().collect();
+                        bind_params(&def.params, &mut bound, &mut frame)?;
+                        let var = def
+                            .stage
+                            .folds
+                            .iter()
+                            .find(|var| var.slot == def.slot)
+                            .ok_or(ErrorKind::MalformedIr)?;
+                        let value = eval(program, &def.exprs, &mut frame, var.init, None)?;
+                        fitted_at(value, &var.ty, def.exprs.span(var.init))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Rule 15: every fold this slice's `key` clauses read, into the slots they read it from.
+///
+/// In the list's own order, which is evaluation order: an inner link of a chain was pushed
+/// before the outer one that takes it as an argument, so by the time the outer one's
+/// arguments are evaluated the inner slot is filled.
+fn lookups(
+    program: &Program,
+    exprs: &Exprs,
+    slice: &Slice,
+    frame: &mut Frame,
+    asof: &Asof<'_>,
+) -> Result<(), Error> {
+    for lookup in &slice.lookups {
+        let mut args: Vec<(Ident, Value)> = Vec::with_capacity(lookup.args.len());
+        for (name, value) in &lookup.args {
+            args.push((name.clone(), eval(program, exprs, frame, *value, None)?));
+        }
+        let value = asof.value(program, &lookup.fold, &args)?;
+        let value = fitted_at(value, &lookup.ty, lookup.span)?;
+        frame.set(lookup.slot, value)?;
+    }
+    Ok(())
+}
+
 /// Every slice with its filters evaluated. This runs before the fold, so what a run
 /// read is known whatever the body goes on to decide, which is why the condition comes
 /// back with a refusal too.
@@ -2432,7 +2582,27 @@ fn fold(
     if query.slices.is_empty() {
         return Ok(());
     }
-    log.read(&query, &mut |record| {
+    // **A fold with a rule 15 lookup reads its records out first**, because folding one
+    // means reading the log again, once per record, for the fold it keys through.
+    //
+    // Buffered rather than recursed into from inside the visitor, which is what keeps the
+    // re-entrancy out of `Log::read`: the seam takes `&self` and says nothing about being
+    // called again from its own visitor, so a host holding a cursor, a connection or a
+    // `RefCell` borrow across the visit would deadlock rather than merely be slow. The
+    // cost lands only on the folds that need it, which are the quadratic ones already.
+    let buffered: Option<Vec<Record>> = match stage.slices.iter().any(|at| !at.lookups.is_empty()) {
+        false => None,
+        true => {
+            let mut found = Vec::new();
+            log.read(&query, &mut |record| {
+                found.push(record.clone());
+                Ok(())
+            })?;
+            Some(found)
+        }
+    };
+
+    let mut visit = |record: &Record| -> Result<(), Error> {
         let event = &record.event;
         // Before the slices, because an arm's value reads these and a slice's updates
         // are that value. One list for the whole fold, so a record that matches no slice
@@ -2449,6 +2619,17 @@ fn fold(
                 let value = field(event, &bind.field)?.clone();
                 let value = seal(program, event, &bind.field, value)?;
                 frame.set(bind.slot, value)?;
+            }
+            // Rule 15: the folds this arm's `key` clauses read, as of this record, which
+            // here means folded again over the log before it. After the binds, because
+            // their arguments read them, and before the computed parts, which read the
+            // slots they land in.
+            if !slice.lookups.is_empty() {
+                let asof = Asof::Replay {
+                    log,
+                    upto: record.position,
+                };
+                lookups(program, exprs, slice, frame, &asof)?;
             }
             // **A computed key part, compared rather than written.** This is a by-key
             // read: the caller's argument is already in the slot, so a record whose
@@ -2477,7 +2658,12 @@ fn fold(
             }
         }
         Ok(())
-    })
+    };
+
+    match &buffered {
+        Some(records) => records.iter().try_for_each(&mut visit),
+        None => log.read(&query, &mut visit),
+    }
 }
 
 fn matches(predicate: &Predicate, event: &Event) -> Result<bool, Error> {

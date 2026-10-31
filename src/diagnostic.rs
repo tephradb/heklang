@@ -95,6 +95,8 @@ pub enum Code {
     // Statements about the whole program, checked after every pass.
     RecursiveFn,
     RecursiveGuard,
+    /// A fold that keys through itself. See `docs/folds.md` rule 15.
+    RecursiveFold,
     MaxTightening,
     SelfTrigger,
     ConstCycle,
@@ -148,6 +150,7 @@ impl Code {
         Code::TestShape,
         Code::RecursiveFn,
         Code::RecursiveGuard,
+        Code::RecursiveFold,
         Code::MaxTightening,
         Code::SelfTrigger,
         Code::ConstCycle,
@@ -199,6 +202,7 @@ impl Code {
             Code::TestShape => "test-shape",
             Code::RecursiveFn => "recursive-fn",
             Code::RecursiveGuard => "recursive-guard",
+            Code::RecursiveFold => "recursive-fold",
             Code::MaxTightening => "max-tightening",
             Code::SelfTrigger => "self-trigger",
             Code::ConstCycle => "const-cycle",

@@ -219,6 +219,7 @@ be the whole of it:
 | `test-shape` | a test body out of order, or an expectation its action cannot produce |
 | `recursive-fn` | a `fn` that calls itself |
 | `recursive-guard` | a guard that names itself |
+| `recursive-fold` | a fold keyed through itself |
 | `max-tightening` | a `@max` position bounding tighter than the field written into it declares |
 | `self-trigger` | an effect that can trigger itself |
 | `const-cycle` | a `const` that names itself |

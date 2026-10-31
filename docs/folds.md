@@ -385,11 +385,19 @@ the accumulator into the signature and left the braces holding only `on` lines.
 Three things follow, and the third is why this is a rule rather than an observation:
 
 - a fold cannot refuse (rule 4) because there is nowhere in one to write a `reject`
-- a fold cannot read a fold, so there is no fold graph, no `recursive-fold` code, and nothing to
-  order before the splice
+- **a fold's value cannot be computed from another fold's value**, so no caller's boundary is ever
+  wider than the arms under it
 - `hek check --boundaries` is exact for a fold in a way it is not for a guard. `docs/guards.md`
   rule 5 pays for composition by admitting the boundary "stops being readable off the page"; a
   fold's never leaves it, because what a fold reads is the arms under it.
+
+**The second bullet used to say more than it should**, and rule 15 is why it no longer does. It said
+a fold cannot read a fold at all, "so there is no fold graph, no `recursive-fold` code, and nothing
+to order before the splice". A fold *can* now read one, in a `key` clause, so there is a graph and
+there is a `recursive-fold` code; what has not changed is the splice, because a lookup is not
+spliced and a fold is still a leaf there. The rest of this rule stands as written, and it stands for
+the **value** side, which is still what the port measured: nothing in those 25,347 lines computes
+one fold's value from another's.
 
 **This document said the opposite while it was a design**, and the correction came from building it.
 "A fold may read a fold to any depth" was written by analogy with guard composition, and the
@@ -1105,6 +1113,150 @@ which are the same rule the other way:
 record writes one key, which is not a range, so a host deriving range indexes needs to know nothing
 about this state. A fan-out, one record writing every month between two dates, is a different
 feature and not this one.
+
+## 15. A key part may be read through another fold
+
+Rule 14 computes a part from the record. This computes one from **another named fold**, as it stood
+when the record being folded was appended:
+
+```hek
+fold GenreUnits(genre: Genre) -> n: Int = 0 {
+  on @game.purchased { game_id } key genre = GameGenre { game_id } => n + 1
+  on @game.refunded { receipt_id }
+    key genre = GameGenre { game_id: ReceiptGame { receipt_id } } => n - 1
+}
+```
+
+**What it buys is events that stop carrying other entities' attributes.** Before it, a key part had
+to be on the event, so events copied values across just so a read model could group by them: in the
+ported application `@game.purchased` carried `developer_id`, `genre` and `country` copied from three
+folds, and the command folded all three *only* to stamp them on the event, which widened its append
+condition with slices the decision never read. `@game.refunded` repeated the whole receipt so every
+total could subtract the sale, and its command declared twelve folds mostly to copy their values
+out. With this it is `{ receipt_id, reason, playtime_minutes, achievements, refunded_at }`, and a
+new "sales by region" total is one new fold filled from the whole log rather than a new event field
+with no history behind it.
+
+**The spelling is the one a command reads a fold with**, deliberately: `GameGenre { game_id }` means
+the same thing in both places, parens to declare and braces to use, and the bare-name shorthand
+works. To the grammar it is a `record_literal` either way, so there is no new rule in
+`tree-sitter-hek` and the parser decides, which it may because a lookup is reachable in exactly one
+position.
+
+### As of the record, and strictly before it
+
+The value is the looked-up fold over the log `[0, p)` for a record at position `p`, which is what a
+command appending that record would have read.
+
+**Not the current value**, so a replay is deterministic and a sale counts towards the genre the game
+had when it sold. **And not including the record itself**, which is the half worth proving:
+
+```hek
+fold GenreListings(genre: String) -> n: Int = 0 {
+  on @game.listed { game_id } key genre = GameGenre { game_id } => n + 1
+}
+```
+
+where `@game.listed` is what `GameGenre` folds too, so the record moves the fold it is counted
+through. Strictly before, the first listing counts under the seed. The sink has no choice about it:
+it works out every key for a record before it writes any of them, so the column it reads holds the
+value from before that record, and a by-key read that included it would answer differently. One
+expression read two ways has to answer alike in both, so the position is settled by the driver that
+cannot bend rather than by taste.
+
+**A lookup can only read what an earlier record established**, which follows and is the first thing
+to get wrong. Keying a refund through `ReceiptGame { receipt_id }` works because a receipt is
+created by the *purchase*; a `ReceiptGame` folding `@game.refunded` would be reading the refund
+itself and would answer its seed.
+
+**And a refund keyed through a fold that still moves decrements where the thing is now.** The
+example above subtracts from the genre the game has at the refund, not the genre it was sold under.
+That is this rule applied twice rather than a defect, and the fix is modelling: key through a fold
+that captures the sale, so what the lookup answers cannot move afterwards.
+
+### Query-only, and what may be looked up
+
+**A fold with a lookup is query-only**, as rule 12's envelope binding and rule 14's computed part
+make one, and for the sharpest version of the same reason: a lookup's boundary is *another key's
+whole history*, which no append condition can express. There is nothing to narrow the log by and
+nothing to conflict on. The refusal names the lookup rather than the part, because it is why the
+part cannot be had without reading the log:
+
+> `GenreUnits` keys through `GameGenre`, so it can be queried but not folded by a command
+
+**Only a stored fold may be looked up**, because the sink answers a lookup from the looked-up fold's
+own column. A fold whose key no event supplies has no column, and `hek check --tables` lists it:
+
+> `OrdersSince` is not stored, so a key cannot be read through it: no event supplies `at`, so
+> nothing keeps a column for it
+
+**A cycle is refused**, including a fold looking itself up, with the message a guard's gets:
+
+> `GenreUnits` keys through `GameGenre` keys through `GenreUnits`: a fold keyed through itself has
+> no value to key by
+
+**A sealed result may not be a key part**, which is rule 14's argument one step along: a key is
+plaintext and an erase cannot reach one, so a row filed under decrypted content would hold personal
+data nothing could erase. Refused on the **declared return type**, which is where a fold publishes
+its seal (rule 7), so unlike a computed part there is no `fn` to launder it through.
+
+**And the result's type has to fit the part**, which is the ordinary check: the lookup lowers to a
+slot carrying the looked-up fold's declared return type. An optional result in a non-optional part
+is refused like any other optional, and the author writes the fallback. A `none` that silently
+skipped the record would hide a modelling mistake.
+
+**The arguments are held to rule 14's rule**, and they have to be asked for separately: the lookup
+leaves a slot load behind and keeps its arguments off the expression tree, so the walk over the key
+expression sees nothing of them. That matters because the shape it lets through is the most natural
+one there is, passing the key part the arm already pins:
+
+```hek
+// Refused: `shop_id` is a part of the key this arm is computing.
+on @game.purchased(shop_id) { game_id } key genre = GameGenre { shop_id, game_id } => n + 1
+// Written: the field is destructured, so the lookup reads the record.
+on @game.purchased(shop_id) { shop_id, game_id } key genre = GameGenre { shop_id, game_id } => n + 1
+```
+
+The filter still narrows and the arm still pins the part from it; what changes is that `shop_id`
+inside the clause is the record's field rather than the key's part, which is what the sink has.
+
+**And a lookup may not be written under a binder.** It is hoisted out of the expression onto the arm
+and evaluated once per record, which is what lets one chain into another, so a comprehension's name
+does not exist yet at that point: `key p = [One { x: i } for i in ids].len()` checked clean and
+failed the fill. Refused rather than left in place, because leaving it there would mean a read of
+the log per element.
+
+### Seen from the read side
+
+`hek check --tables` prints the dependency, so a reader can see why editing one column refolds
+another:
+
+```
+  TABLE genre  (genre: Genre)  1 column
+    genre_units: Int  <- @game.purchased, @game.refunded  (keyed through game_genre, receipt_game)
+```
+
+Transitive, so a chain shows every link. `Column::reads` is that list, and three things read it:
+
+- **`hek digest`**, because editing a looked-up fold changes the dependent's values. A command's
+  entry already covers the folds it reads, since the splice puts them physically inside it; a lookup
+  is not spliced, so the dependent's form carries a hash of each fold it reaches instead. A moved
+  **signature** of a looked-up fold moves the dependent's `hash` and not its `signature_hash`: the
+  dependent's own table and type have not changed, so it is a column to refold in place.
+- **`Tables::only`**, because a rebuild of a dependent needs its dependencies' values *as of each
+  past record*, which only maintaining them alongside can give. `Layout::closure` adds them for the
+  same reason it adds a range's minters, and the two feed each other.
+- **a host**, which is told what to replay together rather than working it out.
+
+**What it costs is the by-key read.** `Interpreter::fold` and the `fold` test action answer a lookup
+fold by evaluating the lookup at every candidate record's position, which is a fold of the
+looked-up fold per record: quadratic, and accepted. A deployment serves these from the table and
+never takes that path on a request, and a test is a handful of records.
+
+**Only a `key` clause, for now.** A lookup in an arm's **value** expression has the same mechanics
+and the same rules, and the evidence for it is already measured: the one projector the ported
+application has left, twenty counters of it, is not reached by this rule, because what it reads is a
+sibling column rather than a key. That is the next rule rather than this one.
 
 ## Seen from the read side
 

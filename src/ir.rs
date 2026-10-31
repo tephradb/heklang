@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::error;
 use std::fmt;
 use std::sync::Arc;
@@ -392,6 +393,77 @@ impl Program {
             at = def.parent.as_deref();
         }
         chain
+    }
+
+    /// Every fold `name` looks up, directly or through a chain, sorted and each once.
+    ///
+    /// **Transitive, which is what the digest and the layout both want.** A change to a
+    /// looked-up fold changes the dependent's values, and a change two links away changes
+    /// them too, so the closure is the set that has to be recorded rather than the direct
+    /// reads. [`crate::Column::reads`] is this, and `hek check --tables` prints it.
+    ///
+    /// Cycle-safe: one is refused at check time (`recursive-fold`), and this answers with
+    /// what it reached rather than looping, so a caller on malformed IR still terminates.
+    pub fn reads(&self, name: &str) -> Vec<Ident> {
+        let mut found: Vec<Ident> = Vec::new();
+        let mut queue: Vec<&Ident> = match self.fold(name) {
+            Some(def) => def.reads().collect(),
+            None => Vec::new(),
+        };
+        while let Some(next) = queue.pop() {
+            if found.contains(next) {
+                continue;
+            }
+            found.push(next.clone());
+            if let Some(def) = self.fold(next) {
+                queue.extend(def.reads());
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// The folds a lookup chain reaches through, first to last, when they form a cycle.
+    /// `None` when they do not.
+    ///
+    /// Depth-first with a path stack, so the answer names the loop rather than reporting
+    /// that one exists, which is [`crate::inline::cycle`]'s shape for guards. A fold
+    /// looking *itself* up is the one-element case and lands here too.
+    pub fn lookup_cycle(&self) -> Option<Vec<Ident>> {
+        let mut done: HashSet<&str> = HashSet::new();
+        for fold in &self.folds {
+            let mut path: Vec<Ident> = Vec::new();
+            if let Some(found) = self.looping(&fold.name, &mut path, &mut done) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    fn looping<'a>(
+        &'a self,
+        name: &'a str,
+        path: &mut Vec<Ident>,
+        done: &mut HashSet<&'a str>,
+    ) -> Option<Vec<Ident>> {
+        if let Some(at) = path.iter().position(|seen| seen == name) {
+            let mut found = path[at..].to_vec();
+            found.push(name.to_string());
+            return Some(found);
+        }
+        if done.contains(name) {
+            return None;
+        }
+        let def = self.fold(name)?;
+        path.push(name.to_string());
+        for read in def.reads() {
+            if let Some(found) = self.looping(read, path, done) {
+                return Some(found);
+            }
+        }
+        path.pop();
+        done.insert(&def.name);
+        None
     }
 
     pub fn constant(&self, name: &str) -> Option<&ConstDef> {
@@ -987,7 +1059,10 @@ impl Fold {
     /// log to the events it writes nor conflict on them. [`Self::computes`] names the
     /// part, so the refusal can say which of the two this is.
     pub fn query_only(&self) -> bool {
-        !self.envelope.is_empty() || self.computes().is_some()
+        // A lookup is reachable only inside a `key` clause, so `computes` already answers
+        // for one; asked anyway, because the day those decouple is the day a fold with a
+        // lookup becomes foldable by a command with no append condition for it.
+        !self.envelope.is_empty() || self.computes().is_some() || self.looks_up().is_some()
     }
 
     /// The first key part any arm computes, for a diagnostic that names it.
@@ -996,6 +1071,27 @@ impl Fold {
             .slices
             .iter()
             .find_map(|slice| slice.keys.first())
+    }
+
+    /// The first fold any arm looks up, for a diagnostic that names it. Checked before
+    /// [`Self::computes`] wherever both could answer, because a lookup is the sharper
+    /// reason: it is why the part cannot be computed without reading the log.
+    pub fn looks_up(&self) -> Option<&Lookup> {
+        self.stage
+            .slices
+            .iter()
+            .find_map(|slice| slice.lookups.first())
+    }
+
+    /// Every fold this one looks up, in the order written, **with repeats**: one fold
+    /// looked up by two arms is here twice. `Program::reads` is the deduplicated,
+    /// transitive answer, and the walks that use this one do not care.
+    pub fn reads(&self) -> impl Iterator<Item = &Ident> {
+        self.stage
+            .slices
+            .iter()
+            .flat_map(|slice| &slice.lookups)
+            .map(|lookup| &lookup.fold)
     }
 }
 
@@ -1084,10 +1180,54 @@ pub struct Slice {
     pub event: EventPath,
     pub filters: Vec<Filter>,
     pub binds: Vec<Bind>,
+    /// The named folds this arm's `key` clauses read, in **evaluation order**: an inner
+    /// link of a chain before the outer one that takes it as an argument.
+    ///
+    /// Hoisted out of the expressions rather than left in them, which is what keeps
+    /// [`crate::Expr`] and the whole of `eval` out of this feature: each one lands in a
+    /// slot and the `key` clause reads that slot, so a driver fills them and then
+    /// evaluates ordinary expressions. It is also the two-phase rule the sink needs,
+    /// structurally: the phase that fills the slots is a different loop from the phase
+    /// that writes.
+    pub lookups: Vec<Lookup>,
     /// `key <param> = <expr>`: key parts this arm computes from the record it folds.
     /// Empty for every arm that does not write one, which is almost all of them.
     pub keys: Vec<ComputedKey>,
     pub updates: Vec<Update>,
+}
+
+/// One `Name { args }` inside a `key` clause: another named fold, read as it stood when
+/// the record being folded was appended. See `docs/folds.md` rule 15.
+///
+/// **Strictly before the record, which is what a command appending it would have read.**
+/// Not the current value, so a replay is deterministic and a sale counts towards the genre
+/// the game had when it sold; not including the record itself, because one that both moves
+/// the looked-up fold and is counted through it would otherwise depend on the order the
+/// arms happen to be applied in.
+///
+/// **It makes the fold query-only**, for a sharper version of [`ComputedKey`]'s reason: a
+/// lookup's boundary is other keys' histories, which no append condition can express.
+///
+/// `slot`, `ty` and the arena ids ride along for [`ComputedKey`]'s reasons. `args` are
+/// expressions in this fold's own arena, unlike a [`FoldCall`]'s, which are the caller's:
+/// nothing is spliced here, so there is no caller.
+#[derive(Debug, Clone)]
+pub struct Lookup {
+    pub fold: Ident,
+    /// The key part whose clause this was written in.
+    ///
+    /// Carried for the digest, which sorts the clauses: a `key` list is a set and
+    /// reordering it is no change, so the lookups have to sort with it or a comma
+    /// reordering would move the hash through their slot numbering. Within one part the
+    /// order stays written, because a chain's links are evaluated inner-first and that
+    /// order *is* the program.
+    pub part: Ident,
+    /// Parameter name to value, in the order written.
+    pub args: Vec<(Ident, ExprId)>,
+    pub slot: Slot,
+    /// The looked-up fold's declared return type, which is what the slot holds.
+    pub ty: Type,
+    pub span: Span,
 }
 
 /// One key part an arm computes from the record, rather than taking from a field.

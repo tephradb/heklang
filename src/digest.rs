@@ -33,8 +33,8 @@ pub use sexp::{Sexp, SexpError};
 use crate::ir::{
     Absent, Action, Arm, Bind, Builtin, Command, Effect, EntityDef, EntityField, EnumDef, EnvBind,
     EnvField, EventDef, Expect, Expr, ExprId, Exprs, FieldDef, Filter, Fold, Function, Handler,
-    Ident, Iter, Literal, Program, Projector, RecordDef, RecordField, ReplySpec, Return, Setup,
-    Slice, Slot, Stage, Stmt, SubjectDef, Test, Type, UnOp,
+    Ident, Iter, Literal, Lookup, Program, Projector, RecordDef, RecordField, ReplySpec, Return,
+    Setup, Slice, Slot, Stage, Stmt, SubjectDef, Test, Type, UnOp,
 };
 use crate::parse::children;
 use crate::value::Json;
@@ -251,8 +251,31 @@ impl Digest {
         for def in &program.functions {
             forms.push((Kind::Function, def.name.clone(), function(def)));
         }
+        // **A fold's form carries the folds it keys through** (`docs/folds.md` rule 15),
+        // because editing a looked-up fold's arms changes the dependent's values and a
+        // catalog that said `UpToDate` would serve a column that is silently wrong. The
+        // same obligation a command's entry already meets through the splice, which puts
+        // the fold it reads physically inside it; a lookup is not spliced, so the hash
+        // goes in instead.
+        //
+        // **Local forms and the transitive closure, not the entry hashes recursively.** A
+        // dependent records a hash of each fold it reaches built *without* its own `reads`
+        // section, so one pass of `fold` serves every entry: no topological order to get
+        // right, and nothing to loop on if a cycle reached here past the checker. The
+        // closure is what makes it complete, since a change two links away has to move the
+        // hash too and a local form says nothing about its own dependencies.
+        let local: HashMap<&str, Hash> = program
+            .folds
+            .iter()
+            .map(|def| (def.name.as_str(), Hash::line(&fold(def, &[]))))
+            .collect();
         for def in &program.folds {
-            forms.push((Kind::Fold, def.name.clone(), fold(def)));
+            let reads: Vec<(String, Hash)> = program
+                .reads(&def.name)
+                .into_iter()
+                .filter_map(|name| local.get(name.as_str()).map(|hash| (name, *hash)))
+                .collect();
+            forms.push((Kind::Fold, def.name.clone(), fold(def, &reads)));
         }
         for def in &program.commands {
             forms.push((Kind::Command, def.name.clone(), command(def)));
@@ -683,7 +706,7 @@ fn function(def: &Function) -> Sexp {
 /// The outer head is `fold` and so is the accumulator node inside the `(stage ..)`, which
 /// is two uses of one token and not a clash: a declaration head is only ever at the start
 /// of a line, and `head_of` reads nothing else.
-fn fold(def: &Fold) -> Sexp {
+fn fold(def: &Fold, reads: &[(String, Hash)]) -> Sexp {
     let mut frame = Frame::new(&def.exprs);
     // A fold's parameter names leave the program twice over: they are the argument names
     // at a `fold x = Name { .. }` call site, and `tables::layout` derives a stored
@@ -707,6 +730,15 @@ fn fold(def: &Fold) -> Sexp {
     // non-empty list is what makes the fold query-only.
     parts.extend(frame.trigger(&[], &def.envelope));
     parts.push(frame.stage(&def.stage));
+    // Last, and absent when there are none, so a fold that keys through nothing packs
+    // byte for byte as it did. Sorted by `Program::reads`, since a set of dependencies has
+    // no order to mean.
+    if !reads.is_empty() {
+        let seen = reads
+            .iter()
+            .map(|(name, hash)| node("f", [atom(name.clone()), atom(hash.to_string())]));
+        parts.push(node("reads", seen));
+    }
     node("fold", parts)
 }
 
@@ -1009,6 +1041,25 @@ impl<'a> Frame<'a> {
         }
         for (param, value) in self.sorted(&key_filters(slice)) {
             parts.push(node("keyed", [atom(param), value]));
+        }
+        // Rule 15, before the `computed` nodes that read the slots it fills.
+        //
+        // **Sorted by the clause they belong to and written within it**, which is the two
+        // halves of the question answered separately. A `key` list is a set, so the
+        // `computed` nodes above are sorted and the lookups have to sort with them: these
+        // are built first and hand out the slot numbers, so leaving them written made a
+        // pure comma reordering move the hash as soon as either clause had a lookup. A
+        // *chain* inside one clause is not a set, because its links are evaluated
+        // inner-first and that order is the program, so within a part the order stays.
+        let mut reads: Vec<&Lookup> = slice.lookups.iter().collect();
+        reads.sort_by_key(|lookup| &lookup.part);
+        for lookup in reads {
+            let mut read = vec![self.slot(lookup.slot), atom(lookup.fold.clone())];
+            for (name, value) in &lookup.args {
+                let value = self.expr(*value);
+                read.push(node("a", [atom(name.clone()), value]));
+            }
+            parts.push(node("lookup", read));
         }
         // Sorted by parameter, exactly as the two above are sorted and for the same
         // reason: reordering the comma list is no change at all, since `tables::layout`

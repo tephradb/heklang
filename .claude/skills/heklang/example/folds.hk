@@ -59,3 +59,21 @@ fn month_of(at: Timestamp) -> String {
 fold MonthlyRevenue(workshop_id: Uuid, month: String) -> taken: Money(2) = 0 {
   on @seat.booked as e (workshop_id) { paid } key month = month_of(e.at) => taken + paid
 }
+
+// Rule 15: a key part read out of **another fold**, as it stood when the record being
+// folded was appended. `@seat.booked` carries no title, and before this it would have had
+// to, purely so revenue could be grouped by one. The lookup is written exactly as a
+// command reads a fold, and it makes this fold query-only for the sharpest version of the
+// reason above: its boundary is another key's whole history.
+fold WorkshopTitle(workshop_id: Uuid) -> String = "untitled" {
+  on @workshop.opened(workshop_id) { title } => title
+}
+
+// Strictly before the record, so a seat booked before the workshop was opened counts
+// under `"untitled"` rather than under a title it did not have yet. `hek check --tables`
+// prints `(keyed through workshop_title)` against this column, which is how a reader sees
+// why editing `WorkshopTitle` refolds this one.
+fold TitleRevenue(title: String) -> taken: Money(2) = 0 {
+  on @seat.booked() { workshop_id, paid } key title = WorkshopTitle { workshop_id } =>
+    taken + paid
+}

@@ -374,6 +374,13 @@ never sees an earlier ranged one, where `Interpreter::fold` over the same key ap
 answer is the one a store can produce and the one every path through the sink produces, so a follow
 and a backfill agree; `docs/folds.md` section 11 has the argument and what it costs.
 
+**A column may be keyed through another column** (`docs/folds.md` rule 15), and two things follow for
+a host. `apply` reads every lookup for a record **before** it writes anything for that record, across
+every table, so the looked-up column is at exactly the record's own position: a host applying records
+in order needs to do nothing for that, and a host applying them out of order gets the wrong answer in
+a way nothing can detect. And `Column::reads` is the dependency, transitively: it is what
+`Layout::closure` adds to a rebuild, and what tells a catalog that editing one fold refolds another.
+
 **`Tables::only` is for a rebuild, and `apply` is wrong for one twice over.** A column is rebuilt by
 replaying the log into it, and `apply` runs every arm of every column over that replay: the columns
 that are already correct do the work again for nothing, and a body that can `fail` or overflow fails

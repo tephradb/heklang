@@ -114,6 +114,7 @@ The set is closed: every diagnostic heklang can produce is one of these.
 | --- | --- | --- |
 | `recursive-fn` | a `fn` that calls itself, directly or through a chain | the error names the cycle; rewrite as a `for` over a finite container |
 | `recursive-guard` | a guard that names itself | a guard is copied into what names it, so a cycle has no end |
+| `recursive-fold` | a fold whose `key` clause keys through itself, directly or through a chain | the error names the loop; key through a fold that does not key back, or on a field the event carries |
 | `max-tightening` | a bounded position tighter than a field written into it | widen the target's `@max`, or narrow the source's; a computed value is not this defect |
 | `self-trigger` | an effect that can trigger itself through invoked commands | break the cycle, or have the command refuse a replay so the chain ends |
 | `const-cycle` | a `const` that names itself | the error names the chain |

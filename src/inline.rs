@@ -23,7 +23,7 @@ use std::mem;
 
 use crate::ir::{
     Arm, Bind, Command, ComputedKey, Expr, ExprId, Exprs, Filter, Fold, FoldCall, FoldVar, Guard,
-    GuardCall, Ident, Iter, Param, Program, Return, Slice, Slot, Span, Stage, Stmt, Update,
+    GuardCall, Ident, Iter, Lookup, Param, Program, Return, Slice, Slot, Span, Stage, Stmt, Update,
 };
 
 /// The guards a name reaches through, first to last, when they form a cycle. `None`
@@ -429,6 +429,24 @@ fn at(site: &mut Site<'_>, callee: &Copied<'_>, call: &Placed<'_>, grown: &mut G
                 .binds
                 .iter()
                 .map(|b| shift_bind(b, slot_off))
+                .collect(),
+            // Always empty in practice, for `keys`' reason one step on: a lookup makes the
+            // fold query-only too.
+            lookups: slice
+                .lookups
+                .iter()
+                .map(|lookup| Lookup {
+                    fold: lookup.fold.clone(),
+                    part: lookup.part.clone(),
+                    args: lookup
+                        .args
+                        .iter()
+                        .map(|(name, value)| (name.clone(), shift_expr_id(*value, expr_off)))
+                        .collect(),
+                    slot: shift_slot(lookup.slot, slot_off),
+                    ty: lookup.ty.clone(),
+                    span: lookup.span,
+                })
                 .collect(),
             // Always empty in practice: a fold with a computed key part is query-only, so
             // no caller reaches the splice at all. Shifted rather than asserted away,

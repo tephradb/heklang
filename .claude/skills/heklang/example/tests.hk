@@ -224,3 +224,27 @@ test "a month's takings are bucketed by when the seat was booked" {
 
   expect 80.00
 }
+
+// Rule 15, through both drivers. The workshop is opened first, so the seat's lookup finds
+// the title; `fill` reads what the sink wrote and `fold` scans and compares, and the two
+// agreeing is the whole of that rule's correctness.
+test "revenue is grouped by a title the booking event does not carry" {
+  given @workshop.opened { workshop_id: RUST, title: "Rust", seats: 2, price: 40.00 }
+  given a_seat(BOOKING, 7)
+
+  fill
+
+  expect title["Rust"] { title_revenue: 40.00 }
+}
+
+test "a seat booked before the workshop was opened reads the title it had then" {
+  // Strictly before the record, so this one is counted under the seed: at the booking
+  // there was no title yet. The second seat finds one.
+  given a_seat(BOOKING, 7)
+  given @workshop.opened { workshop_id: RUST, title: "Rust", seats: 2, price: 40.00 }
+  given a_seat(SECOND, 8)
+
+  fold TitleRevenue { title: "untitled" }
+
+  expect 40.00
+}

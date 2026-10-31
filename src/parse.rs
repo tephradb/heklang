@@ -8,7 +8,7 @@ use crate::inline;
 use crate::ir::{
     Absent, Action, Arm, BinOp, Bind, Builtin, Command, ComputedKey, ConstDef, Delivery, Effect,
     EntityDef, EntityField, EnumDef, EnvField, EventDef, EventPath, Expect, Expr, ExprId, Exprs,
-    FieldDef, Filter, Fold, Function, Given, Guard, Handler, Ident, Index, Iter, Literal,
+    FieldDef, Filter, Fold, Function, Given, Guard, Handler, Ident, Index, Iter, Literal, Lookup,
     MessagePart, Number, Param, Pos, Program, Projector, RecordDef, RecordField, RefusalDef,
     RefusalParam, ReplySpec, Return, SecretDef, Setup, Slot, Span, Stage, Stmt, SubjectDef, Test,
     Type, UnOp, Update,
@@ -129,6 +129,25 @@ struct Parser {
     /// `key bucket = tag(email)` through `fn tag(s: String) -> String` checked clean, and
     /// the column then held ciphertext a by-key read could not match.
     keying: bool,
+    /// How many **binders** the parser is inside: a comprehension's condition or yield,
+    /// which are the only expression positions in the language that introduce a name.
+    ///
+    /// Rule 15 asks it. A lookup is hoisted out of the expression onto the slice, so one
+    /// written under a binder would be evaluated before the binder's slot was filled:
+    /// `key p = [One { x: i } for i in ids].len()` checked clean and then failed the fill
+    /// with `slot read before it was set`. Refused rather than left in place, because
+    /// leaving it in place would mean a lookup per element and a read of the log per
+    /// element with it.
+    binders: usize,
+    /// The lookups a `key` clause's expressions have read so far (rule 15), `Some` only
+    /// while one is being parsed.
+    ///
+    /// **One field for two jobs, and they are the same job.** A lookup is parsed deep
+    /// inside an expression and cannot be handed back up the stack, so it is collected
+    /// here; and `Some` is what tells `primary` that a `Name { .. }` in this position may
+    /// be a lookup rather than the record literal it is everywhere else in the language.
+    /// So the construct is reachable exactly where it is collectable.
+    lookups: Option<Vec<Lookup>>,
     /// Set alongside `fold_arm` when the arm bound its own envelope with `as`. That is
     /// the one case where reading the binding inside an arm is right, because it is the
     /// record being folded rather than a trigger standing still outside the fold.
@@ -416,6 +435,8 @@ impl Parser {
             folding: false,
             fold_arm: false,
             keying: false,
+            binders: 0,
+            lookups: None,
             arm_envelope: false,
             envelope_read: false,
             pending_envelope: None,
@@ -969,6 +990,7 @@ impl Parser {
         };
         self.check_recursion(&program)?;
         self.check_guards(&program)?;
+        self.check_lookups(&program)?;
         self.check_duplicate_folds()?;
         self.check_query_only(&program)?;
         self.check_cycles(&program)?;
@@ -1082,6 +1104,8 @@ impl Parser {
             folding,
             fold_arm,
             keying,
+            binders,
+            lookups,
             arm_envelope,
             envelope_read,
             pending_envelope,
@@ -1109,6 +1133,8 @@ impl Parser {
         *folding = false;
         *fold_arm = false;
         *keying = false;
+        *binders = 0;
+        *lookups = None;
         *arm_envelope = false;
         *envelope_read = false;
         *pending_envelope = None;
@@ -4741,7 +4767,7 @@ impl Parser {
             // record's names are in scope: the filter list above is parsed before the
             // scope is pushed, and a conjunct there resolves once for the whole slice
             // rather than per record.
-            let keys = self.computed_keys(lower, &filters, named)?;
+            let (lookups, keys) = self.computed_keys(lower, &filters, named)?;
 
             self.expect_sym(Sym::Arrow)?;
             self.folding = true;
@@ -4808,7 +4834,7 @@ impl Parser {
                 }
             }
 
-            lower.b.slice(path, filters, binds, keys, updates);
+            lower.b.slice(path, filters, binds, lookups, keys, updates);
         }
 
         // With the keyword at the front the declaration line reads as a binding, and with
@@ -5190,9 +5216,9 @@ impl Parser {
         lower: &mut Lower,
         filters: &[Filter],
         named: bool,
-    ) -> Result<Vec<ComputedKey>, Diagnostic> {
+    ) -> Result<(Vec<Lookup>, Vec<ComputedKey>), Diagnostic> {
         if !self.at_soft("key") {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         let word = self.span_here();
         self.bump();
@@ -5212,6 +5238,13 @@ impl Parser {
                     "a computed key part is a parameter of a stored fold, and {fix}"
                 )));
         }
+
+        // **Armed for the whole clause, which is both the collector and the permission.**
+        // A lookup (rule 15) is parsed deep inside an expression, so it cannot be returned
+        // up the stack, and `Some` here is the one thing that tells `primary` a `Name { }`
+        // may be one: everywhere else in the language that spelling is a record literal
+        // and stays one. Taken below, so an error leaves it to `abandon`.
+        let outer = self.lookups.replace(Vec::new());
 
         let mut keys: Vec<ComputedKey> = Vec::new();
         loop {
@@ -5279,16 +5312,37 @@ impl Parser {
             // `keying` beside it is the one thing a key clause does *not* share with the
             // arm's value: the seal check stays on, at every position inside the
             // expression rather than only over its result.
+            let before = self.lookups.as_ref().map_or(0, Vec::len);
             self.folding = true;
             self.keying = true;
             let value = self.expr(lower, Some(param.ty.clone()));
             self.keying = false;
             self.folding = false;
             let value = value?;
+            // Whose clause the lookups just parsed belong to, which only this loop knows.
+            if let Some(found) = self.lookups.as_mut() {
+                for lookup in &mut found[before..] {
+                    lookup.part = name.clone();
+                }
+            }
             // Unlike rule 13's conjunct this *may* read the record, which is the point, so
             // the check is narrower than `slot_read`'s rather than absent: the record's
             // names are in, and the key's own and the accumulator are out.
-            if let Some((slot, at)) = lower.b.key_read(value) {
+            //
+            // **A rule 15 lookup's arguments are checked here too**, and they have to be
+            // asked for separately: `fold_lookup` leaves an `Expr::Load` of the slot
+            // behind and keeps the arguments on the `Lookup`, off the expression tree, so
+            // the walk below sees nothing of them. Without this the hole rule 14 exists to
+            // close was open one level down, and through the most natural shape there is:
+            // `key genre = GameGenre { shop_id, game_id }` passing the key part the arm
+            // already pins checked clean and failed the fill.
+            let through = self
+                .lookups
+                .iter()
+                .flatten()
+                .flat_map(|lookup| &lookup.args)
+                .find_map(|(_, value)| lower.b.key_read(*value));
+            if let Some((slot, at)) = lower.b.key_read(value).or(through) {
                 let name = lower.b.slot_name(slot).unwrap_or_default().to_string();
                 let what = match lower.b.params().iter().any(|other| other.slot == slot) {
                     true => "a part of the key this arm is computing",
@@ -5301,7 +5355,7 @@ impl Parser {
                         at,
                     )
                     .with_hint(
-                        "a computed part decides which row the record belongs to, so it runs before there is a key to bind the parameters from and before there is a row to hold the accumulator; it reads the record's own fields, the envelope binding, consts and pure `fn`s of those",
+                        "a computed part decides which row the record belongs to, so it runs before there is a key to bind the parameters from and before there is a row to hold the accumulator; it reads the record's own fields, the envelope binding, consts and pure `fn`s of those, so destructure the field and read that",
                     ));
             }
             keys.push(ComputedKey {
@@ -5316,18 +5370,6 @@ impl Parser {
             }
         }
 
-        // **The other direction of the rule above, and the drivers need both.** A filter
-        // resolves *once* for the whole slice, against the key the caller asked for; a
-        // computed part is per record and there is no such key, so a filter reading one
-        // has nothing to resolve against. `(label: month)` is the plain case and
-        // `(label: month.upper())` the one the duplicate check above cannot see at all:
-        // it pins no part, so the arm stayed storable while the filter narrowed the log
-        // to the records whose field already equalled what the part computed, silently
-        // dropping every other one from the read model.
-        //
-        // It is also what makes the sink able to check an arm's narrowing *before* it
-        // evaluates a computed part: with this refused, no filter it has to resolve
-        // depends on a part it has not computed yet.
         // **Every filter of this arm has to resolve from the record alone**, and the two
         // refusals below are the two ways one would not.
         //
@@ -5393,7 +5435,11 @@ impl Parser {
                 }
             }
         }
-        Ok(keys)
+        // In the order they were pushed, which is the order they have to be evaluated in:
+        // `fold_lookup` pushes after its arguments are parsed, so an inner link of a chain
+        // lands before the outer one that reads it.
+        let lookups = mem::replace(&mut self.lookups, outer).unwrap_or_default();
+        Ok((lookups, keys))
     }
 
     /// A filter naming something that is not a field of the event. In a fold's arm the
@@ -7872,6 +7918,17 @@ impl Parser {
                     }
                     return self.call_fn(lower, name, span);
                 }
+                // Rule 15, and **before the record literal** because inside a `key` clause
+                // this spelling is the fold read it looks like. `self.lookups` is `None`
+                // everywhere else, so a `Name { .. }` keeps the one meaning it has always
+                // had at every other position in the language.
+                if self.lookups.is_some()
+                    && !self.no_record_literal
+                    && self.at_sym(Sym::LBrace)
+                    && self.folds.iter().any(|other| other.name == name)
+                {
+                    return self.fold_lookup(lower, name, span);
+                }
                 if !self.no_record_literal
                     && self.at_sym(Sym::LBrace)
                     && self.record_def(&name).is_some()
@@ -9815,17 +9872,23 @@ impl Parser {
         self.expect_word(Keyword::For)?;
         lower.b.push_scope();
         let iter = self.iter_bindings(lower)?;
+        // Rule 15: the two positions that can read the binding this scope just pushed.
+        self.binders += 1;
         let cond = if self.eat_word(Keyword::If) {
             Some(self.expr(lower, Some(Type::Bool))?)
         } else {
             None
         };
+        self.binders -= 1;
         self.expect_sym(Sym::RBracket)?;
         let end = self.pos;
 
         self.pos = start;
         let yielded = self.span_here();
-        let yields = self.expr(lower, inner.clone())?;
+        self.binders += 1;
+        let yields = self.expr(lower, inner.clone());
+        self.binders -= 1;
+        let yields = yields?;
         // Rule 16, the same as a list literal's element: without it `[KEY for i in xs]`
         // synthesises `List(Secret)`, and `.contains` on one is an equality oracle over
         // two credentials that answers in a loggable `Bool`.
@@ -10077,6 +10140,149 @@ impl Parser {
         let lit = Literal::EmptyMap(key.as_ref().clone(), value.as_ref().clone());
         lower.b.at(span);
         Ok(lower.b.lit(lit))
+    }
+
+    /// `Name { args }` inside a `key` clause: rule 15's lookup, another named fold read as
+    /// it stood when the record being folded was appended.
+    ///
+    /// **It lowers to a slot load, and that is the whole design.** The read itself is
+    /// recorded on the slice ([`Lookup`]) and what the expression gets back is an ordinary
+    /// `Expr::Load`, so no node of the IR and no arm of `eval` knows this construct
+    /// exists: a driver fills the slots and then evaluates expressions as it always did.
+    /// The type check is the ordinary one for the same reason, since the slot carries the
+    /// looked-up fold's declared return type.
+    ///
+    /// A chain (`GameGenre { game_id: ReceiptGame { receipt_id } }`) falls out: the inner
+    /// one is parsed while the outer one's arguments are, so pushing *after* the arguments
+    /// leaves the list in evaluation order.
+    ///
+    /// Arguments are checked exactly as [`Self::fold_use`] checks a command's, because
+    /// they are the same thing. What differs is where they are evaluated: a command's
+    /// become prologue assignments and resolve once, these resolve per record, so the
+    /// "reads a fold that has not folded yet" check has nothing to say here and the
+    /// `key_read` rule in `computed_keys` covers what they may read instead.
+    fn fold_lookup(
+        &mut self,
+        lower: &mut Lower,
+        name: Ident,
+        span: Span,
+    ) -> Result<ExprId, Diagnostic> {
+        // A lookup is hoisted out of the expression onto the slice and evaluated once per
+        // record, so one written under a binder would run before the binder's slot was
+        // filled. See `Parser::binders`.
+        if self.binders > 0 {
+            return Err(self
+                .err(
+                    Code::FoldRestriction,
+                    format!("`{name}` is read once per record, so it cannot be read inside a comprehension"),
+                    span,
+                )
+                .with_hint(
+                    "a lookup is evaluated before the key expression, which is what lets one chain into another, and a comprehension's binding does not exist yet at that point; read the fold once outside the comprehension, or compute the part without one",
+                ));
+        }
+        let signature = self
+            .folds
+            .iter()
+            .find(|other| other.name == name)
+            .cloned()
+            .expect("checked by caller");
+        let ret = signature
+            .ret
+            .clone()
+            .expect("a fold's signature always declares a result");
+        // **A key is plaintext and an erase cannot reach one**, which is the argument rule
+        // 14 makes for a computed part and this is the same position. Refused on the
+        // declared return type, which is where a fold publishes its seal (rule 7), so the
+        // `fn`-laundering hole a computed part had cannot open here.
+        if let Some(subject) = ret.subject() {
+            return Err(self
+                .err(
+                    Code::SealBoundary,
+                    format!(
+                        "`{name}` returns content sealed under `{subject}`, so a key part cannot be read through it"
+                    ),
+                    span,
+                )
+                .with_hint(
+                    "a key is plaintext and an erase cannot reach one, so a row filed under sealed content would hold personal data nothing could erase; look up a fold whose value is not sealed, or key on something the subject is not in",
+                ));
+        }
+        if self.record_def(&name).is_some() {
+            return Err(self
+                .err(
+                    Code::DeclaredTwice,
+                    format!("`{name}` is the name of a fold and of a record"),
+                    span,
+                )
+                .with_hint(
+                    "inside a `key` clause `Name { .. }` reads the fold, and everywhere else it builds the record, so one of the two has to be renamed before either can be written here",
+                ));
+        }
+
+        let mut args: Vec<(Ident, ExprId)> = Vec::new();
+        self.expect_sym(Sym::LBrace)?;
+        while !self.at_sym(Sym::RBrace) {
+            let at = self.span_here();
+            let field = self.expect_ident()?;
+            let Some((_, declared)) = signature.params.iter().find(|(param, _)| param == &field)
+            else {
+                return Err(self.err(
+                    Code::UnknownMember,
+                    format!("fold `{name}` has no parameter `{field}`"),
+                    at,
+                ));
+            };
+            if args.iter().any(|(seen, _)| seen == &field) {
+                return Err(self.err(
+                    Code::DuplicateField,
+                    format!("`{field}` is given twice"),
+                    at,
+                ));
+            }
+            let expected = declared.clone();
+            let value = if self.eat_sym(Sym::Colon) {
+                self.expr(lower, Some(expected.clone()))?
+            } else if lower.b.lookup(&field).is_none() {
+                return Err(self.not_in_scope(&field, at));
+            } else {
+                self.shorthand(lower, &field, &expected, at)
+            };
+            args.push((field, self.lifted(lower, value, &expected, at)));
+            if !self.eat_sym(Sym::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Sym::RBrace)?;
+        for (param, _) in &signature.params {
+            if !args.iter().any(|(field, _)| field == param) {
+                return Err(self.err(
+                    Code::MissingField,
+                    format!("fold `{name}` needs `{param}`"),
+                    span,
+                ));
+            }
+        }
+
+        // Allocated under a name no source token can spell, as `hidden_bind` does and for
+        // the same reason: the slot is the fold's own frame and nothing may shadow or read
+        // it by name.
+        let slot = lower.b.alloc(format!("@lookup:{name}"), Some(ret.clone()));
+        // **After the arguments**, so a chain comes out inner-first.
+        if let Some(found) = self.lookups.as_mut() {
+            found.push(Lookup {
+                fold: name,
+                // Stamped by `computed_keys` when the clause closes: a lookup is parsed
+                // deep inside an expression and has no idea which part it is feeding.
+                part: String::new(),
+                args,
+                slot,
+                ty: ret,
+                span,
+            });
+        }
+        lower.b.at(span);
+        Ok(lower.b.read(slot))
     }
 
     /// `Name { field: value }`, with the same bare-name shorthand `emit` and `put`
@@ -11070,6 +11276,85 @@ impl Parser {
         })
     }
 
+    /// Rule 15's two whole-program checks: a lookup chain that comes back round, and a
+    /// lookup of a fold no column is kept for.
+    ///
+    /// Here rather than at the call site because neither answer exists until every body is
+    /// parsed. Pass C reads `fold Name(..) -> T` and a lookup is in an arm, so the graph
+    /// is not known; and storability is a property of the whole program, since what makes
+    /// a fold storable is that *some* arm of it supplies each key part.
+    fn check_lookups(&self, program: &Program) -> Result<(), Diagnostic> {
+        // A cycle first, because `Program::reads` below answers with what it reached
+        // rather than looping and the layout would then be reported against a graph that
+        // makes no sense.
+        if let Some(path) = program.lookup_cycle() {
+            let names: Vec<String> = path.iter().map(|name| format!("`{name}`")).collect();
+            let at = program.fold(&path[0]);
+            let span = at.map(|def| def.span).unwrap_or_default();
+            let mut error = Diagnostic::new(
+                Code::RecursiveFold,
+                format!(
+                    "{}: a fold keyed through itself has no value to key by",
+                    names.join(" keys through ")
+                ),
+                span,
+            );
+            for link in path.iter().filter_map(|name| program.fold(name)) {
+                if link.span == span {
+                    continue;
+                }
+                let related = Related::new(format!("`{}` is declared here", link.name), link.span);
+                error.related.push(match &link.module {
+                    Some(module) => related.in_file(module),
+                    None => related,
+                });
+            }
+            return Err(match at.and_then(|def| def.module.as_ref()) {
+                Some(module) => error.in_file(module),
+                None => error,
+            });
+        }
+
+        // Built directly rather than through `Parser::derived`, which pass E fills: the
+        // two answers are the same, since the splice leaves `program.folds` standing, and
+        // one less order to depend on.
+        let layout = tables::layout(program);
+        for def in &program.folds {
+            for slice in &def.stage.slices {
+                for lookup in &slice.lookups {
+                    if layout.column(&lookup.fold).is_some() {
+                        continue;
+                    }
+                    let unstored = layout
+                        .unstored
+                        .iter()
+                        .find(|at| at.fold == lookup.fold)
+                        .map(|at| at.unmatched.join(", "));
+                    let why = match &unstored {
+                        Some(unmatched) => format!(
+                            "no event supplies `{unmatched}`, so nothing keeps a column for it"
+                        ),
+                        None => "it is not a fold this program declares".to_string(),
+                    };
+                    let error = self
+                        .err(
+                            Code::FoldRestriction,
+                            format!("`{}` is not stored, so a key cannot be read through it: {why}", lookup.fold),
+                            lookup.span,
+                        )
+                        .with_hint(
+                            "a lookup is answered from the looked-up fold's own column, and `hek check --tables` lists what is kept and what is not; key on a fold every part of whose key some arm supplies",
+                        );
+                    return Err(match &def.module {
+                        Some(module) => error.in_file(module),
+                        None => error,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// `docs/folds.md` rule 12: a fold that binds the envelope is query-only, so nothing
     /// may fold it.
     ///
@@ -11104,16 +11389,23 @@ impl Parser {
                 if !fold.query_only() {
                     continue;
                 }
-                // Two ways in, and the message names which: the envelope has no predicate
-                // form and neither does a computed key part, so a command could narrow
-                // the log to neither and conflict on neither.
-                let (why, where_, hint) = match fold.computes() {
-                    Some(key) => (
+                // Three ways in, and the message names which: none of the envelope, a
+                // computed key part and a lookup has a predicate form, so a command could
+                // narrow the log to none of them and conflict on none of them. A lookup is
+                // checked first because it is the sharper reason: it is *why* the part
+                // cannot be had without reading the log.
+                let (why, where_, hint) = match (fold.looks_up(), fold.computes()) {
+                    (Some(lookup), _) => (
+                        format!("keys through `{}`", lookup.fold),
+                        Related::new(format!("`{}` reads it here", fold.name), lookup.span),
+                        "a lookup's boundary is another key's whole history, which no append condition can express: there is nothing for a command to narrow the log by and nothing to conflict on; read this one as a stored value, or carry what you need on the event",
+                    ),
+                    (None, Some(key)) => (
                         format!("computes the key part `{}`", key.param),
                         Related::new(format!("`{}` computes it here", fold.name), key.span),
                         "a computed key is per record and a slice is narrowed once, so there is no query for a command to read it with and nothing to conflict on; key on a field the event carries, or read this one as a stored value",
                     ),
-                    None => (
+                    (None, None) => (
                         "binds the envelope (`as`)".to_string(),
                         Related::new(format!("`{}` binds it here", fold.name), fold.span),
                         "an event's append time is not a decision's to read: a test cannot pin it, and a backfilled event's is when it was imported rather than when it happened; fold a `Timestamp` the event declares, or read this one as a stored value",

@@ -1226,3 +1226,208 @@ fold Seen(shop_id: Int, order_id: Int) -> n: Int = 0 {
         "a refold is a function of the key and the whole log, so both ranges reach it"
     );
 }
+
+// ---------------------------------------------------------------------------
+
+/// Rule 15 through both drivers: a key part read out of **another named fold**, as it
+/// stood when the record being folded was appended.
+///
+/// `@game.refunded` carries neither the game nor the genre, which is the whole point of
+/// the feature: without it the event would have to copy them, and `Refund` would fold
+/// twelve folds to stamp values onto an event its decision never reads.
+const KEYED: &str = "event @game.added { game_id: Int, genre: String }
+event @game.purchased { receipt_id: Int, game_id: Int }
+event @game.refunded { receipt_id: Int }
+
+fold GameGenre(game_id: Int) -> String = \"unknown\" {
+  on @game.added(game_id) { genre } => genre
+}
+
+fold ReceiptGame(receipt_id: Int) -> Int = 0 {
+  on @game.purchased(receipt_id) { game_id } => game_id
+}
+
+fold GenreUnits(genre: String) -> n: Int = 0 {
+  on @game.purchased() { game_id } key genre = GameGenre { game_id } => n + 1
+  on @game.refunded() { receipt_id }
+    key genre = GameGenre { game_id: ReceiptGame { receipt_id } } => n - 1
+}
+";
+
+#[test]
+fn a_key_read_through_another_fold_agrees_with_a_refold() {
+    let program = program(KEYED);
+    let mut interpreter = Interpreter::new(&program);
+    given(
+        &mut interpreter,
+        "game.added",
+        [("game_id", Value::Int(1)), ("genre", Value::str("rpg"))],
+    );
+    given(
+        &mut interpreter,
+        "game.purchased",
+        [("receipt_id", Value::Int(50)), ("game_id", Value::Int(1))],
+    );
+    // **The record that both moves the looked-up fold and is counted through it**, which
+    // is the case the handoff asked to be tested either way the question was answered. The
+    // sale above is an rpg and the one below a shooter, because a lookup is as of the
+    // record and strictly before it: a genre change between two sales splits them.
+    given(
+        &mut interpreter,
+        "game.added",
+        [("game_id", Value::Int(1)), ("genre", Value::str("shooter"))],
+    );
+    given(
+        &mut interpreter,
+        "game.purchased",
+        [("receipt_id", Value::Int(51)), ("game_id", Value::Int(1))],
+    );
+    // A refund keyed through two folds, from an event carrying only the receipt.
+    given(
+        &mut interpreter,
+        "game.refunded",
+        [("receipt_id", Value::Int(50))],
+    );
+
+    let cells = agrees(&program, &interpreter);
+    assert_eq!(
+        cells.get("genre", &[Key::Str("rpg".into())], "genre_units"),
+        Some(&Value::Int(1)),
+        "the first sale, under the genre the game had when it sold"
+    );
+    // **And the refund lands here, not under `\"rpg\"`**, which is as-of doing exactly what
+    // it says: the record being folded is the *refund*, so `GameGenre` is read as of the
+    // refund and the game is a shooter by then. The sale it reverses was an rpg.
+    //
+    // That is a modelling trap and not a defect, and it is worth knowing before a port
+    // leans on it: a refund keyed through a **mutable** fold decrements the bucket the
+    // thing is in now rather than the one it was sold under. An author who needs the
+    // other keys through a fold that captures the sale, so that what the lookup answers
+    // cannot move afterwards.
+    assert_eq!(
+        cells.get("genre", &[Key::Str("shooter".into())], "genre_units"),
+        Some(&Value::Int(0)),
+        "the second sale, and the refund of the first"
+    );
+}
+
+#[test]
+fn a_looked_up_fold_is_a_column_and_a_dependency() {
+    let layout = heklang::layout(&program(KEYED));
+    let (_, column) = layout.column("GenreUnits").expect("it is kept");
+    assert_eq!(
+        column.reads,
+        vec!["GameGenre".to_string(), "ReceiptGame".to_string()],
+        "transitive and sorted: the chain's inner link counts too"
+    );
+    // Nothing keys through these, so they carry no dependency of their own.
+    assert!(layout.column("GameGenre").expect("kept").1.reads.is_empty());
+
+    // **A rebuild of the dependent has to replay the dependencies**, because a lookup
+    // wants their value as of each past record and only maintaining them alongside gives
+    // that. `Tables::only` closes over them for the same reason it closes a range over its
+    // table's minters.
+    assert_eq!(
+        layout.closure(&["GenreUnits".to_string()]),
+        vec![
+            "GameGenre".to_string(),
+            "GenreUnits".to_string(),
+            "ReceiptGame".to_string(),
+        ]
+    );
+    assert_eq!(
+        layout.closure(&["GameGenre".to_string()]),
+        vec!["GameGenre".to_string()],
+        "a dependency does not drag its dependents in"
+    );
+}
+
+#[test]
+fn a_restricted_replay_of_a_keyed_column_is_the_whole_sink() {
+    let program = program(KEYED);
+    let mut interpreter = Interpreter::new(&program);
+    given(
+        &mut interpreter,
+        "game.added",
+        [("game_id", Value::Int(1)), ("genre", Value::str("rpg"))],
+    );
+    given(
+        &mut interpreter,
+        "game.purchased",
+        [("receipt_id", Value::Int(50)), ("game_id", Value::Int(1))],
+    );
+
+    let tables = Tables::new(&program);
+    let rebuild = tables.only(&["GenreUnits".to_string()]);
+    let mut part = Cells::default();
+    interpreter
+        .host()
+        .read(&tables.query(), &mut |record| {
+            rebuild.apply(record, &mut part)
+        })
+        .expect("the sink applies every record it is given");
+
+    // The dependency was replayed alongside, so the lookup had a value to read. Without
+    // the closure it would have read `GameGenre`'s seed and filed the sale under
+    // `"unknown"`, which is the silent wrong answer the closure exists to prevent.
+    assert_eq!(
+        part.get("genre", &[Key::Str("rpg".into())], "genre_units"),
+        Some(&Value::Int(1))
+    );
+    assert!(
+        part.get("genre", &[Key::Str("unknown".into())], "genre_units")
+            .is_none()
+    );
+}
+
+/// **A record that both moves the looked-up fold and is counted through it**, which is the
+/// case that makes the as-of position observable at all, and which the handoff asked for
+/// either way the question was answered.
+///
+/// One event feeds both folds here, so the lookup is reading a column this same record is
+/// about to change. Strictly before it, the listing counts under the seed; at and
+/// including it, under the genre it carries. Everything else in this file is indifferent
+/// to the choice, because `@game.added` and `@game.purchased` are different events and a
+/// purchase never moves `GameGenre`.
+///
+/// **Strictly before is the answer, and the sink is why it is not a preference.** The sink
+/// works out every key before it writes any of them, so the column it reads holds the
+/// value from before this record whatever anyone would prefer; a by-key read that included
+/// the record would answer differently and the two drivers would part company. It is also
+/// what a command appending the record would have read, and it leaves the answer
+/// independent of the order the arms happen to be applied in.
+const SELF_MOVING: &str = "event @game.listed { game_id: Int, genre: String }
+
+fold GameGenre(game_id: Int) -> String = \"unknown\" {
+  on @game.listed(game_id) { genre } => genre
+}
+
+fold GenreListings(genre: String) -> n: Int = 0 {
+  on @game.listed() { game_id } key genre = GameGenre { game_id } => n + 1
+}
+";
+
+#[test]
+fn a_lookup_reads_the_log_strictly_before_the_record() {
+    let program = program(SELF_MOVING);
+    let mut interpreter = Interpreter::new(&program);
+    for genre in ["rpg", "rpg"] {
+        given(
+            &mut interpreter,
+            "game.listed",
+            [("game_id", Value::Int(1)), ("genre", Value::str(genre))],
+        );
+    }
+
+    let cells = agrees(&program, &interpreter);
+    assert_eq!(
+        cells.get("genre", &[Key::Str("unknown".into())], "genre_listings"),
+        Some(&Value::Int(1)),
+        "the first listing is counted before it has a genre to be counted under"
+    );
+    assert_eq!(
+        cells.get("genre", &[Key::Str("rpg".into())], "genre_listings"),
+        Some(&Value::Int(1)),
+        "the second reads what the first left"
+    );
+}

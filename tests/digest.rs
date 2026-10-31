@@ -1845,3 +1845,174 @@ fold Counted(shop_id: Int, month: String, label: String) -> n: Int = 0 {{
         "sorted by parameter, not written: {form}"
     );
 }
+
+/// Rule 15: **a dependent's hash moves when a fold it keys through changes**, which is the
+/// obligation a command's entry already meets through the splice. A lookup is not spliced,
+/// so the looked-up fold's hash goes into the dependent's form instead; without it a
+/// catalog would report `UpToDate` for a column whose values had changed underneath it.
+#[test]
+fn a_fold_keyed_through_another_carries_that_folds_hash() {
+    let source = |genre: &str| {
+        format!(
+            "\
+event @game.added {{ game_id: Int, genre: String }}
+event @game.purchased {{ game_id: Int }}
+
+fold GameGenre(game_id: Int) -> String = \"unknown\" {{
+  on @game.added(game_id) {{ genre }} => {genre}
+}}
+
+fold GenreUnits(genre: String) -> n: Int = 0 {{
+  on @game.purchased() {{ game_id }} key genre = GameGenre {{ game_id }} => n + 1
+}}
+"
+        )
+    };
+    let before = digest(&source("genre"));
+    let after = digest(&source("genre.lower()"));
+
+    // The looked-up fold changed, so of course its own entry moved.
+    assert_ne!(
+        entry(&before, "GameGenre").hash,
+        entry(&after, "GameGenre").hash
+    );
+    // And so does the dependent's, which is the rule.
+    assert_ne!(
+        entry(&before, "GenreUnits").hash,
+        entry(&after, "GenreUnits").hash,
+        "a change to a looked-up fold has to move the hash of what keys through it"
+    );
+
+    // **Its signature does not.** The dependent's table, key order and column type are
+    // what something outside the body decides from, and none of them moved: this is a
+    // column to refold in place, not one to rebuild differently.
+    let (one, two) = (entry(&before, "GenreUnits"), entry(&after, "GenreUnits"));
+    assert_eq!(
+        one.signature_hash, two.signature_hash,
+        "the dependent's signature is its table and its type, and neither changed"
+    );
+}
+
+/// Transitively, because a change two links away changes the dependent's values just as a
+/// change one link away does. The closure is what makes the recorded set complete, and it
+/// is also why the hashes recorded are of each fold's **own** form: one pass serves every
+/// entry, with no order to get right and nothing to loop on.
+#[test]
+fn a_chain_carries_every_link() {
+    let source = |game: &str| {
+        format!(
+            "\
+event @game.added {{ game_id: Int, genre: String }}
+event @game.purchased {{ receipt_id: Int, game_id: Int }}
+event @game.refunded {{ receipt_id: Int }}
+
+fold GameGenre(game_id: Int) -> String = \"unknown\" {{
+  on @game.added(game_id) {{ genre }} => genre
+}}
+
+fold ReceiptGame(receipt_id: Int) -> Int = 0 {{
+  on @game.purchased(receipt_id) {{ game_id }} => {game}
+}}
+
+fold GenreUnits(genre: String) -> n: Int = 0 {{
+  on @game.refunded() {{ receipt_id }}
+    key genre = GameGenre {{ game_id: ReceiptGame {{ receipt_id }} }} => n - 1
+}}
+"
+        )
+    };
+    let before = digest(&source("game_id"));
+    let after = digest(&source("game_id + 0"));
+    assert_ne!(
+        entry(&before, "GenreUnits").hash,
+        entry(&after, "GenreUnits").hash,
+        "the inner link of the chain is two steps away and still counts"
+    );
+}
+
+/// And a fold that keys through nothing packs byte for byte as it did, which is what keeps
+/// `hek-digest 6` standing and every existing hash where it was.
+#[test]
+fn a_fold_that_keys_through_nothing_has_no_reads_section() {
+    let one = with_events(
+        "\
+fold Spend(customer_id: Customer) -> n: Money(2) = 0 {
+  on @order.placed(customer_id) { total } => n + total
+}
+",
+    );
+    assert!(
+        !entry(&one, "Spend").form.packed().contains("reads"),
+        "{}",
+        entry(&one, "Spend").form.packed()
+    );
+}
+
+/// Two spellings of one chain are two programs, so the lookups are packed in **written
+/// order** rather than sorted: a chain's links are evaluated inner-first and the slots they
+/// hand out follow, where the `key` clauses above them are a set and are sorted.
+#[test]
+fn the_order_of_a_chains_links_is_the_form() {
+    // `x` is destructured rather than filtered on, so the lookups read the **record**
+    // rather than a key part, which is rule 14's rule and rule 15 inherits it.
+    let fold = |keys: &str| {
+        format!(
+            "\
+event @a.b {{ x: Int, y: Int }}
+
+fold One(x: Int) -> Int = 0 {{
+  on @a.b(x) {{ y }} => y
+}}
+
+fold Two(x: Int) -> Int = 0 {{
+  on @a.b(x) {{ y }} => y + 1
+}}
+
+fold Counted(p: Int) -> n: Int = 0 {{
+  on @a.b() {{ x }} key {keys} => n + 1
+}}
+"
+        )
+    };
+    let one = digest(&fold("p = One { x: Two { x } }"));
+    let two = digest(&fold("p = Two { x: One { x } }"));
+    assert_ne!(
+        entry(&one, "Counted").hash,
+        entry(&two, "Counted").hash,
+        "one chain each way round is two programs"
+    );
+}
+
+/// A `key` list is a set, so reordering it is no change **even when a clause carries a
+/// lookup**. The lookups are built before the sorted `computed` nodes and hand out the
+/// slot numbers, so leaving them in written order made a pure comma reordering move the
+/// hash and report a breaking change.
+#[test]
+fn the_order_two_clauses_with_lookups_are_written_in_is_not_the_form() {
+    let fold = |keys: &str| {
+        format!(
+            "\
+event @a.b {{ x: Int, y: Int }}
+
+fold One(x: Int) -> Int = 0 {{
+  on @a.b(x) => 1
+}}
+
+fold Two(x: Int) -> Int = 0 {{
+  on @a.b(x) => 2
+}}
+
+fold Counted(p: Int, q: Int) -> n: Int = 0 {{
+  on @a.b() {{ x, y }} key {keys} => n + 1
+}}
+"
+        )
+    };
+    let one = digest(&fold("p = One { x }, q = Two { x: y }"));
+    let two = digest(&fold("q = Two { x: y }, p = One { x }"));
+    assert_eq!(
+        one.packed(),
+        two.packed(),
+        "two spellings of one clause list pack alike"
+    );
+}

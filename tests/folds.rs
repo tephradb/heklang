@@ -2145,3 +2145,251 @@ fold LatestEmail(customer_id: Customer) -> Sealed(String, Customer)? = none {
 ";
     program(column);
 }
+
+/// Rule 15: a key part read out of **another named fold**, as it stood when the record
+/// being folded was appended.
+///
+/// The spelling is the one a command uses to read a fold, which is the point: `GameGenre {
+/// game_id }` means the same thing in both places. To tree-sitter it is a `record_literal`
+/// either way, so the grammar needed no rule and the parser decides, which it may because
+/// a lookup is reachable only inside a `key` clause.
+const KEYED: &str = "\
+event @game.added { game_id: Int, genre: String }
+event @game.purchased { receipt_id: Int, game_id: Int }
+event @game.refunded { receipt_id: Int }
+
+fold GameGenre(game_id: Int) -> String = \"unknown\" {
+  on @game.added(game_id) { genre } => genre
+}
+
+fold ReceiptGame(receipt_id: Int) -> Int = 0 {
+  on @game.purchased(receipt_id) { game_id } => game_id
+}
+";
+
+#[test]
+fn a_key_part_can_be_read_through_another_fold() {
+    let source = format!(
+        "{KEYED}
+fold GenreUnits(genre: String) -> n: Int = 0 {{
+  on @game.purchased() {{ game_id }} key genre = GameGenre {{ game_id }} => n + 1
+  on @game.refunded() {{ receipt_id }}
+    key genre = GameGenre {{ game_id: ReceiptGame {{ receipt_id }} }} => n - 1
+}}
+"
+    );
+    let program = program(&source);
+
+    // The chain is two lookups in evaluation order, inner first, because each is recorded
+    // after its own arguments are parsed.
+    let fold = program.fold("GenreUnits").expect("declared");
+    let chain = &fold.stage.slices[1].lookups;
+    assert_eq!(
+        chain.iter().map(|at| at.fold.as_str()).collect::<Vec<_>>(),
+        vec!["ReceiptGame", "GameGenre"]
+    );
+
+    // It makes the fold query-only, as the envelope and a computed part do, and the
+    // message names the lookup because it is the sharper reason: it is *why* the part
+    // cannot be had without reading the log.
+    let read = format!(
+        "{source}
+command C(genre: String) {{
+  fold n = GenreUnits {{ genre }}
+  emit @game.refunded {{ receipt_id: n }}
+}}
+"
+    );
+    assert_eq!(
+        error(&read),
+        "`GenreUnits` keys through `GameGenre`, so it can be queried but not folded by a command"
+    );
+}
+
+#[test]
+fn only_a_stored_fold_can_be_keyed_through() {
+    // A lookup is answered from the looked-up fold's own column, so a fold no column is
+    // kept for has nothing to answer with. Checked over the whole program, because what
+    // makes a fold storable is that *some* arm of it supplies each key part.
+    let source = format!(
+        "{KEYED}
+fold Since(at: Timestamp) -> Int = 0 {{
+  on @game.added() => 1
+}}
+
+fold Odd(n: Int) -> Int = 0 {{
+  on @game.added() {{ game_id }} key n = Since {{ at: \"2020-01-01T00:00:00Z\" }} => game_id
+}}
+"
+    );
+    assert_eq!(
+        error(&source),
+        "`Since` is not stored, so a key cannot be read through it: no event supplies `at`, so nothing keeps a column for it"
+    );
+}
+
+#[test]
+fn a_lookup_chain_cannot_come_back_round() {
+    let source = "\
+event @a.b { x: Int, y: Int }
+
+fold A(x: Int) -> Int = 0 {
+  on @a.b() { y } key x = B { y } => y
+}
+
+fold B(y: Int) -> Int = 0 {
+  on @a.b() { x } key y = A { x } => x
+}
+";
+    assert_eq!(
+        error(source),
+        "`A` keys through `B` keys through `A`: a fold keyed through itself has no value to key by"
+    );
+
+    // A fold looking itself up is the one-link case and lands in the same walk.
+    let itself = "\
+event @a.b { x: Int, y: Int }
+
+fold A(x: Int) -> Int = 0 {
+  on @a.b() { y } key x = A { x: y } => y
+}
+";
+    assert_eq!(
+        error(itself),
+        "`A` keys through `A`: a fold keyed through itself has no value to key by"
+    );
+}
+
+#[test]
+fn a_looked_up_fold_may_not_return_sealed_content() {
+    // The argument rule 14 makes for a computed part, one step along: a key is plaintext
+    // and an erase cannot reach one. Refused on the **declared return type**, which is
+    // where a fold publishes its seal (rule 7), so there is no `fn` to launder it through.
+    let source = "\
+subject Customer(Int)
+
+event @order.placed { order_id: Int, customer_id: Customer, email: String @subject(customer_id) }
+
+fold LatestEmail(customer_id: Customer) -> Sealed(String, Customer)? = none {
+  on @order.placed(customer_id) { email } => email
+}
+
+fold ByEmail(email: String) -> n: Int = 0 {
+  on @order.placed() { customer_id } key email = LatestEmail { customer_id } => n + 1
+}
+";
+    assert_eq!(
+        error(source),
+        "`LatestEmail` returns content sealed under `Customer`, so a key part cannot be read through it"
+    );
+}
+
+#[test]
+fn a_lookup_is_only_a_lookup_inside_a_key_clause() {
+    // Everywhere else `Name { .. }` is the record literal it has always been, which is
+    // what keeps the spelling free: the parser claims it in one position.
+    let source = format!(
+        "{KEYED}
+fold Odd(game_id: Int) -> n: Int = 0 {{
+  on @game.purchased(game_id) => n + GameGenre {{ game_id }}
+}}
+"
+    );
+    assert_eq!(error(&source), "`GameGenre` is not in scope");
+
+    // And its arguments are checked as a command's read of the same fold is.
+    let wrong = format!(
+        "{KEYED}
+fold Odd(genre: String) -> n: Int = 0 {{
+  on @game.purchased() {{ receipt_id }} key genre = GameGenre {{ receipt_id }} => n + 1
+}}
+"
+    );
+    assert_eq!(
+        error(&wrong),
+        "fold `GameGenre` has no parameter `receipt_id`"
+    );
+
+    let missing = format!(
+        "{KEYED}
+fold Odd(genre: String) -> n: Int = 0 {{
+  on @game.purchased() {{ receipt_id }} key genre = GameGenre {{ }} => n + 1
+}}
+"
+    );
+    assert_eq!(error(&missing), "fold `GameGenre` needs `game_id`");
+}
+
+/// Rule 14's rule, inherited: **a lookup's arguments read the record and nothing of the
+/// key.** The check has to ask for them separately, because `fold_lookup` leaves an
+/// `Expr::Load` of the slot behind and keeps the arguments off the expression tree, so the
+/// walk over the key expression sees nothing of them.
+///
+/// It is the most natural shape there is, which is why it mattered: passing the key part
+/// the arm already pins. It checked clean and failed the fill.
+#[test]
+fn a_lookups_arguments_read_the_record_and_nothing_of_the_key() {
+    let source = |args: &str| {
+        format!(
+            "\
+event @game.added {{ shop_id: Int, game_id: Int, genre: String }}
+event @game.purchased {{ shop_id: Int, game_id: Int }}
+
+fold GameGenre(shop_id: Int, game_id: Int) -> String = \"unknown\" {{
+  on @game.added(shop_id, game_id) {{ genre }} => genre
+}}
+
+fold GenreUnits(shop_id: Int, genre: String) -> n: Int = 0 {{
+  on @game.purchased(shop_id) {{ {args} }} key genre = GameGenre {{ shop_id, game_id }}
+    => n + 1
+}}
+"
+        )
+    };
+    assert_eq!(
+        error(&source("game_id")),
+        "`shop_id` is a part of the key this arm is computing, so a computed key part cannot read it"
+    );
+
+    // And the fix the hint names: destructure the field, so the lookup reads the record.
+    // The filter still narrows, and the arm still pins the part from it.
+    program(&source("shop_id, game_id"));
+}
+
+/// A lookup is **hoisted** out of the key expression onto the slice and evaluated once per
+/// record, which is what lets one chain into another. A binder's name does not exist at
+/// that point, so a lookup under one is refused rather than read before its argument is
+/// set.
+#[test]
+fn a_lookup_cannot_be_written_inside_a_comprehension() {
+    let source = "\
+event @a.b { x: Int, ids: List(Int) }
+
+fold One(x: Int) -> Int = 0 {
+  on @a.b(x) => 1
+}
+
+fold Counted(p: Int) -> n: Int = 0 {
+  on @a.b() { ids } key p = [One { x: i } for i in ids].len() => n + 1
+}
+";
+    assert_eq!(
+        error(source),
+        "`One` is read once per record, so it cannot be read inside a comprehension"
+    );
+
+    // Outside the comprehension it is an ordinary lookup, and the comprehension may read
+    // the slot it filled.
+    let outside = "\
+event @a.b { x: Int, ids: List(Int) }
+
+fold One(x: Int) -> Int = 0 {
+  on @a.b(x) => 1
+}
+
+fold Counted(p: Int) -> n: Int = 0 {
+  on @a.b() { x, ids } key p = One { x } + [i for i in ids].len() => n + 1
+}
+";
+    program(outside);
+}

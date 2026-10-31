@@ -72,38 +72,41 @@ impl Layout {
     /// everything a range asked for, since [`crate::Columns::keys`] is all a ranged arm
     /// reads. Keeping the values too is the simpler thing and costs only an overlay.
     pub fn closure(&self, folds: &[Ident]) -> Vec<Ident> {
-        let ranges = |column: &&Column| {
-            column
-                .arms
-                .iter()
-                .any(|arm| arm.fields.iter().any(|field| !field.pinned()))
-        };
         let mints = |column: &&Column| {
             column
                 .arms
                 .iter()
                 .any(|arm| arm.fields.iter().all(ArmMatch::pinned))
         };
+        // A worklist, because the two rules feed each other: a column added for a range
+        // may itself key through something, and a dependency may range over a table whose
+        // minters are not in yet. Each name enters `out` once, so it closes.
         let mut out: Vec<Ident> = Vec::new();
-        for table in &self.tables {
-            let wanted: Vec<&Column> = table
-                .columns
-                .iter()
-                .filter(|column| folds.contains(&column.fold))
-                .collect();
-            if wanted.iter().any(ranges) {
-                out.extend(
-                    table
-                        .columns
-                        .iter()
-                        .filter(mints)
-                        .map(|column| column.fold.clone()),
-                );
+        let mut queue: Vec<Ident> = folds.to_vec();
+        while let Some(name) = queue.pop() {
+            // A name no column is kept for contributes nothing, so an unstored fold and a
+            // typo both drop out here rather than at the apply.
+            let Some((table, column)) = self.column(&name) else {
+                continue;
+            };
+            if out.contains(&name) {
+                continue;
             }
-            out.extend(wanted.iter().map(|column| column.fold.clone()));
+            out.push(name);
+            // **Rule 15.** A column keyed through another needs that one's value as of
+            // each past record, which only maintaining it alongside can give.
+            queue.extend(column.reads.iter().cloned());
+            // **The range rule.** An arm leaving a part open covers the keys the table
+            // holds, and its table's minters are what put them there.
+            let ranges = column
+                .arms
+                .iter()
+                .any(|arm| arm.fields.iter().any(|field| !field.pinned()));
+            if ranges {
+                queue.extend(table.columns.iter().filter(mints).map(|at| at.fold.clone()));
+            }
         }
         out.sort();
-        out.dedup();
         out
     }
 }
@@ -151,6 +154,14 @@ pub struct Column {
     /// Per column and not per table, because one key signature is reached by parameters
     /// of different names: `(shop_id: Shop)` and `(shop: Shop)` are one key.
     pub args: Vec<Ident>,
+    /// The folds this column **keys through** (`docs/folds.md` rule 15), directly or
+    /// through a chain, sorted and each once. Empty for almost every column.
+    ///
+    /// Transitive rather than direct, because that is the set anything acting on it wants:
+    /// a change two links away changes this column's values just as a change one link away
+    /// does, so it is what the digest records, what a rebuild has to replay alongside, and
+    /// what `hek check --tables` prints.
+    pub reads: Vec<Ident>,
     /// The events this column folds, first written first, each once.
     pub events: Vec<EventPath>,
     /// One per `on`, in source order.
@@ -301,6 +312,7 @@ pub fn layout(program: &Program) -> Layout {
             fold: fold.name.clone(),
             ty: fold.ret.clone(),
             args,
+            reads: program.reads(&fold.name),
             events: events_of(&arms),
             arms,
         };

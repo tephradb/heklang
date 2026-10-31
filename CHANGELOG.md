@@ -9,6 +9,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A key part may be read through another fold**, as it stood when the record being folded was
+  appended (`docs/folds.md` rule 15):
+
+  ```hek
+  fold GenreUnits(genre: Genre) -> n: Int = 0 {
+    on @game.purchased { game_id } key genre = GameGenre { game_id } => n + 1
+    on @game.refunded { receipt_id }
+      key genre = GameGenre { game_id: ReceiptGame { receipt_id } } => n - 1
+  }
+  ```
+
+  **What it buys is events that stop carrying other entities' attributes.** A key part had to be on
+  the event, so events copied values across purely so a read model could group by them: in the
+  ported application `@game.purchased` carried `developer_id`, `genre` and `country` copied from
+  three folds, and the command folded all three *only* to stamp them on the event, widening its
+  append condition with slices the decision never read. `@game.refunded` repeated the whole receipt
+  so every total could subtract the sale, and its command declared twelve folds mostly to copy their
+  values out. A new "sales by region" total is now one new fold filled from the whole log rather
+  than a new event field with no history behind it.
+
+  Written as a command reads a fold, and chains. To the grammar it is a `record_literal` either way,
+  so `tree-sitter-hek` needed no rule and its generated parser did not move; the parser decides,
+  which it may because a lookup is reachable in exactly one position.
+
+  **As of the record and strictly before it**, which is what a command appending it would have read.
+  Not the current value, so a replay is deterministic and a sale counts towards the genre the game
+  had when it sold; and not including the record, which the sink has no choice about: it works out
+  every key for a record before it writes any of them, **across every table**, so the looked-up
+  column holds the value from before that record. A by-key read that included it would answer
+  differently, and one expression read two ways has to answer alike in both. Two consequences worth
+  knowing: a lookup can only read what an *earlier* record established, so keying a refund through
+  `ReceiptGame { receipt_id }` works because the purchase created the receipt; and a refund keyed
+  through a fold that still moves decrements where the thing is now rather than where it was sold.
+
+  **It makes the fold query-only**, as rule 12's envelope binding and rule 14's computed part do, for
+  the sharpest version of the reason: a lookup's boundary is another key's whole history, which no
+  append condition can express. The refusal names the lookup. Four more: only a **stored** fold may
+  be looked up, since the sink answers from its column; a **cycle** is the new `recursive-fold`
+  code; a **sealed** return type is `seal-boundary`, because a key is plaintext and an erase cannot
+  reach one, and it is refused on the declared return type so there is no `fn` to launder it
+  through; and the result's type has to fit the part.
+
+  **`Column::reads` is the dependency, transitively**, and three things read it. `hek check --tables`
+  prints `(keyed through game_genre, receipt_game)` against the column. The digest puts a hash of
+  each reached fold into the dependent's form, so editing a looked-up fold moves the dependent's
+  `hash` while leaving its `signature_hash` alone: a column to refold in place, not to rebuild
+  differently. And `Layout::closure` adds them to a rebuild, for the same reason it adds a range's
+  minters, because a lookup wants its dependencies' values as of each past record.
+
+  **The arguments are held to rule 14's rule**, so they read the record and nothing of the key, and
+  they are asked for separately because the lookup keeps them off the expression tree: without that
+  the hole rule 14 exists to close was open through the most natural shape there is, passing the key
+  part the arm already pins. Destructuring the field is the fix, and the hint says so. **And a
+  lookup may not be written under a binder**, since it is hoisted out of the expression and
+  evaluated once per record, so a comprehension's name does not exist yet at that point.
+
+  What it costs is the by-key read: `Interpreter::fold` evaluates the lookup at every candidate
+  record's position, which is a fold of the looked-up fold per record. Quadratic and accepted, since
+  a deployment serves these from the table. It **buffers** its records before folding when any arm
+  has a lookup, which keeps the re-entrancy out of the host seam: `Log::read` takes `&self` and says
+  nothing about being called from inside its own visitor, so a store holding a cursor or a
+  connection across the visit would deadlock rather than merely be slow.
 - Named `fold` declarations. A fold can now be declared once at module scope and read by name,
   which is the value half of what `guard` does for a proposition: `fold spend = LifetimeSpend {
   customer_id }` puts the same slices in the same append condition as writing the fold inline.

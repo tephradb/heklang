@@ -504,6 +504,15 @@ module.exports = grammar({
     computed_key: ($) =>
       seq(field('param', $.identifier), '=', field('value', $._expression)),
 
+    // A `record_literal` inside one of these values may be a **fold lookup** rather than a
+    // record (`docs/folds.md` rule 15): `key genre = GameGenre { game_id }` reads the fold
+    // `GameGenre`, and it is written exactly as a command reads one. There is no rule for
+    // it here, deliberately, because the two spellings are identical and the parser is
+    // what tells them apart: `Name { .. }` is a lookup where `Name` is a declared fold and
+    // the position is a `key` clause, and a record literal everywhere else. That is the
+    // same split `as e` takes, which this grammar accepts anywhere and the parser refuses
+    // outside a module-scope fold arm.
+
     // A slice always carries its parentheses, which is what tells a fold arm from a
     // handler when both begin `on @path` (parse.rs `slice_ref`).
     //

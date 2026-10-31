@@ -196,6 +196,57 @@ because a `fn`'s declared return type launders the subject away.
 all there, so `fn month_of(at: Timestamp) -> String { return "{at.year()}-{at.month().pad(2)}" }`
 is the month key; `at.year() * 100 + at.month()` is an `Int` bucket that sorts and pads nothing.
 
+## 5b. A fold arm may read a key part out of another fold
+
+The fourth way an arm writes a part, and the one that stops events carrying other entities'
+attributes just so a read model can group by them.
+
+```hek
+fold GenreUnits(genre: Genre) -> n: Int = 0 {
+  on @game.purchased { game_id } key genre = GameGenre { game_id } => n + 1
+  on @game.refunded { receipt_id }
+    key genre = GameGenre { game_id: ReceiptGame { receipt_id } } => n - 1
+}
+```
+
+Written exactly as a command reads a fold, and chains. `@game.refunded` carries neither the game nor
+the genre.
+
+**As of the record, and strictly before it**: the looked-up fold over the log before the record
+being folded, which is what a command appending it would have read. So a sale counts towards the
+genre the game had when it sold, and a record that *moves* the fold it is counted through counts
+under the old value. Two consequences worth holding:
+
+- **A lookup only reads what an earlier record established.** Key a refund through `ReceiptGame {
+  receipt_id }` and it works because the *purchase* created the receipt; a `ReceiptGame` folding
+  `@game.refunded` would read the refund itself and answer its seed.
+- **A refund keyed through a fold that still moves decrements where the thing is now**, not where it
+  was sold. Key through a fold that captures the sale if that matters.
+
+**It makes the fold query-only**, as 5a's computed part does, for the sharpest version of the
+reason: a lookup's boundary is another key's whole history, which no append condition can express.
+The refusal names the lookup.
+
+Six more refusals on top of 5a's: **only a stored fold** may be looked up (the sink answers from its
+column, and `hek check --tables` lists what is kept); a **cycle**, including a fold looking itself
+up, is `recursive-fold`; a **sealed** return type is `seal-boundary`, because a key is plaintext and
+an erase cannot reach one; the result's type has to fit the part, so an optional result in a
+non-optional part is refused and the author writes the fallback; the **arguments** are held to 5a's
+rule, so `GameGenre { shop_id, game_id }` passing a key part is refused and destructuring the field
+is the fix; and a lookup may not be written **under a binder**, because it is hoisted out of the
+expression and a comprehension's name does not exist where it lands.
+
+**`hek check --tables` prints the dependency**, transitively, which is how you see why editing one
+column refolds another:
+
+```
+    genre_units: Int  <- @game.purchased, @game.refunded  (keyed through game_genre, receipt_game)
+```
+
+That list is also what moves the dependent's digest `hash` when a looked-up fold changes, and what a
+rebuild replays alongside. A by-key read of one is quadratic and that is accepted: hekla serves it
+from the table.
+
 ## 6. Sealed return types
 
 `Sealed(T, Subject)` is spellable in a fold's return type **and nowhere else**, so a fold can hand

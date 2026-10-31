@@ -427,7 +427,11 @@ about the seed and the reason there is no `expect nothing` here.
 comparison a row's column goes through in section 6, so a `Money(2)` is matched on its scale and a
 subject-bound value on its content. The failure names the fold and both sides.
 
-**A fold that computes a key part is read here by its computed key** (`docs/folds.md` rule 14).
+**A fold that computes a key part is read here by its computed key** (`docs/folds.md` rule 14), and
+one that reads a part out of another fold (rule 15) is read the same way. The scan costs more there:
+the lookup is evaluated at every candidate record's position, which is a fold of the looked-up fold
+per record. That is quadratic and accepted, because a deployment serves these from the table and a
+test is a handful of records.
 `fold UsageCounted { shop_id: 1, month: "2026-03" }` scans the fold's events and keeps the records
 whose computed part equals the key asked for, which is the same expression the stored side
 evaluates to decide where a row goes.
@@ -509,6 +513,12 @@ columns its arms name, carrying the accumulator in the store, which is what a ho
 with (`docs/folds.md` section 11). The records arrive through `Tables::query`, so a test exercises
 the subscription too: a query that selects nothing would otherwise look exactly like a read model
 with nothing to do.
+
+**A key read through another fold is a key part like any other here too** (rule 15), and `fill` is
+where the as-of position shows: the sink works out every key for a record before it writes any of
+them, across every table, so the looked-up column holds what it held *before* this record. A seat
+booked before its workshop was opened therefore lands under the seed, and section 8's `fold` over
+the same key agrees, which is what makes that position a fact rather than a preference.
 
 **A computed key part is a key part like any other here**, and this is the clearest place to see
 rule 14: the subscript names the computed value, because the sink put the row there by evaluating

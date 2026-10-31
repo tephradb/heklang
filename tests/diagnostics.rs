@@ -468,6 +468,18 @@ fn cases() -> Vec<(Code, String)> {
             ),
         ),
         (Code::ConstCycle, "const A: Int = B\nconst B: Int = A\n"),
+        (
+            Code::RecursiveFold,
+            concat!(
+                "event @a.b { x: Int, y: Int }\n",
+                "fold A(x: Int) -> Int = 0 {\n",
+                "  on @a.b() { y } key x = B { y } => y\n",
+                "}\n",
+                "fold B(y: Int) -> Int = 0 {\n",
+                "  on @a.b() { x } key y = A { x } => x\n",
+                "}\n",
+            ),
+        ),
     ];
 
     let with_prelude: Vec<(Code, &str)> = vec![

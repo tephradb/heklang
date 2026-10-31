@@ -194,6 +194,25 @@ form, which is the same redundancy an `event` already has between its own entry 
 it. What it buys back is the attribution `docs/folds.md` rule 11 names as a loss: a moved fold hash
 now says which fold moved.
 
+**A fold's entry carries the folds it keys through** (`docs/folds.md` rule 15), because editing a
+looked-up fold changes the dependent's values and a catalog that said `UpToDate` would serve a
+column that is silently wrong. It is the obligation a command's entry already meets: the splice puts
+the fold a command reads physically inside it, so the hash covers it. A lookup is not spliced, so
+the hash goes in as a hash.
+
+**Of each reached fold's own form, over the transitive closure.** A dependent records
+`(reads (f <Fold> <hash>) ..)` where each hash is of that fold built *without* its own `reads`
+section, so one pass serves every entry: no topological order to get right and nothing to loop on if
+a cycle reached here past the checker. The closure is what makes it complete, since a change two
+links away has to move the hash too and a local form says nothing about its own dependencies. A fold
+that keys through nothing has no section, so every existing hash stayed where it was and
+`hek-digest 6` stands.
+
+A moved **signature** of a looked-up fold moves the dependent's `hash` and not its
+`signature_hash`, which is rule 8's split doing its job: the dependent's own table, key order and
+column type have not changed, so it is a column to refold in place rather than one to rebuild
+differently.
+
 ## 8. Every entry carries its own hash
 
 `Digest::entries` is one `Entry` per declaration, each with the kind, the name it is known by, its

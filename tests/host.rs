@@ -37,6 +37,15 @@ struct Elsewhere {
     /// Every seal this host was asked to open, so a test can assert that a key is used
     /// once per `reveal` rather than once per record a fold walks.
     opened: RefCell<Vec<(String, String)>>,
+    /// Set while `read` is running, so a second call from inside its own visitor is an
+    /// error rather than something this host silently tolerates.
+    ///
+    /// `Log::read` takes `&self` and says nothing about being re-entrant, so a real store
+    /// holding a cursor or a connection across the visit would deadlock rather than be
+    /// slow. A rule 15 lookup folds the looked-up fold per record, which is a read per
+    /// record, and `interp::fold` buffers its records first precisely so that read does
+    /// not land inside this one. The harness scans a `Vec` and would never have noticed.
+    reading: RefCell<bool>,
     /// How many more appends to beat to the log before letting one through. Each one
     /// lands a rival event inside the slice first, which is the shape a real store's
     /// condition check produces rather than an error invented for the test.
@@ -60,6 +69,28 @@ impl Log for Elsewhere {
         visit: &mut dyn FnMut(&Record) -> Result<(), Error>,
     ) -> Result<(), Error> {
         self.asked.borrow_mut().push(query.clone());
+        if self.reading.replace(true) {
+            return Err(ErrorKind::Host(
+                "`read` was called from inside its own visitor".to_string(),
+            )
+            .into());
+        }
+        let answer = self.reading_now(query, visit);
+        self.reading.replace(false);
+        answer
+    }
+
+    fn append(&mut self, events: &[Event], condition: &AppendCondition) -> Result<(), Error> {
+        self.appending(events, condition)
+    }
+}
+
+impl Elsewhere {
+    fn reading_now(
+        &self,
+        query: &Query,
+        visit: &mut dyn FnMut(&Record) -> Result<(), Error>,
+    ) -> Result<(), Error> {
         let last = query.upto.unwrap_or(u64::MAX);
         for record in &self.records {
             if record.position > last {
@@ -79,7 +110,7 @@ impl Log for Elsewhere {
         Ok(())
     }
 
-    fn append(&mut self, events: &[Event], condition: &AppendCondition) -> Result<(), Error> {
+    fn appending(&mut self, events: &[Event], condition: &AppendCondition) -> Result<(), Error> {
         if self.beat > 0 {
             self.beat -= 1;
             let position = self.records.len() as u64;
@@ -1170,4 +1201,45 @@ fn a_body_is_read_strictly_however_a_stored_payload_is_read() {
     let err = Value::from_json(&partial, &ty, defs)
         .expect_err("`body` carries `@absent`, and a body is still not history");
     assert_eq!(err.to_string(), "body: expected String, stored nothing");
+}
+
+/// **`Log::read` is not re-entrant, and a rule 15 lookup does not make it so.**
+///
+/// A lookup folds the looked-up fold once per candidate record, which is a read of the log
+/// per record, and the obvious shape is to recurse from inside the visitor. The trait takes
+/// `&self` and says nothing about allowing that, so a store holding a cursor, a connection
+/// or a `RefCell` borrow across the visit would deadlock rather than merely be slow.
+/// `interp::fold` therefore reads the records out first when any arm has a lookup.
+///
+/// `Elsewhere::read` refuses a nested call, which is the whole of this test: the harness
+/// scans a `Vec` and would have tolerated either shape.
+#[test]
+fn a_lookup_does_not_read_the_log_from_inside_a_read() {
+    let program = program(
+        "fold CustomerOrders(customer_id: Customer) -> n: Int = 0 {
+  on @order.placed(customer_id) => n + 1
+}
+
+fold OrdersByCount(n: Int) -> seen: Int = 0 {
+  on @order.placed() { customer_id } key n = CustomerOrders { customer_id } => seen + 1
+}
+",
+    );
+    let host = Elsewhere {
+        records: (0..3).map(|at| order(at, 7)).collect(),
+        ..Elsewhere::default()
+    };
+    let interpreter = Interpreter::with_host(&program, host);
+
+    // Each record's lookup folds `CustomerOrders` over the log before it, so the counts
+    // are 0, 1 and 2 and each lands in its own row. What matters is that it answers at
+    // all: a nested read is an error from this host.
+    for (count, want) in [(0, 1), (1, 1), (2, 1)] {
+        assert_eq!(
+            interpreter
+                .fold("OrdersByCount", [("n", Value::Int(count))])
+                .expect("a lookup fold reads without re-entering `read`"),
+            Value::Int(want)
+        );
+    }
 }
