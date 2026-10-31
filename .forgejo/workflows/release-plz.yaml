@@ -25,31 +25,33 @@ on:
 jobs:
   release-plz:
     runs-on: native
-    env:
-      # **Keep cargo-semver-checks out of `/tmp`.** release-plz runs it to work out whether
-      # a bump is breaking, and it builds rustdoc for each crate in a scratch workspace of
-      # its own under the system temp dir (`/tmp/.tmpXXXX/hostexecutor/target/semver-checks/
-      # local-hek-0_5_5-.../`). The runner sets `PrivateTmp = true`, so that `/tmp` is a
-      # systemd tmpfs rather than the disk, and a whole dependency tree does not build in
-      # it: first `sccache: encountered fatal error` (exit 254), then, with the wrapper off,
-      # `couldn't create a temp dir: No such file or directory` on the rustc metadata
-      # tempfile. Both surface three layers up as `failed to determine next versions`.
-      #
-      # The runner already moves `CARGO_HOME` and `SCCACHE_DIR` to its state directory for
-      # related reasons; `TMPDIR` was the one heavy path left pointing at the private tmpfs.
-      # The step below sets it, because it has to be on disk **and outside the checkout**:
-      # the first attempt put it in the workspace and cargo then read the workspace root
-      # above the scratch crate, "current package believes it's in a workspace when it's
-      # not". The proper fix is `TMPDIR` beside `SCCACHE_DIR` in the runner's own config,
-      # which would cover every repo rather than this one.
-      #
-      # No sccache here either, and deliberately still off. It failed in the same place for
-      # what is probably the same reason, so it may well work once the scratch tree is off
-      # the tmpfs, but nothing has shown that yet. Restore it once a release run is green,
-      # and take the cold build until then: semver-checks is what turns a breaking change
-      # into a minor bump on a 0.x crate, and without it a `feat` alone cuts 0.11.2 where
-      # 0.12.0 is owed.
-      RUSTC_WRAPPER: ""
+    # Two things this job has to undo about the runner's environment, both of them only
+    # reachable by cargo-semver-checks, which release-plz runs to work out whether a bump
+    # is breaking. Nothing else in the repository builds the way it does.
+    #
+    # **Keep cargo-semver-checks out of `/tmp`.** release-plz runs it to work out whether
+    # a bump is breaking, and it builds rustdoc for each crate in a scratch workspace of
+    # its own under the system temp dir (`/tmp/.tmpXXXX/hostexecutor/target/semver-checks/
+    # local-hek-0_5_5-.../`). The runner sets `PrivateTmp = true`, so that `/tmp` is a
+    # systemd tmpfs rather than the disk, and a whole dependency tree does not build in
+    # it: first `sccache: encountered fatal error` (exit 254), then, with the wrapper off,
+    # `couldn't create a temp dir: No such file or directory` on the rustc metadata
+    # tempfile. Both surface three layers up as `failed to determine next versions`.
+    #
+    # The runner already moves `CARGO_HOME` and `SCCACHE_DIR` to its state directory for
+    # related reasons; `TMPDIR` was the one heavy path left pointing at the private tmpfs.
+    # The step below sets it, because it has to be on disk **and outside the checkout**:
+    # the first attempt put it in the workspace and cargo then read the workspace root
+    # above the scratch crate, "current package believes it's in a workspace when it's
+    # not". The proper fix is `TMPDIR` beside `SCCACHE_DIR` in the runner's own config,
+    # which would cover every repo rather than this one.
+    #
+    # sccache is off for this job too, and it is **unset in the steps rather than emptied
+    # here**. Cargo reads an empty `RUSTC_WRAPPER` as no
+    # wrapper, so emptying it did stop rustc being wrapped; `cc-rs`, which compiles
+    # `tree-sitter`'s `lib.c` from its build script, asks only whether the variable is
+    # *present* and then prepends it to the C compiler. The result was `"sccache" "cc"`
+    # dying the same way one step further in. `unset` removes it for both.
     steps:
       - uses: actions/checkout@v4
         with:
@@ -79,8 +81,12 @@ jobs:
       - name: Publish and tag
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: release-plz release --forge gitea --git-token "${{ secrets.FORGE_TOKEN }}"
+        run: |
+          unset RUSTC_WRAPPER
+          release-plz release --forge gitea --git-token "${{ secrets.FORGE_TOKEN }}"
 
       # Keep the release PR (version bumps + changelogs) up to date.
       - name: Update the release PR
-        run: release-plz release-pr --forge gitea --git-token "${{ secrets.FORGE_TOKEN }}"
+        run: |
+          unset RUSTC_WRAPPER
+          release-plz release-pr --forge gitea --git-token "${{ secrets.FORGE_TOKEN }}"
