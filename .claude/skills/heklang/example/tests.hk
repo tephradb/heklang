@@ -174,3 +174,41 @@ test "an erased attendee skips rather than sending plaintext" {
 
   expect skipped
 }
+
+// The two ways a named fold is asserted. `fold` names one column at one key and takes
+// exactly one `expect`; `fill` follows the whole given log into the derived read model
+// and asserts a row of it, which is what a projector's row expectation was before the
+// read side became folds.
+test "releasing a seat gives it back" {
+  given @workshop.opened { workshop_id: RUST, title: "Rust", seats: 2, price: 40.00 }
+  given a_seat(BOOKING, 7)
+  given @seat.released { workshop_id: RUST, booking_id: BOOKING, attendee_id: 7 }
+
+  fold WorkshopSeatsLeft { workshop_id: RUST }
+
+  expect 2
+}
+
+test "a booked seat fills the row it is keyed by" {
+  given @workshop.opened { workshop_id: RUST, title: "Rust", seats: 2, price: 40.00 }
+  given a_seat(BOOKING, 7)
+
+  fill
+
+  // The column names are `hek check --tables`', and the subscript is the whole key in
+  // the order that listing prints: the subject part leads.
+  expect attendee__workshop[7, RUST] {
+    attendee_seats: 1,
+    // Sealed on the event and sealed in the column, and compared on its plaintext: the
+    // runner opens it through the world's key store, so a test writes what it put in.
+    attendee_email: "ada@example.com",
+    // Query-only, readable here and by nothing that decides. The harness stamps one
+    // minute per event from 2020-01-01T00:00:00Z, so this is the second `given`.
+    attendee_booked_at: "2020-01-01T00:01:00Z",
+  }
+  expect no attendee__workshop[8, RUST]
+
+  // A column no arm wrote is at its seed rather than missing, which is the one way a
+  // derived row reads differently from a projector's.
+  expect workshop[RUST] { workshop_seats_left: 1, workshop_revenue: 40.00 }
+}

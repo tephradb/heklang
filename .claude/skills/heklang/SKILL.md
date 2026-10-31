@@ -13,8 +13,9 @@ language for [hekla](https://git.tqwewe.com/tephra/hekla). Six declaration kinds
 - an **effect** reacts to appended events with durable side effects, and is the only kind that
   reaches the network;
 - a **guard** is a named proposition about the log that several commands share;
-- a **fold** is a named slice of the log and the value it folds to, which several commands,
-  guards and effect arms read by name;
+- a **fold** is a named slice of the log and the value it folds to, read by name by several
+  commands, guards and effect arms, and **also the read model**: one table per key signature, a row
+  per key, a column per fold;
 - a **refusal** is a named reason one said no.
 
 **The restrictions are the point.** A command cannot call out, read a clock in a fold, or decrypt.
@@ -36,6 +37,7 @@ hek test  path/      # the same, then run every `test` declaration
 hek                  # both, on the current directory
 hek fmt   path/      # rewrite canonically; --check makes it a gate
 hek check --boundaries   # per command, what it guards and what it reads, transitively
+hek check --tables       # the read model the program's named folds imply
 hek digest --hash path/  # a hash of what the program does, for "did this meaningfully change?"
 ```
 
@@ -392,7 +394,8 @@ specification in `docs/` of the heklang repository, which carries the reasoning 
 | File | Covers |
 | --- | --- |
 | `reference/language.md` | types, literals and inference, optionals and narrowing, money, strings, containers, `fn`, `const`, `record`, `enum`, modules |
-| `reference/commands.md` | commands, folds, stages, the append condition, guards, refusals |
+| `reference/commands.md` | commands, inline folds, stages, the append condition, guards, refusals |
+| `reference/folds.md` | named folds, the read model they are, `--tables`, storability, sealed return types |
 | `reference/projectors.md` | projectors, entities, `put`/`patch`/`update`/`delete`, zeros, indexes |
 | `reference/effects.md` | effect arms, the journal, `http`, `Json`, `invoke`, sealing, `reveal`, `erase` |
 | `reference/stdlib.md` | every method and builtin, and where each may be called |
@@ -420,22 +423,49 @@ command GrantTier(customer_id: Customer, tier: String) {
 }
 ```
 
-Four rules carry their weight:
+**A named fold is also the read model.** Nothing declares a table: a fold says what a value is,
+which events change it and what it is keyed by, so its **parameters are the key**, the fold is **one
+column**, and folds sharing one key signature are **one table** with a row per key. That is why the
+read side of an application is folds rather than projectors, and why `hek check --tables` is the
+command to run after adding or renaming one:
+
+```
+  TABLE shop__order  (shop: Shop, order: Int)  3 columns
+    order_email: String @subject(Customer)?  <- @order.contact.recorded
+    order_seen_at: Timestamp?                <- @order.placed
+    order_total: Money(2)                    <- @order.placed
+
+  not stored, because no event supplies the key:
+    OrdersSince  (at)
+```
+
+A column is the fold's name in `snake_case`; a key part is named for its **subject**, or for its
+parameter with one trailing `_id` dropped; a table is its parts joined with `__`, or **`global`**
+for a fold with no parameters. A fold whose key no event supplies is listed rather than refused.
+
+Rules that carry their weight:
 
 - **One accumulator, no `return`**, and its name is written only where an arm reads the running
   value. `-> spend: Money(2) = 0` because `=> spend + total` reads it; `-> Bool = false` when the
   arm only replaces the value. Writing a name no arm reads is `unused-accumulator`.
+- **Spelled like a type: an initial capital, and no `_`.** The underscores go in the derived column.
+  Both are refusals, and they are what keeps `snake_case` reversible so two folds cannot arrive as
+  one column.
+- **Named for the VALUE, never the entity.** `OrderName`, `ShopAccessToken`, `OpenProposal`. Not
+  `Order`, not `Shop`. One value out, so two facts about an order are two folds and the command
+  conflicts on exactly the two slices it read. Naming one after a part of its own key is refused
+  outright, since the table would need two columns of one name.
 - **A fold may not refuse.** It computes; a guard refuses. A fold's body is arms only, so a
   `reject` in one is unwritable rather than reported.
-- **Named for the value, never the entity.** `OrderName`, `ShopAccessToken`, `OpenProposal`. Not
-  `Order`, not `Shop`. One value out, so two facts about an order are two folds and the command
-  conflicts on exactly the two slices it read.
+- **An arm binding the envelope with `as` makes the fold query-only**: stored and readable by a
+  test, never folded by a command, because an append time is not a decision's to read.
 - **Inline folds are unchanged and still the default.** Name one when a second declaration wants it.
 
 `Sealed(T, Subject)` is spellable in a fold's return type and nowhere else, so a fold can hand back
-sealed content for its caller to `reveal`.
+sealed content for its caller to `reveal`. The subject need not be in the key and usually is not.
 
-`docs/folds.md` is the contract.
+`reference/folds.md` has all of this; `docs/folds.md` is the contract. For what a deployment serves
+the tables over, use the **hekla** skill rather than guessing from here.
 
 ## Compound keys
 
