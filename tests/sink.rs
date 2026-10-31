@@ -5,6 +5,14 @@
 //! accumulator in the store rather than re-deriving it from the log, so that equality is
 //! the whole of its correctness, and `agrees` asserts it for every column at every key
 //! after every program here.
+//!
+//! **One exception, and it is a boundary rather than a bug**: a range arm covers the keys
+//! the table holds when the record arrives, so a key minted later never sees it, while a
+//! refold applies every ranged record to every key. The sink's answer is the definition,
+//! because it is the implementable one;
+//! `a_key_minted_after_a_ranged_record_does_not_see_it` states the difference and
+//! `docs/folds.md` section 11 has the argument. Every fixture here keeps its ranged
+//! records after the keys they cover, which is what lets `agrees` hold over all of them.
 
 use heklang::{
     Cells, Event, EventPath, Interpreter, Key, Log, Program, Tables, Value, parse, value,
@@ -991,5 +999,230 @@ fn the_sink_does_not_evaluate_a_key_for_a_record_the_arm_rejects() {
     assert!(
         cells.is_empty("kind__rate__shop"),
         "no record has tags equal to its own kind"
+    );
+}
+
+// ---------------------------------------------------------------------------
+
+/// **One column's arms apply in the order they were written**, which the two-pass sink did
+/// not do and which is the file's headline claim.
+///
+/// `applying` runs every fully pinned arm of every column before every ranged one, because
+/// a range over a key this record mints has to see it. For a column with one of each on the
+/// same event that put them in *pass* order: the pinned arm wrote `1` and the ranged arm
+/// then overwrote it with `0`, where a refold applies the slices in source order and
+/// answers `1`. `agrees` could not see it, because no other fixture has a column whose
+/// pinned and ranged arms share an event path.
+const ORDERED: &str = "event @x.happened { shop_id: Int, order_id: Int }
+
+fold Seen(shop_id: Int, order_id: Int) -> n: Int = 0 {
+  on @x.happened(shop_id) => 0
+  on @x.happened(shop_id, order_id) => n + 1
+}
+";
+
+#[test]
+fn one_columns_arms_apply_in_written_order() {
+    let program = program(ORDERED);
+    let mut interpreter = Interpreter::new(&program);
+    given(
+        &mut interpreter,
+        "x.happened",
+        [("shop_id", Value::Int(1)), ("order_id", Value::Int(7))],
+    );
+    let cells = agrees(&program, &interpreter);
+    assert_eq!(
+        cells.get("order__shop", &[Key::Int(7), Key::Int(1)], "seen"),
+        Some(&Value::Int(1)),
+        "the ranged arm resets and the pinned arm counts, in that order"
+    );
+}
+
+/// The same shape with the pinned arm written first, so the reset wins. Both orders, because
+/// a fix that applied one column's arms in *reverse* would pass the test above alone.
+#[test]
+fn the_written_order_is_the_order_and_not_a_fixed_one() {
+    let source = "event @x.happened { shop_id: Int, order_id: Int }
+
+fold Seen(shop_id: Int, order_id: Int) -> n: Int = 0 {
+  on @x.happened(shop_id, order_id) => n + 1
+  on @x.happened(shop_id) => 0
+}
+";
+    let program = program(source);
+    let mut interpreter = Interpreter::new(&program);
+    given(
+        &mut interpreter,
+        "x.happened",
+        [("shop_id", Value::Int(1)), ("order_id", Value::Int(7))],
+    );
+    let cells = agrees(&program, &interpreter);
+    assert_eq!(
+        cells.get("order__shop", &[Key::Int(7), Key::Int(1)], "seen"),
+        Some(&Value::Int(0)),
+        "the pinned arm counts and the ranged arm resets, in that order"
+    );
+}
+
+/// `Columns::keys` is held to `Log::read`'s cut: **over-delivering is a cost and
+/// under-delivering is a bug**, so a host may answer with more keys than the arm writes
+/// and the sink drops the rest.
+///
+/// A store with no index for a range answers with every row of the table, which is the
+/// cheapest correct implementation and the one the contract exists to allow. It used to
+/// abort the record: a part the arm pinned with a rule 13 conjunct is bound from whatever
+/// key came back, so the conjunct's gate went dead, and a dead gate was read as a
+/// disagreement between `layout` and the arm rather than as a key to skip.
+#[derive(Default)]
+struct Everything(Cells);
+
+impl heklang::Columns for Everything {
+    fn value(
+        &self,
+        table: &str,
+        key: &[Key],
+        column: &str,
+    ) -> Result<Option<Value>, heklang::Error> {
+        self.0.value(table, key, column)
+    }
+
+    fn set(
+        &mut self,
+        table: &str,
+        key: Vec<Key>,
+        column: &str,
+        value: Value,
+    ) -> Result<(), heklang::Error> {
+        self.0.set(table, key, column, value)
+    }
+
+    fn keys(&self, table: &str, _pinned: &[(usize, Key)]) -> Result<Vec<Vec<Key>>, heklang::Error> {
+        Ok(self.0.rows(table).map(<[Key]>::to_vec).collect())
+    }
+}
+
+#[test]
+fn a_host_may_over_deliver_the_keys_a_range_covers() {
+    let source = "event @y.happened { shop_id: Int, order_id: Int, kind: String }
+
+fold OfKind(shop_id: Int, order_id: Int, kind: String) -> n: Int = 0 {
+  on @y.happened(shop_id, order_id, kind, kind == \"a\") => n + 1
+  on @y.happened(shop_id, kind, kind == \"a\") => n + 100
+}
+
+fold OtherKind(shop_id: Int, order_id: Int, kind: String) -> n: Int = 0 {
+  on @y.happened(shop_id, order_id, kind == \"b\") => n + 1
+}
+";
+    let program = program(source);
+    let mut interpreter = Interpreter::new(&program);
+    // The `"b"` record is what puts a row in the table that `OfKind`'s range does not
+    // write, and the third is what makes the range run while that row is there.
+    for (order, kind) in [(7, "a"), (8, "b"), (9, "a")] {
+        given(
+            &mut interpreter,
+            "y.happened",
+            [
+                ("shop_id", Value::Int(1)),
+                ("order_id", Value::Int(order)),
+                ("kind", Value::str(kind)),
+            ],
+        );
+    }
+
+    let tables = Tables::new(&program);
+    let mut cells = Everything::default();
+    interpreter
+        .host()
+        .read(&tables.query(), &mut |record| {
+            tables.apply(record, &mut cells)
+        })
+        .expect("an over-delivered key is skipped rather than aborting the record");
+
+    let key = |order, kind: &str| vec![Key::Str(kind.into()), Key::Int(order), Key::Int(1)];
+    assert_eq!(
+        cells.0.get("kind__order__shop", &key(7, "a"), "of_kind"),
+        Some(&Value::Int(201)),
+        "its own arm once, and the range of both `\"a\"` records"
+    );
+    assert_eq!(
+        cells.0.get("kind__order__shop", &key(9, "a"), "of_kind"),
+        Some(&Value::Int(101)),
+        "minted by the third record, so only its own range reaches it"
+    );
+    // Offered to the range and not written by it: the key it carries is not the one the
+    // arm pins.
+    assert_eq!(
+        cells.0.get("kind__order__shop", &key(8, "b"), "of_kind"),
+        None
+    );
+    assert_eq!(
+        cells.0.get("kind__order__shop", &key(8, "b"), "other_kind"),
+        Some(&Value::Int(1))
+    );
+}
+
+/// **A range arm covers the keys the table holds when the record arrives, and a key minted
+/// later never sees it.** The one place the sink and a refold are *meant* to differ, pinned
+/// here because it is easy to meet and nothing said so.
+///
+/// `docs/folds.md` section 11 had the right boundary and the wrong reason for its safety:
+/// "the keys a range arm can need are exactly the keys the pinning arms mint" is about
+/// *which* keys exist and not about *when*. A refold is a function of a key and the whole
+/// log, so it applies every ranged record to every key; a sink walks forward and can only
+/// apply one to the rows that are there.
+///
+/// Both answers are defensible and only one is implementable, so the sink's is the
+/// definition and this is what it costs. An author who needs the other does not write a
+/// range: an arm pinning the whole key is the same under both.
+#[test]
+fn a_key_minted_after_a_ranged_record_does_not_see_it() {
+    let source = "event @x.happened { shop_id: Int, order_id: Int }
+
+fold Seen(shop_id: Int, order_id: Int) -> n: Int = 0 {
+  on @x.happened(shop_id) => n + 10
+  on @x.happened(shop_id, order_id) => n + 1
+}
+";
+    let program = program(source);
+    let mut interpreter = Interpreter::new(&program);
+    for order in [7, 8] {
+        given(
+            &mut interpreter,
+            "x.happened",
+            [("shop_id", Value::Int(1)), ("order_id", Value::Int(order))],
+        );
+    }
+
+    let tables = Tables::new(&program);
+    let mut cells = Cells::default();
+    interpreter
+        .host()
+        .read(&tables.query(), &mut |record| {
+            tables.apply(record, &mut cells)
+        })
+        .expect("the sink applies every record it is given");
+
+    // Order 7 exists for both records, so it takes both ranges and its own count.
+    assert_eq!(
+        cells.get("order__shop", &[Key::Int(7), Key::Int(1)], "seen"),
+        Some(&Value::Int(21))
+    );
+    // Order 8 is minted by the second record, so the first record's range passed it by.
+    assert_eq!(
+        cells.get("order__shop", &[Key::Int(8), Key::Int(1)], "seen"),
+        Some(&Value::Int(11))
+    );
+    // And this is the difference, stated rather than discovered: a refold applies both.
+    assert_eq!(
+        interpreter
+            .fold_stored(
+                "Seen",
+                [("shop_id", Value::Int(1)), ("order_id", Value::Int(8))],
+                2
+            )
+            .expect("the column refolds"),
+        Value::Int(21),
+        "a refold is a function of the key and the whole log, so both ranges reach it"
     );
 }

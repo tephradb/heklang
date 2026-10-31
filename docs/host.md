@@ -362,8 +362,17 @@ boundary: a range update covers the keys the table holds. `docs/folds.md` sectio
 that costs and why it is safe.
 
 **`keys` is held to `read`'s cut, not to `row`'s.** Over-delivering is a cost and under-delivering is
-a bug: a key handed back that the arm does not write is re-checked and skipped, while one withheld is
-a column that silently stops following its log.
+a bug: a key handed back that the arm does not write is dropped by the sink, while one withheld is a
+column that silently stops following its log. Dropped there and not re-checked later, which took a
+review to get right: a key part the arm pinned with a `docs/folds.md` rule 13 conjunct is *bound*
+from whatever key came back, so the conjunct's gate goes dead, and a dead gate at the fold means the
+layout and the arm disagree rather than that there is a key to skip. A store with no index for a
+range answering with every row of its table is the implementation this exists to allow.
+
+**A range covers the keys the table holds when the record arrives.** A key minted by a later record
+never sees an earlier ranged one, where `Interpreter::fold` over the same key applies it. The sink's
+answer is the one a store can produce and the one every path through the sink produces, so a follow
+and a backfill agree; `docs/folds.md` section 11 has the argument and what it costs.
 
 **`Tables::only` is for a rebuild, and `apply` is wrong for one twice over.** A column is rebuilt by
 replaying the log into it, and `apply` runs every arm of every column over that replay: the columns

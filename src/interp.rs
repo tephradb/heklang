@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error;
 use std::fmt;
 use std::sync::Arc;
@@ -954,9 +954,17 @@ impl<'a> Tables<'a> {
         folds: Option<&[Ident]>,
         columns: &mut dyn Columns,
     ) -> Result<(), Error> {
-        for pinned_only in [true, false] {
-            for table in &self.layout.tables {
-                for column in &table.columns {
+        for table in &self.layout.tables {
+            // **What this record writes, worked out before any of it is written.** The two
+            // passes are over *key discovery* and not over the writing, which is the whole
+            // of this shape: a pinned arm mints a key and a range has to cover it, so the
+            // pinned arms go first and `minted` is what a range unions in. Reading the
+            // store back for them, which is what this did, is the same set by a longer
+            // route and it put the writing in pass order.
+            let mut minted: BTreeSet<Vec<Key>> = BTreeSet::new();
+            let mut writes: BTreeMap<(usize, Vec<Key>), Vec<usize>> = BTreeMap::new();
+            for pinned_only in [true, false] {
+                for (which, column) in table.columns.iter().enumerate() {
                     // Sorted by `Layout::closure`, so this is a search rather than the
                     // scan per column per pass per record a `contains` would be.
                     if folds.is_some_and(|folds| folds.binary_search(&column.fold).is_err()) {
@@ -966,59 +974,75 @@ impl<'a> Tables<'a> {
                         if arm.event != record.event.path {
                             continue;
                         }
-                        let complete = arm.fields.iter().all(ArmMatch::pinned);
-                        if complete != pinned_only {
+                        if arm.fields.iter().all(ArmMatch::pinned) != pinned_only {
                             continue;
                         }
-                        self.arm(record, table, column, at, columns)?;
+                        for key in self.arm(record, table, column, at, &minted, columns)? {
+                            if pinned_only {
+                                minted.insert(key.clone());
+                            }
+                            writes.entry((which, key)).or_default().push(at);
+                        }
                     }
                 }
+            }
+
+            // **One group per column and key, and its arms in written order.** A fold is
+            // its arms applied in source order to one accumulator, and the two passes
+            // above hand them out pinned-first, so a column with one arm of each kind on
+            // one event had them the wrong way round: the pinned arm counted and the
+            // ranged arm then overwrote it, where a refold resets and then counts. It is
+            // also one store read and one write per row rather than per arm.
+            for ((which, key), mut arms) in writes {
+                arms.sort_unstable();
+                self.fold_into(record, table, &table.columns[which], &arms, key, columns)?;
             }
         }
         Ok(())
     }
 
-    /// One arm of one column, at every key this record writes it for.
+    /// Every key one arm of one column writes this record at, its predicate already
+    /// checked: what [`applying`](Self::applying) groups by column and key before it folds
+    /// anything.
+    ///
+    /// **Read-only, and that is what makes the grouping possible.** It asks
+    /// [`Columns::keys`] for a range and nothing else, so every key the record writes is
+    /// known before the first `set`, and the arms of one row can then be applied in the
+    /// order they were written.
+    #[allow(clippy::too_many_arguments)]
     fn arm(
         &self,
         record: &Record,
         table: &Table,
         column: &Column,
         at: usize,
-        columns: &mut dyn Columns,
-    ) -> Result<(), Error> {
+        minted: &BTreeSet<Vec<Key>>,
+        columns: &dyn Columns,
+    ) -> Result<Vec<Vec<Key>>, Error> {
         let arm = &column.arms[at];
-        // **Resolved only for an arm that computes a part**, which is read off the arm
-        // rather than off the fold so that the common arm costs nothing: `Program::fold`
-        // is a scan of every fold by name, and this runs per column per arm per record in
-        // the path `Tables::only` exists to make cheaper. `fold_into` resolves it again
-        // per key, which is once per row written rather than once per record seen.
-        let computes = arm
-            .fields
-            .iter()
-            .any(|field| matches!(field, ArmMatch::Computed(_)));
-        let def = match computes {
-            true => Some(
-                self.program
-                    .fold(&column.fold)
-                    .ok_or_else(|| Error::new(ErrorKind::UnknownFold(column.fold.to_string())))?,
-            ),
-            false => None,
-        };
-        let module = def.and_then(|def| def.module.as_deref());
+        // **Once per arm per record, and passed down from here.** `Program::fold` is a
+        // scan of every fold by name, and the per-key work below asks the same question:
+        // resolving it there cost one scan per key of a range, in the path `Tables::only`
+        // exists to make cheaper. `fold_into` keeps its own, which is once per row written
+        // rather than once per key considered.
+        let def = self
+            .program
+            .fold(&column.fold)
+            .ok_or_else(|| Error::new(ErrorKind::UnknownFold(column.fold.to_string())))?;
+        let module = def.module.as_deref();
         // Built on demand and reused across parts, because building it means reading and
         // sealing every bound field.
         let mut computed: Option<Frame> = None;
 
-        // The arm's own narrowing, before a computed part is evaluated. `folded` checks it
-        // again per key, and has to: it is what reads the accumulator, and a ranged arm
-        // has one key per row rather than the one this resolved against.
-        if let Some(def) = def
+        // The arm's own narrowing, before a computed part is evaluated. `matching` checks
+        // it again per key, and has to: a ranged arm has one key per row rather than the
+        // one this resolved against.
+        if !def.stage.slices[at].keys.is_empty()
             && !self
                 .narrowed(record, table, column, at, def)
                 .map_err(|err| err.in_module(module))?
         {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         // The key, part by part, in the table's order. A part the arm pinned is known
@@ -1038,11 +1062,6 @@ impl<'a> Tables<'a> {
                 // evaluates to over this record is the key the row is written at, and
                 // `fold_into` binds the parameter from it below.
                 ArmMatch::Computed(id) => {
-                    // Always `Some`: `computes` above is this same test over the same
-                    // list, so an arm with a computed part resolved its fold.
-                    let Some(def) = def else {
-                        return Err(ErrorKind::MalformedIr.into());
-                    };
                     let slice = &def.stage.slices[at];
                     let frame = match computed {
                         Some(ref mut frame) => frame,
@@ -1071,7 +1090,7 @@ impl<'a> Tables<'a> {
         }
 
         let whole: Option<Vec<Key>> = key.iter().cloned().collect();
-        let keys = match whole {
+        let mut keys = match whole {
             Some(key) => vec![key],
             None => {
                 let pinned: Vec<(usize, Key)> = key
@@ -1079,13 +1098,40 @@ impl<'a> Tables<'a> {
                     .enumerate()
                     .filter_map(|(at, part)| part.clone().map(|part| (at, part)))
                     .collect();
-                columns.keys(&table.name, &pinned)?
+                // **The store's keys and the ones this record has just minted.** A range
+                // covers every key the table holds, and a key an earlier arm of this same
+                // record minted is one of them: nothing has been written yet, so the store
+                // cannot answer for it and `minted` is where it is. Deduplicated, because
+                // a key the store already held and this record minted again is one key and
+                // folding its arms twice would count the record twice.
+                //
+                // **Both sides go through `covers`, including the store's.**
+                // `Columns::keys` is held to `Log::read`'s cut: over-delivering is a cost
+                // and under-delivering is a bug, so a host may answer with more than the
+                // arm writes and this is where the rest is dropped. Leaving it to the
+                // predicate re-check was not the same thing: a part the arm pinned with a
+                // rule 13 conjunct is bound from whatever key came back, so the gate goes
+                // dead, and a dead gate here is a `malformed ir` that aborts the record
+                // rather than a key to skip.
+                let mut found = columns.keys(&table.name, &pinned)?;
+                found.retain(|key| covers(&pinned, key));
+                found.extend(minted.iter().filter(|key| covers(&pinned, key)).cloned());
+                found.sort();
+                found.dedup();
+                found
             }
         };
-        for key in keys {
-            self.fold_into(record, table, column, at, key, columns)?;
+        // The check a host cannot make for itself: an arm's field filters, which
+        // `ColumnArm` does not carry. Here rather than at the fold, so the list is exactly
+        // what the arm writes and `minted` says what the table now holds rather than what
+        // it might.
+        let mut writes = Vec::with_capacity(keys.len());
+        for key in keys.drain(..) {
+            if self.matching(record, column, at, &key, def)? {
+                writes.push(key);
+            }
         }
-        Ok(())
+        Ok(writes)
     }
 
     /// Whether this arm's predicate holds for this record, checked **before** a computed
@@ -1139,6 +1185,81 @@ impl<'a> Tables<'a> {
         Ok(resolved.live && matches(&resolved.predicate, &record.event)?)
     }
 
+    /// Whether one arm matches this record **at one key**: the check a host cannot make
+    /// for itself, because [`ColumnArm`] carries the key parts an arm pins and not the
+    /// field filters it also wrote.
+    ///
+    /// Split out of the fold, where it used to sit, so that
+    /// [`applying`](Self::applying) knows every key the record writes before it writes
+    /// any of them. That is what lets a row's arms be folded in the order they were
+    /// written, and what makes the minted set exact: a key an arm computed but whose
+    /// filters failed is not one the table now holds, and another column's range must not
+    /// be told otherwise.
+    ///
+    /// **Resolved after the parameters, which is what makes a rule 13 gate hold.** A
+    /// caller resolves a key conjunct as a *gate*, comparing what the arm writes against
+    /// the argument it was given; there is no argument here, so the key came from the arm
+    /// and the gate is true by construction. Going through `resolved_one` anyway is what
+    /// keeps a field filter fitted identically, and a dead slice at this point is a
+    /// disagreement between `layout` and the arm rather than a case to skip.
+    fn matching(
+        &self,
+        record: &Record,
+        column: &Column,
+        at: usize,
+        key: &[Key],
+        def: &Fold,
+    ) -> Result<bool, Error> {
+        // Stamped over the whole of it, which is what `fold_into` does with the fold and
+        // for the reason its comment gives: this is the boundary that knows which module
+        // the fold came from, and a `MissingField` raised while comparing a predicate
+        // against a record reached a host naming no file at all.
+        let module = def.module.as_deref();
+        self.matched(record, column, at, key, def)
+            .map_err(|err| err.in_module(module))
+    }
+
+    /// The body of [`matching`](Self::matching), so one `map_err` covers all of it.
+    fn matched(
+        &self,
+        record: &Record,
+        column: &Column,
+        at: usize,
+        key: &[Key],
+        def: &Fold,
+    ) -> Result<bool, Error> {
+        let mut frame = Frame::new(def.frame);
+        self.bind_key(column, key, def, &mut frame)?;
+        let slice = &def.stage.slices[at];
+        let resolved = resolved_one(self.program, &def.exprs, slice, &mut frame)?;
+        if !resolved.live {
+            return Err(ErrorKind::MalformedIr.into());
+        }
+        matches(&resolved.predicate, &record.event)
+    }
+
+    /// The parameters from the key, which is the inverse of what a caller does and the
+    /// reason [`Column::args`] is recorded: a key part is named for its subject or for the
+    /// parameter with one `_id` off, so the part's name is not callable.
+    ///
+    /// [`Column::args`]: crate::Column::args
+    fn bind_key(
+        &self,
+        column: &Column,
+        key: &[Key],
+        def: &Fold,
+        frame: &mut Frame,
+    ) -> Result<(), Error> {
+        for (name, part) in column.args.iter().zip(key) {
+            let Some(param) = def.params.iter().find(|param| &param.name == name) else {
+                return Err(ErrorKind::MalformedIr.into());
+            };
+            let value = fitted_at(value::from_key(part), &param.ty, Span::default())?;
+            frame.set(param.slot, value)?;
+        }
+        Ok(())
+    }
+
     /// The frame a computed key part is evaluated in: this record's envelope and this
     /// slice's binds, which is exactly what `key param = ...` is allowed to read.
     ///
@@ -1164,7 +1285,7 @@ impl<'a> Tables<'a> {
         record: &Record,
         table: &Table,
         column: &Column,
-        at: usize,
+        arms: &[usize],
         key: Vec<Key>,
         columns: &mut dyn Columns,
     ) -> Result<(), Error> {
@@ -1176,7 +1297,7 @@ impl<'a> Tables<'a> {
         // Stamped once here, which is the boundary that knows which module the fold came
         // from, exactly as `run` and `project` are the boundary for a handler's.
         let folded = self
-            .folded(record, table, column, at, &key, def, columns)
+            .folded(record, table, column, arms, &key, def, columns)
             .map_err(|err| err.in_module(module))?;
         // Not shredded. This is the fill path, so it behaves as `fold_stored` does and
         // hands a `Value::Sealed` through for the store to hold and shred on its own
@@ -1184,7 +1305,7 @@ impl<'a> Tables<'a> {
         // refolding anything.
         match folded {
             Some(folded) => columns.set(&table.name, key, &column.name, folded),
-            // The record failed the arm's own filters, so this key is not one it writes.
+            // No arm of this column writes this key, which `applying` does not ask for.
             None => Ok(()),
         }
     }
@@ -1197,45 +1318,22 @@ impl<'a> Tables<'a> {
         record: &Record,
         table: &Table,
         column: &Column,
-        at: usize,
+        arms: &[usize],
         key: &[Key],
         def: &Fold,
         columns: &dyn Columns,
     ) -> Result<Option<Value>, Error> {
-        let slice = &def.stage.slices[at];
-        let mut frame = Frame::new(def.frame);
-
-        // The parameters from the key, which is the inverse of what a caller does and the
-        // reason `Column::args` is recorded: a key part is named for its subject or for
-        // the parameter with one `_id` off, so the part's name is not callable.
-        for (name, part) in column.args.iter().zip(key) {
-            let Some(param) = def.params.iter().find(|param| &param.name == name) else {
-                return Err(ErrorKind::MalformedIr.into());
-            };
-            let value = fitted_at(value::from_key(part), &param.ty, Span::default())?;
-            frame.set(param.slot, value)?;
-        }
-
-        // **Resolved after the parameters, which is what makes a rule 13 gate hold.** A
-        // caller resolves a key conjunct as a *gate*, comparing what the arm writes
-        // against the argument it was given; there is no argument here, so the key came
-        // from the arm and the gate is true by construction. Going through the same
-        // function anyway is what keeps a field filter fitted identically, and a dead
-        // slice at this point is a disagreement between `layout` and the arm rather than
-        // a case to skip.
-        let resolved = resolved_one(self.program, &def.exprs, slice, &mut frame)?;
-        if !resolved.live {
-            return Err(ErrorKind::MalformedIr.into());
-        }
-        // The check a host cannot make for itself: an arm's field filters, which
-        // `ColumnArm` does not carry.
-        if !matches(&resolved.predicate, &record.event)? {
+        if arms.is_empty() {
             return Ok(None);
         }
+        let mut frame = Frame::new(def.frame);
+        self.bind_key(column, key, def, &mut frame)?;
 
         // The accumulator: what the column holds, or the seed where it holds nothing. A
         // key no event has touched folds to the seed, so an absent row and an absent
-        // value are one thing (`docs/folds.md` section 11).
+        // value are one thing (`docs/folds.md` section 11). Read **once** for the row,
+        // not once per arm, which is what folding a row's arms together buys besides
+        // getting their order right.
         let held = match columns.value(&table.name, key, &column.name)? {
             Some(value) => value,
             None => {
@@ -1251,19 +1349,28 @@ impl<'a> Tables<'a> {
         };
         frame.set(def.slot, held)?;
 
-        // From here it is the fold driver's own inner loop, for one slice.
+        // Before the slices, because an arm's value reads these. One list for the whole
+        // fold, exactly as the free `fold` driver writes them.
         for bind in &def.envelope {
             frame.set(bind.slot, envelope_value(record, bind.field))?;
         }
-        for bind in &slice.binds {
-            let value = field(&record.event, &bind.field)?.clone();
-            let value = seal(self.program, &record.event, &bind.field, value)?;
-            frame.set(bind.slot, value)?;
-        }
-        for update in &slice.updates {
-            let value = eval(self.program, &def.exprs, &mut frame, update.value, None)?;
-            let value = fitted_at(value, &update.ty, def.exprs.span(update.value))?;
-            frame.set(update.slot, value)?;
+
+        // **In the order they were written**, which is the fold's own inner loop for the
+        // arms that match this row. `applying` sorted them and `matching` is what decided
+        // they belong here, so there is nothing left to re-check: a fold is its arms
+        // applied in source order to one accumulator, and so is this.
+        for &at in arms {
+            let slice = &def.stage.slices[at];
+            for bind in &slice.binds {
+                let value = field(&record.event, &bind.field)?.clone();
+                let value = seal(self.program, &record.event, &bind.field, value)?;
+                frame.set(bind.slot, value)?;
+            }
+            for update in &slice.updates {
+                let value = eval(self.program, &def.exprs, &mut frame, update.value, None)?;
+                let value = fitted_at(value, &update.ty, def.exprs.span(update.value))?;
+                frame.set(update.slot, value)?;
+            }
         }
         Ok(Some(frame.get(def.slot)?.clone()))
     }
@@ -2415,6 +2522,17 @@ pub fn partition_key(arm: &Arm, event: &Event) -> Result<Vec<Key>, Error> {
             })
         })
         .collect()
+}
+
+/// Whether a key carries every part a ranged arm pinned, which is what
+/// [`Columns::keys`] is asked and what the minted set has to be filtered by before it is
+/// unioned in.
+///
+/// `pinned` is a position in the table's key order and the value the arm fixed it to, so a
+/// key agrees when each named position holds that value; the positions it does not name
+/// are the range.
+fn covers(pinned: &[(usize, Key)], key: &[Key]) -> bool {
+    pinned.iter().all(|(at, part)| key.get(*at) == Some(part))
 }
 
 fn field<'a>(event: &'a Event, name: &str) -> Result<&'a Value, Error> {

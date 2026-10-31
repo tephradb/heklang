@@ -343,6 +343,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **One column's arms now apply in the order they were written** when a record reaches more than one
+  of them. `Tables::apply` runs every fully pinned arm before every ranged one, because a range over
+  a key this same record mints has to see it, and it used to fold as it went: a column with one arm
+  of each kind on one event therefore applied them in *pass* order, so the pinned arm counted and
+  the ranged arm then overwrote it, where a refold resets and then counts. A fold is its arms
+  applied in source order to one accumulator and the sink has to be the same fold, which is the
+  claim `tests/sink.rs` is built on; no fixture had a column whose pinned and ranged arms shared an
+  event path, so nothing caught it.
+
+  The two passes now work out only *what* the record writes, the keys they mint accumulate in a set
+  that a range unions in rather than being read back out of the store, and the work is grouped by
+  column and key and folded in written order. A row is therefore one `Columns::value` and one
+  `Columns::set` rather than one of each per arm.
+- **An over-delivered key no longer aborts the record.** `Columns::keys` is held to `Log::read`'s
+  cut, so a store with no index for a range may answer with every row of its table, and the sink now
+  drops the keys the arm does not write instead of leaving them to the predicate re-check. It could
+  not survive that: a part the arm pinned with a rule 13 conjunct is *bound* from whatever key came
+  back, so the conjunct's gate went dead, and a dead gate there is read as a disagreement between
+  `layout` and the arm rather than as a key to skip, which raised `malformed ir`.
+- **`docs/folds.md` section 11's safety argument for a range arm was wrong**, and the boundary is now
+  stated and tested rather than discovered. It said the keys a range can need "are exactly the keys
+  the pinning arms mint", which is about which keys exist and not about *when*: a refold applies
+  every ranged record to every key, while a sink walks forward and can only apply one to the rows
+  that are there, so **a key minted after a ranged record never sees it**. An order placed after a
+  `@shop.uninstalled` is `false` in the store and `true` on a refold. The sink's answer is the
+  definition, because it is the one a store can produce and every path through the sink produces it,
+  so a follow and a backfill agree with each other; an author who wants the other does not write a
+  range.
 - **A named fold laundered a `@subject` seal out through a plain declared return type.** A fold
   declared `-> String?` folding a `String @subject(shop_id)` field handed back the **plaintext**,
   and it reached a plain event field with no `reveal` on a clean `hek check`. An arm that folds

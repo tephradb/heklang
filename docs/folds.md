@@ -651,6 +651,23 @@ Two obligations are the sink's own, and both were learned from a store that got 
   range update over every key carrying the parts it did pin, and a key this same record mints is one
   of them. Reading the range first leaves the new key out and nothing afterwards corrects it. One
   record is the whole obligation, since a key minted by an earlier record is already stored.
+
+  **That ordering is over working out the keys, not over writing them**, and the difference is a
+  defect that stood for three releases. The two passes used to fold as they went, so a column with
+  one pinned and one ranged arm on the same event applied them in *pass* order: the pinned arm
+  counted and the ranged arm then overwrote it, where a refold resets and then counts. A fold is its
+  arms applied in **source order** to one accumulator, and the sink has to be the same fold for the
+  keys it has. So the passes now only collect what the record writes, the keys they mint accumulate
+  in a set a range unions in rather than being read back out of the store, and the work is then
+  grouped by column and key and folded in written order. That also makes it one read and one write
+  per row instead of per arm.
+
+  **`Columns::keys` may over-deliver and the sink drops the rest**, which is the trait's own cut and
+  used to be honoured only by accident. A store with no index for a range answering with every row
+  of the table is the cheapest correct implementation; a key it hands back that the arm does not
+  write is skipped here rather than re-checked later, because a part the arm pinned with a rule 13
+  conjunct would be *bound* from that key and the conjunct's gate would go dead, which the fold
+  reads as a disagreement between `layout` and the arm and not as a key to skip.
 - **The subscription is derived here, not by each host.** `Tables::query` is one predicate per event
   any column folds, with no filters, because two columns on one event filter it differently and a
   subscription is their union. The first store to build its own used `EventPath`'s `Display`, which
@@ -687,10 +704,32 @@ key and discarding the value is enough, since `Columns::keys` is all a ranged ar
 than an implementation detail. A fold is a total function of a key and a log, so `OrderClosed(shop,
 order)` with an arm on `@shop.uninstalled(shop_id)` is `true` under `Interpreter::fold` for *any*
 order id, including one no event ever mentioned. The store has no row there and reads the seed, so
-the two disagree. The key space is unbounded and the alternative is not implementable; what makes it
-safe is that every key part is pinned by some arm (`hek check --tables` does not keep a fold whose
-key no event supplies), so the keys a range arm can need are exactly the keys the pinning arms mint.
-A read at a key nothing minted is a question about a row that does not exist.
+the two disagree. The key space is unbounded and the alternative is not implementable, and a read at
+a key nothing minted is a question about a row that does not exist.
+
+**The boundary is in time as well as in space**, and this document used to get the second half
+wrong. It said the keys a range arm can need "are exactly the keys the pinning arms mint", which is
+about *which* keys exist and says nothing about *when*. A refold is a function of a key and the whole
+log, so it applies every ranged record to every key; a sink walks forward one record at a time and
+can only apply one to the rows that are there. **A key minted after a ranged record never sees it.**
+
+```hek
+fold Seen(shop_id: Int, order_id: Int) -> n: Int = 0 {
+  on @x.happened(shop_id) => n + 10
+  on @x.happened(shop_id, order_id) => n + 1
+}
+```
+
+Two records under one shop, orders 7 and 8. The sink leaves order 8 at `11`, because it did not
+exist when the first record's range ran; `Interpreter::fold` answers `21`. The same shape reaches
+`OrderClosed` above with nothing exotic: an order placed *after* the uninstall is `false` in the
+store and `true` on a refold.
+
+**The sink's answer is the definition**, because it is the one a store can produce and the one every
+path produces: a rebuild replays the log through `Tables::apply` too, so a follow and a backfill
+agree with each other. What they differ from is `Interpreter::fold` and `fold_stored`, which is why
+a store fills a column through the sink rather than mixing the two. An author who wants the refold's
+answer does not write a range: an arm pinning the whole key means the same thing under both.
 
 `Interpreter::fold_stored`'s bound **is a head and not a position**, which is the one number a store
 has: `Log::head` answers
