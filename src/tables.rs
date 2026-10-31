@@ -10,7 +10,7 @@
 //! is why the rules live in the library rather than in the CLI.
 
 use crate::interp::{Error, ErrorKind, eval_pure, fitted_at};
-use crate::ir::{EventPath, Expr, ExprId, Filter, Fold, Ident, Param, Program, Type};
+use crate::ir::{EventPath, Expr, ExprId, Exprs, Filter, Fold, Ident, Program, Slot, Type};
 use crate::parse::snake_case;
 use crate::value::Value;
 
@@ -66,10 +66,11 @@ impl Layout {
     /// A name no column is kept for contributes nothing, so an unstored fold and a typo
     /// both drop out here rather than at the apply.
     ///
-    /// **The columns this adds are written through.** A caller rebuilding one column has
-    /// to let the additions land somewhere the replay can read back, which is what mints
-    /// the keys, and discard them at the end rather than withhold them as it goes:
-    /// dropping the write is dropping the key.
+    /// **What the additions are for is the keys, so the keys are what a caller has to
+    /// keep.** A rebuild that drops their writes outright drops the keys with them and is
+    /// back where it started; one that records the key and discards the value has
+    /// everything a range asked for, since [`crate::Columns::keys`] is all a ranged arm
+    /// reads. Keeping the values too is the simpler thing and costs only an overlay.
     pub fn closure(&self, folds: &[Ident]) -> Vec<Ident> {
         let ranges = |column: &&Column| {
             column
@@ -258,8 +259,10 @@ pub fn layout(program: &Program) -> Layout {
                         };
                         let found = fixed.or_else(computed).or_else(|| {
                             slice.filters.iter().find_map(|filter| match filter {
-                                Filter::Field { field, value } => pins(fold, *value, param)
-                                    .then(|| ArmMatch::Field(field.clone())),
+                                Filter::Field { field, value } => {
+                                    pins(&fold.exprs, *value, param.slot)
+                                        .then(|| ArmMatch::Field(field.clone()))
+                                }
                                 Filter::Key { .. } => None,
                             })
                         });
@@ -359,14 +362,19 @@ pub fn layout(program: &Program) -> Layout {
 /// one here: `Parser::lift` makes it an operand of a comparison, and `Parser::lifted` the
 /// value of a spliced call's parameter assignment, which lives in the **caller's** arena
 /// rather than in `fold.exprs`.
-fn pins(fold: &Fold, value: ExprId, param: &Param) -> bool {
+///
+/// Over an [`Exprs`] rather than a [`Fold`], because the parser asks the same question of
+/// an arm it has not lowered into one yet: rule 14 refuses a filter reading a parameter
+/// this arm leaves *open*, and open means no filter pins it. One derivation and two
+/// readers, as `part_names` already is.
+pub fn pins(exprs: &Exprs, value: ExprId, slot: Slot) -> bool {
     let mut id = value;
     // A fold body has no statements and so nothing that narrows, but peeling is free and
     // the house style everywhere else.
-    if let Some(Expr::Unwrap(inner)) = fold.exprs.get(id) {
+    if let Some(Expr::Unwrap(inner)) = exprs.get(id) {
         id = *inner;
     }
-    matches!(fold.exprs.get(id), Some(Expr::Load(slot)) if *slot == param.slot)
+    matches!(exprs.get(id), Some(Expr::Load(found)) if *found == slot)
 }
 
 /// The name each key part takes, in **parameter** order rather than key order: what

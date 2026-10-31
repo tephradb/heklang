@@ -679,8 +679,9 @@ So the restricted sink is a **handle** and the closure is **readable off it**, w
 section 7a's half of this and matters to anyone writing a rebuild: the sink carries the accumulator
 in the store, so replaying onto a column that already holds its value folds every record into it
 twice. `Rebuild::folds` is the set a rebuild resets or shadows before it starts, and it is wider than
-the set it asked for. The extra columns are discarded at the end rather than withheld as they go,
-because dropping the write is dropping the key.
+the set it asked for. What the extra columns are there for is their **keys**, so a rebuild that
+drops their writes outright drops the keys with them and is back where it started; recording each
+key and discarding the value is enough, since `Columns::keys` is all a ranged arm reads.
 
 **A stored column is defined over the keys the table holds**, and that is a real boundary rather
 than an implementation detail. A fold is a total function of a key and a log, so `OrderClosed(shop,
@@ -993,18 +994,40 @@ otherwise answer:
   stayed storable while the filter narrowed the log to the records whose field already equalled what
   the part computed, dropping every other one from the read model with nothing to say so.
 
-**The second half is what lets the sink check the arm's narrowing first**, which it has to: a by-key
-read skips a record its predicate rejects and never runs the expression at all, so
-`key rate = 100 / units` under `(kind: "paid")` must not fail a replay on a free record with no
-units. With a filter unable to read a computed part, no conjunct the sink has to resolve depends on
-a part it has not computed yet, so the frame-free ones can be checked before anything is evaluated.
+A third refusal falls out of the second and belongs with it: in an arm that computes a part, **a
+filter may not read a parameter the arm leaves open** either. An open parameter is a range over
+every key the table holds, so such a conjunct has one value per key the store hands back, and the
+key the range is narrowed with is what the computed part is being evaluated to produce.
+
+**That is what lets the sink check the arm's narrowing first**, which it has to: a by-key read skips
+a record its predicate rejects and never runs the expression at all, so `key rate = 100 / units`
+under `(kind: "paid")` must not fail a replay on a free record with no units. Between them the two
+refusals leave every conjunct of such an arm reading only parameters the arm *pins*, which are on
+the record or fixed by the arm, so the **whole** predicate resolves before anything is evaluated.
+Checking only the conjuncts that read nothing was the first attempt and it was not enough: a second
+filter reading an already-pinned parameter is a real narrowing conjunct, and skipping it left the
+division running on records the arm never folded.
+
+**A computed part may not be sealed content**, and this is the one position inside an arm where that
+is so. Rule 7 lets an arm fold sealed content into a sealed column, which is why the ordinary seal
+check stands down inside a fold; a key is different, because erasure empties a column and cannot
+reach a primary key, so a row filed under decrypted content would be personal data nothing could
+erase. It also could not run: the seal is a `Value::Sealed` at the sink, which will not reduce to a
+key, and a by-key read compares the plaintext it was asked for against the ciphertext and folds
+nothing. `--tables` called the column stored, `fill` raised `malformed ir`, and `fold` answered the
+seed. The fix is rule 7 itself: return the sealed value as a column of its own.
+
+The check is the ordinary seal check with the fold's stand-down lifted for this one clause, so it
+runs at **every position inside the expression** rather than over its result. Over the result alone
+a `fn` launders the subject away: `key bucket = tag(email)` through `fn tag(s: String) -> String`
+checked clean and left the hole exactly where it was.
 
 Binding the parts an arm pins from a field first, and computing the rest against them, is a real
 feature and a different one. It would make what a part may read depend on what else the arm pinned
 and on the order two computed parts were written in, where this rule is one sentence, and none of
 the cases that asked for computed keys reads a key part.
 
-Six things are refused:
+Eight things are refused:
 
 **A part of a subject type.** A subject's ids are minted and filed by the key store, so a computed
 one would address a row under a key nothing issued while `KeyPart::subject` reported it as that
@@ -1017,16 +1040,27 @@ at all.
 **A name that is not a parameter.** `key` computes a key part; a value the arm wants and the key
 does not is an ordinary expression in the arm.
 
-**A part already written in that arm**, whichever of the three ways wrote it, for the reason two
-rule 13 conjuncts on one part are refused.
+**A part already written in that arm** by a rule 13 conjunct or by another `key` clause, for the
+reason two rule 13 conjuncts on one part are refused. A **field** filter writes one too, and is
+refused by the rule below rather than by this one, because a filter writes a part by its *value*:
+`(month: 3)` narrows an event field that happens to be spelled like a parameter and pins nothing, so
+comparing names refused an ordinary program.
 
 **A read of the key or the accumulator**, which is the rule above:
 
 > `` `tag` is a part of the key this arm is computing, so a computed key part cannot read it ``
 
-**A filter reading a part the arm computes**, which is the same rule the other way:
+**A filter reading a part the arm computes**, and **a filter reading a part the arm leaves open**,
+which are the same rule the other way:
 
 > `` `month` is a key part this arm computes, so the filter on `label` cannot read it ``
+
+> the filter on `label` reads `order_id`, which no conjunct of this arm pins
+
+**A part whose value is sealed content**, which is `seal-boundary` rather than
+`fold-restriction`, because it is the decrypt boundary and not the key derivation:
+
+> `` `bucket` is a key part, and this is content sealed under `Customer` ``
 
 **Seen from the read side**, the part is `ArmMatch::Computed` and it counts as **pinned**: one
 record writes one key, which is not a range, so a host deriving range indexes needs to know nothing

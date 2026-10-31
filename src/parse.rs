@@ -119,6 +119,16 @@ struct Parser {
     /// trigger binding there is plainly the constant it is; in an arm it would read as
     /// though it advanced with the records, which is what this rejects.
     fold_arm: bool,
+    /// Set while parsing a `key` clause's value (rule 14), which is the one position
+    /// inside a fold where `folding` must **not** stand `check_seal` down.
+    ///
+    /// Rule 7 is why it stands down at all: an arm's value may carry sealed content into
+    /// a sealed column, and a key is the exception, because erasure empties a column and
+    /// cannot reach a primary key. Checking only the expression's own type was not
+    /// enough, because a `fn`'s declared return type launders the subject away:
+    /// `key bucket = tag(email)` through `fn tag(s: String) -> String` checked clean, and
+    /// the column then held ciphertext a by-key read could not match.
+    keying: bool,
     /// Set alongside `fold_arm` when the arm bound its own envelope with `as`. That is
     /// the one case where reading the binding inside an arm is right, because it is the
     /// record being folded rather than a trigger standing still outside the fold.
@@ -405,6 +415,7 @@ impl Parser {
             prologue: false,
             folding: false,
             fold_arm: false,
+            keying: false,
             arm_envelope: false,
             envelope_read: false,
             pending_envelope: None,
@@ -1070,6 +1081,7 @@ impl Parser {
             prologue,
             folding,
             fold_arm,
+            keying,
             arm_envelope,
             envelope_read,
             pending_envelope,
@@ -1096,6 +1108,7 @@ impl Parser {
         *prologue = false;
         *folding = false;
         *fold_arm = false;
+        *keying = false;
         *arm_envelope = false;
         *envelope_read = false;
         *pending_envelope = None;
@@ -5240,14 +5253,15 @@ impl Parser {
             // column storable, which is the reason `slice_filters` refuses the pair of
             // conjuncts it can see.
             //
-            // By **name** here, which catches the shorthand `(month)` and the long
-            // `(month: ..)`. A field of another name whose value is the parameter writes
-            // the part too, because `tables::pins` reads the value rather than the name,
-            // and that is the loop at the end of this function: it is the same defect one
-            // step more general, and one refusal for it is enough.
+            // A field filter is told apart by its **value** and not by its name, which is
+            // what `tables::pins` reads and the loop at the end of this function covers:
+            // `(label: month)` writes the part from a field of another name, and
+            // `(month: 3)` writes nothing, because an event field and a parameter may be
+            // spelled alike and the filter is about the field. Comparing names refused
+            // the second of those, which is an ordinary program.
             let matched = filters.iter().any(|filter| match filter {
                 Filter::Key { param, .. } => param == &name,
-                Filter::Field { field, .. } => field == &name,
+                Filter::Field { .. } => false,
             }) || keys.iter().any(|key| key.param == name);
             if matched {
                 return Err(self
@@ -5262,8 +5276,13 @@ impl Parser {
             }
             self.expect_sym(Sym::Assign)?;
             // The fold's own rule, as an arm's value is held to it: no clock, no call out.
+            // `keying` beside it is the one thing a key clause does *not* share with the
+            // arm's value: the seal check stays on, at every position inside the
+            // expression rather than only over its result.
             self.folding = true;
+            self.keying = true;
             let value = self.expr(lower, Some(param.ty.clone()));
+            self.keying = false;
             self.folding = false;
             let value = value?;
             // Unlike rule 13's conjunct this *may* read the record, which is the point, so
@@ -5309,29 +5328,70 @@ impl Parser {
         // It is also what makes the sink able to check an arm's narrowing *before* it
         // evaluates a computed part: with this refused, no filter it has to resolve
         // depends on a part it has not computed yet.
-        let slots: Vec<Slot> = keys.iter().map(|key| key.slot).collect();
+        // **Every filter of this arm has to resolve from the record alone**, and the two
+        // refusals below are the two ways one would not.
+        //
+        // The sink evaluates a computed part to decide which row the record belongs to,
+        // and it checks the arm's narrowing first, because a by-key read skips a record
+        // its predicate rejects and never runs the expression at all. What it has at that
+        // point is the record and the parts the arm pins from it, so a conjunct reading
+        // anything else cannot be resolved there and the expression would run for a
+        // record the arm was never going to fold.
         for filter in filters {
             let Filter::Field { field, value } = filter else {
                 continue;
             };
-            let Some((slot, at)) = lower.b.reads_one_of(*value, &slots) else {
-                continue;
-            };
-            let Some(key) = keys.iter().find(|key| key.slot == slot) else {
-                continue;
-            };
-            return Err(self
-                .err(
-                    Code::FoldRestriction,
-                    format!(
-                        "`{}` is a key part this arm computes, so the filter on `{field}` cannot read it",
-                        key.param
-                    ),
-                    at,
-                )
-                .with_hint(
-                    "a filter resolves once for the whole slice, against the key its caller asked for, and a computed part is per record with no such key to resolve against; narrow on a field of the event, or compute the part from the field rather than filtering on it",
-                ));
+            for param in lower.b.params() {
+                if lower.b.reads_one_of(*value, &[param.slot]).is_none() {
+                    continue;
+                }
+                let at = lower.b.exprs().span(*value);
+                // Computed in this arm: it has no value until the record is in hand, and
+                // a filter resolves once for the whole slice against the key its caller
+                // asked for. `(label: month)` writes the part twice over, since a filter
+                // pins a part by its value rather than by its name; `(label:
+                // month.upper())` pins nothing, so the column stayed storable while the
+                // filter narrowed the log to the records whose field already equalled
+                // what the part computed and dropped every other one from the read model.
+                if keys.iter().any(|key| key.slot == param.slot) {
+                    return Err(self
+                        .err(
+                            Code::FoldRestriction,
+                            format!(
+                                "`{}` is a key part this arm computes, so the filter on `{field}` cannot read it",
+                                param.name
+                            ),
+                            at,
+                        )
+                        .with_hint(
+                            "a filter resolves once for the whole slice, against the key its caller asked for, and a computed part is per record with no such key to resolve against; narrow on a field of the event, or compute the part from the field rather than filtering on it",
+                        ));
+                }
+                // Open in this arm: no conjunct pins it, so it is a *range* over every
+                // key the table holds and its value is one per key the store hands back.
+                // The sink reaches the computed part before it has asked for them, so
+                // this conjunct would be the one it could not check.
+                let pinned = filters.iter().any(|other| match other {
+                    Filter::Key { slot, .. } => *slot == param.slot,
+                    Filter::Field { value, .. } => {
+                        tables::pins(lower.b.exprs(), *value, param.slot)
+                    }
+                });
+                if !pinned {
+                    return Err(self
+                        .err(
+                            Code::FoldRestriction,
+                            format!(
+                                "the filter on `{field}` reads `{}`, which no conjunct of this arm pins",
+                                param.name
+                            ),
+                            at,
+                        )
+                        .with_hint(
+                            "an unpinned parameter is a range over every key the table holds, so this conjunct has one value per key, and an arm that computes a key part is checked before those keys are asked for; pin it with the parameter alone (`<field>: <param>`) or on an arm with no `key` clause",
+                        ));
+                }
+            }
         }
         Ok(keys)
     }
@@ -9015,7 +9075,9 @@ impl Parser {
     /// thing the seal exists to stop. A `fold` and an entity column are the
     /// exceptions: both take it by propagating the seal onto themselves.
     fn check_seal(&self, lower: &Lower, value: ExprId, want: &Type, at: Span) {
-        if self.folding || self.propagating {
+        // Rule 14's `key` clause is the one position inside a fold that the stand-down is
+        // wrong for, and `keying` is the whole of what tells it apart. See that field.
+        if (self.folding || self.propagating) && !self.keying {
             return;
         }
         let Some(found) = self.type_of(lower, value) else {
@@ -9024,8 +9086,20 @@ impl Parser {
         let Some(subject) = found.subject() else {
             return;
         };
-        if want.subject() == Some(subject) {
+        if want.subject() == Some(subject) && !self.keying {
             return;
+        }
+        if self.keying {
+            return self.note(
+                self.err(
+                    Code::SealBoundary,
+                    format!("a key part is plaintext, and this is content sealed under `{subject}`"),
+                    at,
+                )
+                .with_hint(
+                    "a key is plaintext and an erase cannot reach one, so a row filed under sealed content would hold personal data nothing could erase; key on something the subject is not in, and return the sealed value as a column of its own (rule 7)",
+                ),
+            );
         }
         self.note(self.err(Code::SealBoundary, format!("this is content sealed under `{subject}` and {} is not", a(want)), at).with_hint("`reveal` it first, because writing it here takes it out from behind the decrypt boundary"))
     }

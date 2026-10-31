@@ -191,6 +191,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binds, so reordering the comma list is no longer a breaking change: nothing means an order there,
   since the parts are found by name, all of them must agree, and none may read another.
   `hek-digest 6` stands and needs no bump, because the clause itself is unreleased.
+
+  **A computed part may not be sealed content**, which is the one position inside an arm where a
+  seal is wrong. Rule 7 lets an arm fold sealed content into a sealed column, which is why the
+  ordinary seal check stands down inside a fold; erasure empties a column and cannot reach a primary
+  key, so a row filed under decrypted content would be personal data nothing could erase. It could
+  not run either: the seal is a `Value::Sealed` at the sink, which will not reduce to a key, and a
+  by-key read compares the plaintext it was asked for against the ciphertext and folds nothing, so
+  `--tables` called the column stored, `fill` raised `malformed ir` and `fold` answered the seed.
+  Return the sealed value as a column of its own instead, which is rule 7. The check is the ordinary
+  seal check with the fold's stand-down lifted for this clause, so it runs at every position inside
+  the expression: over the result alone a `fn` launders the subject away, and
+  `key bucket = tag(email)` through `fn tag(s: String) -> String` checked clean.
 - **A per-record sink for the derived read model**: `Tables` and the `Columns` seam, which are to
   `fold_stored` what `Projection` and `Rows` are to a projector rebuild. `Tables::apply(record,
   columns)` applies one record to whatever columns its arms name, carrying the accumulator in the
@@ -241,8 +253,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sink carries the accumulator in the store, so replaying onto a column that already holds its value
   folds every record into it twice. A store rebuilding `order_closed` against its live tables gets
   `order_total` applied beside it and silently doubled, so `folds` is the set it resets or shadows
-  first and the extra columns are the ones it discards at the end, because withholding their writes
-  as it goes is dropping the key the ranged column was added for.
+  first and the extra columns are the ones it throws away afterwards. What it may not do is drop
+  their writes as they go, because the **keys** are what the additions are for: recording each key
+  and discarding the value is enough, since `Columns::keys` is all a ranged arm reads.
 - **`fill` is a fifth test action**, and `expect <table>[key] { column: value }` a row expectation
   over the derived read model. It takes no name, because nothing declares what it fills: a program
   has one read model and `layout` derives all of it from the folds. This is `docs/testing.md`

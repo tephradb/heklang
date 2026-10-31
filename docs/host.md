@@ -391,8 +391,9 @@ carries the accumulator in the store rather than re-deriving it, so replaying th
 that already holds its value folds every record into it a second time. A store rebuilding
 `order_closed` against its live tables gets `order_total` applied beside it and silently doubled, so
 `folds` is the set it resets or shadows first, and it is not the set it passed in. The ones it did
-not ask for are the ones it discards at the end, because withholding their writes as it goes is
-dropping the key the ranged column was added for.
+not ask for are the ones it throws away afterwards; what it may not do is drop their writes as they
+go, because the **keys** are what the additions are for. Recording each key and discarding the value
+is enough, since `keys` is all a ranged arm reads, and keeping both costs only an overlay.
 
 So the closure buys correctness and spends the second thing `only` is for: the bodies it adds run
 over the whole replay, and one of them that can `fail` can still fail a rebuild of the ranged column

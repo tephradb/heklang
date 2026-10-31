@@ -1889,6 +1889,9 @@ fold F(id: Int, kind: String) -> Int = 0 {
 ";
     assert_eq!(error(source), "`kind` is matched twice in this arm");
 
+    // A field filter is refused too, and by the rule about what a filter may read rather
+    // than by this one, because a filter writes a key part by its **value**: the next
+    // test has that half, and the two together are "whichever of the three ways wrote it".
     let field = "\
 event @a.one { id: Int, kind: String, n: Int }
 
@@ -1896,7 +1899,10 @@ fold F(id: Int, kind: String) -> Int = 0 {
   on @a.one(id, kind) { n } key kind = \"y\" => n
 }
 ";
-    assert_eq!(error(field), "`kind` is matched twice in this arm");
+    assert_eq!(
+        error(field),
+        "`kind` is a key part this arm computes, so the filter on `kind` cannot read it"
+    );
 }
 
 /// Rule 14's fifth refusal, and the one the other four were hiding: a computed part may
@@ -1969,16 +1975,62 @@ fold UsageCounted(shop_id: Int, month: String) -> n: Int = 0 {{
     assert_eq!(error(&source("label: month")), wanted);
     assert_eq!(error(&source("label: month.upper()")), wanted);
 
-    // The shorthand and the long form on the part's own name stay the plainer message,
-    // since a pair that is plainly a pair reads better as one.
-    let named = "\
+    // The shorthand is the same case, because `(kind)` is `(kind: kind)` and its value is
+    // the parameter.
+    let shorthand = "\
 event @a.one { id: Int, kind: String, n: Int }
 
 fold F(id: Int, kind: String) -> Int = 0 {
-  on @a.one(id, kind) { n, kind } key kind = kind.upper() => n
+  on @a.one(id, kind) { n } key kind = \"y\" => n
 }
 ";
-    assert_eq!(error(named), "`kind` is matched twice in this arm");
+    assert_eq!(
+        error(shorthand),
+        "`kind` is a key part this arm computes, so the filter on `kind` cannot read it"
+    );
+
+    // **And a filter is about the field, so sharing a name with a parameter is nothing.**
+    // `(month: 3)` pins no part: the filter narrows an event field that happens to be
+    // spelled like one. Comparing names refused this, which is an ordinary program.
+    let alike = "\
+event @usage.recorded { shop_id: Int, month: Int, at: Timestamp }
+
+fold Counted(shop_id: Int, month: String) -> n: Int = 0 {
+  on @usage.recorded(shop_id, month: 3) { at } key month = \"{at.year()}\" => n + 1
+}
+";
+    program(alike);
+}
+
+/// An arm that computes a key part is checked before the keys a range covers are asked
+/// for, so a conjunct reading a parameter the arm leaves **open** is the one it could not
+/// check. The sink would reach the computed part first and run it for records the arm
+/// never folds.
+#[test]
+fn a_filter_of_a_computing_arm_cannot_read_an_unpinned_parameter() {
+    let source = "\
+event @usage.recorded { shop_id: Int, label: Int, units: Int }
+
+fold Counted(shop_id: Int, order_id: Int, bucket: Int) -> n: Int = 0 {
+  on @usage.recorded(shop_id, label: order_id + 1) { units } key bucket = units => n + 1
+  on @usage.recorded(shop_id, order_id) => n
+}
+";
+    assert_eq!(
+        error(source),
+        "the filter on `label` reads `order_id`, which no conjunct of this arm pins"
+    );
+
+    // Pinned by the parameter alone, which is what makes it a key part rather than a
+    // range, so the sink has it from the record.
+    let pinned = "\
+event @usage.recorded { shop_id: Int, label: Int, units: Int }
+
+fold Counted(shop_id: Int, order_id: Int, bucket: Int) -> n: Int = 0 {
+  on @usage.recorded(shop_id, label: order_id) { units } key bucket = units => n + 1
+}
+";
+    program(pinned);
 }
 
 #[test]
@@ -2031,4 +2083,65 @@ fold TaggedUnits(shop_id: Int, bucket: Int) -> n: Int = 0 {
             .expect("the bucket is 5 + 100 + 2"),
         Value::Int(5)
     );
+}
+
+/// **A key is plaintext, and this is the one position inside an arm where a seal is
+/// wrong.** Rule 12 lets an arm fold sealed content into a sealed column, which is why
+/// the ordinary seal check stands down inside a fold, and erasure empties a column but
+/// cannot reach a primary key: a row filed under decrypted content would be personal data
+/// nothing could erase.
+///
+/// It also could not run. The seal is a `Value::Sealed` at the sink, which will not reduce
+/// to a key, and the by-key read compares the plaintext it was asked for against the
+/// ciphertext and folds nothing. So `hek check --tables` called the column stored, `fill`
+/// raised `malformed ir`, and a `fold` read answered the seed.
+#[test]
+fn a_computed_key_part_cannot_be_sealed_content() {
+    let source = "\
+subject Customer(Int)
+
+event @order.placed { order_id: Int, customer_id: Customer, email: String @subject(customer_id) }
+
+fold Placed(customer_id: Customer, bucket: String) -> n: Int = 0 {
+  on @order.placed(customer_id) { email, order_id } key bucket = email => n + order_id
+}
+";
+    assert_eq!(
+        error(source),
+        "a key part is plaintext, and this is content sealed under `Customer`"
+    );
+
+    // **At every position inside the expression, not only over its result.** Checking the
+    // result type alone was the first answer and a `fn`'s declared return type launders
+    // the subject away: this checked clean, `--tables` reported the column stored, and a
+    // by-key read compared the plaintext it was asked for against the ciphertext and
+    // answered the seed.
+    let laundered = "\
+subject Customer(Int)
+
+event @order.placed { order_id: Int, customer_id: Customer, email: String @subject(customer_id) }
+
+fn tag(s: String) -> String { return s }
+
+fold Placed(customer_id: Customer, bucket: String) -> n: Int = 0 {
+  on @order.placed(customer_id) { email, order_id } key bucket = tag(email) => n + order_id
+}
+";
+    assert_eq!(
+        error(laundered),
+        "a key part is plaintext, and this is content sealed under `Customer`"
+    );
+
+    // The same content as a column of its own is rule 7 and stays legal, which is the fix
+    // the hint names: the seal crosses the signature as its own type.
+    let column = "\
+subject Customer(Int)
+
+event @order.placed { order_id: Int, customer_id: Customer, email: String @subject(customer_id) }
+
+fold LatestEmail(customer_id: Customer) -> Sealed(String, Customer)? = none {
+  on @order.placed(customer_id) { email } => email
+}
+";
+    program(column);
 }

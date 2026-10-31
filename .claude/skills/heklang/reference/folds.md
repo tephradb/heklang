@@ -183,9 +183,14 @@ before there is a key or a row. And no filter of the arm may read a part the arm
 filter resolves once for the whole slice against the key its caller asked for, and there is no such
 key. Both halves used to check clean and fail only in the sink.
 
-Six refusals: a subject-typed parameter (ids are minted by the key store, not derived), an inline
-fold's arm (not stored, so no key), a name that is not a parameter, a part the arm already wrote
-some other way, a read of the key or the accumulator, and a filter reading a part the arm computes.
+Eight refusals: a subject-typed parameter (ids are minted by the key store, not derived), an inline
+fold's arm (not stored, so no key), a name that is not a parameter, a part a rule 13 conjunct or
+another `key` clause already wrote, a read of the key or the accumulator, a filter reading a part the
+arm computes, a filter reading a part the arm leaves open, and a part whose value is **sealed**
+content, which is `seal-boundary`: erasure empties a column and cannot reach a primary key, so a row
+filed under decrypted content is personal data nothing could erase. Return the seal as a column of
+its own (rule 6). That one is checked at every position inside the expression, not over its result,
+because a `fn`'s declared return type launders the subject away.
 
 **No builtin is needed for the usual case.** `Timestamp.year()`/`month()` and `Int.pad(width)` are
 all there, so `fn month_of(at: Timestamp) -> String { return "{at.year()}-{at.month().pad(2)}" }`

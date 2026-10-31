@@ -911,6 +911,10 @@ fold TaggedUnits(shop_id: Int, bucket: Int) -> n: Int = 0 {
 fold Rated(shop_id: Int, rate: Int) -> n: Int = 0 {
   on @usage.recorded(shop_id, kind: \"paid\") { units } key rate = 100 / units => n + units
 }
+
+fold Matching(shop_id: Int, kind: String, rate: Int) -> n: Int = 0 {
+  on @usage.recorded(shop_id, kind, tags: [kind]) { units } key rate = 100 / units => n + 1
+}
 ";
 
 fn usage(interpreter: &mut Interpreter<'_>, kind: &str, units: i64) {
@@ -977,4 +981,15 @@ fn the_sink_does_not_evaluate_a_key_for_a_record_the_arm_rejects() {
         "the paid record alone, at 100 / 5"
     );
     assert_eq!(cells.len("rate__shop"), 1, "the free record is in no row");
+
+    // **The whole predicate, not the conjuncts that read nothing.** `Matching` pins
+    // `kind` from the field of that name and then narrows again on `tags: [kind]`, which
+    // reads the parameter the first conjunct pinned. Skipping it as unresolvable left the
+    // key evaluated for every record of the event, which is this program's whole bug: the
+    // free record's tags are not `["free"]`, so the arm does not match it, and the sink
+    // divided by its zero units anyway.
+    assert!(
+        cells.is_empty("kind__rate__shop"),
+        "no record has tags equal to its own kind"
+    );
 }

@@ -988,25 +988,34 @@ impl<'a> Tables<'a> {
         columns: &mut dyn Columns,
     ) -> Result<(), Error> {
         let arm = &column.arms[at];
-        let def = self
-            .program
-            .fold(&column.fold)
-            .ok_or_else(|| Error::new(ErrorKind::UnknownFold(column.fold.to_string())))?;
-        let module = def.module.as_deref();
-        // Built on demand and reused across parts, because almost no arm computes one and
-        // building it means reading and sealing every bound field.
+        // **Resolved only for an arm that computes a part**, which is read off the arm
+        // rather than off the fold so that the common arm costs nothing: `Program::fold`
+        // is a scan of every fold by name, and this runs per column per arm per record in
+        // the path `Tables::only` exists to make cheaper. `fold_into` resolves it again
+        // per key, which is once per row written rather than once per record seen.
+        let computes = arm
+            .fields
+            .iter()
+            .any(|field| matches!(field, ArmMatch::Computed(_)));
+        let def = match computes {
+            true => Some(
+                self.program
+                    .fold(&column.fold)
+                    .ok_or_else(|| Error::new(ErrorKind::UnknownFold(column.fold.to_string())))?,
+            ),
+            false => None,
+        };
+        let module = def.and_then(|def| def.module.as_deref());
+        // Built on demand and reused across parts, because building it means reading and
+        // sealing every bound field.
         let mut computed: Option<Frame> = None;
 
-        // **The arm's own narrowing, before a computed part is evaluated.** A by-key read
-        // checks the predicate and skips the record before it ever runs the expression
-        // (`fold`'s inner loop), so the sink must not raise on a record the arm was never
-        // going to fold: `key bucket = 100 / units` under `(kind: "paid")` failed the
-        // whole replay on a free record with no units, where the same fold read by key
-        // answered. `folded` checks the predicate too, and has to, because it is what
-        // knows the key; this is the half of it that can be known without one.
-        if !def.stage.slices[at].keys.is_empty()
+        // The arm's own narrowing, before a computed part is evaluated. `folded` checks it
+        // again per key, and has to: it is what reads the accumulator, and a ranged arm
+        // has one key per row rather than the one this resolved against.
+        if let Some(def) = def
             && !self
-                .narrowed(record, def, at)
+                .narrowed(record, table, column, at, def)
                 .map_err(|err| err.in_module(module))?
         {
             return Ok(());
@@ -1029,6 +1038,11 @@ impl<'a> Tables<'a> {
                 // evaluates to over this record is the key the row is written at, and
                 // `fold_into` binds the parameter from it below.
                 ArmMatch::Computed(id) => {
+                    // Always `Some`: `computes` above is this same test over the same
+                    // list, so an arm with a computed part resolved its fold.
+                    let Some(def) = def else {
+                        return Err(ErrorKind::MalformedIr.into());
+                    };
                     let slice = &def.stage.slices[at];
                     let frame = match computed {
                         Some(ref mut frame) => frame,
@@ -1074,42 +1088,55 @@ impl<'a> Tables<'a> {
         Ok(())
     }
 
-    /// Whether this arm's **frame-free** filters hold for this record, which is as much
-    /// of its predicate as can be checked before the key is known.
+    /// Whether this arm's predicate holds for this record, checked **before** a computed
+    /// key part is evaluated.
     ///
-    /// A filter whose value reads a slot cannot be resolved here: it reads a parameter,
-    /// and a parameter comes from the key, which is what the computed part is being
-    /// evaluated to find. The ones that remain are the narrowing conjuncts in every real
-    /// case, since `(kind: "paid")` is a literal and `(shop_id)` is the vacuous kind: it
-    /// compares the field the key part was taken *from* against itself.
+    /// A by-key read checks the predicate and skips the record before it ever runs the
+    /// expression (`fold`'s inner loop), so the sink must not raise on a record the arm
+    /// was never going to fold: `key rate = 100 / units` under `(kind: "paid")` failed a
+    /// whole replay on a free record with no units, where the same fold read by key
+    /// answered.
     ///
-    /// **Nothing it skips is a record the arm would have folded.** A frame-free value is
-    /// the same value in both drivers, so a record this rejects is one `folded` would
-    /// reject too. A filter reading an *open* parameter is left to `folded`, which runs
-    /// per ranged key and has one.
-    fn narrowed(&self, record: &Record, def: &Fold, at: usize) -> Result<bool, Error> {
-        let slice = &def.stage.slices[at];
-        let declared = self.program.event(&slice.event);
+    /// **It can check the whole predicate, and rule 14 is what pays for that.** A
+    /// conjunct's value reads nothing but the arm's parameters, since a filter is parsed
+    /// before the destructure's scope exists and cannot read the accumulator, and in an
+    /// arm with a `key` clause every parameter a conjunct reads is one the arm *pins*:
+    /// one it computes is refused, and one it leaves open is refused, which is exactly so
+    /// that none of them is a value this has to go and find. A pinned part is on the
+    /// record or fixed by the arm, so the frame below is complete.
+    ///
+    /// Through `resolved_one` and `matches`, which is what `folded` resolves with, so the
+    /// two cannot come to disagree about what an arm matches.
+    fn narrowed(
+        &self,
+        record: &Record,
+        table: &Table,
+        column: &Column,
+        at: usize,
+        def: &Fold,
+    ) -> Result<bool, Error> {
         let mut frame = Frame::new(def.frame);
-        for filter in &slice.filters {
-            let Filter::Field { field: name, value } = filter else {
-                continue;
+        for ((part, matched), name) in table
+            .key
+            .iter()
+            .zip(&column.arms[at].fields)
+            .zip(&column.args)
+        {
+            let value = match matched {
+                ArmMatch::Field(named) => field(&record.event, named)?.clone(),
+                ArmMatch::Fixed(id) => tables::fixed(self.program, &column.fold, part, *id)?,
+                // The two rule 14 refuses a conjunct for reading, so neither is needed.
+                ArmMatch::Computed(_) | ArmMatch::Open => continue,
             };
-            if slot_read(&def.exprs, *value) {
-                continue;
-            }
-            let held = eval(self.program, &def.exprs, &mut frame, *value, None)?;
-            // Fitted as `resolved_one` fits it, for the reason it does: a bare value
-            // against an optional field compares as the optional or matches nothing.
-            let held = match declared.and_then(|event| event.field(name)) {
-                Some(declared) => fitted_at(held, &declared.ty, def.exprs.span(*value))?,
-                None => held,
+            let Some(param) = def.params.iter().find(|param| &param.name == name) else {
+                return Err(ErrorKind::MalformedIr.into());
             };
-            if field(&record.event, name)? != &held {
-                return Ok(false);
-            }
+            let value = fitted_at(value, &param.ty, Span::default())?;
+            frame.set(param.slot, value)?;
         }
-        Ok(true)
+        let slice = &def.stage.slices[at];
+        let resolved = resolved_one(self.program, &def.exprs, slice, &mut frame)?;
+        Ok(resolved.live && matches(&resolved.predicate, &record.event)?)
     }
 
     /// The frame a computed key part is evaluated in: this record's envelope and this
@@ -1257,9 +1284,13 @@ impl Rebuild<'_, '_> {
     /// sink carries the accumulator in the store rather than re-deriving it, so replaying
     /// the log onto a column that already holds its value folds every record into it a
     /// second time. A rebuild therefore resets or shadows each of these before it starts,
-    /// and the ones it did not ask for are the ones it discards at the end: withholding
-    /// their writes as it goes is not an option, because dropping the write is dropping
-    /// the key the ranged column was added for.
+    /// and the ones it did not ask for are the ones it throws away afterwards. What it may
+    /// not do is drop their writes as they go, because the keys are what the additions are
+    /// *for*: recording each key and discarding the value is enough, since
+    /// [`Columns::keys`] is all a ranged arm reads, and keeping both costs only an
+    /// overlay.
+    ///
+    /// [`Columns::keys`]: crate::Columns::keys
     ///
     /// So the closure buys correctness and spends the second thing
     /// [`Tables::only`] exists for: the bodies it adds run over the whole replay, and one
@@ -2384,26 +2415,6 @@ pub fn partition_key(arm: &Arm, event: &Event) -> Result<Vec<Key>, Error> {
             })
         })
         .collect()
-}
-
-/// Whether an expression loads a frame slot, and so cannot be evaluated without one.
-///
-/// [`Builder::slot_read`](crate::Builder::slot_read) is the parse-time half of this, and
-/// it answers *which* slot because a diagnostic names it. Here the question is only
-/// whether there is one: [`Tables::narrowed`] has no frame to offer and wants to know
-/// which filters it can resolve anyway.
-fn slot_read(exprs: &Exprs, value: ExprId) -> bool {
-    let mut stack = vec![value];
-    while let Some(id) = stack.pop() {
-        let Some(expr) = exprs.get(id) else {
-            continue;
-        };
-        if matches!(expr, Expr::Load(_)) {
-            return true;
-        }
-        stack.extend(crate::parse::children(expr));
-    }
-    false
 }
 
 fn field<'a>(event: &'a Event, name: &str) -> Result<&'a Value, Error> {
