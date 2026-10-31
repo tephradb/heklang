@@ -203,6 +203,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   seal check with the fold's stand-down lifted for this clause, so it runs at every position inside
   the expression: over the result alone a `fn` launders the subject away, and
   `key bucket = tag(email)` through `fn tag(s: String) -> String` checked clean.
+
+  **A `key` clause's own comments trail the arm**, so `hek fmt` is a fixed point over one. The
+  clause is mid-line and undelimited, so there is no group for the comment-aware list printer to
+  break and no line of its own for a suffix to land on: emitted inside the clause, the suffix landed
+  after the `=>` once the arm's value broke, a reparse read it as the value's, and `hek fmt --check`
+  failed on a file `hek fmt` had just written. The hoist stops at the clause's direct children: a
+  comment inside a part's *value* is placed by the value's own printer, and taking it as well
+  printed it twice. That one is `docs/fmt.md`'s known gap reached through a fourth shape, since the
+  clause is what first put an arbitrary expression in an arm's head.
+
+  **And the clause breaks between its parts**, which it had no way to do: it sits in the head and
+  the head has no break either, so two interpolated parts ran to 103 columns against a width of 90.
 - **A per-record sink for the derived read model**: `Tables` and the `Columns` seam, which are to
   `fold_stored` what `Projection` and `Rows` are to a projector rebuild. `Tables::apply(record,
   columns)` applies one record to whatever columns its arms name, carrying the accumulator in the

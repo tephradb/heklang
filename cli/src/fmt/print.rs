@@ -99,8 +99,8 @@ impl<'a> Printer<'a> {
             // trailing comma for the reason an `on` header's path list does not, and each
             // part is a node so that the `=` survives: `kids` is the named children and
             // every piece of punctuation in this grammar is anonymous.
-            "computed_keys" => self.commas("key", node),
-            "computed_key" => self.joined(node, " = "),
+            "computed_keys" => self.computed_keys(node),
+            "computed_key" => self.computed_key(node),
             "fold_clause" => self.keyed("fold", node),
             // One word and no children: the action with nothing to name.
             "fill_clause" => Doc::text("fill"),
@@ -741,7 +741,22 @@ impl<'a> Printer<'a> {
 
     /// `on @path(filters) { fields } => value`, breaking after the arrow if it must.
     fn fold_arm(&self, node: Node<'a>) -> Doc<'a> {
-        let (trailing, kids) = self.split(node);
+        let (mut trailing, kids) = self.split(node);
+        // **A `key` clause's comments are trailed on the arm**, which is the one place the
+        // formatter reaches into a child for them, and `slice` above says why it does not
+        // do that for a filter: a filter list is comment-aware, so taking its comments out
+        // would move one written against a filter up to the slice. A `key` clause is
+        // mid-line and undelimited, so there is no group for `list` to break and no line
+        // of its own for a suffix to land on. Emitted inside the clause, the suffix landed
+        // after the `=>` once the value broke, a reparse read it as the value's, and
+        // `hek fmt` moved it twice before settling: `--check` failed on a file `hek fmt`
+        // had just written.
+        for &kid in &kids {
+            if kid.kind() == "computed_keys" {
+                trailing.extend(self.clause_comments(kid));
+            }
+        }
+        trailing.sort_by_key(Node::start_byte);
         let mut head = vec![Doc::text("on "), self.node(kids[0])];
         for &kid in &kids[1..kids.len() - 1] {
             head.push(Doc::text(" "));
@@ -1179,18 +1194,58 @@ impl<'a> Printer<'a> {
         )
     }
 
-    /// `keyword a, b, c`: [`keyed`](Self::keyed) with commas between the children, for a
-    /// list whose only delimiter is the keyword in front of it.
-    fn commas(&self, keyword: &'a str, node: Node<'a>) -> Doc<'a> {
-        let (comments, kids) = self.split(node);
-        Self::led(
-            self.docs_of(&comments),
-            Doc::concat([
-                Doc::text(keyword),
-                Doc::text(" "),
-                Doc::join(Doc::text(", "), self.docs_of(&kids)),
-            ]),
-        )
+    /// `key a = x, b = y` (`docs/folds.md` rule 14), and `param = value` inside it.
+    ///
+    /// **Neither emits its own comments**, which [`fold_arm`](Self::fold_arm) trails on the
+    /// whole arm instead, and that method says why. Every comment descendant goes, which is
+    /// what makes it a fixed point rather than one shape of it: a comment can sit after
+    /// `key`, after the parameter and after the `=`, and each of the three is mid-line in
+    /// a construct that has no line of its own.
+    fn computed_keys(&self, node: Node<'a>) -> Doc<'a> {
+        let (_, kids) = self.split(node);
+        // Grouped with a break between the parts, because the clause sits in the arm's
+        // head and the head has no break of its own: two interpolated parts ran to 103
+        // columns against a `WIDTH` of 90, which is the one measure the formatter holds
+        // to everywhere else. Indented, so a part that moves down reads as a continuation
+        // of the clause rather than as the next thing in the arm.
+        Doc::group(Doc::concat([
+            Doc::text("key "),
+            Doc::indent(Doc::join(
+                Doc::concat([Doc::text(","), Doc::Line]),
+                self.docs_of(&kids),
+            )),
+        ]))
+    }
+
+    fn computed_key(&self, node: Node<'a>) -> Doc<'a> {
+        let (_, kids) = self.split(node);
+        Doc::join(Doc::text(" = "), self.docs_of(&kids))
+    }
+
+    /// The comments of a `key` clause itself: its own and its `computed_key`s', in source
+    /// order, and **not** the ones inside a part's value.
+    ///
+    /// The clause is what has nowhere to put a comment. A value does: it is an ordinary
+    /// expression, with whatever parens, blocks and comment-aware lists it is made of, and
+    /// its own printer already places one. Taking those too wrote the comment twice, once
+    /// hoisted and once by the printer that owned it, and in an `if` value the two copies
+    /// landed on different lines and collapsed differently on the next pass, which is the
+    /// non-fixed-point this hoist exists to remove.
+    fn clause_comments(&self, node: Node<'a>) -> Vec<Node<'a>> {
+        let mut found = Vec::new();
+        for kid in self.all_kids(node) {
+            match kid.kind() {
+                "comment" => found.push(kid),
+                "computed_key" => found.extend(
+                    self.all_kids(kid)
+                        .into_iter()
+                        .filter(|part| part.kind() == "comment"),
+                ),
+                _ => {}
+            }
+        }
+        found.sort_by_key(Node::start_byte);
+        found
     }
 
     /// The same for a construct that may sit **mid-line**: `let outcome = invoke C { .. }`,

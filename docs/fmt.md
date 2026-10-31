@@ -224,6 +224,18 @@ three tokens.
   a nested node and handles its own comments today, so the caller cannot see them to hoist.
   That is a change to two printers and worth doing on its own rather than in passing.
 
+  A **fourth** shape is a comment inside the *value* of a `key` clause's part
+  (`docs/folds.md` rule 14), and it is the first that does not end its line in `{`: the
+  clause sits in a fold arm's **head**, before the `=>`, so a line suffix the value's own
+  printer emits lands after the arrow and a re-parse finds it against the arm's value. Rule
+  14 is what made this reachable, because before it the head held only a slice and a
+  destructure and both are comment-aware lists. The clause's **own** comments are not this
+  gap: `fold_arm` trails them on the arm and they are a one-pass fixed point, which is the
+  one place a printer reaches into a child for comments. It stops at the clause's direct
+  children deliberately. Taking the value's too printed them twice, once hoisted and once
+  by the printer that owned them, and in an `if` value the copies landed on different lines
+  and collapsed differently on the next pass.
+
 ## Related
 
 - `docs/cli.md`: the binary, its exit statuses, and how `path` is swept.

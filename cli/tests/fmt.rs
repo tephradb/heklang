@@ -564,3 +564,103 @@ fn a_comment_inside_a_construct_leaves_a_program_and_settles() {
         "and it settles without moving a token"
     );
 }
+
+/// A comment inside a **mid-line** construct, which is the one shape the `hek/` corpus
+/// does not hold and so the one `formatting_twice_is_formatting_once` could not see.
+///
+/// `docs/folds.md` rule 14's `key` clause sits between an arm's destructure and its `=>`
+/// and has no delimiters, so there is no group for `list` to break and no line of its own
+/// for a suffix to land on. Emitted inside the clause the suffix landed after the `=>`
+/// once the value broke, a reparse read it as the value's, and `hek fmt` moved it twice
+/// before settling: `--check` failed on a file `hek fmt` had just written. So the arm
+/// trails them, and every position inside the clause has to reach that same home.
+#[test]
+fn a_comment_in_a_mid_line_clause_is_a_fixed_point() {
+    // After `key`, after the parameter, and after the `=`, each with the arm's value
+    // short enough to fit and long enough to break: the break is what moved the suffix.
+    let places = [
+        "key // why this part\n    month = \"{at.year()}\"",
+        "key month // why this part\n    = \"{at.year()}\"",
+        "key month = // why this part\n    \"{at.year()}\"",
+    ];
+    for place in places {
+        for value in [
+            "n + units",
+            "n + units + units + units + units + units + units",
+        ] {
+            let source = format!(
+                "event @usage.recorded {{ shop_id: Int, at: Timestamp, units: Int }}
+
+fold Counted(shop_id: Int, month: String) -> n: Int = 0 {{
+  on @usage.recorded(shop_id) {{ at, units }} {place} => {value}
+}}
+"
+            );
+            let once = hek::fmt::format(&source).expect("the source parses");
+            let twice = hek::fmt::format(&once).expect("formatted output parses");
+            assert_eq!(once, twice, "not a fixed point:\n{once}\n---\n{twice}");
+            assert!(
+                once.contains("// why this part"),
+                "the comment survived:\n{once}"
+            );
+            assert!(
+                once.lines()
+                    .any(|line| line.trim_end().ends_with("// why this part")),
+                "it trails a line rather than breaking one:\n{once}"
+            );
+            assert_eq!(
+                once.matches("// why this part").count(),
+                1,
+                "written once, not hoisted and printed:\n{once}"
+            );
+        }
+    }
+}
+
+/// A comment **nested inside a part's value** is the known gap rather than this one, and
+/// the difference is worth a test of its own because the fix above could have swallowed it.
+///
+/// The value is an ordinary expression and its own printer places the comment, so a hoist
+/// that took it too wrote it twice. Left where it belongs, it is `docs/fmt.md`'s "a comment
+/// inside a construct whose line ends in `{`": the clause sits in the arm's head, so a line
+/// suffix emitted there lands after the `=>` and a re-parse finds it against the value. No
+/// token moves and the run after the first is stable, which is what the gap already allows
+/// for the three shapes it lists; `key` makes a fourth by putting an expression in the head.
+#[test]
+fn a_comment_in_a_key_part_value_is_written_once_and_converges() {
+    let source = "event @usage.recorded { shop_id: Int, at: Timestamp, units: Int }
+
+fold Counted(shop_id: Int, month: String) -> n: Int = 0 {
+  on @usage.recorded(shop_id) { at, units } key month = if units > 1 {
+    // why
+    \"big\"
+  } else { \"small\" } => n + units
+}
+";
+    let once = hek::fmt::format(source).expect("the source parses");
+    assert_eq!(
+        once.matches("// why").count(),
+        1,
+        "the value's own printer places it, and nothing else:\n{once}"
+    );
+    let twice = hek::fmt::format(&once).expect("formatted output parses");
+    let thrice = hek::fmt::format(&twice).expect("formatted output parses");
+    assert_eq!(twice, thrice, "converges:\n{twice}\n---\n{thrice}");
+}
+
+/// The clause breaks between its parts, because it sits in the arm's head and the head has
+/// no break of its own: two interpolated parts ran to 103 columns against a `WIDTH` of 90.
+#[test]
+fn a_long_key_clause_breaks_between_its_parts() {
+    let source = "event @usage.recorded { shop_id: Int, at: Timestamp, units: Int }
+
+fold Counted(shop_id: Int, month: String, label: String) -> n: Int = 0 {
+  on @usage.recorded(shop_id) { at, units } key month = \"{at.year()}-{at.month()}-{at.day()}\", label = \"{at.year()}/{at.month()}/{at.day()}\" => n + units
+}
+";
+    let once = hek::fmt::format(source).expect("the source parses");
+    let over: Vec<&str> = once.lines().filter(|line| line.len() > 90).collect();
+    assert!(over.is_empty(), "over 90 columns: {over:?}\n{once}");
+    let twice = hek::fmt::format(&once).expect("formatted output parses");
+    assert_eq!(once, twice, "not a fixed point:\n{once}\n---\n{twice}");
+}
