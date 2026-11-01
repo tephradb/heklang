@@ -74,6 +74,22 @@ that breaks. Inside a destructure, `@key` binds tight to the field it marks: one
 never a break between them, and when the destructure breaks the marker travels onto its
 field's own line. It is the same shape `@default Free` takes on an enum variant.
 
+**A fold arm's header is measured on its own**, apart from the value, and a `key` clause
+(`docs/folds.md` rule 14) is the one part of it that takes a line of its own rather than
+breaking something inside itself:
+
+```hek
+  on @edit.window.opened as e (shop_id) { shop_id, order_id }
+    key period = period_key(e.at) =>
+    n + excluding_tests(OrderTestOrder { order_id, shop_id })
+```
+
+Measured by the evidence corpus's `Stats` conversion, where seventeen of twenty-three arms
+have this shape: with the arm as one group, the header was only ever weighed as part of the
+value's line, so an over-long header stayed put and the innermost call in the clause broke
+instead, leaving `key period = period_key(` past the margin with `e.at,` below it. A
+destructure keeps its space and breaks its own braces, as every other list does.
+
 **`record`, `event` and `entity` always break; `enum` does not.** Measured: no `record`,
 `event` or `entity` in the corpus is written on one line, and every `enum` is, seven of seven
 with no multi-line counterexample. That is the corpus telling a type declaration apart from a

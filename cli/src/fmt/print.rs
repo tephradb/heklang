@@ -757,16 +757,30 @@ impl<'a> Printer<'a> {
             }
         }
         trailing.sort_by_key(Node::start_byte);
+        // **A `key` clause breaks onto a line of its own, and the header is its own
+        // group.** With one group for the whole arm the header was only ever measured as
+        // part of the value's line, so an over-long header stayed put and the innermost
+        // call inside the clause broke instead: `key period = period_key(` was left past
+        // the margin with `e.at,` below it.
+        //
+        // Only the clause takes a `Line`. A destructure keeps its space and breaks its own
+        // braces open, which is what every other list in the language does and what the
+        // arms without a clause already settled on.
         let mut head = vec![Doc::text("on "), self.node(kids[0])];
         for &kid in &kids[1..kids.len() - 1] {
-            head.push(Doc::text(" "));
-            head.push(self.node(kid));
+            match kid.kind() {
+                "computed_keys" => head.push(Doc::indent(Doc::concat([Doc::Line, self.node(kid)]))),
+                _ => {
+                    head.push(Doc::text(" "));
+                    head.push(self.node(kid));
+                }
+            }
         }
         head.push(Doc::text(" =>"));
         self.trailed(
             &trailing,
             Doc::group(Doc::concat([
-                Doc::concat(head),
+                Doc::group(Doc::concat(head)),
                 Doc::indent(Doc::concat([Doc::Line, self.node(kids[kids.len() - 1])])),
             ])),
         )

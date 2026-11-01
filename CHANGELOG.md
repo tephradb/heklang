@@ -436,6 +436,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`hek fmt` breaks a fold arm's `key` clause onto a line of its own** instead of breaking the
+  innermost call inside it. The arm was one group, so its header was only ever measured as part of
+  the value's line: an over-long header stayed put and `key period = period_key(` was left past the
+  margin with `e.at,` indented below it. The header is its own group now, and only the clause takes
+  a line, so a destructure still breaks its own braces as every other list does. Found by the
+  `Stats` conversion in the evidence corpus, where seventeen of its twenty-three arms are this
+  shape.
+
 - **One column's arms now apply in the order they were written** when a record reaches more than one
   of them. `Tables::apply` runs every fully pinned arm before every ranged one, because a range over
   a key this same record mints has to see it, and it used to fold as it went: a column with one arm

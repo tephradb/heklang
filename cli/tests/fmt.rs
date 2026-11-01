@@ -664,3 +664,60 @@ fold Counted(shop_id: Int, month: String, label: String) -> n: Int = 0 {
     let twice = hek::fmt::format(&once).expect("formatted output parses");
     assert_eq!(once, twice, "not a fixed point:\n{once}\n---\n{twice}");
 }
+
+/// **The clause takes the line, not the call inside its value.** One group for the whole
+/// arm measured the header only as part of the value's line, so an over-long header stayed
+/// put and the innermost call inside the clause broke instead: `key period = period_key(`
+/// past the margin with `e.at,` below it. Seventeen of the twenty-three arms of the evidence
+/// corpus's `Stats` conversion came out that way, which is what found it.
+#[test]
+fn a_key_clause_takes_a_line_rather_than_breaking_its_own_value() {
+    let source = "event @edit.window.opened { shop_id: Int, order_id: Int }
+
+fn period_key(at: Timestamp) -> String {
+  return \"{at.year()}\"
+}
+
+fold WindowsOpened(shop_id: Int, period: String) -> n: Int = 0 {
+  on @edit.window.opened as e (shop_id) { shop_id, order_id } key period = period_key(e.at) => n + 1
+}
+";
+    let once = hek::fmt::format(source).expect("the source parses");
+    let over: Vec<&str> = once.lines().filter(|line| line.len() > 90).collect();
+    assert!(over.is_empty(), "over 90 columns: {over:?}\n{once}");
+    assert!(
+        once.contains("\n    key period = period_key(e.at) =>\n"),
+        "the clause took a line and its value stayed whole:\n{once}"
+    );
+    let twice = hek::fmt::format(&once).expect("formatted output parses");
+    assert_eq!(once, twice, "not a fixed point:\n{once}\n---\n{twice}");
+}
+
+/// And a destructure with no clause beside it still breaks its own braces, which is what
+/// every list in the language does. The first fix gave the destructure a `Line` too, and
+/// reformatted arms that were already settled: `{ quoted, actual, currency }` moved to a
+/// line of its own with its braces flat.
+#[test]
+fn a_long_destructure_breaks_its_braces_rather_than_taking_a_line() {
+    let source = "event @settlement.mismatched {
+  shop_id: Int,
+  proposal_id: Int,
+  quoted: Int,
+  actual: Int,
+  currency: String,
+}
+
+fold EntryMismatch(shop_id: Int, entry_id: Int) -> String = \"\" {
+  on @settlement.mismatched(shop_id, proposal_id: entry_id) { quoted, actual, currency } => \"{quoted}/{actual}/{currency}\"
+}
+";
+    let once = hek::fmt::format(source).expect("the source parses");
+    let over: Vec<&str> = once.lines().filter(|line| line.len() > 90).collect();
+    assert!(over.is_empty(), "over 90 columns: {over:?}\n{once}");
+    assert!(
+        once.contains("entry_id) {\n    quoted,\n"),
+        "the braces broke open rather than the destructure moving:\n{once}"
+    );
+    let twice = hek::fmt::format(&once).expect("formatted output parses");
+    assert_eq!(once, twice, "not a fixed point:\n{once}\n---\n{twice}");
+}
