@@ -379,9 +379,10 @@ fold GameDeveloper(game_id: Game) -> Developer = 0 { .. }       // refused
 fold GameDeveloper(game_id: Game) -> Developer? = none { .. }   // the spelling
 ```
 
-A literal is the one way a subject-typed value appears from nothing; a `fn` returning the
-scalar and `Uuid.derive` into a subject are already refused by the type. An inlined `const`
-is a literal node too.
+Two routes reach an id the log does not hold: a **literal** (an inlined `const` is one too)
+and a **`fn`'s result**, since a `fn` may declare the subject itself and its `return 42` is a
+literal in the function's own body. A `fn` is refused even when it only passes an id through;
+inline the read. `Uuid.derive` into a subject and arithmetic are refused by the type.
 
 **A filter is not refused**: `on @game.announced(game_id, developer_id: 7)` compares records
 rather than writing one.
@@ -391,3 +392,30 @@ caller may send the same number, and the runtime mints a subject key for whateve
 appears, so refusing the literal there closes nothing and would forbid a house account.
 Nothing claims the id a fold writes, so the row it keys answers to no subject and an erasure
 cannot reach it.
+
+## 10. A subject key part is read through a fold, with an explicit skip
+
+```hek
+fold GameDeveloper(game_id: Game) -> Developer? = none {
+  on @game.announced(game_id) { developer_id } => developer_id
+}
+
+fold DeveloperGross(developer_id: Developer) -> cents: Int = 0 {
+  on @game.purchased { game_id, price_cents }
+    key developer_id = GameDeveloper { game_id } else skip => cents + price_cents
+}
+```
+
+A key part whose type is a subject may be read through a stored fold and computed no other
+way: a computed id addresses a row under an id nothing claimed, where a read is whatever the
+column holds and section 9 guarantees that came from an event. **Exactly the lookup**, so
+`pick(GameDeveloper { game_id })` is refused; an expression over one is a derivation again.
+
+**`else skip` is not optional here.** Section 9 leaves a subject-returning fold no legal
+non-optional seed, so it is always `-> T? = none` and the part is always absent sometimes.
+`else skip` means this record belongs under no key: the sink writes nothing for it and a
+by-key read passes it over, and in particular it does **not** land under the seed's key.
+
+It works on any computed part, not only a lookup, and a part whose value is never absent is
+refused because the `else skip` could not fire. `skip` is soft, claimed only after `else` in
+a `key` clause.

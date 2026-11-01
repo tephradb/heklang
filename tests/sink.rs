@@ -1579,3 +1579,77 @@ fold Counted(shop_id: Shop, order_id: Int) -> n: Int = 0 {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+
+/// Rule 19: `else skip` and absent, so the record belongs under **no key**. The two drivers
+/// have to say that the same way, and they say it differently: the sink writes nothing at
+/// all for the record, and a by-key read passes it over under every key. `agrees` is what
+/// checks those are one answer.
+///
+/// Rule 18's shape, and the port's: a sale is filed under the game's developer, and a game
+/// nobody announced has none. Before this the fold needed a seed to be a key part, so every
+/// unannounced game's sale landed under the same invented developer.
+const SKIPPED: &str = "subject Developer(Int)
+
+event @game.announced { game_id: Int, developer_id: Developer }
+event @game.purchased { game_id: Int, price_cents: Int }
+
+fold GameDeveloper(game_id: Int) -> Developer? = none {
+  on @game.announced(game_id) { developer_id } => developer_id
+}
+
+fold DeveloperGross(developer_id: Developer) -> cents: Int = 0 {
+  on @game.purchased { game_id, price_cents }
+    key developer_id = GameDeveloper { game_id } else skip => cents + price_cents
+}
+";
+
+#[test]
+fn a_skipped_record_is_written_under_no_key_by_either_driver() {
+    let program = program(SKIPPED);
+    let mut interpreter = Interpreter::new(&program);
+    given(
+        &mut interpreter,
+        "game.announced",
+        [("game_id", Value::Int(1)), ("developer_id", Value::Int(7))],
+    );
+    given(
+        &mut interpreter,
+        "game.purchased",
+        [("game_id", Value::Int(1)), ("price_cents", Value::Int(500))],
+    );
+    // The game nobody announced. Its sale has no developer to be filed under.
+    given(
+        &mut interpreter,
+        "game.purchased",
+        [
+            ("game_id", Value::Int(99)),
+            ("price_cents", Value::Int(900)),
+        ],
+    );
+
+    let cells = agrees(&program, &interpreter);
+    assert_eq!(
+        cells.get("developer", &[Key::Int(7)], "developer_gross"),
+        Some(&Value::Int(500)),
+        "the announced game's sale is filed under its developer"
+    );
+    // **No row at all**, which is the claim: not a zero, not a row under the seed.
+    let rows: Vec<Vec<Key>> = cells.rows("developer").map(<[Key]>::to_vec).collect();
+    assert_eq!(rows, [vec![Key::Int(7)]], "and the skipped sale wrote none");
+
+    // And the by-key driver has to agree about a key the sink never minted, which is the
+    // half `agrees` cannot reach: it compares at the keys the sink wrote, and the whole
+    // point here is that it wrote none. Asked directly, developer 0 is the key an absent
+    // part would have collapsed to.
+    let head = interpreter.host().records().len() as u64;
+    let zero = interpreter
+        .fold_stored("DeveloperGross", [("developer_id", Value::Int(0))], head)
+        .expect("the column refolds");
+    assert_eq!(
+        zero,
+        Value::Int(0),
+        "a skipped record counts under no key, not under the one an absent part reduces to"
+    );
+}

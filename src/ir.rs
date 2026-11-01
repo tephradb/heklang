@@ -1297,6 +1297,14 @@ pub struct ComputedKey {
     pub slot: Slot,
     pub ty: Type,
     pub value: ExprId,
+    /// `else skip` was written, so [`Self::value`] is an **optional** of [`Self::ty`] and
+    /// `none` means this record belongs under no key: the arm writes nothing for it and a
+    /// by-key read passes it over, which is the same answer from both drivers.
+    ///
+    /// `docs/folds.md` rule 19. Without it the value fills `ty` as any declared position
+    /// does, so a part is present or the program does not check: a key is present or it is
+    /// not a key, and there is no row to write at `none`.
+    pub skip: bool,
     pub span: Span,
 }
 

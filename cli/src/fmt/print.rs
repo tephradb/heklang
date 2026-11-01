@@ -1312,9 +1312,19 @@ impl<'a> Printer<'a> {
         ]))
     }
 
+    /// `param = value`, and `else skip` after it where one was written.
+    ///
+    /// The separator cannot be `" = "` joined across every child: `skip_keyword` is a child
+    /// too, so joining wrote `param = value = skip` and the file no longer parsed.
     fn computed_key(&self, node: Node<'a>) -> Doc<'a> {
         let (_, kids) = self.split(node);
-        Doc::join(Doc::text(" = "), self.docs_of(&kids))
+        let (skip, rest): (Vec<Node<'a>>, Vec<Node<'a>>) =
+            kids.iter().partition(|kid| kid.kind() == "skip_keyword");
+        let mut parts = vec![Doc::join(Doc::text(" = "), self.docs_of(&rest))];
+        if !skip.is_empty() {
+            parts.push(Doc::text(" else skip"));
+        }
+        Doc::concat(parts)
     }
 
     /// The comments of a `key` clause itself: its own and its `computed_key`s', in source

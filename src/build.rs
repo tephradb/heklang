@@ -313,25 +313,6 @@ impl Builder {
         self.loaded(value, |_| true)
     }
 
-    /// The first **node** of an expression that `hit` accepts, with the span to point at.
-    ///
-    /// `loaded` below asks about slots, which is every question a slice has; this
-    /// one asks about the node itself, for a caller holding something keyed by `ExprId`
-    /// rather than by slot. `docs/folds.md` rule 17's literal is the one that does.
-    pub fn node_where(&self, value: ExprId, hit: impl Fn(ExprId) -> bool) -> Option<Span> {
-        let mut stack = vec![value];
-        while let Some(id) = stack.pop() {
-            if hit(id) {
-                return Some(self.exprs.span(id));
-            }
-            let Some(expr) = self.exprs.get(id) else {
-                continue;
-            };
-            stack.extend(crate::parse::children(expr));
-        }
-        None
-    }
-
     /// The first slot an expression loads that `hit` accepts, with the span to point at.
     /// The one walk the three questions below are asked of, so a node that carries a slot
     /// has one place to be found.

@@ -770,6 +770,16 @@
     "type": "computed_key",
     "named": true,
     "fields": {
+      "absent": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "skip_keyword",
+            "named": true
+          }
+        ]
+      },
       "param": {
         "multiple": false,
         "required": true,
@@ -5670,6 +5680,10 @@
   {
     "type": "secret",
     "named": false
+  },
+  {
+    "type": "skip_keyword",
+    "named": true
   },
   {
     "type": "skipped",

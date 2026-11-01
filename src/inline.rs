@@ -460,6 +460,7 @@ fn at(site: &mut Site<'_>, callee: &Copied<'_>, call: &Placed<'_>, grown: &mut G
                     slot: shift_slot(key.slot, slot_off),
                     ty: key.ty.clone(),
                     value: shift_expr_id(key.value, expr_off),
+                    skip: key.skip,
                     span: key.span,
                 })
                 .collect(),

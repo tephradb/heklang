@@ -876,3 +876,27 @@ fold A(game_id: Int) -> cents: Int = 0 {
     let twice = hek::fmt::format(&once).expect("formatted output parses");
     assert_eq!(once, twice, "not a fixed point:\n{once}\n---\n{twice}");
 }
+
+/// `else skip` is a child of `computed_key`, so joining every child with `" = "` wrote
+/// `param = value = skip` and `hek fmt` produced a file that no longer parsed.
+#[test]
+fn a_key_parts_else_skip_survives_the_formatter() {
+    let source = "event @game.purchased { game_id: Int, note: String?, price_cents: Int }
+
+fn bucket(note: String?) -> String? {
+  return note
+}
+
+fold Monthly(month: String, kind: String) -> cents: Int = 0 {
+  on @game.purchased { note, price_cents }
+    key month = bucket(note) else skip, kind = \"sale\" => cents + price_cents
+}
+";
+    let once = hek::fmt::format(source).expect("the source parses");
+    assert!(
+        once.contains("key month = bucket(note) else skip, kind = \"sale\" =>"),
+        "the skip stays and the sibling part does not get one:\n{once}"
+    );
+    let twice = hek::fmt::format(&once).expect("formatted output parses");
+    assert_eq!(once, twice, "not a fixed point:\n{once}\n---\n{twice}");
+}

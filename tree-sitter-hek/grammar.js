@@ -501,8 +501,25 @@ module.exports = grammar({
     // `key` is soft: an identifier the parser claims only here.
     computed_keys: ($) => seq('key', commaSep1($.computed_key)),
 
+    // `else skip` says what an absent value means: this record belongs under no key, so
+    // the arm writes nothing for it (`docs/folds.md` rule 19). It is what lets a part be
+    // read through a fold that answers `T?`, which a key part otherwise cannot be, since a
+    // key is present or it is not a key.
+    //
+    // `skip` is soft, an identifier claimed only here: the corpus uses `skip` as a field
+    // and a variable 28 times. The two tokens tell it from an `if`'s `else`, which is
+    // followed by `{` or `if` and never by a bare word.
     computed_key: ($) =>
-      seq(field('param', $.identifier), '=', field('value', $._expression)),
+      seq(
+        field('param', $.identifier),
+        '=',
+        field('value', $._expression),
+        optional(seq('else', field('absent', $.skip_keyword))),
+      ),
+
+    // A node of its own rather than a bare token, for the reason `delivery_keyword` is one:
+    // a theme can colour it, and `hek fmt` walks named children only.
+    skip_keyword: (_) => 'skip',
 
     // A `record_literal` inside one of these values, or inside a fold arm's own value, may
     // be a **fold lookup** rather than a record (`docs/folds.md` rules 15 and 16):

@@ -5146,16 +5146,11 @@ impl Parser {
     /// account. Derived state is the other case: a seed attaches an id no event claimed to
     /// every key the fold is read at, an arm attaches one to every key it touches, and from
     /// rule 18 a key lookup then files records under it.
-    /// **Only the value's result positions are asked**, which is the whole of what makes
-    /// this a rule about writing. A literal anywhere else in the expression writes nothing:
-    /// `if shop_id == 5 { n + 1 } else { n }` compares, `label(HOUSE)` passes an argument,
-    /// and `if developer_id == 1 { none } else { developer_id }` is the honest spelling this
-    /// rule recommends. Walking the whole subtree refused all three.
     ///
-    /// An `if` is the one expression whose result is somewhere else, so its arms are the
-    /// recursion and everything else is itself. That is the same shape `docs/optionals.md`
-    /// settled on for a declared position, and for the same reason: each arm of an `if`
-    /// lands where the `if` does.
+    /// **Only what the value can forward is asked**, which is the whole of what makes this a
+    /// rule about writing rather than about reading. `if shop_id == 5 { n + 1 } else { n }`
+    /// compares and `label(HOUSE)` passes an argument; neither writes an id, and walking the
+    /// whole subtree refused both.
     fn no_invented_subject(
         &self,
         lower: &Lower,
@@ -5163,40 +5158,62 @@ impl Parser {
         declared: &Type,
         what: &str,
     ) -> Result<(), Diagnostic> {
-        if tables::subject_of(declared).is_none() {
+        let Some(subject) = tables::subject_of(declared) else {
             return Ok(());
-        }
+        };
+        // **Pruned by type, which is what makes the walk safe in the right direction.** A
+        // subtree whose own type is not this subject cannot hand the subject to the result,
+        // so `shop_id == 5` and `label(HOUSE)` are not entered and the literals inside them
+        // are never seen: those are comparisons and arguments, and they write nothing.
+        // Everything that *is* subject-typed has every child walked rather than an
+        // enumerated few, so a kind nobody thought of is still looked through. Enumerating
+        // the pass-throughs instead let `developer_id.unwrap_or(99)` straight past, because
+        // `unwrap_or`'s argument is a result position too.
         let mut stack = vec![value];
         while let Some(id) = stack.pop() {
-            if let Some(subject) = lower.subjects.get(&id).and_then(tables::subject_of) {
+            let forwards = self
+                .type_of(lower, id)
+                .is_some_and(|ty| tables::subject_of(&ty).is_some_and(|found| found == subject));
+            if !forwards {
+                continue;
+            }
+            // A written id. `lower.subjects` holds exactly the literals that resolved
+            // against a subject, which is what `none` is not: it resolves against the
+            // optional and lands in no entry, so a `T? = none` seed passes here.
+            let written = lower.subjects.contains_key(&id);
+            // **A `fn` is the other way an id appears from nothing**, and this walk cannot
+            // see into one: its `return 42` is a literal at a subject-typed position in the
+            // *function's* own arena, noted there and never here. The doc above used to
+            // claim a `fn` was refused by the type, which is true only of one returning the
+            // scalar underneath; one that declares the subject itself is not.
+            let called = matches!(lower.b.exprs().get(id), Some(Expr::CallFn { .. }));
+            if written || called {
+                let (what_it_is, fix) = match written {
+                    true => ("a written id", "fold it from a field of the record"),
+                    false => (
+                        "a `fn`'s result",
+                        "fold the id from a field of the record, or pass the `fn` the id and let it return something else",
+                    ),
+                };
                 return Err(self
                     .err(
                         Code::FoldRestriction,
-                        format!("`{subject}` is a subject, so {what} cannot be a literal one"),
+                        format!("`{subject}` is a subject, so {what} cannot be {what_it_is}"),
                         lower.b.exprs().span(id),
                     )
-                    .with_hint(
-                        "a subject names rows that an erasure has to be able to reach, and a written id is one no event claimed: fold it from a field of the record, or declare the fold `T?` and seed it `none`. A command may write one, because that is where ids enter the system",
-                    ));
+                    .with_hint(format!(
+                        "a subject names rows an erasure has to be able to reach, and it reaches the ids the log holds: a key store mints one for whatever id first appears in an event, so an id a fold makes up is one no key was ever minted for. {fix}, or declare the fold `T?` and seed it `none`. A command may write one, because an event is how an id enters the log"
+                    )));
             }
-            // An `if` is the one expression whose result is somewhere else, and a `Wrap`
-            // is the optional lift that every declared position puts around a bare `T`:
-            // without it the walk stopped at `(wrap Developer (int 99))` and an `if` arm
-            // writing a literal into a `T?` fold went through.
-            match lower.b.exprs().get(id) {
-                Some(Expr::If {
-                    then, otherwise, ..
-                }) => {
-                    stack.push(*then);
-                    stack.push(*otherwise);
-                }
-                Some(Expr::Wrap { value, .. }) => stack.push(*value),
-                _ => {}
+            if let Some(expr) = lower.b.exprs().get(id) {
+                stack.extend(children(expr));
             }
         }
         Ok(())
     }
 
+    /// Rule 12: a fold whose value is subject-bound on one arm and plain on another, named
+    /// by the arm that disagrees with what the others settled on.
     fn mixed_fold(&self, name: &str, subject: &str, offender: &str) -> (String, Option<String>) {
         (
             format!(
@@ -5517,20 +5534,6 @@ impl Parser {
                         "`key` computes a parameter, which is a part of the key; a value the arm needs and the key does not is a `let` in the arm's expression",
                     ));
             };
-            // A subject id is minted by the key store and filed under, never derived: a
-            // computed one would address a row under a key nothing issued, and
-            // `KeyPart::subject` would report it as that subject all the same.
-            if let Some(subject) = tables::subject_of(&param.ty) {
-                return Err(self
-                    .err(
-                        Code::FoldRestriction,
-                        format!("`{name}` keys the subject `{subject}`, so it cannot be computed"),
-                        at,
-                    )
-                    .with_hint(
-                        "a subject's ids are minted and filed by the key store, so one is taken from the event that carries it; compute a part of a plain type beside it instead",
-                    ));
-            }
             // One value per part per arm, whichever way it is written. Two of them cannot
             // both hold, so the arm would fold nothing while `--tables` still called the
             // column storable, which is the reason `slice_filters` refuses the pair of
@@ -5563,9 +5566,21 @@ impl Parser {
             // arm's value: the seal check stays on, at every position inside the
             // expression rather than only over its result.
             let before = self.lookups.as_ref().map_or(0, Vec::len);
+            // **`else skip` is read before the value, by looking past it.** The clause ends
+            // in `else skip` and the value is parsed at a *declared position*, so the
+            // position has to know whether an absent one is allowed before it reads one:
+            // parsed against `T` the optional is a mismatch, and parsed against `T?` a
+            // part with no `else skip` would silently accept one. `else skip` is two
+            // tokens, which is what tells it from an `if`'s `else`, always followed by `{`
+            // or `if` and never by a bare word.
+            let skip = self.skip_follows();
+            let want = match skip {
+                true => Type::Opt(Box::new(param.ty.clone())),
+                false => param.ty.clone(),
+            };
             self.folding = true;
             self.keying = true;
-            let value = self.expr(lower, Some(param.ty.clone()));
+            let value = self.expr(lower, Some(want));
             self.keying = false;
             self.folding = false;
             let value = value?;
@@ -5573,6 +5588,49 @@ impl Parser {
             if let Some(found) = self.lookups.as_mut() {
                 for lookup in &mut found[before..] {
                     lookup.part = name.clone();
+                }
+            }
+            // **Rule 18: a subject key part may be read through a fold and computed no
+            // other way.** Decided here rather than before the `=` because the answer is
+            // what the value turned out to be, and the two cases are not alike:
+            //
+            // A computed one would address a row under an id nothing claimed, and
+            // `KeyPart::subject` would report it as that subject all the same, so an
+            // erasure would be told the row belongs to a subject that never owned it. A
+            // **read of a stored fold** is the opposite: the id is whatever that column
+            // holds, which rule 17 now guarantees came from a field of an event, so it is
+            // an id something claimed. Rule 17 is what makes this sound, and it was written
+            // for this: a literal seed on the looked-up fold would have handed every
+            // unannounced game the same invented developer.
+            //
+            // **Exactly the lookup, not an expression over one.** The value has to be the
+            // slot a lookup filled and nothing else, because anything built from it is a
+            // derivation again: `GameDeveloper { game_id }` is a read and
+            // `pick(GameDeveloper { game_id })` is a computation whose result nothing
+            // claimed. The type check is already free, since the slot carries the
+            // looked-up fold's declared return type.
+            if let Some(subject) = tables::subject_of(&param.ty) {
+                let read = self
+                    .lookups
+                    .as_ref()
+                    .map(|found| &found[before..])
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|lookup| {
+                        matches!(lower.b.exprs().get(value), Some(Expr::Load(slot)) if *slot == lookup.slot)
+                    });
+                if !read {
+                    return Err(self
+                        .err(
+                            Code::FoldRestriction,
+                            format!(
+                                "`{name}` keys the subject `{subject}`, so it is read through a fold or not computed at all"
+                            ),
+                            at,
+                        )
+                        .with_hint(
+                            "a subject names rows an erasure has to reach, so the id has to be one something claimed: `key {name} = <Fold> { .. }` reads a stored fold whose declared type is that subject, and anything built from one is a derivation again. A part of a plain type beside it may be computed freely",
+                        ));
                 }
             }
             // Unlike rule 13's conjunct this *may* read the record, which is the point, so
@@ -5599,11 +5657,40 @@ impl Parser {
                         "a computed part decides which row the record belongs to, so it runs before there is a key to bind the parameters from and before there is a row to hold the accumulator; it reads the record's own fields, the envelope binding, consts and pure `fn`s of those, so destructure the field and read that",
                     ));
             }
+            // **`else skip` has to be able to fire.** The lookahead above decided the
+            // position, so by here the value already fills `T?`; what is left is the
+            // reverse, a part whose value is never absent and whose `else skip` is
+            // therefore unreachable. Refused rather than allowed as a no-op, for the
+            // reason rule 3 refuses an accumulator's name that no arm reads: a word with
+            // no meaning is one a reader has to work out is meaningless.
+            if skip {
+                self.expect_word(Keyword::Else)?;
+                let at = self.span_here();
+                if !self.eat_soft("skip") {
+                    return Err(self.err(
+                        Code::ExpectedToken,
+                        "expected `skip` after `else` in a key part".to_string(),
+                        at,
+                    ));
+                }
+                if !matches!(self.type_of(lower, value), Some(Type::Opt(_))) {
+                    return Err(self
+                        .err(
+                            Code::FoldRestriction,
+                            format!("`{name}` is never absent here, so `else skip` cannot fire"),
+                            at,
+                        )
+                        .with_hint(
+                            "`else skip` says what an absent value means, so it belongs on a part read through a fold that answers `T?`; a value that is always present needs none",
+                        ));
+                }
+            }
             keys.push(ComputedKey {
                 param: param.name,
                 slot: param.slot,
                 ty: param.ty,
                 value,
+                skip,
                 span: at,
             });
             if !self.eat_sym(Sym::Comma) {
@@ -5894,6 +5981,39 @@ impl Parser {
                 at,
             )),
         }
+    }
+
+    /// Whether the next token is a bare word. Every word a test body uses but `test`
+    /// Whether this `key` part ends in `else skip`, looked for past the value.
+    ///
+    /// Two tokens rather than one, which is what tells it from an `if`'s `else`: that is
+    /// always followed by `{` or `if` and never by a bare word. The scan stops at the end
+    /// of the clause (`=>`) or of this part (`,`) at depth zero, so an `else skip` in a
+    /// *later* part is not mistaken for this one's.
+    fn skip_follows(&self) -> bool {
+        let mut depth = 0i32;
+        for (index, spanned) in self.tokens.iter().enumerate().skip(self.pos) {
+            match &spanned.token {
+                Token::End => return false,
+                Token::Sym(Sym::LParen | Sym::LBrace | Sym::LBracket) => depth += 1,
+                Token::Sym(Sym::RParen | Sym::RBrace | Sym::RBracket) => depth -= 1,
+                Token::Sym(Sym::Arrow | Sym::Comma) if depth <= 0 => return false,
+                // **Keep scanning past an `else` that is not `else skip`.** Returning
+                // here read `key m = if c { X } else { Y } else skip` as having no skip,
+                // which parsed the value at the wrong position and gave three spurious
+                // mismatches and an `expected =>`.
+                Token::Word(Keyword::Else) if depth <= 0 => {
+                    if matches!(
+                        self.tokens.get(index + 1).map(|next| &next.token),
+                        Some(Token::Ident(word)) if word == "skip"
+                    ) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Whether the next token is a bare word. Every word a test body uses but `test`
@@ -9175,9 +9295,6 @@ impl Parser {
         }
     }
 
-    /// The fields every listed path shares, as one synthesised definition. A field
-    /// counts only when its type **and** its `@subject` match everywhere, so a
-    /// `reveal` through a multi-path binding stays sound.
     /// The names at least one listed path declares and [`Self::common_fields`] therefore
     /// dropped, which is **not shared** rather than not declared.
     ///
@@ -9214,6 +9331,9 @@ impl Parser {
         out
     }
 
+    /// The fields every listed path shares, as one synthesised definition. A field counts
+    /// only when its type **and** its `@subject` match everywhere, so a `reveal` through a
+    /// multi-path binding stays sound.
     fn common_fields(
         &self,
         paths: &[EventPath],

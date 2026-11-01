@@ -433,3 +433,43 @@ command Buy(game_id: Int) {
         (field_initializer_list
           (field_initializer
             name: (identifier)))))))
+
+================================================================================
+A key part read through a fold, with an explicit skip
+================================================================================
+
+fold DeveloperGross(developer_id: Int) -> cents: Int = 0 {
+  on @game.purchased { game_id } key developer_id = GameDeveloper { game_id } else skip => cents
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fold_definition
+    name: (type_identifier)
+    parameters: (parameters
+      (parameter
+        name: (identifier)
+        type: (type
+          (primitive_type))))
+    accumulator: (identifier)
+    type: (fold_type
+      (type
+        (primitive_type)))
+    seed: (integer_literal)
+    body: (fold_body
+      (fold_arm
+        (slice_reference
+          path: (event_path))
+        destructure: (destructure
+          (identifier))
+        keys: (computed_keys
+          (computed_key
+            param: (identifier)
+            value: (record_literal
+              name: (type_identifier)
+              (field_initializer_list
+                (field_initializer
+                  name: (identifier))))
+            absent: (skip_keyword)))
+        value: (identifier)))))

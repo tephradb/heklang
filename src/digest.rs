@@ -1076,7 +1076,15 @@ impl<'a> Frame<'a> {
         // sorted order rather than letting the written order back in. Appended after
         // `keyed`, so a slice that computes nothing packs byte for byte as it did.
         for (param, value) in self.sorted(&computed_keys(slice)) {
-            parts.push(node("computed", [atom(param), value]));
+            // Rule 19's `else skip` is a third child and only when it was written, so a
+            // part without one packs byte for byte as it did. It belongs in the form
+            // because it is behaviour: the same expression writes a row or writes none.
+            let skip = slice.keys.iter().any(|key| key.param == param && key.skip);
+            let mut children = vec![atom(param), value];
+            if skip {
+                children.push(atom("skip".to_string()));
+            }
+            parts.push(node("computed", children));
         }
         for bind in sorted_binds(&slice.binds) {
             let slot = self.slot(bind.slot);

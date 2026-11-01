@@ -1405,12 +1405,19 @@ fold GameDeveloper(game_id: Game) -> Developer? = none {   // and this is the sp
 }
 ```
 
-**A literal is the one way a subject-typed value appears from nothing.** Every other route
-is already refused by the type: a `fn` returning the scalar underneath, `Uuid.derive` into a
-subject over `Uuid`, arithmetic. What makes a literal different is rule 12's "positional at
-the edge": a subject id *is* its scalar at run time, so a literal resolves against the
-subject and no position has to learn a coercion rule. An inlined `const` is a literal node
-too, so this is keyed by node rather than decided by the shape of the expression.
+**Two routes reach an id the log does not hold.** A **literal**, because of rule 12's
+"positional at the edge": a subject id *is* its scalar at run time, so a literal resolves
+against the subject and no position has to learn a coercion rule. An inlined `const` is a
+literal node too, so this is keyed by node rather than decided by the shape of the
+expression. And a **`fn`'s result**, because a `fn` may declare the subject itself and its
+`return 42` is a literal at a subject-typed position in the function's own body, which the
+fold's check cannot see into. `Uuid.derive` into a subject and arithmetic on one are refused
+by the type and need no rule.
+
+A `fn` is refused even when it only passes an id through, which is over-strict in the safe
+direction: inline the read. What the record gives is fine however it is reached, including
+through a method, and only what the value can **forward** is asked, so `shop_id == 5` and
+`label(HOUSE)` are not examined at all.
 
 Two positions are refused, and they are the two a fold writes from: **the seed**, which
 attaches the id to every key the fold is read at, and **an arm's value**, which attaches it
@@ -1434,3 +1441,61 @@ forbid a legitimate constant: a house account, a system developer.
 Derived state is the other case. Nothing claimed the id a fold writes, no event carries it,
 and the row it keys answers to no subject, so an erasure that reaches every row the subject
 owns still leaves it. That is a hole only derived state can have.
+
+## 18. A subject key part is read through a fold
+
+Rule 17 refuses a fold's *writing* a subject id out of nothing. This is the other half: a
+key part whose type is a subject may be **read through a stored fold** and computed no other
+way.
+
+```hek
+fold GameDeveloper(game_id: Game) -> Developer? = none {
+  on @game.announced(game_id) { developer_id } => developer_id
+}
+
+fold DeveloperGross(developer_id: Developer) -> cents: Int = 0 {
+  on @game.purchased { game_id, price_cents }
+    key developer_id = GameDeveloper { game_id } else skip => cents + price_cents
+}
+```
+
+**Rule 17 is what makes this sound, and it was written for this.** A computed id addresses a
+row under an id nothing claimed, and `KeyPart::subject` reports it as that subject all the
+same, so an erasure is told the row belongs to a subject that never owned it. A read of a
+stored fold is the opposite: the id is whatever that column holds, and rule 17 guarantees it
+came from a field of an event. The hole was a literal seed on the looked-up fold, which
+handed every unannounced game the same invented developer.
+
+**Exactly the lookup, not an expression over one.** `GameDeveloper { game_id }` is a read;
+`pick(GameDeveloper { game_id })` is a computation whose result nothing claimed, and is
+refused. The type check is free, because the slot carries the looked-up fold's declared
+return type.
+
+A part of a plain type beside it may still be computed freely (rule 14).
+
+## 19. `else skip` says what an absent key part means
+
+A key is present or it is not a key, so an optional value cannot fill a part. `else skip`
+says what to do instead: **this record belongs under no key**, so the arm writes nothing for
+it.
+
+```hek
+key developer_id = GameDeveloper { game_id } else skip
+```
+
+**Rule 18 cannot be used without it.** Rule 17 leaves a subject-returning fold no legal
+non-optional seed, since a literal is refused and every other route is refused by the type,
+so such a fold is always `-> T? = none` and such a key part is always absent sometimes.
+
+Both drivers have to say the same thing, and they say it differently: the **sink** writes no
+key at all for the record, and a **by-key read** passes it over under every key. Those are
+one answer, which is what `tests/sink.rs` checks. In particular the record does not land
+under the seed's key, which is what the workaround it replaces did.
+
+It is allowed on any computed part and not only on a lookup, because both ask the same
+question of both drivers and refusing one would cost a check rather than save one. It has to
+be able to fire, though: a part whose value is never absent is refused, for the reason rule 3
+refuses an accumulator's name that no arm reads.
+
+`skip` is a soft keyword, claimed only after `else` in a `key` clause, and the two tokens
+tell it from an `if`'s `else`, which is always followed by `{` or `if`.

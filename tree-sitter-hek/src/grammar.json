@@ -2286,8 +2286,37 @@
             "type": "SYMBOL",
             "name": "_expression"
           }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "else"
+                },
+                {
+                  "type": "FIELD",
+                  "name": "absent",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "skip_keyword"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
         }
       ]
+    },
+    "skip_keyword": {
+      "type": "STRING",
+      "value": "skip"
     },
     "slice_reference": {
       "type": "SEQ",

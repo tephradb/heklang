@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A subject key part may be read through a fold, with an explicit skip** (`docs/folds.md` rules 18
+  and 19). They are one feature:
+
+  ```hek
+  fold GameDeveloper(game_id: Game) -> Developer? = none {
+    on @game.announced(game_id) { developer_id } => developer_id
+  }
+
+  fold DeveloperGross(developer_id: Developer) -> cents: Int = 0 {
+    on @game.purchased { game_id, price_cents }
+      key developer_id = GameDeveloper { game_id } else skip => cents + price_cents
+  }
+  ```
+
+  A key part whose type is a subject was refused outright; it may now be read through a **stored
+  fold** and computed no other way. Rule 17 is what makes that sound, and was written for it: a
+  computed id addresses a row under an id nothing claimed and `KeyPart::subject` reports it as that
+  subject all the same, where a read is whatever the column holds and rule 17 guarantees that came
+  from a field of an event. **Exactly the lookup**, so `pick(GameDeveloper { game_id })` is refused:
+  an expression over one is a derivation again.
+
+  **`else skip` is what makes rule 18 reachable at all**, rather than a convenience. Rule 17 leaves
+  a subject-returning fold no legal non-optional seed, so it is always `-> T? = none` and such a key
+  part is always absent sometimes. `else skip` says that record belongs under **no key**: the sink
+  writes nothing for it and a by-key read passes it over under every key, which `tests/sink.rs`
+  checks are one answer. In particular it does not land under the seed's key, which is what the
+  `""`-seed workaround it replaces did.
+
+  Allowed on any computed part and not only a lookup, since both ask the same question of both
+  drivers; a part whose value is never absent is refused, because its `else skip` could not fire.
+  `skip` is a soft keyword claimed only after `else` in a `key` clause, and the two tokens tell it
+  from an `if`'s `else`, always followed by `{` or `if`. A part with no `else skip` packs byte for
+  byte as it did, so `hek digest --hash hek/` does not move.
+
 - **A fold may not invent a subject id** (`docs/folds.md` rule 17). A `subject` names the rows an
   erasure has to be able to reach, so a literal is refused at the two positions a fold writes from,
   its seed and an arm's value:
@@ -18,11 +52,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fold GameDeveloper(game_id: Game) -> Developer? = none { .. }   // the spelling
   ```
 
-  A literal is the one way a subject-typed value appears from nothing: a `fn` returning the scalar
-  underneath, `Uuid.derive` into a subject over `Uuid`, and arithmetic are all already refused by
-  the type, and what makes a literal different is that it resolves *against* the subject so no
-  position has to learn a coercion rule. An inlined `const` is a literal node too, so this is keyed
-  by node rather than decided from the shape of the expression.
+  Two routes reach an id the log does not hold. A **literal**, because it resolves *against* the
+  subject so no position has to learn a coercion rule, and an inlined `const` is a literal node too.
+  And a **`fn`'s result**, because a `fn` may declare the subject itself and its `return 42` is a
+  literal at a subject-typed position in the function's own body, which a check on the fold cannot
+  see into; a `fn` is refused even where it only passes an id through, which is over-strict in the
+  safe direction. `Uuid.derive` into a subject and arithmetic on one are refused by the type.
+
+  Only what the value can **forward** is asked, so `shop_id == 5` and `label(HOUSE)` are not
+  examined: a comparison and an argument write nothing. Both halves were holes first, and
+  `unwrap_or(99)` reaching the log is why the walk prunes by type rather than by a list of kinds.
 
   **A filter is not refused**, because it compares records rather than writing one, and **a command
   may still write one**: a command is where ids enter the system, its caller may send the same

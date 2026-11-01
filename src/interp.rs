@@ -1131,8 +1131,29 @@ impl<'a> Tables<'a> {
                     };
                     let value = eval(self.program, &def.exprs, frame, *id, None)
                         .map_err(|err| err.in_module(module))?;
-                    fitted_at(value, &part.ty, def.exprs.span(*id))
-                        .map_err(|err| err.in_module(module))?
+                    // **Rule 19: `else skip` and absent, so this record has no key.** Not
+                    // this part and not this arm: a key is whole or it is no key, so the
+                    // arm writes nothing at all for this record and the by-key read skips
+                    // it under every key, which is the two drivers giving one answer.
+                    //
+                    // The flag is looked up by the expression rather than carried on
+                    // `ArmMatch`, which keeps hekla's DDL exactly as it was: a lookup is
+                    // still a `Computed` and the layout still reports `pinned()`.
+                    let skip = slice.keys.iter().any(|key| key.value == *id && key.skip);
+                    match (skip, value) {
+                        (true, Value::Opt { value: None, .. }) => {
+                            return Ok((Vec::new(), read));
+                        }
+                        (
+                            true,
+                            Value::Opt {
+                                value: Some(held), ..
+                            },
+                        ) => fitted_at(*held, &part.ty, def.exprs.span(*id))
+                            .map_err(|err| err.in_module(module))?,
+                        (_, value) => fitted_at(value, &part.ty, def.exprs.span(*id))
+                            .map_err(|err| err.in_module(module))?,
+                    }
                 }
                 ArmMatch::Open => {
                     key.push(None);
@@ -2708,6 +2729,23 @@ fn fold(
             let mut mine = true;
             for key in &slice.keys {
                 let value = eval(program, exprs, frame, key.value, None)?;
+                // Rule 19: `else skip` and absent, so this record belongs under no key at
+                // all and is therefore not this one's. The sink writes nothing for it,
+                // which is the same answer: a record skipped by every key and a record
+                // written at none are one record.
+                let value = match (key.skip, value) {
+                    (true, Value::Opt { value: None, .. }) => {
+                        mine = false;
+                        break;
+                    }
+                    (
+                        true,
+                        Value::Opt {
+                            value: Some(held), ..
+                        },
+                    ) => *held,
+                    (_, value) => value,
+                };
                 let value = fitted_at(value, &key.ty, exprs.span(key.value))?;
                 if frame.get(key.slot)? != &value {
                     mine = false;

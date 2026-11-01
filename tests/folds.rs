@@ -1871,7 +1871,7 @@ fold F(shop_id: Shop) -> Int = 0 {
 ";
     assert_eq!(
         error(subject),
-        "`shop_id` keys the subject `Shop`, so it cannot be computed"
+        "`shop_id` keys the subject `Shop`, so it is read through a fold or not computed at all"
     );
 }
 
@@ -2845,20 +2845,20 @@ event @game.announced {{ game_id: Int, developer_id: Developer }}
         error(&source(
             "fold Seeded(game_id: Int) -> Developer = 7 {\n  on @game.announced(game_id) { developer_id } => developer_id\n}"
         )),
-        "`Developer` is a subject, so this seed cannot be a literal one"
+        "`Developer` is a subject, so this seed cannot be a written id"
     );
     assert_eq!(
         error(&source(
             "fold Armed(game_id: Int) -> Developer? = none {\n  on @game.announced(game_id) => 99\n}"
         )),
-        "`Developer` is a subject, so this arm's value cannot be a literal one"
+        "`Developer` is a subject, so this arm's value cannot be a written id"
     );
     // An inline fold's seed is the same position.
     assert_eq!(
         error(&source(
             "event @noise { game_id: Int }\n\ncommand C(game_id: Int) {\n  fold who: Developer = 7\n    on @game.announced(game_id) { developer_id } => developer_id\n\n  emit @noise { game_id }\n}"
         )),
-        "`Developer` is a subject, so this seed cannot be a literal one"
+        "`Developer` is a subject, so this seed cannot be a written id"
     );
 
     // The honest spelling, and the three positions this does **not** reach.
@@ -2918,7 +2918,7 @@ fn label(shop_id: Shop) -> String {{
         error(&source(
             "fold Sneaky(game_id: Int) -> Developer? = none {\n  on @game.announced(game_id) { developer_id } =>\n    if developer_id == 1 { 99 } else { developer_id }\n}"
         )),
-        "`Developer` is a subject, so this arm's value cannot be a literal one"
+        "`Developer` is a subject, so this arm's value cannot be a written id"
     );
 
     // The subject named is the one at the offending node. It came from an arbitrary map
@@ -2929,6 +2929,188 @@ fn label(shop_id: Shop) -> String {{
         error(&source(
             "fold Armed(game_id: Int) -> Developer? = none {\n  on @game.announced(game_id, shop_id: 5) => 99\n}"
         )),
-        "`Developer` is a subject, so this arm's value cannot be a literal one"
+        "`Developer` is a subject, so this arm's value cannot be a written id"
+    );
+}
+
+/// **Rules 18 and 19 are one feature.** A subject key part may be read through a fold, and
+/// `else skip` is what makes that reachable: rule 17 leaves a subject-returning fold no
+/// legal non-optional seed (a literal is refused and every other route is refused by the
+/// type), so such a fold is always `T? = none` and a key part is always absent sometimes.
+///
+/// Rule 17 is also what makes rule 18 sound. A read of a stored fold is an id something
+/// claimed, where a computed one is an id nothing did, and the port's `""` seed was the
+/// hole: it handed every unannounced game the same invented developer.
+#[test]
+fn a_subject_key_part_is_read_through_a_fold_with_an_explicit_skip() {
+    let source = |arm: &str| {
+        format!(
+            "\
+subject Developer(Int)
+
+event @game.announced {{ game_id: Int, developer_id: Developer }}
+event @game.purchased {{ game_id: Int, dev: Developer, price_cents: Int }}
+
+fn pick(d: Developer?) -> Developer? {{
+  return d
+}}
+
+fold GameDeveloper(game_id: Int) -> Developer? = none {{
+  on @game.announced(game_id) {{ developer_id }} => developer_id
+}}
+
+fold DeveloperGross(developer_id: Developer) -> cents: Int = 0 {{
+  {arm}
+}}
+"
+        )
+    };
+    // The whole shape, which is what the port converts to.
+    let program = program(&source(
+        "on @game.purchased { game_id, price_cents }\n    key developer_id = GameDeveloper { game_id } else skip => cents + price_cents",
+    ));
+    let key = program
+        .fold("DeveloperGross")
+        .expect("declared")
+        .stage
+        .slices
+        .first()
+        .expect("one arm")
+        .keys
+        .first()
+        .expect("one computed part");
+    assert!(key.skip, "the part carries its own `else skip`");
+
+    // A part computed any other way is refused: an expression over a lookup is a
+    // derivation again, and a field of the event is one nothing claimed as a key.
+    for arm in [
+        "on @game.purchased { dev, price_cents } key developer_id = dev => cents + price_cents",
+        "on @game.purchased { game_id, price_cents }\n    key developer_id = pick(GameDeveloper { game_id }) else skip => cents + price_cents",
+    ] {
+        assert_eq!(
+            error(&source(arm)),
+            "`developer_id` keys the subject `Developer`, so it is read through a fold or not computed at all"
+        );
+    }
+
+    // Without `else skip` the optional is refused as it always was, which is the type
+    // rule rather than a new one: a key is present or it is not a key.
+    assert_eq!(
+        error(&source(
+            "on @game.purchased { game_id, price_cents }\n    key developer_id = GameDeveloper { game_id } => cents + price_cents"
+        )),
+        "expected Developer, found Developer?"
+    );
+}
+
+/// `else skip` has to be able to fire, for the reason rule 3 refuses an accumulator's name
+/// that no arm reads: a word with no meaning is one a reader has to work out is meaningless.
+/// It is allowed on any computed part and not only on a lookup, because both are the same
+/// question to both drivers and refusing one would cost a check rather than save one.
+#[test]
+fn else_skip_belongs_on_a_part_that_can_be_absent() {
+    let source = |keys: &str| {
+        format!(
+            "\
+event @game.purchased {{ game_id: Int, note: String?, price_cents: Int }}
+
+fn bucket(note: String?) -> String? {{
+  return note
+}}
+
+fold Monthly(month: String) -> cents: Int = 0 {{
+  on @game.purchased {{ note, price_cents }} key {keys} => cents + price_cents
+}}
+"
+        )
+    };
+    // A computed part, no lookup in sight, and it skips.
+    program(&source("month = bucket(note) else skip"));
+    assert_eq!(
+        error(&source("month = \"2026-01\" else skip")),
+        "`month` is never absent here, so `else skip` cannot fire"
+    );
+    // And an absent value with no `else skip` is the ordinary type rule.
+    assert_eq!(
+        error(&source("month = bucket(note)")),
+        "expected String, found String?"
+    );
+}
+
+/// **The two routes a written id reached the log by anyway.** Rule 17 asked only about an
+/// enumerated set of pass-through expressions and about literals in this arena, and both
+/// assumptions were wrong: `unwrap_or`'s argument is a result position, and a `fn` may
+/// declare the subject itself, so its `return 42` is a literal at a subject-typed position
+/// in the function's own arena and this walk never sees it.
+///
+/// Both put a row in the read model keyed by an id no event carried, which is the whole
+/// hole rules 17 and 18 exist to close: a key store mints a key for whatever id first
+/// appears in an event, so an id a fold makes up is one no key was ever minted for, and an
+/// erasure that reaches every row the subject owns still leaves it.
+#[test]
+fn a_fold_cannot_launder_a_subject_id_through_a_method_or_a_fn() {
+    let source = |arm: &str| {
+        format!(
+            "\
+subject Developer(Int)
+
+event @game.announced {{ game_id: Int, developer_id: Developer? }}
+
+fn house() -> Developer {{
+  return 42
+}}
+
+fn passthru(d: Developer?) -> Developer? {{
+  return d
+}}
+
+fold Held(game_id: Int) -> Developer? = none {{
+  on @game.announced(game_id) {{ developer_id }} => {arm}
+}}
+"
+        )
+    };
+    assert_eq!(
+        error(&source("developer_id.unwrap_or(99)")),
+        "`Developer` is a subject, so this arm's value cannot be a written id"
+    );
+    assert_eq!(
+        error(&source("house()")),
+        "`Developer` is a subject, so this arm's value cannot be a `fn`'s result"
+    );
+    // A `fn` that only passes one through is refused too, and deliberately: this walk
+    // cannot see into a body, so a result it cannot account for is one it will not take.
+    // Over-strict in the safe direction, and inlining the read is the fix.
+    assert_eq!(
+        error(&source("passthru(developer_id)")),
+        "`Developer` is a subject, so this arm's value cannot be a `fn`'s result"
+    );
+
+    // What the record gives is still fine, through a method as much as directly.
+    program(&source("developer_id"));
+    program(&source(
+        "if developer_id.is_some() { developer_id } else { none }",
+    ));
+}
+
+/// `else skip` is looked for past the value, so an `if` in the value must not end the
+/// scan: returning at the first `else` read `key m = if c { X } else { Y } else skip` as
+/// having no skip, parsed the value at the wrong position, and gave three spurious
+/// mismatches and an `expected =>`.
+#[test]
+fn an_if_in_a_key_parts_value_does_not_hide_its_else_skip() {
+    program(
+        "\
+event @game.purchased { game_id: Int, note: String?, price_cents: Int }
+
+fn bucket(note: String?) -> String? {
+  return note
+}
+
+fold Monthly(month: String) -> cents: Int = 0 {
+  on @game.purchased { note, game_id, price_cents }
+    key month = if game_id > 1 { bucket(note) } else { none } else skip => cents + price_cents
+}
+",
     );
 }

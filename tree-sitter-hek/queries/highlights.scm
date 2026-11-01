@@ -126,6 +126,9 @@
 ; `latest` and `live` are soft too, claimed only between `on` and the first path.
 (delivery_keyword) @keyword
 
+; `skip` is soft, claimed only after `else` in a `key` clause.
+(skip_keyword) @keyword
+
 ; Soft inside a test body and an ordinary name everywhere else.
 [
   "given"

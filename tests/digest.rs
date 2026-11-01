@@ -2095,3 +2095,47 @@ fold F{arms}
         assert_eq!(entry(&one, "F").hash, entry(&two, "F").hash);
     }
 }
+
+/// `else skip` is **behaviour**, so it is in the form: the same expression either writes a
+/// row or writes none. A part without one packs byte for byte as it did, which is why the
+/// marker is a third child rather than a changed shape.
+#[test]
+fn else_skip_is_part_of_a_computed_parts_form() {
+    let program = |keys: &str| {
+        format!(
+            "\
+event @game.purchased {{ game_id: Int, note: String?, price_cents: Int }}
+
+fn bucket(note: String?) -> String? {{
+  return note
+}}
+
+fold Monthly(month: String) -> cents: Int = 0 {{
+  on @game.purchased {{ note, price_cents }} key {keys} => cents + price_cents
+}}
+"
+        )
+    };
+    let skipping = digest(&program("month = bucket(note) else skip"));
+    assert!(
+        entry(&skipping, "Monthly")
+            .form
+            .packed()
+            .contains("(computed month (fn bucket $2) skip)"),
+        "{}",
+        entry(&skipping, "Monthly").form.packed()
+    );
+
+    // A part with no `else skip` has two children, as every computed part always did.
+    let plain = digest(
+        "event @game.purchased { game_id: Int, price_cents: Int }
+
+fold Monthly(month: String) -> cents: Int = 0 {
+  on @game.purchased { game_id, price_cents } key month = \"{game_id}\" => cents + price_cents
+}
+",
+    );
+    let packed = entry(&plain, "Monthly").form.packed();
+    assert!(packed.contains("(computed month "), "{packed}");
+    assert!(!packed.contains("skip"), "{packed}");
+}
