@@ -392,6 +392,18 @@ impl KeySite {
             )),
         }
     }
+
+    /// What to call this site in the refusal of a missing filter list.
+    ///
+    /// The list is written even when it is empty at all three, so the only thing that
+    /// varies is the noun. One message for every site said "an arm of a fold" to a
+    /// `guard`, and pointed it at a projector's `on`, which it is not either.
+    fn slice_noun(self) -> &'static str {
+        match self {
+            KeySite::Fold | KeySite::Inline => "an arm of a fold",
+            KeySite::Guard => "a guard",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -647,6 +659,33 @@ impl Parser {
     /// what makes a runtime error and a hover read the same extent a static one does.
     fn close(&self, lower: &mut Lower, id: ExprId, start: Pos) -> ExprId {
         lower.b.respan(id, self.span_from(start))
+    }
+
+    /// Whether a method call follows the group whose opening paren was just consumed.
+    ///
+    /// `(x)` and `(x).len()` want opposite things from the same expected type: in the first
+    /// it is `x` that has to fit, and in the second it is `len`'s result, so checking `x`
+    /// against it made `("abc").len()` at an `Int` position a type error. Nothing inside
+    /// the parentheses says which this is, so the answer is past them.
+    fn method_follows_group(&self) -> bool {
+        let mut depth = 1i32;
+        for (index, spanned) in self.tokens.iter().enumerate().skip(self.pos) {
+            match &spanned.token {
+                Token::End => return false,
+                Token::Sym(Sym::LParen | Sym::LBrace | Sym::LBracket) => depth += 1,
+                Token::Sym(Sym::RParen | Sym::RBrace | Sym::RBracket) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return matches!(
+                            self.tokens.get(index + 1).map(|next| &next.token),
+                            Some(Token::Sym(Sym::Dot))
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn command_end(&self) -> usize {
@@ -4698,6 +4737,7 @@ impl Parser {
             let filters = self.slice_filters(
                 lower,
                 &path,
+                at,
                 &def,
                 match named {
                     true => KeySite::Fold,
@@ -5040,7 +5080,7 @@ impl Parser {
         let at = self.span_here();
         let path = self.expect_path()?;
         let def = self.event_def(events, &path, at)?;
-        let filters = self.slice_filters(lower, &path, def, KeySite::Guard)?;
+        let filters = self.slice_filters(lower, &path, at, def, KeySite::Guard)?;
         Ok((path, filters))
     }
 
@@ -5109,10 +5149,30 @@ impl Parser {
         &mut self,
         lower: &mut Lower,
         path: &EventPath,
+        path_at: Span,
         def: &EventDef,
         site: KeySite,
     ) -> Result<Vec<Filter>, Diagnostic> {
-        self.expect_sym(Sym::LParen)?;
+        // **The list is written even when it is empty**, because it is what a slice is:
+        // `()` says this arm takes every record of the event, which is a statement about
+        // the append condition and not punctuation. A projector's `on` has no filter list
+        // at all, so `on @path { .. }` is right there and wrong here, and the bare error
+        // said only `expected (`.
+        if !self.at_sym(Sym::LParen) {
+            return Err(self
+                .err(
+                    Code::ExpectedToken,
+                    format!(
+                        "{} matches a slice, so `{path}` needs a filter list",
+                        site.slice_noun()
+                    ),
+                    path_at,
+                )
+                .with_hint(
+                    "write `()` to take every record of the event, or name the fields it narrows by; a projector's `on` is the one that takes a destructure straight after the path",
+                ));
+        }
+        self.bump();
         let key = site == KeySite::Fold;
 
         let mut filters = Vec::new();
@@ -7885,7 +7945,17 @@ impl Parser {
             }
             Token::Sym(Sym::LParen) => {
                 let outer = mem::replace(&mut self.no_record_literal, false);
-                let value = self.expr(lower, expect)?;
+                // **Parentheses with a method after them are not a declared position.**
+                // The expected type still reaches the expression, because `Map.empty` and
+                // `none` take what they are from it, but `expr`'s checks belong to the
+                // position that owns the type, and with a method call after the
+                // parentheses that is the method's own receiver check and the position
+                // outside. Running them here made `("abc").len()` at an `Int` position
+                // `expected Int, found String`, where `"abc".len()` was always fine.
+                let value = match self.method_follows_group() {
+                    true => self.or_expr(lower, expect)?,
+                    false => self.expr(lower, expect)?,
+                };
                 self.no_record_literal = outer;
                 self.expect_sym(Sym::RParen)?;
                 Ok(value)
@@ -11378,17 +11448,31 @@ impl Parser {
         // rather than looping and the layout would then be reported against a graph that
         // makes no sense.
         if let Some(path) = program.lookup_cycle() {
-            let names: Vec<String> = path.iter().map(|name| format!("`{name}`")).collect();
+            // **Each link says which kind it is**, because rule 15 keys through what it
+            // reads and rule 16 only reads it: one verb for the whole chain told an author
+            // whose folds merely read each other to go and find a `key` clause that was
+            // nowhere in the program. The tail clause follows the same split, and a cycle
+            // with any key link takes the sharper one.
+            let keyed = |from: &str, to: &str| {
+                program
+                    .fold(from)
+                    .is_some_and(|def| Fold::keys_through(def, to))
+            };
+            let mut names = format!("`{}`", path[0]);
+            for link in path.windows(2) {
+                let verb = match keyed(&link[0], &link[1]) {
+                    true => "keys through",
+                    false => "reads",
+                };
+                names.push_str(&format!(" {verb} `{}`", link[1]));
+            }
+            let why = match path.windows(2).any(|link| keyed(&link[0], &link[1])) {
+                true => "a fold keyed through itself has no value to key by",
+                false => "a fold that reads itself has no value to read",
+            };
             let at = program.fold(&path[0]);
             let span = at.map(|def| def.span).unwrap_or_default();
-            let mut error = Diagnostic::new(
-                Code::RecursiveFold,
-                format!(
-                    "{}: a fold keyed through itself has no value to key by",
-                    names.join(" keys through ")
-                ),
-                span,
-            );
+            let mut error = Diagnostic::new(Code::RecursiveFold, format!("{names}: {why}"), span);
             for link in path.iter().filter_map(|name| program.fold(name)) {
                 if link.span == span {
                     continue;
@@ -11485,8 +11569,15 @@ impl Parser {
                 // checked first because it is the sharper reason: it is *why* the part
                 // cannot be had without reading the log.
                 let (why, where_, hint) = match (fold.looks_up(), fold.computes()) {
+                    // Rule 15 keys through the fold it reads and rule 16 just reads it,
+                    // which is the difference the empty `part` carries. Worth saying,
+                    // because "keys through" sends a reader looking for a `key` clause and
+                    // a value lookup has none.
                     (Some(lookup), _) => (
-                        format!("keys through `{}`", lookup.fold),
+                        match lookup.part.is_empty() {
+                            true => format!("reads `{}`", lookup.fold),
+                            false => format!("keys through `{}`", lookup.fold),
+                        },
                         Related::new(format!("`{}` reads it here", fold.name), lookup.span),
                         "a lookup's boundary is another key's whole history, which no append condition can express: there is nothing for a command to narrow the log by and nothing to conflict on; read this one as a stored value, or carry what you need on the event",
                     ),

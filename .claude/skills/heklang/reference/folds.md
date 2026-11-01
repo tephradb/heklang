@@ -138,6 +138,14 @@ including one no event mentioned; the store has no row there and reads the seed.
 unbounded and the alternative is not implementable. What makes it safe is that every key part is
 pinned by some arm, so the keys a range arm can need are the keys the pinning arms mint.
 
+## 4a. An arm's filter list is written even when it is empty
+
+`on @game.purchased() { game_id } => ..`, never `on @game.purchased { game_id }`. The list is what a
+slice is, so `()` says this arm takes every record of the event, which is a statement about the
+caller's boundary. A **projector's** `on` has no filter list at all, so the paren-less spelling is
+right there and wrong here: it is the one place the two constructs do not read alike, and it is the
+mistake two independent authors made first.
+
 ## 5. A fold arm may match a key part the event does not carry
 
 `param == value` in a filter list matches a **fold parameter** rather than an event field, and names
@@ -203,8 +211,8 @@ attributes just so a read model can group by them.
 
 ```hek
 fold GenreUnits(genre: Genre) -> n: Int = 0 {
-  on @game.purchased { game_id } key genre = GameGenre { game_id } => n + 1
-  on @game.refunded { receipt_id }
+  on @game.purchased() { game_id } key genre = GameGenre { game_id } => n + 1
+  on @game.refunded() { receipt_id }
     key genre = GameGenre { game_id: ReceiptGame { receipt_id } } => n - 1
 }
 ```

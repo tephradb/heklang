@@ -14,8 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   ```hek
   fold GenreUnits(genre: Genre) -> n: Int = 0 {
-    on @game.purchased { game_id } key genre = GameGenre { game_id } => n + 1
-    on @game.refunded { receipt_id }
+    on @game.purchased() { game_id } key genre = GameGenre { game_id } => n + 1
+    on @game.refunded() { receipt_id }
       key genre = GameGenre { game_id: ReceiptGame { receipt_id } } => n - 1
   }
   ```
@@ -436,6 +436,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Parentheses around a receiver are no longer a declared position.** `("abc").len()` at an `Int`
+  position was `expected Int, found String`: the parenthesised expression was checked against the
+  type the whole postfix chain has to produce, which turns a hint the primaries treat softly into a
+  check, so every `(x).m()` whose method changes the type was refused. Only a `Bool` hint escaped
+  it, because an operand of a comparison is not checked against one. With a method after them the
+  parentheses still *pass* the expected type, because `Map.empty` and `none` take what they are from
+  it, and no longer check against it: that belongs to the method's own receiver check and to the
+  position outside, both of which still refuse a seal and a secret. Nothing to do with folds, but
+  found through one: parentheses are mandatory around a lookup in an `if` header. Two shapes still
+  reject a correct program and are recorded in `docs/types.md` section 5: a doubled `((x)).m()`, and
+  an `if` expression as the receiver.
+
+- **The query-only refusal tells a key lookup from a value one.** A fold whose arm's *value* reads
+  another fold (rule 16) was reported as one that "keys through" it, which sent the reader looking
+  for a `key` clause it does not have. It now says "reads", and a fold with both names the key one,
+  which is the sharper reason.
+
+- **A fold arm with no filter says what to write.** `on @path { field }` is a projector's handler
+  and not a fold arm, whose filter list is written even when empty, and the error was a bare
+  ``expected `(` ``. It now names the path and the hint says to write `()`. The rule 15 and rule 16
+  examples in `docs/folds.md` had the `()` missing, which is where two authors got it from.
+
 - **`hek fmt` breaks a fold arm's `key` clause onto a line of its own** instead of breaking the
   innermost call inside it. The arm was one group, so its header was only ever measured as part of
   the value's line: an over-long header stayed put and `key period = period_key(` was left past the
@@ -566,7 +588,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lifetime total. `unused-accumulator` could not see it, because the *other* arm satisfies that
   check. Now `declared-twice` at the bind, for the inline form as well, and only when some arm does
   read the accumulator: a fold whose every arm replaces the value has nothing to shadow, and
-  `fold token: String? = none / on @shop.connected { token } => token` stays the ordinary spelling
+  `fold token: String? = none / on @shop.connected() { token } => token` stays the ordinary spelling
   of that.
 - **A fold's declared seal was applied twice, and its declared subject was never checked.**
   `-> Sealed(String, Customer)?` lowered to `Opt(Sealed(Sealed(String, Customer), Customer))`:

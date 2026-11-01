@@ -2258,6 +2258,41 @@ fold A(x: Int) -> Int = 0 {
         error(itself),
         "`A` keys through `A`: a fold keyed through itself has no value to key by"
     );
+
+    // **Each link says which kind it is.** A cycle made only of rule 16 value reads has no
+    // `key` clause anywhere in it, and saying "keys through" sent the reader looking for
+    // one; a cycle with any key link keeps the sharper verb and the sharper reason.
+    let values = "\
+event @a.b { x: Int }
+
+fold A(x: Int) -> n: Int = 0 {
+  on @a.b(x) { x } => if ((B { x }) > 0) { n } else { n + 1 }
+}
+
+fold B(x: Int) -> n: Int = 0 {
+  on @a.b(x) { x } => if ((A { x }) > 0) { n } else { n + 1 }
+}
+";
+    assert_eq!(
+        error(values),
+        "`A` reads `B` reads `A`: a fold that reads itself has no value to read"
+    );
+
+    let mixed = "\
+event @a.b { x: Int, y: Int }
+
+fold A(x: Int) -> n: Int = 0 {
+  on @a.b() { x, y } key x = B { x: y } => n + 1
+}
+
+fold B(x: Int) -> n: Int = 0 {
+  on @a.b(x) { x } => if ((A { x }) > 0) { n } else { n + 1 }
+}
+";
+    assert_eq!(
+        error(mixed),
+        "`A` keys through `B` reads `A`: a fold keyed through itself has no value to key by"
+    );
 }
 
 #[test]
@@ -2524,5 +2559,127 @@ fold Tally(shop_id: Shop, order_id: Int) -> Int = 0 {{
     assert_eq!(
         error(&shape("enum Tally { @default One, Two }")),
         "`Tally` is already the name of an enum"
+    );
+}
+
+/// **An arm's filter list is written even when it is empty**, because the list is what a
+/// slice is: `()` says the arm takes every record of the event, which is a statement about
+/// the append condition. A projector's `on` has no filter list at all, so `on @path { .. }`
+/// is right there and wrong here, and two authors wrote it from the docs, whose rule 15 and
+/// rule 16 examples had left the `()` out.
+#[test]
+fn an_arm_with_no_filter_still_writes_its_filter_list() {
+    let arm = |slice: &str| {
+        format!(
+            "\
+event @game.purchased {{ game_id: Int }}
+
+fold Units(game_id: Int) -> n: Int = 0 {{
+  on {slice} => n + 1
+}}
+"
+        )
+    };
+    assert_eq!(
+        error(&arm("@game.purchased { game_id }")),
+        "an arm of a fold matches a slice, so `@game.purchased` needs a filter list"
+    );
+    assert!(
+        hint(&arm("@game.purchased { game_id }")).contains("write `()`"),
+        "the hint says what to write: {}",
+        hint(&arm("@game.purchased { game_id }"))
+    );
+
+    // A guard shares the same parser, and is told it is a guard: one message for every
+    // site called it an arm of a fold and pointed it at a projector.
+    assert_eq!(
+        error(
+            "\
+event @shop.connected { shop_id: Int, token: String }
+event @shop.pinged { shop_id: Int }
+
+command Ping(shop_id: Int) {
+  guard @shop.connected
+  emit @shop.pinged { shop_id }
+}
+"
+        ),
+        "a guard matches a slice, so `@shop.connected` needs a filter list"
+    );
+
+    // The same arm with the list, and an inline fold's arm, which shares the loop.
+    program(&arm("@game.purchased() { game_id }"));
+    assert_eq!(
+        error(
+            "\
+event @shop.connected { shop_id: Int, token: String }
+event @shop.pinged { shop_id: Int }
+
+command Ping(shop_id: Int) {
+  fold token: String? = none
+    on @shop.connected { token } => token
+
+  return @shop.pinged { shop_id }
+}
+"
+        ),
+        "an arm of a fold matches a slice, so `@shop.connected` needs a filter list"
+    );
+}
+
+/// Rule 15 **keys through** the fold it reads and rule 16 just **reads** it, and the
+/// query-only refusal says which. It said "keys through" for both, which sent a reader
+/// looking for a `key` clause that a value lookup does not have.
+#[test]
+fn the_query_only_refusal_tells_a_key_lookup_from_a_value_one() {
+    const PRELUDE: &str = "\
+event @game.wishlisted { user_id: Int, game_id: Int }
+event @game.purchased { user_id: Int, game_id: Int }
+
+fold Wished(user_id: Int, game_id: Int) -> Bool = false {
+  on @game.wishlisted(user_id, game_id) => true
+}
+";
+    let caller = |reader: &str, args: &str| {
+        format!(
+            "{PRELUDE}
+{reader}
+command Buy(game_id: Int, user_id: Int) {{
+  fold seen = Reader {{ {args} }}
+  emit @game.purchased {{ user_id, game_id: seen }}
+}}
+"
+        )
+    };
+
+    // Rule 16: the arm's value reads the fold, and no key part comes from it.
+    assert_eq!(
+        error(&caller(
+            "\
+fold Reader(game_id: Int) -> n: Int = 0 {
+  on @game.purchased(game_id) { user_id, game_id } =>
+    if (Wished { user_id, game_id }) { n } else { n + 1 }
+}
+",
+            "game_id"
+        )),
+        "`Reader` reads `Wished`, so it can be queried but not folded by a command"
+    );
+
+    // Rule 15: the key part itself is read through it, which is the sharper reason and
+    // the one a fold with both should name.
+    assert_eq!(
+        error(&caller(
+            "\
+fold Reader(game_id: Int, wished: Bool) -> n: Int = 0 {
+  on @game.wishlisted(game_id, wished == true) { user_id, game_id } =>
+    if (Wished { user_id, game_id }) { n } else { n + 1 }
+  on @game.purchased(game_id) { user_id, game_id }
+    key wished = Wished { user_id, game_id } => n + 1
+}
+",
+            "game_id, wished: true"
+        )),
+        "`Reader` keys through `Wished`, so it can be queried but not folded by a command"
     );
 }

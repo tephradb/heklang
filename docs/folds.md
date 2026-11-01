@@ -241,7 +241,7 @@ accumulator's. It is now `declared-twice` at the bind:
 
 **Only when some arm reads the accumulator**, which is the whole condition. A fold whose every arm
 *replaces* the value has nothing to shadow, and
-`fold token: String? = none / on @shop.connected { token } => token` is the common spelling of
+`fold token: String? = none / on @shop.connected() { token } => token` is the common spelling of
 exactly that: refusing the bind there would force a rename for no gain. The inline form shares the
 arm loop, so it shares the rule; it cannot drop the name, but it can rename it.
 
@@ -343,6 +343,12 @@ What a command folded is what it conflicts on, and a named fold folds on the com
 its slices arrive in the `AppendCondition` exactly as if they had been written inline. The filters
 resolve against the arguments the caller passed, so a predicate names the order the command was
 called for rather than the parameter the fold declared.
+
+**The filter list is written even when it is empty**, because the list is what a slice is: `()` says
+this arm takes every record of the event, which is a statement about the boundary and not
+punctuation. `on @game.purchased() { game_id } => ..`, never `on @game.purchased { game_id }`. A
+projector's `on` has no filter list at all (`docs/projectors.md`), so the paren-less spelling is
+right there and wrong here, and that is the one place the two constructs do not read alike.
 
 **A fold is copied, not called.** `src/inline.rs` splices it into whatever names it, before the
 interpreter sees either, so a command reaches the fold with one arena, one frame, one slice list and
@@ -1121,8 +1127,8 @@ when the record being folded was appended:
 
 ```hek
 fold GenreUnits(genre: Genre) -> n: Int = 0 {
-  on @game.purchased { game_id } key genre = GameGenre { game_id } => n + 1
-  on @game.refunded { receipt_id }
+  on @game.purchased() { game_id } key genre = GameGenre { game_id } => n + 1
+  on @game.refunded() { receipt_id }
     key genre = GameGenre { game_id: ReceiptGame { receipt_id } } => n - 1
 }
 ```
@@ -1153,7 +1159,7 @@ had when it sold. **And not including the record itself**, which is the half wor
 
 ```hek
 fold GenreListings(genre: String) -> n: Int = 0 {
-  on @game.listed { game_id } key genre = GameGenre { game_id } => n + 1
+  on @game.listed() { game_id } key genre = GameGenre { game_id } => n + 1
 }
 ```
 

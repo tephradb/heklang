@@ -1478,3 +1478,121 @@ fn the_shorthand_does_not_excuse_a_missing_field() {
         "`return @thing.happened` needs `name`; an event is written whole"
     );
 }
+
+/// **Parentheses around a receiver are not a declared position.** `("abc").len()` at an
+/// `Int` position was `expected Int, found String`: the paren arm of `primary` handed its
+/// caller's expected type to the expression inside, which turns a hint the primaries treat
+/// softly into a check, so every `(x).m()` where `m` changes the type was refused. Only a
+/// `Bool` hint escaped it, because an operand of a comparison is not checked against one.
+///
+/// Reported from a port that reached for parentheses around a fold lookup, which is where
+/// they are mandatory (`docs/folds.md` rule 16, an `if` header reads `Name {` as a block),
+/// but nothing about it was particular to a lookup.
+#[test]
+fn parentheses_around_a_receiver_do_not_take_the_callers_type() {
+    let shapes = [
+        ("fn l() -> Int {\n  return (\"abc\").len()\n}", "a literal"),
+        (
+            "fn l(t: List(String)) -> Int {\n  return (t).len()\n}",
+            "a parameter",
+        ),
+        (
+            "fn l(t: List(String)) -> Int {\n  return (t.push(\"x\")).len()\n}",
+            "a method call",
+        ),
+        (
+            "fn l(a: Int, b: Int) -> String {\n  return (a + b).pad(2)\n}",
+            "an operator expression",
+        ),
+    ];
+    for (body, what) in shapes {
+        parse(&source(body))
+            .unwrap_or_else(|err| panic!("{what} in parentheses is a receiver: {err}"));
+    }
+
+    // And the hint still reaches the expression when the parentheses are the whole of it,
+    // which is what a decimal literal needs to know what it is.
+    program("fn m() -> Money(2) {\n  return (1.50)\n}");
+    assert_eq!(
+        err("fn m() -> Money(2) {\n  return (\"x\")\n}"),
+        "expected Money(2), found String"
+    );
+}
+
+/// And the checks `expr` runs at a declared position are not what parentheses skip. With a
+/// method after them the receiver check in the postfix chain owns the seal, and the
+/// position outside owns the type; with nothing after them `expr` runs as it always did.
+/// Worth its own test because the fix above stopped calling `expr` for the first case.
+#[test]
+fn parentheses_do_not_launder_a_seal_or_a_secret() {
+    const SEALED: &str = "\
+subject Customer(Int)
+
+secret API_KEY
+
+event @shop.connected {
+  shop_id: Int,
+  customer_id: Customer,
+  token: String @subject(customer_id) @max(200),
+}
+
+event @leaked { shop_id: Int, n: Int, s: String }
+
+fold Token(shop_id: Int) -> Sealed(String, Customer) = \"\" {
+  on @shop.connected(shop_id) { token } => token
+}
+";
+    let leak = |body: &str| {
+        format!(
+            "{SEALED}
+command Leak(shop_id: Int) {{
+  fold t = Token {{ shop_id }}
+  {body}
+}}
+"
+        )
+    };
+    let refusal = |source: &str| {
+        parse(source)
+            .expect_err("expected this to be rejected")
+            .message
+    };
+    assert_eq!(
+        refusal(&leak("emit @leaked { shop_id, n: (t).len(), s: \"x\" }")),
+        "`len` reads content sealed under `Customer`"
+    );
+    assert_eq!(
+        refusal(&leak("emit @leaked { shop_id, n: 0, s: (t) }")),
+        "this is content sealed under `Customer` and a String is not"
+    );
+    assert_eq!(
+        refusal(&leak(
+            "emit @leaked { shop_id, n: (API_KEY).len(), s: \"x\" }"
+        )),
+        "only an effect reads a deployment secret"
+    );
+}
+
+/// Section 5's two remaining shapes, asserted as gaps rather than left to be rediscovered.
+/// Both reject a correct program, and both need "this position is advisory" carried down
+/// through an *inherited* expected type, which is the thing a flag would get wrong in the
+/// direction that matters: suppressed too widely it takes the seal and secret checks with
+/// it. The fix in each is to drop what is redundant.
+#[test]
+fn a_doubled_paren_and_an_if_receiver_are_still_checked_against_the_position() {
+    assert_eq!(
+        err("fn l(s: String) -> Int {\n  return ((s)).len()\n}"),
+        "expected Int, found String"
+    );
+    program("fn l(s: String) -> Int {\n  return (s).len()\n}");
+
+    assert_eq!(
+        err(
+            "fn l(s: String, t: String, c: Bool) -> Int {\n  return (if c { s } else { t }).len()\n}"
+        ),
+        "expected Int, found String"
+    );
+    program(
+        "fn l(s: String, t: String, c: Bool) -> Int {\n  let pick = if c { s } else { t }\n  return pick.len()\n}",
+    );
+}

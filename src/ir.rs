@@ -1076,22 +1076,36 @@ impl Fold {
     /// The first fold any arm looks up, for a diagnostic that names it. Checked before
     /// [`Self::computes`] wherever both could answer, because a lookup is the sharper
     /// reason: it is why the part cannot be computed without reading the log.
+    ///
+    /// **A key-position lookup wins over a value one** wherever a fold has both, for that
+    /// same reason, which is also why a caller cannot read the answer off the key: the
+    /// empty [`Lookup::part`] is what tells the two apart, and a diagnostic that said
+    /// "keys through" about a rule 16 read sent the reader looking for a key clause that
+    /// was not there.
     pub fn looks_up(&self) -> Option<&Lookup> {
-        self.stage
-            .slices
-            .iter()
-            .find_map(|slice| slice.lookups.first())
+        self.lookups()
+            .find(|lookup| !lookup.part.is_empty())
+            .or_else(|| self.lookups().next())
+    }
+
+    /// Every lookup any arm of this fold makes, in the order written.
+    pub fn lookups(&self) -> impl Iterator<Item = &Lookup> {
+        self.stage.slices.iter().flat_map(|slice| &slice.lookups)
     }
 
     /// Every fold this one looks up, in the order written, **with repeats**: one fold
     /// looked up by two arms is here twice. `Program::reads` is the deduplicated,
     /// transitive answer, and the walks that use this one do not care.
     pub fn reads(&self) -> impl Iterator<Item = &Ident> {
-        self.stage
-            .slices
-            .iter()
-            .flat_map(|slice| &slice.lookups)
-            .map(|lookup| &lookup.fold)
+        self.lookups().map(|lookup| &lookup.fold)
+    }
+
+    /// Whether this fold reads `other` **in a key position**, which is what a diagnostic
+    /// about one link of a cycle needs: rule 15 keys through what it reads and rule 16
+    /// just reads it, and only the first leaves the reader a `key` clause to look at.
+    pub fn keys_through(&self, other: &str) -> bool {
+        self.lookups()
+            .any(|lookup| lookup.fold == other && !lookup.part.is_empty())
     }
 }
 
