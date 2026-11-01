@@ -1051,8 +1051,13 @@ impl<'a> Frame<'a> {
         // pure comma reordering move the hash as soon as either clause had a lookup. A
         // *chain* inside one clause is not a set, because its links are evaluated
         // inner-first and that order is the program, so within a part the order stays.
+        //
+        // A rule 16 lookup belongs to no part and carries the empty sentinel, so it sorts
+        // **last** rather than first: it is written in the arm's value and runs after every
+        // clause, and an author cannot reorder it against a clause without reordering the
+        // program. Sorting the sentinel first put the packed form out of evaluation order.
         let mut reads: Vec<&Lookup> = slice.lookups.iter().collect();
-        reads.sort_by_key(|lookup| &lookup.part);
+        reads.sort_by_key(|lookup| (lookup.part.is_empty(), &lookup.part));
         for lookup in reads {
             let mut read = vec![self.slot(lookup.slot), atom(lookup.fold.clone())];
             for (name, value) in &lookup.args {

@@ -1180,8 +1180,10 @@ pub struct Slice {
     pub event: EventPath,
     pub filters: Vec<Filter>,
     pub binds: Vec<Bind>,
-    /// The named folds this arm's `key` clauses read, in **evaluation order**: an inner
-    /// link of a chain before the outer one that takes it as an argument.
+    /// The named folds this arm reads, from its `key` clauses (rule 15) and from its value
+    /// (rule 16), in **evaluation order**: every key-clause lookup before every value one,
+    /// because the clause is parsed first, and an inner link of a chain before the outer
+    /// one that takes it as an argument.
     ///
     /// Hoisted out of the expressions rather than left in them, which is what keeps
     /// [`crate::Expr`] and the whole of `eval` out of this feature: each one lands in a
@@ -1214,13 +1216,15 @@ pub struct Slice {
 #[derive(Debug, Clone)]
 pub struct Lookup {
     pub fold: Ident,
-    /// The key part whose clause this was written in.
+    /// The key part whose clause this was written in, and **empty for a rule 16 lookup**,
+    /// which is written in the arm's value and belongs to no part.
     ///
     /// Carried for the digest, which sorts the clauses: a `key` list is a set and
     /// reordering it is no change, so the lookups have to sort with it or a comma
     /// reordering would move the hash through their slot numbering. Within one part the
     /// order stays written, because a chain's links are evaluated inner-first and that
-    /// order *is* the program.
+    /// order *is* the program, and the empty sentinel sorts **last** so that the value's
+    /// lookups stay after the clauses that feed them, which is the order they run in.
     pub part: Ident,
     /// Parameter name to value, in the order written.
     pub args: Vec<(Ident, ExprId)>,

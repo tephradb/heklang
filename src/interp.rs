@@ -2474,7 +2474,8 @@ impl Asof<'_> {
     }
 }
 
-/// Rule 15: every fold this slice's `key` clauses read, into the slots they read it from.
+/// Rules 15 and 16: every fold this slice reads, from a `key` clause or from the arm's own
+/// value, into the slots they read it from.
 ///
 /// In the list's own order, which is evaluation order: an inner link of a chain was pushed
 /// before the outer one that takes it as an argument, so by the time the outer one's

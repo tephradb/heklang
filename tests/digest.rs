@@ -2016,3 +2016,32 @@ fold Counted(p: Int, q: Int) -> n: Int = 0 {{
         "two spellings of one clause list pack alike"
     );
 }
+
+/// A rule 16 lookup carries no part, so it packs **after** every clause, which is the order
+/// it runs in: the clauses are evaluated first and the value reads the slots they filled.
+/// The empty sentinel sorted first, so the packed form listed the value's lookup ahead of
+/// the clause that precedes it and the slice's form was no longer evaluation order.
+#[test]
+fn a_value_lookup_packs_after_the_key_clauses_it_runs_after() {
+    let source = "\
+event @a.b { x: Int, y: Int }
+
+fold One(x: Int) -> Int = 0 {
+  on @a.b(x) => 1
+}
+
+fold Two(x: Int) -> Int = 0 {
+  on @a.b(x) => 2
+}
+
+fold Counted(p: Int) -> n: Int = 0 {
+  on @a.b() { x, y } key p = One { x } => n + Two { x: y }
+}
+";
+    let packed = entry(&digest(source), "Counted").form.packed();
+    let clause = packed
+        .find("One")
+        .expect("the key clause's lookup is packed");
+    let value = packed.find("Two").expect("the value's lookup is packed");
+    assert!(clause < value, "the clause's lookup comes first:\n{packed}");
+}
