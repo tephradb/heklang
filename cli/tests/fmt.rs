@@ -774,3 +774,105 @@ command Ping(shop_id: Int) {
     let twice = hek::fmt::format(&once).expect("formatted output parses");
     assert_eq!(once, twice, "not a fixed point:\n{once}\n---\n{twice}");
 }
+
+/// **A fold arm's slice lists paths, and the printer is the handler's.** It took `kids[0]`
+/// as the path and everything before the `(` as the binding, so a second path came out as
+/// `on @a.b as @c.d (..)`, which does not parse: `hek fmt` wrote out a broken file. One
+/// `path_list` serves both now.
+///
+/// The filter list takes a space after several paths, so `@a, @b (x)` does not read as
+/// `@a` and then `@b(x)`. One path keeps it tight, which is how every arm in every corpus
+/// is written.
+#[test]
+fn a_fold_arm_prints_its_whole_path_list() {
+    let source = "event @game.purchased { game_id: Int, price_cents: Int }
+event @game.gifted { game_id: Int, price_cents: Int }
+
+fold GameGross(game_id: Int) -> cents: Int = 0 {
+  on @game.purchased, @game.gifted (game_id) { price_cents } => cents + price_cents
+  on @game.purchased(game_id) { price_cents } => cents + price_cents
+}
+";
+    let once = hek::fmt::format(source).expect("the source parses");
+    assert!(
+        once.contains("  on @game.purchased, @game.gifted (game_id) { price_cents } =>"),
+        "both paths, and a space before the list:\n{once}"
+    );
+    assert!(
+        once.contains("  on @game.purchased(game_id) { price_cents } =>"),
+        "one path stays tight:\n{once}"
+    );
+    let twice = hek::fmt::format(&once).expect("formatted output parses");
+    assert_eq!(once, twice, "not a fixed point:\n{once}\n---\n{twice}");
+}
+
+/// **A comment anywhere in a slice keeps its own line.** Rewriting the binding loop for the
+/// path list dropped its comment arm, so a comment after the binding came out as
+/// `as // why` with the rest of the line commented out, and `hek fmt` wrote a file that no
+/// longer parsed. A `guard_slice` goes through the same printer and broke the same way.
+///
+/// The second shape is the blank line: when the path list ends on a comment it has already
+/// left the line indented, so the binding takes no separator in front of it.
+#[test]
+fn a_comment_in_a_slice_keeps_its_line_and_adds_no_blank() {
+    let source = "event @game.purchased { game_id: Int, price_cents: Int }
+event @game.gifted { game_id: Int, price_cents: Int }
+event @shop.connected { shop_id: Int }
+event @shop.pinged { shop_id: Int }
+
+fold A(game_id: Int) -> cents: Int = 0 {
+  on @game.purchased as e // why
+    (game_id) { price_cents } => cents + price_cents + e.position
+}
+
+fold B(game_id: Int) -> cents: Int = 0 {
+  on @game.purchased // which
+    as e (game_id) { price_cents } => cents + price_cents + e.position
+}
+
+command Ping(shop_id: Int) {
+  guard @shop.connected as e // because
+    (shop_id)
+  emit @shop.pinged { shop_id }
+}
+";
+    let once = hek::fmt::format(source).expect("the source parses");
+    for comment in ["// why", "// which", "// because"] {
+        assert!(
+            once.lines().any(|line| line.trim() == comment),
+            "{comment} is on a line of its own:\n{once}"
+        );
+    }
+    assert!(
+        !once.contains("as //"),
+        "never a commented-out line:\n{once}"
+    );
+    // No blank line mid-construct: a comment that ended the path list already broke it.
+    assert!(
+        once.contains("// which\n    as e "),
+        "the binding follows the comment directly:\n{once}"
+    );
+    let twice = hek::fmt::format(&once).expect("formatted output parses");
+    assert_eq!(once, twice, "not a fixed point:\n{once}\n---\n{twice}");
+}
+
+/// And a path list that broke takes no space before the filter list: the break has already
+/// separated the paths, so the space that keeps `@a, @b (x)` readable while flat would be a
+/// stray one at the head of a continuation line.
+#[test]
+fn a_broken_path_list_takes_no_space_before_the_filters() {
+    let source = "event @aaaa.something.rather.extremely.long.indeed.truly { game_id: Int, price_cents: Int }
+event @bbbb.something.rather.extremely.long.indeed.truly { game_id: Int, price_cents: Int }
+
+fold A(game_id: Int) -> cents: Int = 0 {
+  on @aaaa.something.rather.extremely.long.indeed.truly, @bbbb.something.rather.extremely.long.indeed.truly (game_id) { price_cents } => cents + price_cents
+}
+";
+    let once = hek::fmt::format(source).expect("the source parses");
+    assert!(
+        once.contains("    @bbbb.something.rather.extremely.long.indeed.truly(game_id)"),
+        "tight after a break:\n{once}"
+    );
+    let twice = hek::fmt::format(&once).expect("formatted output parses");
+    assert_eq!(once, twice, "not a fixed point:\n{once}\n---\n{twice}");
+}

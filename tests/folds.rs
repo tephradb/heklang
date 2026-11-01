@@ -2685,3 +2685,128 @@ fold Reader(game_id: Int, wished: Bool) -> n: Int = 0 {
         "`Reader` keys through `Wished`, so it can be queried but not folded by a command"
     );
 }
+
+/// **Several paths on one arm are the arms written out**, not merely equivalent to them.
+/// The arm's tokens are read once per path so each slice allocates its own bind slots,
+/// which is what keeps `hek digest` from calling a rewrite a change: the port has 53 folds
+/// with a `@game.purchased` arm and a `@game.gifted` arm identical apart from the path.
+#[test]
+fn several_paths_on_one_arm_lower_to_the_arms_written_out() {
+    let program = program(
+        "\
+event @game.purchased { game_id: Int, price_cents: Int }
+event @game.gifted { game_id: Int, price_cents: Int }
+
+fold GameGross(game_id: Int) -> cents: Int = 0 {
+  on @game.purchased, @game.gifted (game_id) { price_cents } => cents + price_cents
+}
+",
+    );
+    let fold = program.fold("GameGross").expect("declared");
+    let events: Vec<String> = fold
+        .stage
+        .slices
+        .iter()
+        .map(|slice| slice.event.to_string())
+        .collect();
+    assert_eq!(events, ["@game.purchased", "@game.gifted"]);
+    // Its own slot per slice, which is the half that makes the digest agree.
+    let slots: Vec<_> = fold
+        .stage
+        .slices
+        .iter()
+        .flat_map(|slice| &slice.binds)
+        .map(|bind| bind.slot)
+        .collect();
+    assert_eq!(slots.len(), 2, "one bind per slice");
+    assert_ne!(slots[0], slots[1], "and a slot of its own");
+}
+
+/// A name the arm uses has to be a field of every path, with the same type, `@subject` and
+/// `absent`, which is `common_fields` and the check a projector handler already passes.
+/// Listing a path twice is refused rather than deduplicated.
+#[test]
+fn an_arms_paths_must_share_every_name_it_uses() {
+    let arm = |events: &str, body: &str| {
+        format!(
+            "\
+{events}
+fold F(game_id: Int) -> n: Int = 0 {{
+  on {body} => n + 1
+}}
+"
+        )
+    };
+    let two = "\
+event @game.purchased { game_id: Int, price_cents: Int }
+event @game.gifted { game_id: Int, wrapped: Bool }
+";
+    assert_eq!(
+        error(&arm(
+            two,
+            "@game.purchased, @game.gifted (game_id) { price_cents }"
+        )),
+        "@game.purchased, @game.gifted has no field `price_cents`"
+    );
+    assert_eq!(
+        error(&arm(two, "@game.purchased, @game.purchased (game_id)")),
+        "this arm already lists @game.purchased"
+    );
+    // **A filter names the paths too.** `def` is their intersection, so naming only the
+    // first said `@game.purchased has no field `price_cents`` about an event that has it.
+    assert_eq!(
+        error(&arm(two, "@game.purchased, @game.gifted (price_cents: 1)")),
+        "@game.purchased, @game.gifted has no field `price_cents`"
+    );
+
+    // The shared `game_id` is enough for an arm that names only it, and an arm that names
+    // nothing at all is fine even when the paths share no field: a fold may just count.
+    program(&arm(two, "@game.purchased, @game.gifted (game_id)"));
+    program(&arm(
+        "\
+event @a.failed { why: String }
+event @b.failed { code: Int }
+",
+        "@a.failed, @b.failed",
+    ));
+}
+
+/// And the same field under a different `@subject` is not the same field, so an arm cannot
+/// bind one name that is sealed on one path and plain on the other.
+#[test]
+fn an_arms_paths_must_agree_on_the_subject_too() {
+    let source = "\
+subject Customer(Int)
+
+event @a.seen { game_id: Int, customer_id: Customer, note: String @subject(customer_id) }
+event @b.seen { game_id: Int, note: String }
+
+fold F(game_id: Int) -> String = \"\" {
+  on @a.seen, @b.seen (game_id) { note } => note
+}
+";
+    assert_eq!(error(source), "@a.seen, @b.seen has no field `note`");
+}
+
+/// A repeat pass reports nothing twice. The arm is read once per path, so a diagnostic
+/// from its body would be reported once per path; `common_fields` is what makes dropping
+/// the repeats sound, since every pass is handed the same field set and so reaches the
+/// same diagnostics. A type mismatch in an arm's value is a note rather than a stop, which
+/// is how it got as far as being reported twice.
+#[test]
+fn a_multi_path_arm_reports_its_diagnostics_once() {
+    let source = "\
+event @game.purchased { game_id: Int, name: String }
+event @game.gifted { game_id: Int, name: String }
+
+fold Bad(game_id: Int) -> Int = 0 {
+  on @game.purchased, @game.gifted (game_id) { name } => name
+}
+";
+    let found = heklang::check_files([("a.hk", source)]).expect_err("this source is meant to fail");
+    let mismatches = found
+        .iter()
+        .filter(|at| at.code == heklang::Code::TypeMismatch)
+        .count();
+    assert_eq!(mismatches, 1, "{found:#?}");
+}

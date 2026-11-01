@@ -138,7 +138,16 @@ including one no event mentioned; the store has no row there and reads the seed.
 unbounded and the alternative is not implementable. What makes it safe is that every key part is
 pinned by some arm, so the keys a range arm can need are the keys the pinning arms mint.
 
-## 4a. An empty filter list is left out
+## 4a. An arm may list several event paths
+
+`on @game.purchased, @game.gifted (game_id) { price_cents } => cents + price_cents` is one arm per
+path, read once per path, so it lowers to exactly the arms written out: same slices, same bind
+slots, same digest. Every name the arm uses must be a field of **every** path with the same type,
+`@subject` and `@absent`; an arm that names nothing may list unrelated events and count them.
+
+A `guard` takes one path per slice, because `guard` already separates its slices with commas.
+
+## 4b. An empty filter list is left out
 
 `on @game.purchased { game_id } => ..` and `on @game.purchased() { game_id } => ..` are one slice,
 and `hek fmt` writes the first. A slice with no filters conflicts on every record of its event; the

@@ -2045,3 +2045,53 @@ fold Counted(p: Int) -> n: Int = 0 {
     let value = packed.find("Two").expect("the value's lookup is packed");
     assert!(clause < value, "the clause's lookup comes first:\n{packed}");
 }
+
+/// **Several paths on one arm pack as the arms written out.** Not merely equivalently: the
+/// parser reads the arm once per path so each slice allocates its own bind slots, and the
+/// first version shared one across the slices, which left the two spellings two programs.
+/// The port rewrites 53 folds into this form, and a breaking-change check that calls that a
+/// change is a breaking-change check nobody reads.
+#[test]
+fn several_paths_on_one_arm_hash_as_the_arms_written_out() {
+    let program = |arms: &str| {
+        format!(
+            "\
+event @game.purchased {{ game_id: Int, price_cents: Int }}
+event @game.gifted {{ game_id: Int, price_cents: Int }}
+event @game.listed {{ game_id: Int, genre: String }}
+
+fold GameGenre(game_id: Int) -> String = \"rpg\" {{
+  on @game.listed(game_id) {{ genre }} => genre
+}}
+
+fold F{arms}
+"
+        )
+    };
+    let pairs = [
+        (
+            "(game_id: Int) -> n: Int = 0 {\n  on @game.purchased, @game.gifted (game_id) { price_cents } => n + price_cents\n}",
+            "(game_id: Int) -> n: Int = 0 {\n  on @game.purchased(game_id) { price_cents } => n + price_cents\n  on @game.gifted(game_id) { price_cents } => n + price_cents\n}",
+        ),
+        // Rule 12: the envelope is deduplicated for the whole fold, so both give one slot.
+        (
+            "(game_id: Int) -> Timestamp? = none {\n  on @game.purchased, @game.gifted as e (game_id) => e.at\n}",
+            "(game_id: Int) -> Timestamp? = none {\n  on @game.purchased as e (game_id) => e.at\n  on @game.gifted as e (game_id) => e.at\n}",
+        ),
+        // Rules 14 and 15: a computed part read through a lookup, per path.
+        (
+            "(genre: String) -> n: Int = 0 {\n  on @game.purchased, @game.gifted { game_id } key genre = GameGenre { game_id } => n + 1\n}",
+            "(genre: String) -> n: Int = 0 {\n  on @game.purchased { game_id } key genre = GameGenre { game_id } => n + 1\n  on @game.gifted { game_id } key genre = GameGenre { game_id } => n + 1\n}",
+        ),
+    ];
+    for (listed, written) in pairs {
+        let one = digest(&program(listed));
+        let two = digest(&program(written));
+        assert_eq!(
+            entry(&one, "F").form.packed(),
+            entry(&two, "F").form.packed(),
+            "one arm listing two paths packs as the two arms:\n{listed}"
+        );
+        assert_eq!(entry(&one, "F").hash, entry(&two, "F").hash);
+    }
+}

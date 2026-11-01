@@ -370,3 +370,66 @@ fold GenreListings(genre: String) -> n: Int = 0 {
         value: (binary_expression
           left: (identifier)
           right: (integer_literal))))))
+
+================================================================================
+Several event paths on one arm, and a guard still takes one
+================================================================================
+
+fold GameGross(game_id: Int) -> cents: Int = 0 {
+  on @game.purchased, @game.gifted (game_id) { price_cents } => cents + price_cents
+}
+
+command Buy(game_id: Int) {
+  guard @game.purchased(game_id), @game.refunded(game_id)
+  emit @game.purchased { game_id }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fold_definition
+    name: (type_identifier)
+    parameters: (parameters
+      (parameter
+        name: (identifier)
+        type: (type
+          (primitive_type))))
+    accumulator: (identifier)
+    type: (fold_type
+      (type
+        (primitive_type)))
+    seed: (integer_literal)
+    body: (fold_body
+      (fold_arm
+        (slice_reference
+          path: (event_path)
+          path: (event_path)
+          (filter
+            field: (identifier)))
+        destructure: (destructure
+          (identifier))
+        value: (binary_expression
+          left: (identifier)
+          right: (identifier)))))
+  (command_declaration
+    name: (type_identifier)
+    parameters: (parameters
+      (parameter
+        name: (identifier)
+        type: (type
+          (primitive_type))))
+    body: (block
+      (guard_declaration
+        (guard_slice
+          path: (event_path)
+          (filter
+            field: (identifier)))
+        (guard_slice
+          path: (event_path)
+          (filter
+            field: (identifier))))
+      (emit_statement
+        path: (event_path)
+        (field_initializer_list
+          (field_initializer
+            name: (identifier)))))))

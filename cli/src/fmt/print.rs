@@ -435,18 +435,20 @@ impl<'a> Printer<'a> {
         )
     }
 
-    /// `on latest @a, @b as e { @key k, field } { .. }`.
+    /// `@a.b, @c.d`, an `on` header's path list, and whether it left the line already
+    /// indented.
+    ///
+    /// **Shared by a projector or effect handler and a fold arm's slice**, which list paths
+    /// the same way. The second copy drifted the moment it existed: printing a fold arm's
+    /// second path as its `as` binding wrote `on @a.b as @c.d (..)`, which does not parse.
     ///
     /// The path list breaks like any other list except that it takes **no trailing comma**:
     /// it has no closing delimiter, so a comma there would be followed by `as` and would
     /// not parse. Its continuations are indented rather than aligned under the first path,
     /// which is what the corpus does by hand; one site writes twelve paths that way, and
-    /// flat it would be a 328-column line.
-    ///
-    /// The delivery modifier stays on the header line with `on`. It is taken out before
-    /// the loop below rather than matched inside it, because it is the one child that
-    /// comes *before* the first path: left in, it would make `rest` non-empty and send
-    /// every path down the fallback arm, commas and all.
+    /// flat it would be a 328-column line. The comma goes on the path rather than in the
+    /// separator, so that a comment landing between two paths still gets one and a comment
+    /// after the last path does not.
     ///
     /// Missing that closing delimiter is also why a comment in here needs its own answer
     /// rather than `list`'s. A list ends its line with the delimiter, so `docs/fmt.md`
@@ -454,21 +456,7 @@ impl<'a> Printer<'a> {
     /// line, so a `//` written anywhere in it swallowed the paths, the binding and the
     /// block's opening brace, and the file no longer parsed. Every comment here therefore
     /// ends its own line with a hard break, and the piece it leads starts the next one.
-    fn handler(&self, node: Node<'a>) -> Doc<'a> {
-        let kids = self.kids(node);
-        let mut delivery = None;
-        let mut paths = Vec::new();
-        let mut rest = Vec::new();
-        for &kid in &kids {
-            match kid.kind() {
-                "delivery_keyword" => delivery = Some(self.text(kid)),
-                "event_path" | "comment" if rest.is_empty() => paths.push(kid),
-                _ => rest.push(kid),
-            }
-        }
-        // The comma goes on the path rather than in the separator, so that a comment
-        // landing between two paths still gets one and a comment after the last path does
-        // not: `@a.b,` followed by `as` is the shape that does not parse.
+    fn path_list(&self, paths: &[Node<'a>]) -> (Vec<Doc<'a>>, bool) {
         let last = paths.iter().rposition(|kid| kid.kind() == "event_path");
         let mut lead = Vec::new();
         let mut previous: Option<Node<'a>> = None;
@@ -505,6 +493,28 @@ impl<'a> Printer<'a> {
         if hanging {
             lead.push(Doc::Hardline);
         }
+        (lead, hanging)
+    }
+
+    /// `on latest @a, @b as e { @key k, field } { .. }`.
+    ///
+    /// The delivery modifier stays on the header line with `on`. It is taken out before the
+    /// path loop rather than matched inside it, because it is the one child that comes
+    /// *before* the first path: left in, it would make `rest` non-empty and send every path
+    /// down the fallback arm, commas and all.
+    fn handler(&self, node: Node<'a>) -> Doc<'a> {
+        let kids = self.kids(node);
+        let mut delivery = None;
+        let mut paths = Vec::new();
+        let mut rest = Vec::new();
+        for &kid in &kids {
+            match kid.kind() {
+                "delivery_keyword" => delivery = Some(self.text(kid)),
+                "event_path" | "comment" if rest.is_empty() => paths.push(kid),
+                _ => rest.push(kid),
+            }
+        }
+        let (lead, hanging) = self.path_list(&paths);
         let mut parts = vec![
             match delivery {
                 Some(word) => Doc::concat([Doc::text("on "), Doc::text(word), Doc::text(" ")]),
@@ -802,6 +812,20 @@ impl<'a> Printer<'a> {
         let (before, filters): (Vec<Node<'a>>, Vec<Node<'a>>) =
             kids[1..].iter().partition(|kid| kid.start_byte() < paren);
 
+        // **A fold arm's slice lists paths too**, so the ones after the first and any
+        // comment among them go to `path_list` and only what follows them is the binding.
+        // Taking `kids[0]` as the path and everything before the `(` as the binding wrote
+        // `on @a.b as @c.d (..)`, which does not parse.
+        let mut listed = vec![kids[0]];
+        let mut bound = Vec::new();
+        for &kid in &before {
+            match kid.kind() {
+                "event_path" | "comment" if bound.is_empty() => listed.push(kid),
+                _ => bound.push(kid),
+            }
+        }
+        let (paths, hanging) = self.path_list(&listed);
+
         // **An empty list is dropped, and `guard_slice` keeps it**, which is the grammar's
         // own split: a fold arm may leave it out and a guard may not. Dropping it is the
         // canonical form, so `on @x() { .. }` is rewritten to `on @x { .. }`.
@@ -819,42 +843,70 @@ impl<'a> Printer<'a> {
         // there to separate `as e` from the `(` and is a double space without one.
         let paren = node.kind() == "guard_slice" || !filters.is_empty();
 
-        // A line of its own for a comment and a space for the binding, which is what an
-        // `event_handler` does with the same two things in the same position.
-        let mut bound = Vec::new();
-        let mut fresh = false;
-        for kid in before {
-            match kid.kind() {
-                "comment" => {
-                    bound.push(Doc::Hardline);
-                    bound.push(Doc::text(self.text(kid)));
-                    fresh = true;
+        // A line of its own for a comment and a space for the binding, which is what
+        // `event_handler` does with the same two things in the same position. A hard break
+        // in the path list above has already left the line indented, so nothing is pushed
+        // in front of the first thing here when it has: `fresh` starts at `hanging` and
+        // the push is guarded, because doing it unguarded put a blank line mid-construct.
+        //
+        // **The comment arm is the whole of this.** Without it a comment after the binding
+        // is printed as `as // why`, the rest of the line is commented out, and `hek fmt`
+        // writes a file that no longer parses. `bound` holds everything after the binding,
+        // comments included, since only *leading* comments go to the path list.
+        let mut tail = Vec::new();
+        let mut fresh = hanging;
+        for kid in bound {
+            if kid.kind() == "comment" {
+                if !fresh {
+                    tail.push(Doc::Hardline);
                 }
-                _ => {
-                    bound.push(match fresh {
-                        true => Doc::Hardline,
-                        false => Doc::text(" "),
-                    });
-                    bound.push(Doc::concat([
-                        Doc::text("as "),
-                        self.node(kid),
-                        match paren {
-                            true => Doc::text(" "),
-                            false => Doc::text(""),
-                        },
-                    ]));
-                    fresh = false;
-                }
+                tail.push(Doc::text(self.text(kid)));
+                fresh = true;
+                continue;
             }
+            if !fresh {
+                tail.push(Doc::text(" "));
+            }
+            // The binding carries its own trailing separator, as it always did: one space
+            // to hold the `(` off `as e`, and none when the list was dropped.
+            tail.push(Doc::concat([
+                Doc::text("as "),
+                self.node(kid),
+                match paren {
+                    true => Doc::text(" "),
+                    false => Doc::text(""),
+                },
+            ]));
+            fresh = false;
         }
         if fresh {
-            bound.push(Doc::Hardline);
+            tail.push(Doc::Hardline);
         }
+        // **A separator only where nothing else supplies one.** A binding brings its own,
+        // above; with none, several paths take a space so `@a, @b (x)` does not read as
+        // `@a` and then `@b(x)`, and one path keeps it tight, which is how every arm in
+        // every corpus is written. `if_break` is what keeps the space off a continuation
+        // line, since a list that broke has already separated them.
+        let several = listed
+            .iter()
+            .filter(|kid| kid.kind() == "event_path")
+            .count()
+            > 1;
+        let apart = match tail.is_empty() && several {
+            true => Doc::if_break(Doc::text(""), Doc::text(" ")),
+            false => Doc::text(""),
+        };
         Self::led(
             leading,
             Doc::concat([
-                self.node(kids[0]),
-                Doc::indent(Doc::concat(bound)),
+                Doc::group(Doc::concat([
+                    Doc::indent(Doc::concat(paths)),
+                    match paren {
+                        true => apart,
+                        false => Doc::text(""),
+                    },
+                ])),
+                Doc::indent(Doc::concat(tail)),
                 match paren {
                     true => self.list("(", ")", false, &filters),
                     false => Doc::text(""),

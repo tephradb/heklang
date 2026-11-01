@@ -4701,30 +4701,77 @@ impl Parser {
         // agreeing, so it is settled across the declaration rather than at any one arm.
         // The seed is never subject-bound, which is allowed and is why `plain` records
         // only arms.
-        let mut bound: Option<(Ident, EventPath)> = None;
-        let mut plain: Option<(EventPath, Span)> = None;
+        // The label is the arm's events, joined, so a message about "the record it folds"
+        // names every path a multi-path arm lists rather than just the first.
+        let mut bound: Option<(Ident, String)> = None;
+        let mut plain: Option<(String, Span)> = None;
         let mut any_arm = false;
         // Where an arm binds a field named like the accumulator, if one does.
         let mut shadow: Option<Span> = None;
 
-        while self.at_word(Keyword::On) {
-            any_arm = true;
-            let arm = self.span_here();
-            self.bump();
-            self.no_delivery(
-                "a fold arm",
-                "a fold arm reads the log rather than being delivered",
-            )?;
-            let at = self.span_here();
-            let path = self.expect_path()?;
-            let def = self.event_def(events, &path, at)?.clone();
+        // **Several paths are one arm, lowered by reading the arm once per path.** Each
+        // pass allocates its own bind slots, so the result is what writing the arms out
+        // gives rather than merely equivalent to it, and `hek digest` does not call the
+        // rewrite a change. A projector handler already takes several paths this way.
+        //
+        // `common_fields` is what makes the repeat sound: every name the arm can use has
+        // the same type, `@subject` and `absent` on every path, and every pass is handed
+        // that same intersection, so a later pass reaches no diagnostic the first did not.
+        // That is why their notes are dropped rather than reported once per path, and a
+        // type mismatch in an arm's value is a note.
+        //
+        // No `must_share` here, unlike a handler: a handler's body reads the event, and a
+        // fold arm listing two unrelated failures to count them names nothing at all.
+        let mut pending: Vec<EventPath> = Vec::new();
+        let mut resume = 0usize;
+        let mut armed: Option<(EventDef, String, Span, Span)> = None;
+
+        while self.at_word(Keyword::On) || !pending.is_empty() {
+            let (event, def, listed, at, arm, mark) = match pending.pop() {
+                Some(event) => {
+                    let (def, listed, at, arm) =
+                        armed.clone().expect("the first pass set this arm");
+                    self.pos = resume;
+                    (
+                        event,
+                        def,
+                        listed,
+                        at,
+                        arm,
+                        Some(self.errors.borrow().len()),
+                    )
+                }
+                None => {
+                    any_arm = true;
+                    let arm = self.span_here();
+                    self.bump();
+                    self.no_delivery(
+                        "a fold arm",
+                        "a fold arm reads the log rather than being delivered",
+                    )?;
+                    let (paths, spans) = self.arm_paths()?;
+                    let at = spans[0];
+                    let def = self.common_fields(&paths, &spans, events)?;
+                    let listed = paths
+                        .iter()
+                        .map(EventPath::to_string)
+                        .collect::<Vec<String>>()
+                        .join(", ");
+                    resume = self.pos;
+                    // Reversed, so `pop` hands them back in the order they were written.
+                    pending = paths[1..].to_vec();
+                    pending.reverse();
+                    armed = Some((def.clone(), listed.clone(), at, arm));
+                    (paths[0].clone(), def, listed, at, arm, None)
+                }
+            };
             // `docs/folds.md` rule 12, written here rather than after the filters because that is
             // where a projector handler writes it and the two should read alike.
             let binding = self.fold_envelope(lower, named, slot)?;
             self.pending_envelope = binding.clone();
             let filters = self.slice_filters(
                 lower,
-                &path,
+                &listed,
                 at,
                 &def,
                 match named {
@@ -4773,7 +4820,7 @@ impl Parser {
                         return Err(self
                             .err(
                                 Code::UnknownMember,
-                                format!("{path} has no field `{field}`"),
+                                format!("{listed} has no field `{field}`"),
                                 bind,
                             )
                             .with_hint(format!(
@@ -4890,7 +4937,7 @@ impl Parser {
                     if let Some((have, first)) = &bound
                         && have != &field
                     {
-                        return Err(self.err(Code::StageShape, format!("`{name}` folds under two subjects, `{have}` from {first} and `{field}` from {path}"), arm).with_hint("one variable holds one subject, because `reveal` names the key by it"));
+                        return Err(self.err(Code::StageShape, format!("`{name}` folds under two subjects, `{have}` from {first} and `{field}` from {listed}"), arm).with_hint("one variable holds one subject, because `reveal` names the key by it"));
                     }
                     if let Some((first, at)) = &plain {
                         return Err(self.advised(
@@ -4899,18 +4946,22 @@ impl Parser {
                             *at,
                         ));
                     }
-                    bound.get_or_insert((field, path.clone()));
+                    bound.get_or_insert((field, listed.clone()));
                 }
                 None => {
                     if let Some((have, _)) = &bound {
-                        let message = self.mixed_fold(name, have, &path);
+                        let message = self.mixed_fold(name, have, &listed);
                         return Err(self.advised(Code::StageShape, message, arm));
                     }
-                    plain.get_or_insert((path.clone(), arm));
+                    plain.get_or_insert((listed.clone(), arm));
                 }
             }
 
-            lower.b.slice(path, filters, binds, lookups, keys, updates);
+            lower.b.slice(event, filters, binds, lookups, keys, updates);
+            // The notes of a repeat pass, which the first pass has already reported.
+            if let Some(mark) = mark {
+                self.errors.borrow_mut().truncate(mark);
+            }
         }
 
         // With the keyword at the front the declaration line reads as a binding, and with
@@ -5043,12 +5094,7 @@ impl Parser {
 
     /// Rule 12: a seed may be plain, an arm may not. Said the same way whichever order
     /// the two arms are written in, because the defect is the pair rather than either.
-    fn mixed_fold(
-        &self,
-        name: &str,
-        subject: &str,
-        offender: &EventPath,
-    ) -> (String, Option<String>) {
+    fn mixed_fold(&self, name: &str, subject: &str, offender: &str) -> (String, Option<String>) {
         (
             format!(
                 "`{name}` folds a subject-bound value under `{subject}`, so the arm on {offender} cannot fold a plain one into it"
@@ -5068,7 +5114,7 @@ impl Parser {
         let at = self.span_here();
         let path = self.expect_path()?;
         let def = self.event_def(events, &path, at)?;
-        let filters = self.slice_filters(lower, &path, at, def, KeySite::Guard)?;
+        let filters = self.slice_filters(lower, &path.to_string(), at, def, KeySite::Guard)?;
         Ok((path, filters))
     }
 
@@ -5136,7 +5182,7 @@ impl Parser {
     fn slice_filters(
         &mut self,
         lower: &mut Lower,
-        path: &EventPath,
+        path: &str,
         path_at: Span,
         def: &EventDef,
         site: KeySite,
@@ -5561,10 +5607,13 @@ impl Parser {
     /// A filter naming something that is not a field of the event. In a fold's arm the
     /// likely slip is reaching for a key part with `:`, so the message says which sigil
     /// the other form takes.
+    /// `path` is a label rather than an [`EventPath`], because a fold arm may list several
+    /// and `def` is then their intersection: naming only the first said `@game.purchased
+    /// has no field `price_cents`` about an event that has it.
     fn unknown_filter(
         &self,
         lower: &Lower,
-        path: &EventPath,
+        path: &str,
         name: &str,
         key: bool,
         at: Span,
@@ -8869,26 +8918,9 @@ impl Parser {
         // names, and only the token after `on` can be one of these.
         let delivery = self.delivery()?;
 
-        // Captured before the path rather than after it: the extent of a path is the
-        // path, and `self.span_here()` once it has been consumed is whatever follows.
-        let mut spans = vec![self.span_here()];
-        let mut paths = vec![self.expect_path()?];
-        while self.eat_sym(Sym::Comma) {
-            let at = self.span_here();
-            let path = self.expect_path()?;
-            if let Some(index) = paths.iter().position(|other| other == &path) {
-                return Err(self
-                    .err(
-                        Code::DeclaredTwice,
-                        format!("this arm already lists {path}"),
-                        at,
-                    )
-                    .with_related(self.elsewhere("first listed here", spans[index], self.pos)));
-            }
-            paths.push(path);
-            spans.push(at);
-        }
+        let (paths, spans) = self.arm_paths()?;
         let def = self.common_fields(&paths, &spans, events)?;
+        self.must_share(&def, &paths, &spans)?;
         self.triggers = paths.clone();
 
         let mut lower = Lower {
@@ -9064,17 +9096,57 @@ impl Parser {
                 fields.push(field.clone());
             }
         }
-        if fields.is_empty() {
-            let at = spans[0];
-            return Err(self
-                .err(
-                    Code::EventShape,
-                    "these event types share no field, so an arm listing them could name nothing",
-                    at,
-                )
-                .with_hint(format!("{} is the first that differs", paths[1])));
-        }
         Ok(EventDef::new(first.path.clone(), fields))
+    }
+
+    /// `@a.b, @c.d`, the paths one arm lists, with the span of each.
+    ///
+    /// One loop for a projector or effect handler and a fold arm, which list them the same
+    /// way and are held to the same [`Self::common_fields`] check. A repeat is refused
+    /// rather than deduplicated: the second is a typo or a claim the first already made.
+    fn arm_paths(&mut self) -> Result<(Vec<EventPath>, Vec<Span>), Diagnostic> {
+        // Captured before the path rather than after it: the extent of a path is the
+        // path, and `self.span_here()` once it has been consumed is whatever follows.
+        let mut spans = vec![self.span_here()];
+        let mut paths = vec![self.expect_path()?];
+        while self.eat_sym(Sym::Comma) {
+            let at = self.span_here();
+            let path = self.expect_path()?;
+            if let Some(index) = paths.iter().position(|other| other == &path) {
+                return Err(self
+                    .err(
+                        Code::DeclaredTwice,
+                        format!("this arm already lists {path}"),
+                        at,
+                    )
+                    .with_related(self.elsewhere("first listed here", spans[index], self.pos)));
+            }
+            paths.push(path);
+            spans.push(at);
+        }
+        Ok((paths, spans))
+    }
+
+    /// The refusal a **handler** gets for paths with nothing in common, which a fold arm
+    /// does not: a handler's body reads the event, so an intersection of nothing leaves it
+    /// with nothing to read, where a fold arm listing two unrelated failures and counting
+    /// them (`on @a.failed, @b.failed => n + 1`) is a whole reasonable arm.
+    fn must_share(
+        &self,
+        def: &EventDef,
+        paths: &[EventPath],
+        spans: &[Span],
+    ) -> Result<(), Diagnostic> {
+        if !def.fields.is_empty() || paths.len() == 1 {
+            return Ok(());
+        }
+        Err(self
+            .err(
+                Code::EventShape,
+                "these event types share no field, so an arm listing them could name nothing",
+                spans[0],
+            )
+            .with_hint(format!("{} is the first that differs", paths[1])))
     }
 
     /// Whether a statement begins with one of the soft-named effect builtins. They are

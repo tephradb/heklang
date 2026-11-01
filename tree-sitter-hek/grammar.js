@@ -529,16 +529,28 @@ module.exports = grammar({
     // port measured the shape concentrating in folds no command reads, where the slice is
     // not an append condition at all. Where it is one, the claim is made visible by
     // `hek check --boundaries` instead, which is where the command's author reads it.
+    // **Several paths are one arm**, the way a projector handler already takes several:
+    // `on @game.purchased, @game.gifted (game_id) { price_cents } => ..`. The parser
+    // lowers it to one slice per path, so everything downstream (the append condition,
+    // `--boundaries`, `--tables`, the digest) sees exactly what writing the arms out
+    // gives. Every name the arm uses has to be a field of every path, which is
+    // `parse.rs` `common_fields`, the same check a handler is held to.
     slice_reference: ($) =>
-      seq($._slice_head, optional(seq('(', commaSep($.filter), ')'))),
+      seq(
+        commaSep1(field('path', $.event_path)),
+        optional(seq('as', field('binding', $.identifier))),
+        optional(seq('(', commaSep($.filter), ')')),
+      ),
 
-    // **A guard's slice keeps the list**, and the reason is this grammar rather than
-    // taste: a guard's slice *is* the statement, so a `(` after it is the start of the
-    // next statement just as readily as its own filter list, and `(x).len()` is an
-    // `expression_statement`. A fold arm has `=>` after it and so has no such reading.
+    // **A guard's slice keeps its list and takes one path**, and both are this grammar's
+    // doing rather than taste's. A guard's slice *is* the statement, so a `(` after it is
+    // the start of the next statement just as readily as its own filter list, and
+    // `(x).len()` is an `expression_statement`; and `guard` already separates its slices
+    // with commas, so a path list there would read `guard @a, @b(x)` as one slice over
+    // both paths where the comma trains you to read two. A fold arm has `=>` after it and
+    // its arms are not comma-separated, so it has neither reading.
     guard_slice: ($) => seq($._slice_head, '(', commaSep($.filter), ')'),
 
-    // Shared, so the binding keeps one position in both and `locals.scm` sees one shape.
     _slice_head: ($) =>
       seq(
         field('path', $.event_path),

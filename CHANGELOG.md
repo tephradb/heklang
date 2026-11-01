@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A fold arm may list several event paths**, as a projector handler may, and it is one arm per
+  path:
+
+  ```hek
+  fold GameGross(game_id: Game) -> cents: Int = 0 {
+    on @game.purchased, @game.gifted (game_id) { price_cents } => cents + price_cents
+    on @game.refunded(game_id) { refunded_cents } => cents - refunded_cents
+  }
+  ```
+
+  The arm is **read once per path**, so it lowers to exactly the arms written out: the same slices,
+  the same bind slots, the same append condition, `--boundaries`, `--tables` and digest. That last
+  one is the point and is asserted rather than assumed: a port rewriting 53 folds into this form
+  would otherwise have 53 fold hashes move for a change in spelling, and a breaking-change check
+  with false positives is one nobody reads. The first version shared one bind slot across the
+  slices, which left the two spellings two programs.
+
+  Every name the arm uses has to be a field of **every** path, with the same type, `@subject` and
+  `@absent`, which is the check a handler already passes: that is one field under one name or it is
+  two fields, and an arm binding it would get whichever event arrived. An arm that names nothing may
+  list unrelated events and count them. A path listed twice is refused.
+
+  **A `guard` takes one path per slice**, and that asymmetry is the grammar's rather than taste's:
+  `guard` already separates its slices with commas, so `guard @a, @b(x)` would read as one slice over
+  both paths where the comma trains you to read two. Arms are not comma-separated and `=>` closes
+  them, so a fold arm has no such reading.
+
 - **A key part may be read through another fold**, as it stood when the record being folded was
   appended (`docs/folds.md` rule 15):
 
