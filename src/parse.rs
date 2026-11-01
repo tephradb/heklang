@@ -9937,13 +9937,19 @@ impl Parser {
         lower.b.push_scope();
         let iter = self.iter_bindings(lower)?;
         // Rule 15: the two positions that can read the binding this scope just pushed.
+        //
+        // Both restore the count before `?`, which no test reaches and none can: every
+        // declaration-level error goes through `recovering`, and `abandon` zeroes the count
+        // along with the rest of the declaration. It matters the day a recovery point
+        // inside a declaration does not abandon, because a leaked count refuses the next
+        // legitimate lookup with a comprehension it was never written inside.
         self.binders += 1;
-        let cond = if self.eat_word(Keyword::If) {
-            Some(self.expr(lower, Some(Type::Bool))?)
-        } else {
-            None
+        let cond = match self.eat_word(Keyword::If) {
+            true => Some(self.expr(lower, Some(Type::Bool))),
+            false => None,
         };
         self.binders -= 1;
+        let cond = cond.transpose()?;
         self.expect_sym(Sym::RBracket)?;
         let end = self.pos;
 
