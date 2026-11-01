@@ -68,7 +68,7 @@ command ArchivePlan(plan_id: Uuid, shop_id: Int) {
           (primitive_type))))
     body: (block
       (guard_declaration
-        (slice_reference
+        (guard_slice
           path: (event_path)
           (filter
             field: (identifier))))

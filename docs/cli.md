@@ -46,9 +46,19 @@ checked 9 files
   5 events, 6 commands, 9 guards, 12 refusals, 3 consts, 21 tests
 
   Subscribe guards CourseIsDefined, StudentIsRegistered, CourseHasSeats
-            reads CourseExists, StudentExists, CourseSubscriptionCount
+             reads CourseExists, StudentExists, CourseSubscriptionCount
+             every @course.opened via CourseHasSeats
   Unsubscribe guards SubscriptionIsActive
 ```
+
+The third line is the one claim the declarations no longer show. A slice with no filters
+conflicts on every record of its event, which is the widest boundary a command can have, and an
+arm leaves an empty filter list out (`docs/folds.md` section 5), so nothing in the fold says so
+either. `every` names each such event and the guard or fold that explains it; an event with no
+`via` came from one of the command's own inline folds, which has no name to give.
+
+Informational, not a warning. A command that reads a global counter is doing nothing wrong, and a
+diagnostic an author learns to ignore is worse than a line they can look at when they want it.
 
 `--tables` prints the read model the program's named folds imply. Nothing declares it: a
 fold already says what a value is, which events change it and what it is keyed by, so a

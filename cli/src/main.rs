@@ -17,7 +17,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use heklang::{
-    Diagnostic, Digest, EventPath, Program, Severity, Span, TestOutcome, check_files, run_tests,
+    Diagnostic, Digest, EventPath, Program, Severity, Span, Stage, TestOutcome, check_files,
+    run_tests,
 };
 
 /// Where a `= ` line wraps. Wide enough for a long sentence to stay one or two lines,
@@ -397,10 +398,21 @@ fn suite(program: &Program) -> bool {
 /// run to restate what its own `guard` lines already say. Only the transitive part is
 /// information, and only when someone is asking.
 fn boundaries(program: &Program) {
+    // **A command with a whole-event slice is listed even when it names nothing.** It used
+    // to be enough to have a guard or a fold by name, because names were all this printed;
+    // the `every` line below is about slices, and the widest boundary of all is a raw
+    // `guard @x()` or the command's own inline fold, neither of which has a name.
     let named: Vec<&heklang::Command> = program
         .commands
         .iter()
-        .filter(|command| !command.calls.is_empty() || !command.reads.is_empty())
+        .filter(|command| {
+            !command.calls.is_empty()
+                || !command.reads.is_empty()
+                || command
+                    .stages
+                    .iter()
+                    .any(|at| at.whole_events().next().is_some())
+        })
         .collect();
     if named.is_empty() {
         return;
@@ -449,6 +461,60 @@ fn boundaries(program: &Program) {
                 false => format!("  {:width$}  reads ", "", width = command.name.len()),
             };
             println!("{label}{}", read.join(", "));
+        }
+        // **The widest claim, written where it is read.** A slice with no filters conflicts
+        // on every record of its event, and since a fold arm may leave an empty filter
+        // list out that is no longer visible in the declaration. It was never read there
+        // either: the author writes `fold n = StoreUnits {}` in another file.
+        //
+        // Informational, not a warning. A command that legitimately reads a global counter
+        // is doing nothing wrong, and a diagnostic an author learns to ignore is worse than
+        // a line they can look at.
+        // The command's own stages are the boundary, because a fold is copied into them
+        // rather than called, so they already hold every slice the names above contribute.
+        // The names are walked only to say which one *explains* an event, and an event
+        // with no name against it came from an inline fold, which has none.
+        let mut via: Vec<(String, &str)> = Vec::new();
+        for guard in guarded.iter().filter_map(|name| program.guard(name)) {
+            via.extend(
+                guard
+                    .stage
+                    .whole_events()
+                    .map(|path| (format!("{path}"), guard.name.as_str())),
+            );
+        }
+        for fold in read.iter().filter_map(|name| program.fold(name)) {
+            via.extend(
+                fold.stage
+                    .whole_events()
+                    .map(|path| (format!("{path}"), fold.name.as_str())),
+            );
+        }
+        let mut seen: Vec<String> = Vec::new();
+        let mut every: Vec<String> = Vec::new();
+        for path in command.stages.iter().flat_map(Stage::whole_events) {
+            let path = format!("{path}");
+            if !push_once(&path, &mut seen) {
+                continue;
+            }
+            every.push(match via.iter().find(|(at, _)| at == &path) {
+                Some((_, name)) => format!("{path} via {name}"),
+                None => path,
+            });
+        }
+        if !every.is_empty() {
+            // Three forms, because the line above may have used either of two. `" guards "`
+            // is eight characters and `" reads "` and `" every "` are seven, so a `reads`
+            // line printed as the *first* line sits one column left of a `guards` one, and
+            // an `every` line under it has to match whichever came before it. The listing
+            // has had this off by one twice now; the test asserts whole lines.
+            let width = command.name.len();
+            let label = match (guarded.is_empty(), read.is_empty()) {
+                (true, true) => format!("  {} every ", command.name),
+                (true, false) => format!("  {:width$} every ", ""),
+                _ => format!("  {:width$}  every ", ""),
+            };
+            println!("{label}{}", every.join(", "));
         }
     }
 }

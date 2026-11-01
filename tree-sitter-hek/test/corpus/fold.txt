@@ -312,3 +312,61 @@ fold GenreUnits(genre: Genre) -> n: Int = 0 {
         value: (binary_expression
           left: (identifier)
           right: (integer_literal))))))
+
+================================================================================
+An arm with no filters leaves the list out, and `()` still parses
+================================================================================
+
+fold GenreListings(genre: String) -> n: Int = 0 {
+  on @game.listed { game_id } key genre = GameGenre { game_id } => n + 1
+  on @game.delisted() { game_id } key genre = GameGenre { game_id } => n - 1
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fold_definition
+    name: (type_identifier)
+    parameters: (parameters
+      (parameter
+        name: (identifier)
+        type: (type
+          (primitive_type))))
+    accumulator: (identifier)
+    type: (fold_type
+      (type
+        (primitive_type)))
+    seed: (integer_literal)
+    body: (fold_body
+      (fold_arm
+        (slice_reference
+          path: (event_path))
+        destructure: (destructure
+          (identifier))
+        keys: (computed_keys
+          (computed_key
+            param: (identifier)
+            value: (record_literal
+              name: (type_identifier)
+              (field_initializer_list
+                (field_initializer
+                  name: (identifier))))))
+        value: (binary_expression
+          left: (identifier)
+          right: (integer_literal)))
+      (fold_arm
+        (slice_reference
+          path: (event_path))
+        destructure: (destructure
+          (identifier))
+        keys: (computed_keys
+          (computed_key
+            param: (identifier)
+            value: (record_literal
+              name: (type_identifier)
+              (field_initializer_list
+                (field_initializer
+                  name: (identifier))))))
+        value: (binary_expression
+          left: (identifier)
+          right: (integer_literal))))))

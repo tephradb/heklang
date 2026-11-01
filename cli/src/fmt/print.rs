@@ -118,7 +118,7 @@ impl<'a> Printer<'a> {
             "guard_declaration" => self.guard(node),
             "fold_declaration" => self.fold(node),
             "fold_arm" => self.fold_arm(node),
-            "slice_reference" => self.slice(node),
+            "slice_reference" | "guard_slice" => self.slice(node),
             "filter" => self.filter(node),
             "field_initializer" => self.optional_value(node),
             "let_statement" => self.assignment("let", node),
@@ -588,14 +588,12 @@ impl<'a> Printer<'a> {
     /// The comment handling here is load-bearing twice over. A comment among the slices
     /// joined by `", "` swallowed every slice after it and `hek check` still passed, so a
     /// command silently lost half its append condition; and a comment *before* the first
-    /// slice made `kids.first()` fail the `slice_reference` test, which took the flat
-    /// branch below and **deleted the commas**.
+    /// slice made `kids.first()` fail the `guard_slice` test, which took the flat
+    /// branch below and **deleted the commas**. Renaming the node reproduced it exactly,
+    /// so the test above is the one to update when the grammar moves.
     fn guard(&self, node: Node<'a>) -> Doc<'a> {
         let (trailing, kids) = self.split(node);
-        if kids
-            .first()
-            .is_some_and(|kid| kid.kind() == "slice_reference")
-        {
+        if kids.first().is_some_and(|kid| kid.kind() == "guard_slice") {
             // Flat, and with no trailing comma: `guard_decl` in `parse.rs` is the one
             // comma loop in the language that parses another slice unconditionally after
             // eating a comma, so `guard @a(x),` does not parse.
@@ -804,6 +802,23 @@ impl<'a> Printer<'a> {
         let (before, filters): (Vec<Node<'a>>, Vec<Node<'a>>) =
             kids[1..].iter().partition(|kid| kid.start_byte() < paren);
 
+        // **An empty list is dropped, and `guard_slice` keeps it**, which is the grammar's
+        // own split: a fold arm may leave it out and a guard may not. Dropping it is the
+        // canonical form, so `on @x() { .. }` is rewritten to `on @x { .. }`.
+        //
+        // A comment inside the parentheses holds them open, because `list` is where a
+        // comment in an empty list survives and there is nowhere else for one to go: the
+        // slice is mid-line, so a suffix emitted after a dropped `()` would land past the
+        // `=>` and reparse against the arm's value. Such a comment is already in
+        // `filters`, since the partition above goes by whether it falls after the `(`, so
+        // asking whether `filters` is empty asks about it too. Asking the whole node
+        // instead kept `()` for a comment written *before* the paren, which `bound` prints
+        // and which leaves the list genuinely empty.
+        //
+        // Decided before the binding is printed, because the binding's trailing space is
+        // there to separate `as e` from the `(` and is a double space without one.
+        let paren = node.kind() == "guard_slice" || !filters.is_empty();
+
         // A line of its own for a comment and a space for the binding, which is what an
         // `event_handler` does with the same two things in the same position.
         let mut bound = Vec::new();
@@ -823,7 +838,10 @@ impl<'a> Printer<'a> {
                     bound.push(Doc::concat([
                         Doc::text("as "),
                         self.node(kid),
-                        Doc::text(" "),
+                        match paren {
+                            true => Doc::text(" "),
+                            false => Doc::text(""),
+                        },
                     ]));
                     fresh = false;
                 }
@@ -837,7 +855,10 @@ impl<'a> Printer<'a> {
             Doc::concat([
                 self.node(kids[0]),
                 Doc::indent(Doc::concat(bound)),
-                self.list("(", ")", false, &filters),
+                match paren {
+                    true => self.list("(", ")", false, &filters),
+                    false => Doc::text(""),
+                },
             ]),
         )
     }
@@ -1142,8 +1163,16 @@ impl<'a> Printer<'a> {
                         separate = false;
                     }
                     parts.push(Doc::text(self.text(child)));
-                    if index + 1 < children.len() {
-                        parts.push(Doc::Hardline);
+                    match index + 1 < children.len() {
+                        true => parts.push(Doc::Hardline),
+                        // **The closer has to leave the line.** A `//` comment runs to the
+                        // end of it, so a `)` printed after one is commented out and
+                        // `hek fmt` writes a file that no longer parses. Reachable only
+                        // when a comment is the last child, which before the filter list
+                        // became optional meant `on @x(/* why */)` and nothing else, so no
+                        // fixture had it. `BreakParent` breaks the group without a line of
+                        // its own, and the group's edge then puts the closer below.
+                        false => parts.push(Doc::BreakParent),
                     }
                 }
                 previous = Some(child);

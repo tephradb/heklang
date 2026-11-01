@@ -458,7 +458,7 @@ module.exports = grammar({
     // the boundary, a name is a declared guard. See `docs/guards.md`.
     guard_declaration: ($) =>
       choice(
-        seq('guard', commaSep1($.slice_reference)),
+        seq('guard', commaSep1($.guard_slice)),
         seq('guard', field('guard', $._type_name), $.field_initializer_list),
       ),
 
@@ -514,21 +514,35 @@ module.exports = grammar({
     // same split `as e` takes, which this grammar accepts anywhere and the parser refuses
     // outside a module-scope fold arm.
 
-    // A slice always carries its parentheses, which is what tells a fold arm from a
-    // handler when both begin `on @path` (parse.rs `slice_ref`).
+    // A fold arm and a projector handler both begin `on @path`, and nothing in either rule
+    // tells them apart: they are reached from different contexts and the parser knows which
+    // it is in. This comment used to claim the parentheses did it, which was never how it
+    // worked and is not true of the grammar either now that the list is optional.
     //
     // `as e` is accepted here and refused by the parser anywhere but a module-scope
     // fold arm, where it makes the fold query-only (parse.rs `fold_envelope`, and
     // `docs/folds.md` rule 12). Written on the shared rule rather than on `fold_arm` so
     // the binding keeps the position a projector handler puts it in, which is what makes
     // the two read alike.
+    // **The list is optional when it is empty.** `on @x { .. }` and `on @x() { .. }` are
+    // one slice, and `hek fmt` writes the first: an empty list narrows by nothing, and the
+    // port measured the shape concentrating in folds no command reads, where the slice is
+    // not an append condition at all. Where it is one, the claim is made visible by
+    // `hek check --boundaries` instead, which is where the command's author reads it.
     slice_reference: ($) =>
+      seq($._slice_head, optional(seq('(', commaSep($.filter), ')'))),
+
+    // **A guard's slice keeps the list**, and the reason is this grammar rather than
+    // taste: a guard's slice *is* the statement, so a `(` after it is the start of the
+    // next statement just as readily as its own filter list, and `(x).len()` is an
+    // `expression_statement`. A fold arm has `=>` after it and so has no such reading.
+    guard_slice: ($) => seq($._slice_head, '(', commaSep($.filter), ')'),
+
+    // Shared, so the binding keeps one position in both and `locals.scm` sees one shape.
+    _slice_head: ($) =>
       seq(
         field('path', $.event_path),
         optional(seq('as', field('binding', $.identifier))),
-        '(',
-        commaSep($.filter),
-        ')',
       ),
 
     // Two forms, told apart by the token after the name: `:` and the bare shorthand

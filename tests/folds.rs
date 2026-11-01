@@ -2562,13 +2562,16 @@ fold Tally(shop_id: Shop, order_id: Int) -> Int = 0 {{
     );
 }
 
-/// **An arm's filter list is written even when it is empty**, because the list is what a
-/// slice is: `()` says the arm takes every record of the event, which is a statement about
-/// the append condition. A projector's `on` has no filter list at all, so `on @path { .. }`
-/// is right there and wrong here, and two authors wrote it from the docs, whose rule 15 and
-/// rule 16 examples had left the `()` out.
+/// **An arm leaves an empty filter list out, and a guard does not.** Both spellings of an
+/// arm are one slice, so the IR and the digest cannot tell them apart; `hek fmt` writes the
+/// shorter one. The port measured the shape at 59 of 270 arms, every one in a fold no
+/// command reads, where the slice is not an append condition and `()` claims nothing.
+///
+/// A guard keeps the list for the grammar's reason rather than taste's: a guard's slice is
+/// the whole statement, so a `(` after it is the start of the next statement just as
+/// readily as its own list, and `(x).len()` is one.
 #[test]
-fn an_arm_with_no_filter_still_writes_its_filter_list() {
+fn an_arm_leaves_an_empty_filter_list_out_and_a_guard_does_not() {
     let arm = |slice: &str| {
         format!(
             "\
@@ -2580,38 +2583,18 @@ fold Units(game_id: Int) -> n: Int = 0 {{
 "
         )
     };
+    // One slice, two spellings, and nothing downstream can tell: the filter list is the
+    // same empty vector either way.
+    let bare = program(&arm("@game.purchased { game_id }"));
+    let empty = program(&arm("@game.purchased() { game_id }"));
     assert_eq!(
-        error(&arm("@game.purchased { game_id }")),
-        "an arm of a fold matches a slice, so `@game.purchased` needs a filter list"
-    );
-    assert!(
-        hint(&arm("@game.purchased { game_id }")).contains("write `()`"),
-        "the hint says what to write: {}",
-        hint(&arm("@game.purchased { game_id }"))
-    );
-
-    // A guard shares the same parser, and is told it is a guard: one message for every
-    // site called it an arm of a fold and pointed it at a projector.
-    assert_eq!(
-        error(
-            "\
-event @shop.connected { shop_id: Int, token: String }
-event @shop.pinged { shop_id: Int }
-
-command Ping(shop_id: Int) {
-  guard @shop.connected
-  emit @shop.pinged { shop_id }
-}
-"
-        ),
-        "a guard matches a slice, so `@shop.connected` needs a filter list"
+        format!("{:?}", bare.fold("Units").expect("declared").stage.slices),
+        format!("{:?}", empty.fold("Units").expect("declared").stage.slices),
     );
 
-    // The same arm with the list, and an inline fold's arm, which shares the loop.
-    program(&arm("@game.purchased() { game_id }"));
-    assert_eq!(
-        error(
-            "\
+    // An inline fold's arm shares the loop, so it leaves it out too.
+    program(
+        "\
 event @shop.connected { shop_id: Int, token: String }
 event @shop.pinged { shop_id: Int }
 
@@ -2619,12 +2602,31 @@ command Ping(shop_id: Int) {
   fold token: String? = none
     on @shop.connected { token } => token
 
-  return @shop.pinged { shop_id }
+  emit @shop.pinged { shop_id }
 }
-"
-        ),
-        "an arm of a fold matches a slice, so `@shop.connected` needs a filter list"
+",
     );
+
+    // And a guard is refused, with its own reason rather than an arm's.
+    let guard = "\
+event @shop.connected { shop_id: Int, token: String }
+event @shop.pinged { shop_id: Int }
+
+command Ping(shop_id: Int) {
+  guard @shop.connected
+  emit @shop.pinged { shop_id }
+}
+";
+    assert_eq!(
+        error(guard),
+        "a guard's slice keeps its filter list, so `@shop.connected` needs one"
+    );
+    assert!(
+        hint(guard).contains("the next one may start with `(`"),
+        "the hint gives the grammar's reason: {}",
+        hint(guard)
+    );
+    program(&guard.replace("@shop.connected\n", "@shop.connected()\n"));
 }
 
 /// Rule 15 **keys through** the fold it reads and rule 16 just **reads** it, and the

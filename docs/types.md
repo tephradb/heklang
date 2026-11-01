@@ -287,8 +287,8 @@ story.
   argument, so calendar arithmetic through it drops any fraction the original carried. The written
   form and `Timestamp.parse` both keep microseconds, and so do the `add_` methods, which is most of
   why they are in the language rather than written as a `fn` over these two.
-- **Two shapes of receiver still take the position's type as a check.** `(x).m()` does not, because
-  the expected type belongs to `m`'s result, and that is what section 3 means by a declared position.
+- **Two shapes of receiver still take the position's type as a check.** `(x).m()` does not: the
+  expected type belongs to `m`'s result, and that is what section 3 means by a declared position.
   Two ways in still get it wrong and reject a correct program: a doubled `((x)).m()`, where the inner
   parentheses cannot see that a method follows the outer ones, and `(if c { a } else { b }).m()`,
   whose arms are each lifted at the position the `if` inherits. The fix in both is to drop what is
@@ -296,6 +296,13 @@ story.
   general fix is to carry "this position is advisory" down through every expected type that is
   inherited rather than introduced, and a flag that suppresses a check too widely would suppress the
   seal and secret checks with it, which fail the other way.
+
+- **And a receiver that needs a target type gets no usable one from a method.** The other half of
+  the same seam, and the opposite failure: the expected type does reach the parentheses, which is
+  what keeps `(Map.empty).set(k, v)` working, but it is the *method's result* type, which only a
+  method that preserves the receiver's type can supply. So `(Map.empty).len()`, `([]).len()` and
+  `(none).is_none()` are `needs-target-type` rather than a wrong-type check, exactly as they are
+  without the parentheses. Degenerate enough that no real program has wanted one.
 
 ## Methods
 

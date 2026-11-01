@@ -721,3 +721,56 @@ fold EntryMismatch(shop_id: Int, entry_id: Int) -> String = \"\" {
     let twice = hek::fmt::format(&once).expect("formatted output parses");
     assert_eq!(once, twice, "not a fixed point:\n{once}\n---\n{twice}");
 }
+
+/// **An empty filter list is dropped, and a comment holds the parentheses open.** Dropping
+/// it is the canonical form now that the grammar makes the list optional on a fold arm; a
+/// `guard`'s is not optional and is never dropped.
+///
+/// The comment half was a source-destroying bug that predates the optional list and that no
+/// fixture reached: a comment as a list's only child had nothing after it to break the
+/// group, so the closer landed on the same line and a `//` comment swallowed it. `hek fmt`
+/// wrote a file that no longer parsed.
+#[test]
+fn an_empty_filter_list_is_dropped_and_a_comment_keeps_it() {
+    let source = "event @game.listed { game_id: Int }
+event @shop.connected { shop_id: Int }
+event @shop.pinged { shop_id: Int }
+
+fold A(game_id: Int) -> n: Int = 0 {
+  on @game.listed() { game_id } => n + 1
+}
+
+fold B(game_id: Int) -> n: Int = 0 {
+  on @game.listed(
+    // every listing, deliberately
+  ) { game_id } => n + 1
+}
+
+command Ping(shop_id: Int) {
+  guard @shop.connected()
+  emit @shop.pinged { shop_id }
+}
+";
+    let once = hek::fmt::format(source).expect("the source parses");
+    assert!(
+        once.contains("  on @game.listed { game_id } => n + 1"),
+        "the empty list is dropped:\n{once}"
+    );
+    assert!(
+        once.contains("  guard @shop.connected()"),
+        "a guard keeps its list:\n{once}"
+    );
+    // The closer leaves the line, so the output still parses. `()` is kept, because the
+    // comment has nowhere else to go: the slice is mid-line.
+    assert!(
+        once.contains("// every listing, deliberately\n  ) { game_id }"),
+        "the comment keeps the parentheses and the closer gets a line:\n{once}"
+    );
+    assert_eq!(
+        once.matches("// every listing, deliberately").count(),
+        1,
+        "written once:\n{once}"
+    );
+    let twice = hek::fmt::format(&once).expect("formatted output parses");
+    assert_eq!(once, twice, "not a fixed point:\n{once}\n---\n{twice}");
+}

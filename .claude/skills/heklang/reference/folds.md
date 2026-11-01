@@ -138,13 +138,16 @@ including one no event mentioned; the store has no row there and reads the seed.
 unbounded and the alternative is not implementable. What makes it safe is that every key part is
 pinned by some arm, so the keys a range arm can need are the keys the pinning arms mint.
 
-## 4a. An arm's filter list is written even when it is empty
+## 4a. An empty filter list is left out
 
-`on @game.purchased() { game_id } => ..`, never `on @game.purchased { game_id }`. The list is what a
-slice is, so `()` says this arm takes every record of the event, which is a statement about the
-caller's boundary. A **projector's** `on` has no filter list at all, so the paren-less spelling is
-right there and wrong here: it is the one place the two constructs do not read alike, and it is the
-mistake two independent authors made first.
+`on @game.purchased { game_id } => ..` and `on @game.purchased() { game_id } => ..` are one slice,
+and `hek fmt` writes the first. A slice with no filters conflicts on every record of its event; the
+port measured 59 of 270 arms that way and every one was in a fold no command reads, where that is
+not an append condition at all. Where it is one, `hek check --boundaries` prints an `every` line
+naming the events and what explains them, which is where the boundary is read.
+
+**A guard keeps its list**: `guard @shop.connected()`. Its slice is the whole statement, so a `(`
+after it reads as the start of the next statement just as readily as its own list.
 
 ## 5. A fold arm may match a key part the event does not carry
 
@@ -211,8 +214,8 @@ attributes just so a read model can group by them.
 
 ```hek
 fold GenreUnits(genre: Genre) -> n: Int = 0 {
-  on @game.purchased() { game_id } key genre = GameGenre { game_id } => n + 1
-  on @game.refunded() { receipt_id }
+  on @game.purchased { game_id } key genre = GameGenre { game_id } => n + 1
+  on @game.refunded { receipt_id }
     key genre = GameGenre { game_id: ReceiptGame { receipt_id } } => n - 1
 }
 ```
@@ -252,8 +255,10 @@ column refolds another:
 ```
 
 That list is also what moves the dependent's digest `hash` when a looked-up fold changes, and what a
-rebuild replays alongside. A by-key read of one is quadratic and that is accepted: hekla serves it
-from the table.
+rebuild replays alongside. A by-key read of one costs one log read per candidate record, each
+narrowed by the looked-up fold's own slices, so an index makes it n log n and a scan makes it
+quadratic. Accepted either way: hekla serves these from the table and never takes that path on a
+request, and it is also why a query-only fold cannot be folded by a command, a guard or an effect.
 
 ## 5c. And an arm's value may read a fold too
 

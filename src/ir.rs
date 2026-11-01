@@ -1182,6 +1182,31 @@ impl Stage {
         [&self.pre, &self.post]
     }
 
+    /// The events this stage takes **every record** of: a slice that narrows by no *field*
+    /// conflicts on the whole event.
+    ///
+    /// For `hek check --boundaries`, which is where the claim belongs. An arm may leave an
+    /// empty filter list out, so it is no longer visible in the declaration, and that was
+    /// never where it was read anyway: the author who needs to know writes
+    /// `fold n = StoreUnits {}` in another file and never opens the fold.
+    ///
+    /// **A [`Filter::Key`] does not count**, which is the whole reason this asks about
+    /// fields rather than about `filters.is_empty()`. A rule 13 conjunct resolves once in
+    /// the caller's frame and decides whether the slice participates; it is not a
+    /// predicate on the event and a host never sees it, so `on @item.listed(kind ==
+    /// "listing")` reads every `@item.listed` record while its filter list is not empty.
+    pub fn whole_events(&self) -> impl Iterator<Item = &EventPath> {
+        self.slices
+            .iter()
+            .filter(|slice| {
+                !slice
+                    .filters
+                    .iter()
+                    .any(|filter| matches!(filter, Filter::Field { .. }))
+            })
+            .map(|slice| &slice.event)
+    }
+
     /// Whether this stage reads the log. A stage with no slices has nothing to resolve
     /// and nothing to fold, so it never takes `after` and never asks the host.
     pub fn reads(&self) -> bool {

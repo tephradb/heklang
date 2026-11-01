@@ -14,8 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   ```hek
   fold GenreUnits(genre: Genre) -> n: Int = 0 {
-    on @game.purchased() { game_id } key genre = GameGenre { game_id } => n + 1
-    on @game.refunded() { receipt_id }
+    on @game.purchased { game_id } key genre = GameGenre { game_id } => n + 1
+    on @game.refunded { receipt_id }
       key genre = GameGenre { game_id: ReceiptGame { receipt_id } } => n - 1
   }
   ```
@@ -434,7 +434,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entry of the `hek/` corpus moves (`effect AnnounceTier`, the one declaration that reads a sealed
   named fold); in the port it is 5 sealed folds across 37 call sites in 13 declarations.
 
+### Changed
+
+- **A fold arm leaves an empty filter list out.** `on @game.purchased { game_id } => ..` and
+  `on @game.purchased() { game_id } => ..` are one slice, with identical IR and an identical digest,
+  and `hek fmt` writes the first. A slice with no filters conflicts on every record of its event,
+  which is the widest boundary a fold can declare, and the case for writing it was that such a claim
+  should not be made by omission. The port measured where the shape falls: **59 of 270 arms**, every
+  one in a fold no command reads (21 in parameterless global folds, 38 in `key`-clause folds that
+  rules 14 to 16 make query-only), where the slice is not an append condition and `()` claims
+  nothing. Where it is one, `()` in a fold in another file was not what made it visible either, so
+  the claim moved to where it is read: see `--boundaries` below.
+
+  **A guard keeps its list**, and the asymmetry is the grammar's rather than taste's: a guard's
+  slice is the whole statement, so a `(` after it reads as the start of the next statement just as
+  readily as its own list, and `(x).len()` is one. A fold arm has `=>` after it and so has no such
+  reading. `tree-sitter-hek` grew a `guard_slice` node for that form, which is the first time its
+  generated parser has moved since computed keys.
+
+### Added
+
+- **`hek check --boundaries` prints an `every` line**, naming each event a command conflicts on
+  every record of and the guard or fold that explains it. That claim used to be visible as `()` in a
+  fold's arm, which was both the wrong place to read it (the author writes `fold n = StoreUnits {}`
+  in another file) and now optional. Informational rather than a warning: a command that reads a
+  global counter is doing nothing wrong, and a diagnostic an author learns to ignore is worse than a
+  line they can look at.
+
 ### Fixed
+
+- **`hek fmt` no longer comments out a closing delimiter.** A comment as the only child of a list
+  was printed with nothing after it to break the group, so the closer landed on the same line and a
+  `//` comment swallowed it: `hek fmt` wrote a file that no longer parsed. Reachable before this
+  release only as `on @x(/* why */)`, which no fixture had, and reachable now by anyone explaining
+  why an arm takes every record.
 
 - **Parentheses around a receiver are no longer a declared position.** `("abc").len()` at an `Int`
   position was `expected Int, found String`: the parenthesised expression was checked against the
@@ -447,6 +480,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   found through one: parentheses are mandatory around a lookup in an `if` header. Two shapes still
   reject a correct program and are recorded in `docs/types.md` section 5: a doubled `((x)).m()`, and
   an `if` expression as the receiver.
+
+- **The query-only refusal points at the fix and gives the cost.** Its hint now says to fold the
+  events you need in a plain fold, and names what refusing buys: answering a lookup fold by key
+  costs one log read per candidate record. Decided with hekla and the port after measuring it, and
+  the three kinds stay refused in an effect as well as in a command and a guard, because "as of the
+  trigger" is stale by design for something about to act on the world.
 
 - **The query-only refusal tells a key lookup from a value one.** A fold whose arm's *value* reads
   another fold (rule 16) was reported as one that "keys through" it, which sent the reader looking

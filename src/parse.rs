@@ -392,18 +392,6 @@ impl KeySite {
             )),
         }
     }
-
-    /// What to call this site in the refusal of a missing filter list.
-    ///
-    /// The list is written even when it is empty at all three, so the only thing that
-    /// varies is the noun. One message for every site said "an arm of a fold" to a
-    /// `guard`, and pointed it at a projector's `on`, which it is not either.
-    fn slice_noun(self) -> &'static str {
-        match self {
-            KeySite::Fold | KeySite::Inline => "an arm of a fold",
-            KeySite::Guard => "a guard",
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -5153,24 +5141,28 @@ impl Parser {
         def: &EventDef,
         site: KeySite,
     ) -> Result<Vec<Filter>, Diagnostic> {
-        // **The list is written even when it is empty**, because it is what a slice is:
-        // `()` says this arm takes every record of the event, which is a statement about
-        // the append condition and not punctuation. A projector's `on` has no filter list
-        // at all, so `on @path { .. }` is right there and wrong here, and the bare error
-        // said only `expected (`.
+        // **An arm leaves the list out when it is empty, and a guard does not.** The port
+        // measured 59 of 270 arms with an empty list, every one of them in a fold no
+        // command reads, where the slice is not an append condition and `()` claims
+        // nothing. Where it *is* one, `hek check --boundaries` marks it, which is where
+        // the command's author reads the boundary rather than in a fold in another file.
+        //
+        // A guard keeps the list for a reason that is the grammar's rather than taste's: a
+        // guard's slice is the whole statement, so a `(` after it reads as the start of
+        // the next statement just as readily as its own list, and `(x).len()` is one.
         if !self.at_sym(Sym::LParen) {
-            return Err(self
-                .err(
-                    Code::ExpectedToken,
-                    format!(
-                        "{} matches a slice, so `{path}` needs a filter list",
-                        site.slice_noun()
-                    ),
-                    path_at,
-                )
-                .with_hint(
-                    "write `()` to take every record of the event, or name the fields it narrows by; a projector's `on` is the one that takes a destructure straight after the path",
-                ));
+            if site == KeySite::Guard {
+                return Err(self
+                    .err(
+                        Code::ExpectedToken,
+                        format!("a guard's slice keeps its filter list, so `{path}` needs one"),
+                        path_at,
+                    )
+                    .with_hint(
+                        "write `()` to guard on every record of the event, or name the fields it narrows by; a fold arm may leave an empty list out and a guard may not, because a guard's slice is the whole statement and the next one may start with `(`",
+                    ));
+            }
+            return Ok(Vec::new());
         }
         self.bump();
         let key = site == KeySite::Fold;
@@ -7946,13 +7938,17 @@ impl Parser {
             Token::Sym(Sym::LParen) => {
                 let outer = mem::replace(&mut self.no_record_literal, false);
                 // **Parentheses with a method after them are not a declared position.**
-                // The expected type still reaches the expression, because `Map.empty` and
-                // `none` take what they are from it, but `expr`'s checks belong to the
-                // position that owns the type, and with a method call after the
-                // parentheses that is the method's own receiver check and the position
-                // outside. Running them here made `("abc").len()` at an `Int` position
-                // `expected Int, found String`, where `"abc".len()` was always fine.
-                let value = match self.method_follows_group() {
+                // `expr`'s checks belong to whatever owns the type, and with a method call
+                // after the parentheses that is the method's own receiver check and the
+                // position outside. Running them here made `("abc").len()` at an `Int`
+                // position `expected Int, found String`, where `"abc".len()` was fine.
+                //
+                // The expected type is still passed, which is what keeps
+                // `(Map.empty).set(k, v)` working. It only helps where the method
+                // *preserves* the receiver's type: `(Map.empty).len()` is still
+                // `needs-target-type`, as it is without the parentheses. See
+                // `docs/types.md` section 5.
+                let value = match expect.is_some() && self.method_follows_group() {
                     true => self.or_expr(lower, expect)?,
                     false => self.expr(lower, expect)?,
                 };
@@ -11579,7 +11575,7 @@ impl Parser {
                             false => format!("keys through `{}`", lookup.fold),
                         },
                         Related::new(format!("`{}` reads it here", fold.name), lookup.span),
-                        "a lookup's boundary is another key's whole history, which no append condition can express: there is nothing for a command to narrow the log by and nothing to conflict on; read this one as a stored value, or carry what you need on the event",
+                        "a lookup's boundary is another key's whole history, which no append condition can express: there is nothing to narrow the log by and nothing to conflict on, and answering it by key would cost one log read per candidate record; fold the events you need in a plain fold, read this one as a stored value, or carry what you need on the event",
                     ),
                     (None, Some(key)) => (
                         format!("computes the key part `{}`", key.param),

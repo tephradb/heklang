@@ -241,7 +241,7 @@ accumulator's. It is now `declared-twice` at the bind:
 
 **Only when some arm reads the accumulator**, which is the whole condition. A fold whose every arm
 *replaces* the value has nothing to shadow, and
-`fold token: String? = none / on @shop.connected() { token } => token` is the common spelling of
+`fold token: String? = none / on @shop.connected { token } => token` is the common spelling of
 exactly that: refusing the bind there would force a rename for no gain. The inline form shares the
 arm loop, so it shares the rule; it cannot drop the name, but it can rename it.
 
@@ -344,11 +344,22 @@ its slices arrive in the `AppendCondition` exactly as if they had been written i
 resolve against the arguments the caller passed, so a predicate names the order the command was
 called for rather than the parameter the fold declared.
 
-**The filter list is written even when it is empty**, because the list is what a slice is: `()` says
-this arm takes every record of the event, which is a statement about the boundary and not
-punctuation. `on @game.purchased() { game_id } => ..`, never `on @game.purchased { game_id }`. A
-projector's `on` has no filter list at all (`docs/projectors.md`), so the paren-less spelling is
-right there and wrong here, and that is the one place the two constructs do not read alike.
+**An empty filter list is left out**, so `on @game.purchased { game_id } => ..` and
+`on @game.purchased() { game_id } => ..` are one slice and `hek fmt` writes the first. A slice
+with no filters conflicts on every record of its event, which is the widest claim a fold can
+make, and the argument for writing it was that such a claim should not be made by omission.
+
+The port measured where the shape actually falls: **59 of 270 arms**, every one of them in a fold
+no command reads, 21 in parameterless global folds and 38 in `key`-clause folds that rules 14 to 16
+make query-only. There the slice is not an append condition at all and `()` claims nothing. Where
+it *is* one, `()` in a fold in another file was never what made it visible either: the author
+writes `fold n = StoreUnits {}` and does not open the fold. So the claim is written where it is
+read, by `hek check --boundaries`, which prints an `every` line naming each event a command takes
+every record of and the guard or fold that explains it.
+
+**A guard keeps its list**, and that asymmetry is the grammar's rather than taste's: a guard's
+slice is the whole statement, so a `(` after it is the start of the next statement just as readily
+as its own list, and `(x).len()` is one. A fold arm has `=>` after it and so has no such reading.
 
 **A fold is copied, not called.** `src/inline.rs` splices it into whatever names it, before the
 interpreter sees either, so a command reaches the fold with one arena, one frame, one slice list and
@@ -1127,8 +1138,8 @@ when the record being folded was appended:
 
 ```hek
 fold GenreUnits(genre: Genre) -> n: Int = 0 {
-  on @game.purchased() { game_id } key genre = GameGenre { game_id } => n + 1
-  on @game.refunded() { receipt_id }
+  on @game.purchased { game_id } key genre = GameGenre { game_id } => n + 1
+  on @game.refunded { receipt_id }
     key genre = GameGenre { game_id: ReceiptGame { receipt_id } } => n - 1
 }
 ```
@@ -1159,7 +1170,7 @@ had when it sold. **And not including the record itself**, which is the half wor
 
 ```hek
 fold GenreListings(genre: String) -> n: Int = 0 {
-  on @game.listed() { game_id } key genre = GameGenre { game_id } => n + 1
+  on @game.listed { game_id } key genre = GameGenre { game_id } => n + 1
 }
 ```
 
@@ -1255,9 +1266,17 @@ Transitive, so a chain shows every link. `Column::reads` is that list, and three
 - **a host**, which is told what to replay together rather than working it out.
 
 **What it costs is the by-key read.** `Interpreter::fold` and the `fold` test action answer a lookup
-fold by evaluating the lookup at every candidate record's position, which is a fold of the
-looked-up fold per record: quadratic, and accepted. A deployment serves these from the table and
-never takes that path on a request, and a test is a handful of records.
+fold by evaluating the lookup at every candidate record's position, so the cost is **one
+`Log::read` per candidate record**, each narrowed by the looked-up fold's own slices. The exponent
+is therefore the host's and not the language's: with an index on the looked-up fold's key fields
+those reads are narrow and the total is n log n, and without one each is a scan and the total is
+quadratic. Measured against the reference host, which narrows by filtering a scan, both a
+well-narrowed and a wide lookup grow 4.5x per doubling of n, so quadratic is what a test and a
+`--replay` actually pay today. A chain nests, since `folding` re-enters `fold` for the next link.
+
+Accepted, because a deployment serves these from the table and never takes that path on a request,
+and a test is a handful of records. It is also the reason a query-only fold is not foldable by a
+command, a guard or an effect: that path would pay this per invocation.
 
 ## 16. An arm's value may read a fold too
 

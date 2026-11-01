@@ -2722,7 +2722,7 @@
           "named": true
         },
         {
-          "type": "slice_reference",
+          "type": "guard_slice",
           "named": true
         }
       ]
@@ -2762,6 +2762,42 @@
           }
         ]
       }
+    }
+  },
+  {
+    "type": "guard_slice",
+    "named": true,
+    "fields": {
+      "binding": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "path": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "event_path",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "filter",
+          "named": true
+        }
+      ]
     }
   },
   {

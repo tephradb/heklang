@@ -2018,7 +2018,7 @@
               "members": [
                 {
                   "type": "SYMBOL",
-                  "name": "slice_reference"
+                  "name": "guard_slice"
                 },
                 {
                   "type": "REPEAT",
@@ -2031,7 +2031,7 @@
                       },
                       {
                         "type": "SYMBOL",
-                        "name": "slice_reference"
+                        "name": "guard_slice"
                       }
                     ]
                   }
@@ -2293,12 +2293,8 @@
       "type": "SEQ",
       "members": [
         {
-          "type": "FIELD",
-          "name": "path",
-          "content": {
-            "type": "SYMBOL",
-            "name": "event_path"
-          }
+          "type": "SYMBOL",
+          "name": "_slice_head"
         },
         {
           "type": "CHOICE",
@@ -2308,15 +2304,56 @@
               "members": [
                 {
                   "type": "STRING",
-                  "value": "as"
+                  "value": "("
                 },
                 {
-                  "type": "FIELD",
-                  "name": "binding",
-                  "content": {
-                    "type": "SYMBOL",
-                    "name": "identifier"
-                  }
+                  "type": "CHOICE",
+                  "members": [
+                    {
+                      "type": "SEQ",
+                      "members": [
+                        {
+                          "type": "SYMBOL",
+                          "name": "filter"
+                        },
+                        {
+                          "type": "REPEAT",
+                          "content": {
+                            "type": "SEQ",
+                            "members": [
+                              {
+                                "type": "STRING",
+                                "value": ","
+                              },
+                              {
+                                "type": "SYMBOL",
+                                "name": "filter"
+                              }
+                            ]
+                          }
+                        },
+                        {
+                          "type": "CHOICE",
+                          "members": [
+                            {
+                              "type": "STRING",
+                              "value": ","
+                            },
+                            {
+                              "type": "BLANK"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "BLANK"
+                    }
+                  ]
+                },
+                {
+                  "type": "STRING",
+                  "value": ")"
                 }
               ]
             },
@@ -2324,6 +2361,15 @@
               "type": "BLANK"
             }
           ]
+        }
+      ]
+    },
+    "guard_slice": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "_slice_head"
         },
         {
           "type": "STRING",
@@ -2377,6 +2423,44 @@
         {
           "type": "STRING",
           "value": ")"
+        }
+      ]
+    },
+    "_slice_head": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "path",
+          "content": {
+            "type": "SYMBOL",
+            "name": "event_path"
+          }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "as"
+                },
+                {
+                  "type": "FIELD",
+                  "name": "binding",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "identifier"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
         }
       ]
     },

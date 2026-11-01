@@ -1157,3 +1157,151 @@ fn digest_flags_are_checked_before_anything_is_read() {
         stderr(&misplaced)
     );
 }
+
+/// **The widest claim, written where it is read.** A slice with no filters conflicts on
+/// every record of its event, and a fold arm may leave an empty list out, so nothing in the
+/// declaration says so any more; it was never read there either, since the author writes
+/// `fold n = MarketUnits {}` in another file. The `every` line names each such event and
+/// what explains it, and an event from one of the command's own inline folds has no name to
+/// give.
+#[test]
+fn boundaries_name_the_events_a_command_reads_every_record_of() {
+    let source = "\
+event @item.listed { seller_id: Int, item_id: Int }
+event @item.sold { seller_id: Int, item_id: Int }
+refusal TooMany \"the marketplace is full\"
+
+fold StoreUnits(seller_id: Int) -> n: Int = 0 {
+  on @item.listed(seller_id) => n + 1
+}
+
+fold MarketUnits() -> n: Int = 0 {
+  on @item.listed => n + 1
+  on @item.sold => n - 1
+}
+
+guard UnderMarketCap() {
+  fold total = MarketUnits {}
+  if total >= 1000 {
+    reject TooMany
+  }
+}
+
+command List(seller_id: Int, item_id: Int) {
+  guard UnderMarketCap {}
+  fold own: Int = 0
+    on @item.sold => own + 1
+
+  fold mine = StoreUnits { seller_id }
+  emit @item.listed { seller_id, item_id: item_id + mine + own }
+}
+";
+    let root = project("every", &[("app.hk", source)]);
+    let path = root.to_str().expect("a utf-8 path").to_string();
+    let output = hek(&["check", "--boundaries", &path]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    // **Whole lines, not fragments.** The three labels are different widths and the
+    // listing has been off by one twice, so `contains` of a fragment is what let it
+    // through: `" guards "` is eight characters and `" reads "` and `" every "` seven.
+    let want = concat!(
+        "  List guards UnderMarketCap\n",
+        "        reads MarketUnits, StoreUnits\n",
+        "        every @item.listed via UnderMarketCap, @item.sold via UnderMarketCap\n",
+    );
+    assert!(text.contains(want), "wanted\n{want}\ngot\n{text}");
+}
+
+/// And a narrowing boundary prints no `every` line at all, so the line's presence is the
+/// signal rather than something a reader has to read past.
+#[test]
+fn boundaries_say_nothing_about_every_when_every_slice_narrows() {
+    let source = "\
+event @item.listed { seller_id: Int, item_id: Int }
+
+fold StoreUnits(seller_id: Int) -> n: Int = 0 {
+  on @item.listed(seller_id) => n + 1
+}
+
+command List(seller_id: Int, item_id: Int) {
+  fold mine = StoreUnits { seller_id }
+  emit @item.listed { seller_id, item_id: item_id + mine }
+}
+";
+    let root = project("narrowed", &[("app.hk", source)]);
+    let path = root.to_str().expect("a utf-8 path").to_string();
+    let output = hek(&["check", "--boundaries", &path]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("List reads StoreUnits"), "{text}");
+    assert!(!text.contains("every"), "{text}");
+}
+
+/// **A rule 13 conjunct narrows no record, so it does not keep a slice off the line.**
+/// `kind == "listing"` is a `Filter::Key`: it resolves once in the caller's frame and
+/// decides whether the slice participates, and `docs/host.md` keeps it out of the
+/// `Predicate` because `kind` is not a field of the event. So the arm reads every
+/// `@item.listed` record while its filter list is not empty, and asking whether the list
+/// was empty gave the one claim this line makes a false negative.
+#[test]
+fn boundaries_count_a_key_conjunct_as_narrowing_nothing() {
+    let source = "\
+event @item.listed { item_id: Int }
+refusal TooMany \"too many\"
+
+fold KindUnits(kind: String) -> n: Int = 0 {
+  on @item.listed(kind == \"listing\") => n + 1
+}
+
+command List(item_id: Int) {
+  fold total = KindUnits { kind: \"listing\" }
+  if total >= 10 {
+    reject TooMany
+  }
+  emit @item.listed { item_id }
+}
+";
+    let root = project("conjunct", &[("app.hk", source)]);
+    let path = root.to_str().expect("a utf-8 path").to_string();
+    let output = hek(&["check", "--boundaries", &path]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    let want = concat!(
+        "  List reads KindUnits\n",
+        "       every @item.listed via KindUnits\n",
+    );
+    assert!(text.contains(want), "wanted\n{want}\ngot\n{text}");
+}
+
+/// And a command that names nothing is listed when it has one, which is the case with the
+/// widest boundary of all: a raw `guard @x()` and the command's own inline fold are the two
+/// ways to read a whole event without naming anything, and the listing used to skip a
+/// command with no names before it got as far as this line.
+#[test]
+fn boundaries_list_a_command_that_names_nothing_but_reads_everything() {
+    let source = "\
+event @shop.connected { shop_id: Int }
+event @shop.pinged { shop_id: Int, seen: Int }
+
+command Ping(shop_id: Int) {
+  guard @shop.connected()
+  fold seen: Int = 0
+    on @shop.pinged => seen + 1
+
+  emit @shop.pinged { shop_id, seen }
+}
+";
+    let root = project("unnamed", &[("app.hk", source)]);
+    let path = root.to_str().expect("a utf-8 path").to_string();
+    let output = hek(&["check", "--boundaries", &path]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    // No `via`, because neither a raw slice nor an inline fold has a name to give, which
+    // is the branch `docs/cli.md` describes.
+    let want = "  Ping every @shop.connected, @shop.pinged\n";
+    assert!(text.contains(want), "wanted\n{want}\ngot\n{text}");
+}

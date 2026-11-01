@@ -10,6 +10,7 @@
   (arguments)
   (annotation_arguments)
   (slice_reference)
+  (guard_slice)
   (parenthesized_expression)
   (interpolation)
   (subscript)

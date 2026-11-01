@@ -64,6 +64,12 @@ and not by delimiter.
 | **list** | fits or breaks; a trailing comma only when broken | `enum` variants, parameters, arguments, annotations, field initializers, object literals, list literals, slice filters, a destructure |
 | **flat** | never breaks, and overflows instead | `for` bindings, `Map(K, V)`, `Money(2)`, and the raw `guard` slice list |
 
+**An empty filter list is dropped**, so `on @x() { .. }` is written `on @x { .. }`: the
+grammar makes the list optional on a fold arm and the shorter form is canonical. A comment
+inside the parentheses holds them open, since the slice is mid-line and a suffix emitted
+after a dropped `()` would land past the `=>`. A `guard`'s list is not optional and is never
+dropped.
+
 An `on` header's path list is a list with one difference: **it takes no trailing comma**,
 because it has no closing delimiter and a comma there would be followed by `as`. Its
 continuations are indented rather than aligned under the first path.
