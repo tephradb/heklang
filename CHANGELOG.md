@@ -9,8 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **A fold arm may list several event paths**, as a projector handler may, and it is one arm per
-  path:
+- **A fold may not invent a subject id** (`docs/folds.md` rule 17). A `subject` names the rows an
+  erasure has to be able to reach, so a literal is refused at the two positions a fold writes from,
+  its seed and an arm's value:
+
+  ```hek
+  fold GameDeveloper(game_id: Game) -> Developer = 0 { .. }       // refused
+  fold GameDeveloper(game_id: Game) -> Developer? = none { .. }   // the spelling
+  ```
+
+  A literal is the one way a subject-typed value appears from nothing: a `fn` returning the scalar
+  underneath, `Uuid.derive` into a subject over `Uuid`, and arithmetic are all already refused by
+  the type, and what makes a literal different is that it resolves *against* the subject so no
+  position has to learn a coercion rule. An inlined `const` is a literal node too, so this is keyed
+  by node rather than decided from the shape of the expression.
+
+  **A filter is not refused**, because it compares records rather than writing one, and **a command
+  may still write one**: a command is where ids enter the system, its caller may send the same
+  number, and the runtime mints a subject key for whatever id first appears, so refusing it there
+  would close nothing while forbidding a house account. Nothing claims the id a *fold* writes, so
+  the row it keys answers to no subject and an erasure that reaches every row the subject owns
+  still leaves it behind. The asymmetry is deliberate and `docs/folds.md` rule 17 says why.
+
+  Found while checking the invariant rule 18 was going to rest on, that a subject id can only come
+  from an event field of that type. It could not: `-> Shop = 1`, `=> 99` in an arm and a literal in
+  an `emit` all checked clean. Measured before committing to it: across `hek/`, the skill example
+  and both evidence corpora, every subject-typed fold uses `? = none` and none uses a literal seed.
+
+- **A fold arm may list several event paths**, as an effect arm may, and it is one arm per path:
 
   ```hek
   fold GameGross(game_id: Game) -> cents: Int = 0 {

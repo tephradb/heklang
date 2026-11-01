@@ -368,3 +368,26 @@ names a runtime refuses, belongs to **hekla** and its own skill. Do not guess at
 
 `docs/folds.md` in the heklang repository is the contract for this file, and `docs/cli.md` for
 `--tables`.
+
+## 9. A fold may not invent a subject id
+
+A `subject` names the rows an erasure must reach, so a literal is refused at the two
+positions a fold writes from, the seed and an arm's value:
+
+```hek
+fold GameDeveloper(game_id: Game) -> Developer = 0 { .. }       // refused
+fold GameDeveloper(game_id: Game) -> Developer? = none { .. }   // the spelling
+```
+
+A literal is the one way a subject-typed value appears from nothing; a `fn` returning the
+scalar and `Uuid.derive` into a subject are already refused by the type. An inlined `const`
+is a literal node too.
+
+**A filter is not refused**: `on @game.announced(game_id, developer_id: 7)` compares records
+rather than writing one.
+
+**A command may write one and a fold may not.** A command is where ids enter the system: its
+caller may send the same number, and the runtime mints a subject key for whatever id first
+appears, so refusing the literal there closes nothing and would forbid a house account.
+Nothing claims the id a fold writes, so the row it keys answers to no subject and an erasure
+cannot reach it.

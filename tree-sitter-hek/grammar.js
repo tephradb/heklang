@@ -529,7 +529,8 @@ module.exports = grammar({
     // port measured the shape concentrating in folds no command reads, where the slice is
     // not an append condition at all. Where it is one, the claim is made visible by
     // `hek check --boundaries` instead, which is where the command's author reads it.
-    // **Several paths are one arm**, the way a projector handler already takes several:
+    // **Several paths are one arm**, the way an effect arm already takes several (a projector
+    // handler takes exactly one):
     // `on @game.purchased, @game.gifted (game_id) { price_cents } => ..`. The parser
     // lowers it to one slice per path, so everything downstream (the append condition,
     // `--boundaries`, `--tables`, the digest) sees exactly what writing the arms out

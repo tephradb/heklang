@@ -72,9 +72,9 @@ dropped.
 
 An `on` header's path list is a list with one difference: **it takes no trailing comma**,
 because it has no closing delimiter and a comma there would be followed by `as`. Its
-continuations are indented rather than aligned under the first path. A projector or effect
-handler and a fold arm share one printer for it: printing a fold arm's second path as its
-`as` binding wrote out `on @a.b as @c.d (..)`, which does not parse.
+continuations are indented rather than aligned under the first path. An effect arm and a fold
+arm share one printer for it: printing a fold arm's second path as its `as` binding wrote out
+`on @a.b as @c.d (..)`, which does not parse.
 
 **A filter list takes a space after several paths**, so `on @a, @b (x)` does not read as `@a`
 and then `@b(x)`. One path keeps it tight, which is how every arm in every corpus is written.

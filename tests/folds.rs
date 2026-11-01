@@ -2746,17 +2746,22 @@ event @game.gifted { game_id: Int, wrapped: Bool }
             two,
             "@game.purchased, @game.gifted (game_id) { price_cents }"
         )),
-        "@game.purchased, @game.gifted has no field `price_cents`"
+        "`price_cents` is not shared by @game.purchased, @game.gifted, so an arm listing them cannot name it"
     );
     assert_eq!(
         error(&arm(two, "@game.purchased, @game.purchased (game_id)")),
         "this arm already lists @game.purchased"
     );
-    // **A filter names the paths too.** `def` is their intersection, so naming only the
-    // first said `@game.purchased has no field `price_cents`` about an event that has it.
+    // A filter says the same thing about the same mistake, and names the paths: `def` is
+    // their intersection, so naming only the first blamed an event that has the field.
     assert_eq!(
         error(&arm(two, "@game.purchased, @game.gifted (price_cents: 1)")),
-        "@game.purchased, @game.gifted has no field `price_cents`"
+        "`price_cents` is not shared by @game.purchased, @game.gifted, so an arm listing them cannot name it"
+    );
+    // And a name on no path at all still gets the ordinary answer.
+    assert_eq!(
+        error(&arm(two, "@game.purchased, @game.gifted (nothing: 1)")),
+        "@game.purchased, @game.gifted has no field `nothing`"
     );
 
     // The shared `game_id` is enough for an arm that names only it, and an arm that names
@@ -2785,7 +2790,10 @@ fold F(game_id: Int) -> String = \"\" {
   on @a.seen, @b.seen (game_id) { note } => note
 }
 ";
-    assert_eq!(error(source), "@a.seen, @b.seen has no field `note`");
+    assert_eq!(
+        error(source),
+        "`note` is not shared by @a.seen, @b.seen, so an arm listing them cannot name it"
+    );
 }
 
 /// A repeat pass reports nothing twice. The arm is read once per path, so a diagnostic
@@ -2809,4 +2817,118 @@ fold Bad(game_id: Int) -> Int = 0 {
         .filter(|at| at.code == heklang::Code::TypeMismatch)
         .count();
     assert_eq!(mismatches, 1, "{found:#?}");
+}
+
+/// **Rule 17: a fold may not invent a subject id.** A literal is the one way a
+/// subject-typed value appears from nothing: every other route is already refused by the
+/// type, and what makes a literal different is that it resolves against a subject so no
+/// position has to learn a coercion rule. An inlined `const` is a literal node too.
+///
+/// It was found while checking the invariant rule 18 wanted to rest on, that a subject id
+/// can only come from an event field of that type. It cannot, and a seed is where the port
+/// was leaning on it: a `""` seed on a looked-up fold hands a sale a developer nobody
+/// announced.
+#[test]
+fn a_fold_cannot_invent_a_subject_id() {
+    let source = |fold: &str| {
+        format!(
+            "\
+subject Developer(Int)
+
+event @game.announced {{ game_id: Int, developer_id: Developer }}
+
+{fold}
+"
+        )
+    };
+    assert_eq!(
+        error(&source(
+            "fold Seeded(game_id: Int) -> Developer = 7 {\n  on @game.announced(game_id) { developer_id } => developer_id\n}"
+        )),
+        "`Developer` is a subject, so this seed cannot be a literal one"
+    );
+    assert_eq!(
+        error(&source(
+            "fold Armed(game_id: Int) -> Developer? = none {\n  on @game.announced(game_id) => 99\n}"
+        )),
+        "`Developer` is a subject, so this arm's value cannot be a literal one"
+    );
+    // An inline fold's seed is the same position.
+    assert_eq!(
+        error(&source(
+            "event @noise { game_id: Int }\n\ncommand C(game_id: Int) {\n  fold who: Developer = 7\n    on @game.announced(game_id) { developer_id } => developer_id\n\n  emit @noise { game_id }\n}"
+        )),
+        "`Developer` is a subject, so this seed cannot be a literal one"
+    );
+
+    // The honest spelling, and the three positions this does **not** reach.
+    program(&source(
+        "fold Honest(game_id: Int) -> Developer? = none {\n  on @game.announced(game_id) { developer_id } => developer_id\n}",
+    ));
+    // A filter compares records rather than writing one, so a literal narrows and invents
+    // nothing.
+    program(&source(
+        "fold Filtered(game_id: Int) -> n: Int = 0 {\n  on @game.announced(game_id, developer_id: 7) => n + 1\n}",
+    ));
+    // And a command may write one: that is where ids enter the system, its caller may send
+    // the same number, and the key store mints a key for whatever first appears.
+    program(&source(
+        "command C(game_id: Int) {\n  emit @game.announced { game_id, developer_id: 42 }\n}",
+    ));
+}
+
+/// Rule 17 asks about the value's **result** positions, not about every literal under it.
+/// Walking the whole subtree refused four programs that write no subject at all, including
+/// the honest spelling the rule itself recommends. An `if` is the one expression whose
+/// result is somewhere else, so its arms are the recursion.
+#[test]
+fn rule_17_asks_what_the_value_writes_and_not_what_it_reads() {
+    let source = |fold: &str| {
+        format!(
+            "\
+subject Shop(Int)
+subject Developer(Int)
+
+const HOUSE: Shop = 1
+
+event @game.announced {{ game_id: Int, shop_id: Shop, developer_id: Developer }}
+
+fn label(shop_id: Shop) -> String {{
+  return \"{{shop_id}}\"
+}}
+
+{fold}
+"
+        )
+    };
+    // A comparison, a `fn` argument, and an `if` whose arms are both honest.
+    program(&source(
+        "fold HouseCount(game_id: Int) -> n: Int = 0 {\n  on @game.announced(game_id) { shop_id } => if shop_id == 5 { n + 1 } else { n }\n}",
+    ));
+    program(&source(
+        "fold Labelled(game_id: Int) -> String = \"\" {\n  on @game.announced(game_id) { shop_id } => label(HOUSE) \n}",
+    ));
+    program(&source(
+        "fold NotHouse(game_id: Int) -> Developer? = none {\n  on @game.announced(game_id) { developer_id } =>\n    if developer_id == 1 { none } else { developer_id }\n}",
+    ));
+
+    // And an `if` arm that *does* write one is still refused, which is why the recursion
+    // has to go through an `if` rather than stop at it.
+    assert_eq!(
+        error(&source(
+            "fold Sneaky(game_id: Int) -> Developer? = none {\n  on @game.announced(game_id) { developer_id } =>\n    if developer_id == 1 { 99 } else { developer_id }\n}"
+        )),
+        "`Developer` is a subject, so this arm's value cannot be a literal one"
+    );
+
+    // The subject named is the one at the offending node. It came from an arbitrary map
+    // value before, so this file reported `Shop` or `Developer` depending on the run; a
+    // `HashMap`'s order is fixed within a process, so this pins the right answer rather
+    // than reproducing the old flakiness, which one run cannot.
+    assert_eq!(
+        error(&source(
+            "fold Armed(game_id: Int) -> Developer? = none {\n  on @game.announced(game_id, shop_id: 5) => 99\n}"
+        )),
+        "`Developer` is a subject, so this arm's value cannot be a literal one"
+    );
 }

@@ -438,7 +438,7 @@ impl<'a> Printer<'a> {
     /// `@a.b, @c.d`, an `on` header's path list, and whether it left the line already
     /// indented.
     ///
-    /// **Shared by a projector or effect handler and a fold arm's slice**, which list paths
+    /// **Shared by an effect arm and a fold arm's slice**, which list paths
     /// the same way. The second copy drifted the moment it existed: printing a fold arm's
     /// second path as its `as` binding wrote `on @a.b as @c.d (..)`, which does not parse.
     ///

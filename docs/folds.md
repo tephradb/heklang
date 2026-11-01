@@ -94,7 +94,8 @@ fold <Name>(<name>: <Type>, ...) -> [<acc>:] <Type> = <seed> {
 A name, parameters, the value's type and seed, and one arm per event type it reads. **Exactly one
 accumulator** (rule 3), and no `return`.
 
-**An arm may list several event paths**, as a projector handler may, and it is one arm per path:
+**An arm may list several event paths**, as an effect arm may (`docs/effects.md` rule 1), and it
+is one arm per path:
 
 ```hek
 fold GameGross(game_id: Game) -> cents: Int = 0 {
@@ -1388,3 +1389,48 @@ supplies is not a key anything could be written under, so a fold with one is lis
 stored. That is a listing and not a diagnostic; the language does not require a fold to be
 storable, and a fold a command reads is doing its job either way. `docs/cli.md` has the
 listing and what orders a key.
+
+## 17. A fold may not invent a subject id
+
+A `subject` names the rows an erasure has to be able to reach, so a fold may not write one
+out of nothing:
+
+```hek
+fold GameDeveloper(game_id: Game) -> Developer = 0 {   // refused: this seed
+  on @game.announced(game_id) { developer_id } => developer_id
+}
+
+fold GameDeveloper(game_id: Game) -> Developer? = none {   // and this is the spelling
+  on @game.announced(game_id) { developer_id } => developer_id
+}
+```
+
+**A literal is the one way a subject-typed value appears from nothing.** Every other route
+is already refused by the type: a `fn` returning the scalar underneath, `Uuid.derive` into a
+subject over `Uuid`, arithmetic. What makes a literal different is rule 12's "positional at
+the edge": a subject id *is* its scalar at run time, so a literal resolves against the
+subject and no position has to learn a coercion rule. An inlined `const` is a literal node
+too, so this is keyed by node rather than decided by the shape of the expression.
+
+Two positions are refused, and they are the two a fold writes from: **the seed**, which
+attaches the id to every key the fold is read at, and **an arm's value**, which attaches it
+to every key the arm touches. From rule 18 a key lookup then files records under whatever
+those produce, which is how this was found: the invariant rule 18 wanted to rest on, that a
+subject id can only come from an event field of that type, was not true.
+
+**A filter is not one of them**, because it compares records rather than writing one:
+`on @game.announced(game_id, developer_id: 7)` narrows to the records that already carry
+that id and invents nothing.
+
+### Why a command may write one and a fold may not
+
+`emit @game.announced { game_id, developer_id: 42 }` stays legal, and the asymmetry is
+deliberate rather than an oversight. **A command is where ids enter the system.** The same
+command already takes `developer_id: Developer` from its caller, who may send 42, and the
+runtime mints a subject key for whatever id first appears rather than pre-issuing them. So
+refusing the literal there would close nothing while the input path stays open, and it would
+forbid a legitimate constant: a house account, a system developer.
+
+Derived state is the other case. Nothing claimed the id a fold writes, no event carries it,
+and the row it keys answers to no subject, so an erasure that reaches every row the subject
+owns still leaves it. That is a hole only derived state can have.

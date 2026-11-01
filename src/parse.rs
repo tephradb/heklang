@@ -4177,6 +4177,10 @@ impl Parser {
         self.folding = true;
         let init = self.expr(lower, Some(ret.clone()))?;
         self.folding = false;
+        // Rule 17, at the two positions inside a fold that attach a value to a row. Not a
+        // filter, which also sets `folding`: a filter compares records rather than writing
+        // one, so a literal there narrows and invents nothing.
+        self.no_invented_subject(lower, init, ret, "this seed")?;
         self.expect_sym(Sym::LBrace)?;
 
         // The accumulator is allocated under the name the author wrote, or under one no
@@ -4625,6 +4629,10 @@ impl Parser {
         self.folding = true;
         let init = self.expr(lower, Some(ty.clone()))?;
         self.folding = false;
+        // Rule 17, at the two positions inside a fold that attach a value to a row. Not a
+        // filter, which also sets `folding`: a filter compares records rather than writing
+        // one, so a literal there narrows and invents nothing.
+        self.no_invented_subject(lower, init, &ty, "this seed")?;
         // A seed runs before the fold, so it reads the other fold's seed rather than what
         // it folds to. That answer is wrong rather than late, and it used to check clean:
         // `fold t: Int = s` returned 0 where the author meant 3.
@@ -4712,7 +4720,11 @@ impl Parser {
         // **Several paths are one arm, lowered by reading the arm once per path.** Each
         // pass allocates its own bind slots, so the result is what writing the arms out
         // gives rather than merely equivalent to it, and `hek digest` does not call the
-        // rewrite a change. A projector handler already takes several paths this way.
+        // rewrite a change. An effect arm already takes several paths this way; a projector
+        // handler takes exactly one.
+        //
+        // `@a, @b` as a label and as the list: the label goes in messages, and the list is
+        // what tells "not declared anywhere" from "declared differently on one of them".
         //
         // `common_fields` is what makes the repeat sound: every name the arm can use has
         // the same type, `@subject` and `absent` on every path, and every pass is handed
@@ -4724,18 +4736,19 @@ impl Parser {
         // fold arm listing two unrelated failures to count them names nothing at all.
         let mut pending: Vec<EventPath> = Vec::new();
         let mut resume = 0usize;
-        let mut armed: Option<(EventDef, String, Span, Span)> = None;
+        let mut armed: Option<(EventDef, String, Vec<Ident>, Span, Span)> = None;
 
         while self.at_word(Keyword::On) || !pending.is_empty() {
-            let (event, def, listed, at, arm, mark) = match pending.pop() {
+            let (event, def, listed, listed_paths, at, arm, mark) = match pending.pop() {
                 Some(event) => {
-                    let (def, listed, at, arm) =
+                    let (def, listed, listed_paths, at, arm) =
                         armed.clone().expect("the first pass set this arm");
                     self.pos = resume;
                     (
                         event,
                         def,
                         listed,
+                        listed_paths,
                         at,
                         arm,
                         Some(self.errors.borrow().len()),
@@ -4761,8 +4774,9 @@ impl Parser {
                     // Reversed, so `pop` hands them back in the order they were written.
                     pending = paths[1..].to_vec();
                     pending.reverse();
-                    armed = Some((def.clone(), listed.clone(), at, arm));
-                    (paths[0].clone(), def, listed, at, arm, None)
+                    let unshared = self.unshared(&paths, &spans, events);
+                    armed = Some((def.clone(), listed.clone(), unshared.clone(), at, arm));
+                    (paths[0].clone(), def, listed, unshared, at, arm, None)
                 }
             };
             // `docs/folds.md` rule 12, written here rather than after the filters because that is
@@ -4772,6 +4786,7 @@ impl Parser {
             let filters = self.slice_filters(
                 lower,
                 &listed,
+                &listed_paths,
                 at,
                 &def,
                 match named {
@@ -4817,6 +4832,25 @@ impl Parser {
                                     .to_string()
                             }
                         };
+                        // **Not shared is a different mistake from not declared**, and it
+                        // is the one a multi-path arm actually makes: `common_fields`
+                        // drops a field whose type, `@subject` or `@absent` differs, so
+                        // "declare it on the event" sent the author to add a field that
+                        // is already there on both. An effect arm has said this since it
+                        // learned to list paths.
+                        if listed_paths.contains(&field) {
+                            return Err(self
+                                .err(
+                                    Code::EventShape,
+                                    format!(
+                                        "`{field}` is not shared by {listed}, so an arm listing them cannot name it"
+                                    ),
+                                    bind,
+                                )
+                                .with_hint(
+                                    "one field under one name or it is two fields, so every path has to declare it with the same type, `@subject` and `@absent`; split the arm, or give the odd one out its own",
+                                ));
+                        }
                         return Err(self
                             .err(
                                 Code::UnknownMember,
@@ -4890,6 +4924,8 @@ impl Parser {
             let value = value?;
             self.fold_arm = false;
             self.folding = false;
+            // Rule 17, the other position a fold writes from.
+            self.no_invented_subject(lower, value, ty, "this arm's value")?;
             // **Here rather than in `computed_keys`, because a lookup is collected by the
             // line above.** The sink checks an arm's narrowing before it evaluates either a
             // computed part or a lookup, and `arm_filters` is what makes that possible; it
@@ -5094,6 +5130,73 @@ impl Parser {
 
     /// Rule 12: a seed may be plain, an arm may not. Said the same way whichever order
     /// the two arms are written in, because the defect is the pair rather than either.
+    /// Rule 17: a fold may not invent a subject id.
+    ///
+    /// **A literal is the one way a subject-typed value appears from nothing.** Every other
+    /// route is already refused by the type: a `fn` returning its scalar, `Uuid.derive`
+    /// into a subject over `Uuid`, arithmetic. What makes a literal different is
+    /// [`Self::note_subject`], which lets one fill a subject position so that no position
+    /// has to learn a coercion rule, and an inlined `const` is a literal node too.
+    ///
+    /// **The asymmetry with a command is deliberate.** `emit @game.announced {
+    /// developer_id: 42 }` stays legal: a command is where ids enter the system, the same
+    /// command already takes a `Developer` from its caller who may send 42, and hekla's key
+    /// store mints a subject key for whatever id first appears rather than pre-issuing
+    /// them. Refusing the literal there would close nothing and would forbid a house
+    /// account. Derived state is the other case: a seed attaches an id no event claimed to
+    /// every key the fold is read at, an arm attaches one to every key it touches, and from
+    /// rule 18 a key lookup then files records under it.
+    /// **Only the value's result positions are asked**, which is the whole of what makes
+    /// this a rule about writing. A literal anywhere else in the expression writes nothing:
+    /// `if shop_id == 5 { n + 1 } else { n }` compares, `label(HOUSE)` passes an argument,
+    /// and `if developer_id == 1 { none } else { developer_id }` is the honest spelling this
+    /// rule recommends. Walking the whole subtree refused all three.
+    ///
+    /// An `if` is the one expression whose result is somewhere else, so its arms are the
+    /// recursion and everything else is itself. That is the same shape `docs/optionals.md`
+    /// settled on for a declared position, and for the same reason: each arm of an `if`
+    /// lands where the `if` does.
+    fn no_invented_subject(
+        &self,
+        lower: &Lower,
+        value: ExprId,
+        declared: &Type,
+        what: &str,
+    ) -> Result<(), Diagnostic> {
+        if tables::subject_of(declared).is_none() {
+            return Ok(());
+        }
+        let mut stack = vec![value];
+        while let Some(id) = stack.pop() {
+            if let Some(subject) = lower.subjects.get(&id).and_then(tables::subject_of) {
+                return Err(self
+                    .err(
+                        Code::FoldRestriction,
+                        format!("`{subject}` is a subject, so {what} cannot be a literal one"),
+                        lower.b.exprs().span(id),
+                    )
+                    .with_hint(
+                        "a subject names rows that an erasure has to be able to reach, and a written id is one no event claimed: fold it from a field of the record, or declare the fold `T?` and seed it `none`. A command may write one, because that is where ids enter the system",
+                    ));
+            }
+            // An `if` is the one expression whose result is somewhere else, and a `Wrap`
+            // is the optional lift that every declared position puts around a bare `T`:
+            // without it the walk stopped at `(wrap Developer (int 99))` and an `if` arm
+            // writing a literal into a `T?` fold went through.
+            match lower.b.exprs().get(id) {
+                Some(Expr::If {
+                    then, otherwise, ..
+                }) => {
+                    stack.push(*then);
+                    stack.push(*otherwise);
+                }
+                Some(Expr::Wrap { value, .. }) => stack.push(*value),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     fn mixed_fold(&self, name: &str, subject: &str, offender: &str) -> (String, Option<String>) {
         (
             format!(
@@ -5114,7 +5217,7 @@ impl Parser {
         let at = self.span_here();
         let path = self.expect_path()?;
         let def = self.event_def(events, &path, at)?;
-        let filters = self.slice_filters(lower, &path.to_string(), at, def, KeySite::Guard)?;
+        let filters = self.slice_filters(lower, &path.to_string(), &[], at, def, KeySite::Guard)?;
         Ok((path, filters))
     }
 
@@ -5183,6 +5286,7 @@ impl Parser {
         &mut self,
         lower: &mut Lower,
         path: &str,
+        unshared: &[Ident],
         path_at: Span,
         def: &EventDef,
         site: KeySite,
@@ -5246,7 +5350,7 @@ impl Parser {
                 continue;
             }
             let Some(declared) = def.field(&name) else {
-                return Err(self.unknown_filter(lower, path, &name, key, at));
+                return Err(self.unknown_filter(lower, path, unshared, &name, key, at));
             };
             let expected = declared.ty.clone();
             // A filter is lowered once per invocation, before the fold, so it is held
@@ -5614,10 +5718,26 @@ impl Parser {
         &self,
         lower: &Lower,
         path: &str,
+        unshared: &[Ident],
         name: &str,
         key: bool,
         at: Span,
     ) -> Diagnostic {
+        // Not shared is a different mistake from not declared, and a filter has to say so
+        // for the reason a destructure does: the field is on every path and differs.
+        if unshared.iter().any(|field| field == name) {
+            return self
+                .err(
+                    Code::EventShape,
+                    format!(
+                        "`{name}` is not shared by {path}, so an arm listing them cannot name it"
+                    ),
+                    at,
+                )
+                .with_hint(
+                    "one field under one name or it is two fields, so every path has to declare it with the same type, `@subject` and `@absent`; split the arm, or give the odd one out its own",
+                );
+        }
         let error = self.err(
             Code::UnknownMember,
             format!("{path} has no field `{name}`"),
@@ -9058,6 +9178,42 @@ impl Parser {
     /// The fields every listed path shares, as one synthesised definition. A field
     /// counts only when its type **and** its `@subject` match everywhere, so a
     /// `reveal` through a multi-path binding stays sound.
+    /// The names at least one listed path declares and [`Self::common_fields`] therefore
+    /// dropped, which is **not shared** rather than not declared.
+    ///
+    /// That is the mistake a multi-path arm actually makes, and the two answers need
+    /// telling apart wherever a name is looked up: "declare it on the event" sends an
+    /// author to add a field that is already on both, differing only in its type,
+    /// `@subject` or `@absent`. Computed once per arm, where the paths and the event
+    /// definitions are both in reach, and carried to the lookups so a filter and a
+    /// destructure say the same thing about the same mistake.
+    fn unshared(&self, paths: &[EventPath], spans: &[Span], events: &[EventDef]) -> Vec<Ident> {
+        if paths.len() == 1 {
+            return Vec::new();
+        }
+        let defs: Vec<&EventDef> = paths
+            .iter()
+            .zip(spans)
+            .filter_map(|(path, at)| self.event_def(events, path, *at).ok())
+            .collect();
+        let mut out = Vec::new();
+        for def in &defs {
+            for field in &def.fields {
+                let shared = defs.iter().all(|other| {
+                    other.field(&field.name).is_some_and(|found| {
+                        found.ty == field.ty
+                            && found.subject == field.subject
+                            && found.absent == field.absent
+                    })
+                });
+                if !shared && !out.contains(&field.name) {
+                    out.push(field.name.clone());
+                }
+            }
+        }
+        out
+    }
+
     fn common_fields(
         &self,
         paths: &[EventPath],
@@ -9101,7 +9257,7 @@ impl Parser {
 
     /// `@a.b, @c.d`, the paths one arm lists, with the span of each.
     ///
-    /// One loop for a projector or effect handler and a fold arm, which list them the same
+    /// One loop for an effect arm and a fold arm, which list them the same
     /// way and are held to the same [`Self::common_fields`] check. A repeat is refused
     /// rather than deduplicated: the second is a typo or a claim the first already made.
     fn arm_paths(&mut self) -> Result<(Vec<EventPath>, Vec<Span>), Diagnostic> {
