@@ -793,11 +793,31 @@ A record that moved nothing is reported too, and that is the caller's to filter:
 this record" is a fact about every record the query delivered, and deciding which ones count would
 decide it for everyone.
 
-**A column with a range arm is refused**, and the paragraph above is why. The two drivers are
-defined to disagree there and the sink's answer is the definition, so a by-key history of such a
-column would report a step the stored column never took: `Seen(1, 8)` would show the `+ 10` that
-order 8 never received. That is the wrongness a history read exists to remove. `Column::ranges` is
-the same question asked once, for a host that wants to know before a request arrives.
+**A column whose closure holds a range arm is refused**, and the paragraph above is why. The two
+drivers are defined to disagree there and the sink's answer is the definition, so a by-key history
+of such a column would report a step the stored column never took: `Seen(1, 8)` would show the
+`+ 10` that order 8 never received. That is the wrongness a history read exists to remove.
+
+**The closure and not the column**, which is the half asking about its own arms missed. A fold every
+arm of which pins its whole key still disagrees with the store when a fold it *keys through* ranges,
+because a lookup is answered by refolding the looked-up fold:
+
+```hek
+fold OrderDiscounts(order_id: Int) -> n: Int = 0 {
+  on .placed(order_id) => n
+  on .discounted => n + 10          // ranged
+}
+
+fold NotesByDiscount(taken: Int) -> n: Int = 0 {    // every arm pins its whole key
+  on .added { order_id } key taken = OrderDiscounts { order_id } => n + 1
+}
+```
+
+The sink files a note under the discount the store **held**, and a refold applies the ranged record
+to every order and files it under one the store never had: `taken` is `0` in the table and `10` to a
+by-key read. So the history would be a timeline of a row that does not exist, which is worse than no
+timeline. `Layout::ranged_through` is that whole question asked once, and it names the fold that has
+to change rather than the one that was asked for, because they are usually not the same fold.
 
 **A computed key and a lookup are allowed**, which is not symmetrical with that and is not meant to
 be. Those two *agree* between the drivers, which is what `tests/sink.rs` exists to prove; what they

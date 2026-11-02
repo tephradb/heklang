@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A column keyed through a ranged one was served a history that contradicts the store.**
+  `fold_steps` refused a column some arm of **its own** was a range update, which is the right
+  question asked one level too shallow. A fold every arm of which pins its whole key still
+  disagrees with the stored value when a fold it *keys through* ranges, because a lookup is
+  answered by refolding the looked-up fold and a refold applies every ranged record to every key:
+
+  ```hek
+  fold OrderDiscounts(order_id: Int) -> n: Int = 0 {
+    on @order.placed(order_id) => n
+    on @shop.discounted => n + 10          // ranged
+  }
+
+  fold NotesByDiscount(taken: Int) -> n: Int = 0 {    // every arm pins its whole key
+    on @note.added { order_id } key taken = OrderDiscounts { order_id } => n + 1
+  }
+  ```
+
+  The sink files the note under the discount the store **held** and a by-key read finds it under
+  one the store never had: `taken` is `0` in the table and `10` to the refold. So the history was a
+  timeline of a row that does not exist. `Layout::ranged_through` now answers the whole question,
+  the column and its transitive `Column::reads`, in one place so a host and `fold_steps` cannot
+  answer it differently, and it names the fold that has to change rather than the one that was
+  asked for, because they are usually not the same fold.
+
+
 ### Added
 
 - **`Interpreter::fold_steps`, a by-key read that reports the value after each record**

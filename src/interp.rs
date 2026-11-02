@@ -39,10 +39,16 @@ pub enum ErrorKind {
     UnknownProjector(String),
     UnknownEffect(String),
     UnknownFold(String),
-    /// [`Interpreter::fold_steps`] on a column some arm of which is a range update. A
-    /// by-key read of one does not agree with the stored value (`docs/folds.md` section
-    /// 11), so there is no history to report rather than a slow one.
-    NoHistory(String),
+    /// [`Interpreter::fold_steps`] on a column whose closure holds a range update: itself,
+    /// or a fold it keys or reads through. A by-key read of one does not agree with the
+    /// stored value (`docs/folds.md` section 11), so there is no history to report rather
+    /// than a slow one. `ranged` is the column that ranges and `open` its unpinned key
+    /// parts, because the fold asked for is often not the one that has to change.
+    NoHistory {
+        fold: String,
+        ranged: String,
+        open: String,
+    },
     NoSuchPosition(u64),
     /// Rule 12: terminal rather than a wedge, because no retry recovers erased data.
     /// The message names the erase as possibly non-local, which it usually is: rule 9
@@ -194,9 +200,13 @@ impl fmt::Display for ErrorKind {
             ErrorKind::UnknownProjector(name) => write!(f, "unknown projector `{name}`"),
             ErrorKind::UnknownEffect(name) => write!(f, "unknown effect `{name}`"),
             ErrorKind::UnknownFold(name) => write!(f, "unknown fold `{name}`"),
-            ErrorKind::NoHistory(name) => write!(
+            ErrorKind::NoHistory { fold, ranged, open } if fold == ranged => write!(
                 f,
-                "`{name}` has an arm that leaves a key part open, so it has no history: a range covers the keys the table held when each record arrived, and reading it by key would report steps the stored column never took"
+                "`{fold}` has an arm that leaves `{open}` open, so it has no history: a range covers the keys the table held when each record arrived, and reading it by key would report steps the stored column never took"
+            ),
+            ErrorKind::NoHistory { fold, ranged, open } => write!(
+                f,
+                "`{fold}` reads `{ranged}`, which has an arm that leaves `{open}` open, so it has no history: a lookup is answered by refolding, and a refold of a ranged column applies every record to every key, so this column's key is one the store never wrote a row at"
             ),
             ErrorKind::NoSuchPosition(position) => write!(f, "no event at position {position}"),
             ErrorKind::Erased { field, subject, id } => write!(
@@ -2084,10 +2094,17 @@ impl<'a, H: Host> Interpreter<'a, H> {
         let def = self.fold_def(name)?;
         let module = def.module.as_deref();
         let layout = tables::layout(self.program);
-        if let Some((_, column)) = layout.column(name)
-            && column.ranges()
-        {
-            return Err(Error::new(ErrorKind::NoHistory(name.to_string())).in_module(module));
+        if let Some(ranged) = layout.ranged_through(name) {
+            let open = layout
+                .column(ranged)
+                .map(|(table, column)| column.open(table))
+                .unwrap_or_default();
+            return Err(Error::new(ErrorKind::NoHistory {
+                fold: name.to_string(),
+                ranged: ranged.to_string(),
+                open: open.join(", "),
+            })
+            .in_module(module));
         }
         folding(self.program, &self.host, def, args, Some(head), Some(visit))
             .map_err(|err| err.in_module(module))
@@ -2708,14 +2725,6 @@ fn narrowing(resolved: &[Resolved]) -> Vec<Predicate> {
         .collect()
 }
 
-/// The host narrows, and this re-checks, because a store that can only narrow
-/// approximately is still correct.
-///
-/// **The query is built here, from the same resolved list the matching reads.** It used
-/// to be built by each of the three callers and passed in, which made the parallelism
-/// between it and the slices an invariant three places had to keep; now there is one
-/// construction and nothing to assert. `from` and `upto` are the one thing a caller still
-/// decides, because the range is the one latitude `docs/host.md` section 4 does not give.
 /// What [`Interpreter::fold_steps`] is called back with: one record the fold folded and the
 /// accumulator as of it, in log order.
 ///
@@ -2735,6 +2744,14 @@ struct Steps<'a> {
     visit: OnStep<'a>,
 }
 
+/// The host narrows, and this re-checks, because a store that can only narrow
+/// approximately is still correct.
+///
+/// **The query is built here, from the same resolved list the matching reads.** It used
+/// to be built by each of the three callers and passed in, which made the parallelism
+/// between it and the slices an invariant three places had to keep; now there is one
+/// construction and nothing to assert. `from` and `upto` are the one thing a caller still
+/// decides, because the range is the one latitude `docs/host.md` section 4 does not give.
 #[allow(clippy::too_many_arguments)]
 fn fold(
     program: &Program,

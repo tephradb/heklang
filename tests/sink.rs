@@ -1802,7 +1802,7 @@ fold OrderSeen(shop_id: Int, order_id: Int) -> n: Int = 0 {
         )
         .expect_err("a ranged column has no history");
     let message = err.to_string();
-    assert!(message.contains("leaves a key part open"), "got: {message}");
+    assert!(message.contains("leaves `order` open"), "got: {message}");
     assert!(
         message.contains("steps the stored column never took"),
         "the reason is the disagreement, not the cost: {message}"
@@ -1963,4 +1963,108 @@ fold GamePricedAt(game_id: Int) -> Timestamp? = none {
         ]
     );
     assert_eq!(steps.last().cloned(), Some(last));
+}
+
+/// **And a column whose key is read through a ranged one has no history either**, which is
+/// the half that asking `Column::ranges` alone missed. Every arm of `NotesByDiscount` pins
+/// its whole key, so it looked exact; its key comes out of `OrderDiscounts`, which ranges,
+/// and a lookup is answered by **refolding** the looked-up fold. A refold applies every
+/// ranged record to every key, so the key this computes is one the store never wrote a row
+/// at: the sink filed the note under `0` and a by-key read finds it under `10`.
+///
+/// Asserted both ways round, because the point is not that the read is slow. It is that the
+/// two answers are different, and a timeline of a row that does not exist is worse than no
+/// timeline.
+#[test]
+fn a_column_keyed_through_a_ranged_one_has_no_history() {
+    let source = "event @shop.discounted { why: String }
+event @order.placed { order_id: Int }
+event @note.added { order_id: Int }
+
+fold OrderDiscounts(order_id: Int) -> n: Int = 0 {
+  on @order.placed(order_id) => n
+  on @shop.discounted => n + 10
+}
+
+fold NotesByDiscount(taken: Int) -> n: Int = 0 {
+  on @note.added { order_id } key taken = OrderDiscounts { order_id } => n + 1
+}
+";
+    let program = program(source);
+    let mut interpreter = Interpreter::new(&program);
+    given(
+        &mut interpreter,
+        "shop.discounted",
+        [("why", Value::str("sale"))],
+    );
+    given(
+        &mut interpreter,
+        "order.placed",
+        [("order_id", Value::Int(9))],
+    );
+    given(
+        &mut interpreter,
+        "note.added",
+        [("order_id", Value::Int(9))],
+    );
+
+    // The column itself does not range, which is what made this look exact.
+    let tables = Tables::new(&program);
+    let column = |fold: &str| {
+        tables
+            .layout()
+            .column(fold)
+            .unwrap_or_else(|| panic!("{fold} is kept"))
+            .1
+    };
+    assert!(!column("NotesByDiscount").ranges());
+    assert!(column("OrderDiscounts").ranges());
+    // The closure is the question, and it names the fold that has to change.
+    assert_eq!(
+        tables
+            .layout()
+            .ranged_through("NotesByDiscount")
+            .map(|at| at.to_string()),
+        Some("OrderDiscounts".to_string())
+    );
+
+    let err = interpreter
+        .fold_steps(
+            "NotesByDiscount",
+            [("taken", Value::Int(10))],
+            3,
+            &mut |_, _| Ok(()),
+        )
+        .expect_err("a column keyed through a ranged one has no history");
+    let message = err.to_string();
+    assert!(
+        message.contains("`NotesByDiscount` reads `OrderDiscounts`"),
+        "it names the fold that has to change: {message}"
+    );
+    assert!(
+        message.contains("leaves `order` open"),
+        "and the part that has to be pinned: {message}"
+    );
+
+    // The disagreement the refusal is about: the sink wrote the row at `0` and the by-key
+    // read finds the note under `10`.
+    let mut cells = Cells::default();
+    interpreter
+        .host()
+        .read(&tables.query(), &mut |record| {
+            tables.apply(record, &mut cells)
+        })
+        .expect("the sink applies every record");
+    assert_eq!(
+        cells.get("taken", &[Key::Int(0)], "notes_by_discount"),
+        Some(&Value::Int(1)),
+        "the sink used the discount the store held"
+    );
+    assert_eq!(
+        interpreter
+            .fold_stored("NotesByDiscount", [("taken", Value::Int(10))], 3)
+            .expect("the refold answers"),
+        Value::Int(1),
+        "and a refold uses one it never held"
+    );
 }

@@ -25,6 +25,32 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// The column in this fold's **closure** that is a range update, if any: the fold
+    /// itself, or anything it keys or reads through (`Column::reads`).
+    ///
+    /// **This is the whole question "does this column have a history", and it is one
+    /// function so that a host and [`crate::Interpreter::fold_steps`] cannot answer it
+    /// differently.** `Column::ranges` alone is not the answer and asking it alone was a
+    /// hole: a fold every arm of which pins its whole key still disagrees with the stored
+    /// value when the fold it *keys through* ranges, because a lookup is answered by
+    /// refolding the looked-up fold and a refold applies every ranged record to every key
+    /// (`docs/folds.md` section 11). So the key the by-key read computes is a key the store
+    /// never wrote the row at, and a history read of it would be a timeline of a row that
+    /// does not exist.
+    ///
+    /// `None` means every column it depends on pins its whole key, so the by-key read and
+    /// the sink are the same function and the history is exact.
+    pub fn ranged_through(&self, fold: &str) -> Option<&Ident> {
+        let (_, column) = self.column(fold)?;
+        if column.ranges() {
+            return Some(&column.fold);
+        }
+        column
+            .reads
+            .iter()
+            .find(|read| self.column(read).is_some_and(|(_, read)| read.ranges()))
+    }
+
     /// The table and column one named fold is kept in, or `None` for a fold that is not
     /// kept at all.
     ///
@@ -249,6 +275,22 @@ impl Column {
         self.arms
             .iter()
             .any(|arm| !arm.fields.iter().all(ArmMatch::pinned))
+    }
+
+    /// The key parts no arm of this column pins, named as the table names them. Empty
+    /// unless [`ranges`](Self::ranges), and what a diagnostic says has to change.
+    pub fn open(&self, table: &Table) -> Vec<String> {
+        table
+            .key
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| {
+                self.arms
+                    .iter()
+                    .any(|arm| arm.fields.get(*at).is_some_and(|at| !at.pinned()))
+            })
+            .map(|(_, part)| part.name.clone())
+            .collect()
     }
 }
 

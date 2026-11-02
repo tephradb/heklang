@@ -390,11 +390,13 @@ a fact about it and the filtering is the host's. The bound and the sealed hand-b
 `fold_stored`'s, so `head` of `0` yields no steps and a `Value::Sealed` arrives untouched for the
 store to shred on its own read.
 
-It **refuses a column with a range arm**, for the boundary two paragraphs up: the by-key read and the
-sink disagree there, the sink is the definition, and a history that showed the refold's steps would
-show moves the column never made. `Column::ranges` answers the same question once, at startup, so a
-host need not learn it from a failed request. A computed key and a lookup are served, and are only
-quadratic.
+It **refuses a column whose closure holds a range arm**, for the boundary two paragraphs up: the
+by-key read and the sink disagree there, the sink is the definition, and a history that showed the
+refold's steps would show moves the column never made. **The closure, not the column**: a fold whose
+every arm pins its whole key still disagrees when a fold it keys through ranges, since a lookup is
+answered by refolding. `Layout::ranged_through` answers that whole question once, at startup, and
+names the fold that has to change, so a host need not learn it from a failed request. A computed key
+and a lookup over columns that pin their keys are served, and are only quadratic.
 
 **There is no lower bound, and that is not an omission.** `head` is an upper bound, so "as of
 position N" is `fold_steps(.., N + 1, ..)`. There is no `from`, because the value after a record
