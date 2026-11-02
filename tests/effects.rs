@@ -5294,3 +5294,44 @@ fn an_optional_secret_must_be_narrowed_before_it_is_interpolated() {
         "this is a deployment secret, so it cannot be compared"
     );
 }
+
+/// **A method's argument is a position a seal cannot be carried through either**, and the
+/// receiver check alone did not cover it. The declared parameter is plaintext in every row
+/// of the method table, so content arriving in one is content being read: it is the
+/// comparison that `>` refuses and the search that `contains` refuses, written as a call.
+///
+/// Reached by `max`, which was the first method whose operator has a seal refusal of its
+/// own and whose argument had none, so `token.max(seal)` passed `hek check` and raised at
+/// run time. `strip_prefix` had the same hole and was not noticed, which is the argument
+/// for checking the position rather than the method.
+#[test]
+fn a_seal_cannot_be_an_argument_to_a_method() {
+    for (fold, method) in [
+        (
+            "fold Latest(customer_id: Customer) -> held: String? = none {
+  on @order.placed(customer_id) { email } => held.max(email)
+}",
+            "max",
+        ),
+        (
+            "fold Trimmed(customer_id: Customer) -> String = \"\" {
+  on @order.placed(customer_id) { email, order_id } => \"{order_id}\".strip_prefix(email)
+}",
+            "strip_prefix",
+        ),
+        (
+            "fold Seen(customer_id: Customer) -> Bool = false {
+  on @order.placed(customer_id) { email } => [\"a\"].contains(email)
+}",
+            "contains",
+        ),
+    ] {
+        let message = err(fold);
+        assert!(
+            message.contains(&format!(
+                "this is content sealed under `Customer`, so it cannot be an argument to `{method}` without `reveal`"
+            )),
+            "for `{method}`: {message}"
+        );
+    }
+}

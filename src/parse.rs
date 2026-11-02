@@ -8173,7 +8173,22 @@ impl Parser {
                     let hint = sig
                         .as_ref()
                         .and_then(|sig| sig.params.get(args.len()).cloned().flatten());
-                    args.push(self.expr(lower, hint)?);
+                    let at = self.span_here();
+                    let arg = self.expr(lower, hint)?;
+                    // **Rule 12 on the argument, and not only on the receiver above.** A
+                    // method's declared parameter is plaintext in every row of the table,
+                    // so content arriving in one is content being read: `token.max(seal)`
+                    // and `name.strip_prefix(seal)` are the comparison and the search that
+                    // `>` and `==` already refuse a seal in. The receiver check alone let
+                    // both through `hek check` and into a run-time raise, which is the
+                    // drift this and `types::comparable` exist to prevent.
+                    self.no_seal(
+                        lower,
+                        arg,
+                        format!("be an argument to `{name}`").as_str(),
+                        at,
+                    );
+                    args.push(arg);
                     if !self.eat_sym(Sym::Comma) {
                         break;
                     }

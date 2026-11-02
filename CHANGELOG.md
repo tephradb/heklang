@@ -83,6 +83,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **identity**, so a comparison inside a subject-typed subtree is still pruned and the honest
   spellings still check. All four corpora pass unchanged, so the wider refusal costs nothing.
 
+- **A seal could be passed as a method argument.** The rule 12 check inspected a method's receiver
+  and not its arguments, so `token.max(seal)` and `name.strip_prefix(seal)` passed `hek check` and
+  raised at run time. A declared parameter is plaintext in every row of the method table, so an
+  argument is the comparison `>` refuses and the search `contains` refuses, written as a call. Found
+  through `max`, which is the first method whose operator carries a seal refusal of its own;
+  `strip_prefix` had had the hole unnoticed, which is why the fix is on the position rather than the
+  method.
+
 - **`hek fmt` wrote a blank line in the middle of a fold arm.** A slice whose path list ended on a
   comment with no `as` binding after it got two line breaks: `path_list` pushes one when it has
   hung, and the binding loop pushed another on a flag that was still whatever the path list left it

@@ -398,6 +398,8 @@ invoke RecordCopy { note: e.email }      // takes it out from behind the boundar
 if e.email == "x" { }                    // cannot be compared
 e.email.trim()                           // `trim` reads content sealed under `customer_id`
 e.email.unwrap_or("")                    // a plaintext default and sealed content in one slot
+held.max(e.email)                        // cannot be an argument to `max`
+name.strip_prefix(e.email)               // the same, and the receiver is innocent here
 keep(e.email)                            // a `fn` parameter is a plain type, so it is not a move
 ```
 
@@ -405,6 +407,10 @@ A destination is sealed only when it is declared under the **same subject name**
 sealed under `Customer` into a field declared `@subject(shop)` is rejected, because a key is
 filed under exactly one subject. There is no way to declare a sealed `fn` parameter, a sealed record
 field or a sealed container element, so `reveal` at the point of use and pass plaintext onward.
+
+**A method's argument is a position, not just its receiver.** A declared parameter is plaintext in
+every row of the method table, so handing a seal to one is the comparison `>` refuses and the search
+`contains` refuses, written as a call. The last two lines above are that.
 
 **Writing plain content into a seal is free**: a command holding an ordinary `String` may `emit` it
 into a `@subject(...)` field with no ceremony. Only reading back out needs `reveal`.

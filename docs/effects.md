@@ -934,10 +934,20 @@ invoke RecordCopy { note: e.email }      // takes it out from behind the boundar
 if e.email == "x" { }                    // cannot be compared
 e.email.trim()                           // `trim` reads content sealed under `customer_id`
 e.email.unwrap_or("")                    // a plaintext default and sealed content in one slot
+held.max(e.email)                        // cannot be an argument to `max`
+name.strip_prefix(e.email)               // the same, and the receiver is innocent here
 ```
 
 `unwrap_or` gets its own reason because it is the mistake a real port makes: a sentinel standing in
 for content that has a key. It is the same argument `mixed_fold` makes about a fold, one level down.
+
+**A method's argument is a position too**, and the last two lines are it. The receiver check alone
+covered a sealed value being *read by* a method and not one being *handed to* one, and a declared
+parameter is plaintext in every row of the method table: an argument is the comparison `>` refuses
+and the search `contains` refuses, written as a call. `max` is where this showed, because it is the
+first method whose operator carries a seal refusal of its own, so `token.max(seal)` passed
+`hek check` and raised at run time; `strip_prefix` had had the same hole unnoticed, which is the
+argument for checking the position rather than the method.
 
 **Writing plain content into a seal is free**, because that is the encrypting direction. A command
 holding an ordinary `String` may `emit` it into a `@subject(...)` field with no ceremony; only reading
