@@ -3114,3 +3114,135 @@ fold Monthly(month: String) -> cents: Int = 0 {
 ",
     );
 }
+
+/// **A box is not a wall.** Rule 17 pruned its walk on "is this node's own type the
+/// subject", so a record or container literal, whose own type is the record or the
+/// container, was never entered and a written id inside one escaped: `Pick { who: 42 }.who`
+/// checked clean and a `fill` then filed a row under developer 42, an id no event claimed
+/// and no key was minted for. Which is the whole of what rule 17 exists to prevent.
+///
+/// The walk is entered on **containment** and accuses on **identity**, so a comparison
+/// inside a subject-typed subtree is still pruned and the honest spellings still check.
+#[test]
+fn rule_17_looks_inside_a_box_that_holds_the_subject() {
+    let source = |decls: &str| {
+        format!(
+            "\
+subject Game(Int)
+subject Developer(Int)
+
+event @game.announced {{ game_id: Game, developer_id: Developer }}
+
+record Pick {{
+  who: Developer,
+}}
+
+record Box {{
+  ids: List(Developer),
+}}
+
+{decls}
+"
+        )
+    };
+    for (what, arm) in [
+        ("a record field", "Pick { who: 42 }.who"),
+        ("a list inside a record", "Box { ids: [42] }.ids.first()"),
+    ] {
+        let message = error(&source(&format!(
+            "fold Through(game_id: Game) -> Developer? = none {{\n  on @game.announced(game_id) {{ game_id }} => {arm}\n}}"
+        )));
+        assert_eq!(
+            message, "`Developer` is a subject, so this arm's value cannot be a written id",
+            "for {what}"
+        );
+    }
+
+    // A `fn` whose result merely *holds* the subject is refused too, because this walk
+    // cannot see into one either: its `42` is a literal in the function's own arena.
+    assert_eq!(
+        error(&source(
+            "fn made() -> Pick {\n  return Pick { who: 42 }\n}\n\nfold Through(game_id: Game) -> Developer? = none {\n  on @game.announced(game_id) { game_id } => made().who\n}"
+        )),
+        "`Developer` is a subject, so this arm's value cannot be a `fn`'s result"
+    );
+
+    // And the honest spelling through the same box still checks: the id came out of a
+    // field of the record, and a literal compared against is not a literal written.
+    program(&source(
+        "fold Honest(game_id: Game) -> Developer? = none {\n  on @game.announced(game_id) { developer_id } => Pick { who: developer_id }.who\n}\n\nfold Counted(game_id: Game) -> n: Int = 0 {\n  on @game.announced(game_id) { developer_id } => if developer_id == 5 { n + 1 } else { n }\n}",
+    ));
+}
+
+/// **The declared type is asked by containment too**, which is the other half of the box
+/// finding and was missed with it: the check returned early unless the *declared* type was
+/// itself a subject, so a fold declaring a record or a list that holds one skipped rule 17
+/// outright and stored an id no event claimed.
+///
+/// And the walk is over **positions** rather than over nodes. `[developer_id, 42]` takes
+/// its element type from the first element, so the `42` after it is lowered as a plain
+/// `Int` and resolved against nothing: asking the node refused nothing, and chained into
+/// rule 18 a `fill` keyed a row by developer 42. The position answers where the node
+/// cannot.
+#[test]
+fn rule_17_asks_the_position_a_literal_sits_at() {
+    let source = |decls: &str| {
+        format!(
+            "\
+subject Game(Int)
+subject Developer(Int)
+subject Publisher(Int)
+
+event @game.announced {{ game_id: Game, developer_id: Developer }}
+
+record Snap {{
+  who: Developer,
+  n: Int,
+}}
+
+record Pair {{
+  dev: Developer,
+  owner: Publisher,
+}}
+
+{decls}
+"
+        )
+    };
+    for (what, fold) in [
+        (
+            "a record the fold declares",
+            "fold Latest(game_id: Game) -> Snap? = none {\n  on @game.announced(game_id) { game_id } => Snap { who: 42, n: 1 }\n}",
+        ),
+        (
+            "a list the fold declares",
+            "fold Ids(game_id: Game) -> List(Developer) = [] {\n  on @game.announced(game_id) { game_id } => [99]\n}",
+        ),
+        (
+            "an element typed by its neighbour",
+            "fold GameDeveloper(game_id: Game) -> Developer? = none {\n  on @game.announced(game_id) { developer_id } =>\n    [developer_id, 42].remove(developer_id).first()\n}",
+        ),
+    ] {
+        let message = error(&source(fold));
+        assert!(
+            message.contains("is a subject, so this arm's value cannot be a written id"),
+            "for {what}: {message}"
+        );
+    }
+
+    // The subject named is the one the offending **position** is, not the first the type
+    // holds: a record with two cannot be checked against one of them.
+    assert_eq!(
+        error(&source(
+            "fold Both(game_id: Game) -> Pair? = none {\n  on @game.announced(game_id) { developer_id } =>\n    Pair { dev: developer_id, owner: 7 }\n}"
+        )),
+        "`Publisher` is a subject, so this arm's value cannot be a written id"
+    );
+
+    // And an honest value through every one of those shapes still checks. The `n: 1` field
+    // is the case a rule that refused every literal under a subject-holding value would
+    // have broken.
+    program(&source(
+        "fold Latest(game_id: Game) -> Snap? = none {\n  on @game.announced(game_id) { developer_id } => Snap { who: developer_id, n: 1 }\n}\n\nfold Ids(game_id: Game) -> List(Developer) = [] {\n  on @game.announced(game_id) { developer_id } => [developer_id]\n}",
+    ));
+}

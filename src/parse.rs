@@ -5158,9 +5158,13 @@ impl Parser {
         declared: &Type,
         what: &str,
     ) -> Result<(), Diagnostic> {
-        let Some(subject) = tables::subject_of(declared) else {
+        // **Containment, not identity**, which is finding this rule had backwards twice. A
+        // fold declaring `Snap?` over `record Snap { who: Developer }` or `List(Developer)`
+        // writes subject ids as surely as one declaring `Developer?`, and gating on
+        // `subject_of` skipped the check outright for both.
+        if !self.holds_a_subject(declared, &mut Vec::new()) {
             return Ok(());
-        };
+        }
         // **Pruned by type, which is what makes the walk safe in the right direction.** A
         // subtree whose own type is not this subject cannot hand the subject to the result,
         // so `shop_id == 5` and `label(HOUSE)` are not entered and the literals inside them
@@ -5169,23 +5173,46 @@ impl Parser {
         // enumerated few, so a kind nobody thought of is still looked through. Enumerating
         // the pass-throughs instead let `developer_id.unwrap_or(99)` straight past, because
         // `unwrap_or`'s argument is a result position too.
-        let mut stack = vec![value];
-        while let Some(id) = stack.pop() {
-            let forwards = self
-                .type_of(lower, id)
-                .is_some_and(|ty| tables::subject_of(&ty).is_some_and(|found| found == subject));
-            if !forwards {
+        // **The walk is over positions, not over nodes**, and that is the whole shape. Each
+        // entry is an expression together with the type of the **position it sits at**,
+        // because a node's own type is not always what it is being written as: the `42` in
+        // `[developer_id, 42]` is lowered as an `Int`, since the element type came from the
+        // first element and nothing declared one, so asking the node refused nothing and a
+        // row went in under an id no event claimed.
+        //
+        // **Entered on containment and accused on identity.** A subtree whose position
+        // cannot yield a subject is not entered at all, so `shop_id == 5` and
+        // `label(HOUSE)` are never examined and the literals inside them are never seen:
+        // those are a comparison and an argument, and they write nothing. A position that
+        // *is* a subject is where the accusation happens.
+        let mut stack = vec![(value, Some(declared.clone()))];
+        while let Some((id, at)) = stack.pop() {
+            let Some(at) = at.filter(|at| self.holds_a_subject(at, &mut Vec::new())) else {
                 continue;
-            }
-            // A written id. `lower.subjects` holds exactly the literals that resolved
-            // against a subject, which is what `none` is not: it resolves against the
-            // optional and lands in no entry, so a `T? = none` seed passes here.
-            let written = lower.subjects.contains_key(&id);
+            };
+            let subject = tables::subject_of(&at);
+            // **A literal at a subject position is a written id**, whichever way it was
+            // typed. `lower.subjects` holds the literals that *resolved* against a subject,
+            // which covers every declared position (a method argument, a record field, a
+            // `fold` seed) and misses the one that declares nothing: a list element whose
+            // type was inferred from its neighbour. The position answers both.
+            //
+            // `none` is not one of these: it resolves against the optional rather than the
+            // subject, so a `T? = none` seed passes here.
+            let literal = matches!(lower.b.exprs().get(id), Some(Expr::Lit(lit)) if !matches!(lit, Literal::None { .. }));
+            let written = subject.is_some() && (literal || lower.subjects.contains_key(&id));
             // **A `fn` is the other way an id appears from nothing**, and this walk cannot
             // see into one: its `return 42` is a literal at a subject-typed position in the
             // *function's* own arena, noted there and never here. The doc above used to
             // claim a `fn` was refused by the type, which is true only of one returning the
             // scalar underneath; one that declares the subject itself is not.
+            //
+            // On **containment** rather than identity, unlike a written id: a `fn`
+            // returning a record that holds the subject is as opaque as one returning the
+            // subject, and `make().who` would otherwise walk into a call it cannot see
+            // into and find nothing. It refuses an honest pass-through too, which the
+            // hint's "pass the `fn` the id and let it return something else" already
+            // covers and which was already true of one returning the subject directly.
             let called = matches!(lower.b.exprs().get(id), Some(Expr::CallFn { .. }));
             if written || called {
                 let (what_it_is, fix) = match written {
@@ -5195,21 +5222,142 @@ impl Parser {
                         "fold the id from a field of the record, or pass the `fn` the id and let it return something else",
                     ),
                 };
+                // The subject named is the one at the offending position, which for a
+                // container is the one its elements or its field are: `subject_of` answers
+                // it where the position is a subject, and `holds_a_subject` got us here
+                // where it only contains one, so a `fn` returning a record names the field's.
+                let named = match subject {
+                    Some(subject) => subject.clone(),
+                    None => self.a_subject_in(&at, &mut Vec::new()).unwrap_or_default(),
+                };
                 return Err(self
                     .err(
                         Code::FoldRestriction,
-                        format!("`{subject}` is a subject, so {what} cannot be {what_it_is}"),
+                        format!("`{named}` is a subject, so {what} cannot be {what_it_is}"),
                         lower.b.exprs().span(id),
                     )
                     .with_hint(format!(
                         "a subject names rows an erasure has to be able to reach, and it reaches the ids the log holds: a key store mints one for whatever id first appears in an event, so an id a fold makes up is one no key was ever minted for. {fix}, or declare the fold `T?` and seed it `none`. A command may write one, because an event is how an id enters the log"
                     )));
             }
-            if let Some(expr) = lower.b.exprs().get(id) {
-                stack.extend(children(expr));
-            }
+            stack.extend(self.positions(lower, id, &at));
         }
         Ok(())
+    }
+
+    /// Each child of this expression together with the type of the **position it sits at**.
+    ///
+    /// Two shapes answer for their own children and everything else falls back to the
+    /// child's own type, which is what keeps a comparison's operands and a `fn`'s arguments
+    /// out of the walk:
+    ///
+    /// - a **list literal**, whose elements sit at the element type of the list. That type
+    ///   is read off the list's own position rather than off `Expr::List::inner`, which is
+    ///   `None` whenever nothing declared one: `[developer_id, 42]` takes its element type
+    ///   from the first element, so the literal after it is at a subject position with
+    ///   nothing in the node to say so.
+    /// - a **record literal**, whose fields sit at their declared types. A record carries
+    ///   no per-field seal or subject in the value, so the declaration is the only source.
+    fn positions(&self, lower: &Lower, id: ExprId, at: &Type) -> Vec<(ExprId, Option<Type>)> {
+        match lower.b.exprs().get(id) {
+            Some(Expr::List { items, .. }) => {
+                let inner = match at {
+                    Type::List(inner) => Some(inner.as_ref().clone()),
+                    Type::Opt(outer) => match outer.as_ref() {
+                        Type::List(inner) => Some(inner.as_ref().clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                items.iter().map(|&item| (item, inner.clone())).collect()
+            }
+            Some(Expr::Record { ty, fields }) => {
+                let def = self.records.iter().find(|def| &def.name == ty);
+                fields
+                    .iter()
+                    .map(|(name, value)| {
+                        let declared = def.and_then(|def| {
+                            def.fields
+                                .iter()
+                                .find(|field| &field.name == name)
+                                .map(|field| field.ty.clone())
+                        });
+                        (*value, declared)
+                    })
+                    .collect()
+            }
+            Some(expr) => children(expr)
+                .into_iter()
+                .map(|child| (child, self.type_of(lower, child)))
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Some subject this type holds, for naming one in a diagnostic where the position is a
+    /// container rather than a subject itself. The first in declaration order, which is
+    /// stable and is the only one where a type holds exactly one.
+    fn a_subject_in(&self, ty: &Type, seen: &mut Vec<Ident>) -> Option<Ident> {
+        match ty {
+            Type::Opt(inner) | Type::List(inner) => self.a_subject_in(inner, seen),
+            Type::Map(key, value) => self
+                .a_subject_in(key, seen)
+                .or_else(|| self.a_subject_in(value, seen)),
+            Type::Record(name) => {
+                if seen.contains(name) {
+                    return None;
+                }
+                seen.push(name.clone());
+                self.records
+                    .iter()
+                    .find(|def| &def.name == name)
+                    .and_then(|def| {
+                        def.fields
+                            .iter()
+                            .find_map(|field| self.a_subject_in(&field.ty, seen))
+                    })
+            }
+            ty => tables::subject_of(ty).cloned(),
+        }
+    }
+
+    /// Whether a value of this type could still hand **some** subject to the result:
+    /// itself, or anything a field access or a container read could get out of it.
+    ///
+    /// Rule 17's prune, and it is containment rather than [`tables::subject_of`] for two
+    /// findings of the same shape: a record literal's own type is the record, so a walk
+    /// pruned on identity never entered one and `Pick { who: 42 }.who` put a row under an id
+    /// no event claimed; and a fold *declaring* a record or a list that holds a subject
+    /// skipped the rule outright.
+    ///
+    /// **Some** subject rather than a named one, because a record may hold two and a check
+    /// keyed on one of them would walk past the other. The accusation names whichever
+    /// subject the offending position actually is.
+    ///
+    /// `seen` is the record trail, because a record may reach itself through an optional
+    /// field and this would otherwise recur forever on one.
+    fn holds_a_subject(&self, ty: &Type, seen: &mut Vec<Ident>) -> bool {
+        match ty {
+            Type::Opt(inner) | Type::List(inner) => self.holds_a_subject(inner, seen),
+            Type::Map(key, value) => {
+                self.holds_a_subject(key, seen) || self.holds_a_subject(value, seen)
+            }
+            Type::Record(name) => {
+                if seen.contains(name) {
+                    return false;
+                }
+                seen.push(name.clone());
+                self.records
+                    .iter()
+                    .find(|def| &def.name == name)
+                    .is_some_and(|def| {
+                        def.fields
+                            .iter()
+                            .any(|field| self.holds_a_subject(&field.ty, seen))
+                    })
+            }
+            ty => tables::subject_of(ty).is_some(),
+        }
     }
 
     /// Rule 12: a fold whose value is subject-bound on one arm and plain on another, named
@@ -5983,7 +6131,6 @@ impl Parser {
         }
     }
 
-    /// Whether the next token is a bare word. Every word a test body uses but `test`
     /// Whether this `key` part ends in `else skip`, looked for past the value.
     ///
     /// Two tokens rather than one, which is what tells it from an `if`'s `else`: that is

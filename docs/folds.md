@@ -1416,8 +1416,58 @@ by the type and need no rule.
 
 A `fn` is refused even when it only passes an id through, which is over-strict in the safe
 direction: inline the read. What the record gives is fine however it is reached, including
-through a method, and only what the value can **forward** is asked, so `shop_id == 5` and
-`label(HOUSE)` are not examined at all.
+through a method.
+
+**The walk is over positions, and it is entered on containment and accuses on identity.**
+Three different things, and each was a hole until it was not. A position is *examined* when
+its type could still hand a subject to the result: itself, or anything a field access or a
+container read could get out of it. It is *accused* when it **is** a subject. So
+`shop_id == 5` is not entered at all, because a `Bool` cannot yield a `Developer` and the
+literal inside a comparison writes nothing, and neither is `label(HOUSE)`.
+
+**The declared type is asked by containment too**, so a fold declaring a record or a list
+that holds a subject is checked:
+
+```hek
+fold Latest(game_id: Game) -> Snap? = none {         // record Snap { who: Developer, n: Int }
+  on @game.announced(game_id) { game_id } => Snap { who: 42, n: 1 }    // refused
+}
+fold Ids(game_id: Game) -> List(Developer) = [] {
+  on @game.announced(game_id) { game_id } => [99]                      // refused
+}
+```
+
+**And a position is not a node.** A list takes its element type from the first element where
+nothing declared one, so the literal after it is lowered as a plain `Int` and resolved
+against nothing: asking the node refused nothing at all.
+
+```hek
+on @game.announced(game_id) { developer_id } =>
+  [developer_id, 42].remove(developer_id).first()    // refused: the element position
+```
+
+The `n: 1` above is why this is the position and not simply every literal: a record holding
+a subject has fields that are not one, and refusing every literal under a subject-holding
+value would refuse that. The subject named in the refusal is the one the offending position
+*is*, which is also what lets a record holding two be checked at all.
+
+A **box is not a wall** either:
+
+```hek
+record Pick { who: Developer, }
+
+fold GameDeveloper(game_id: Game) -> Developer? = none {
+  on @game.announced(game_id) { game_id } => Pick { who: 42 }.who   // refused
+}
+```
+
+Entering only what forwards the subject missed this: the field access forwards a
+`Developer`, the record literal under it is a `Pick`, and the written id inside that was
+never looked at. A `fill` then filed a row under developer 42, which is the whole of what
+this rule exists to prevent. `Box { ids: [42] }.ids.first()` is the same shape through a
+list, and containment reaches both, through record fields, list and map elements, and
+optionals. A `fn` is refused on containment too, for the reason it is refused at all: one
+returning a `Pick` is as opaque as one returning a `Developer`.
 
 Two positions are refused, and they are the two a fold writes from: **the seed**, which
 attaches the id to every key the fold is read at, and **an arm's value**, which attaches it

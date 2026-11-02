@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Rule 17 could be bypassed three ways, all of them "the id is not where the check looked".** The
+  rule is now over **positions**: a position is examined when its type could still hand a subject to
+  the result, and accused when it **is** a subject.
+
+  - The *declared* type was asked by identity, so a fold declaring a record or a list that holds a
+    subject skipped the rule outright: `-> Snap? = none` with `Snap { who: 42, n: 1 }`, and
+    `-> List(Developer) = []` with `[99]`, both checked clean and stored invented ids.
+  - A **position is not a node**. A list takes its element type from the first element where nothing
+    declared one, so the `42` in `[developer_id, 42]` was lowered as a plain `Int` and resolved
+    against nothing. `[developer_id, 42].remove(developer_id).first()` on a `-> Developer?` fold
+    checked clean, and through rule 18 a `fill` keyed a row by developer 42.
+  - The walk was pruned on the node's own type, so a record or container literal was never entered.
+
+  The `n: 1` beside the refused `who: 42` is why this is the position rather than every literal
+  under a subject-holding value, and the subject named in the refusal is now the one the offending
+  position *is*, which is what lets a record holding two subjects be checked at all.
+
+- **The box half of that, stated on its own**, since it was found first: the walk was pruned on "is
+  this node's own type the subject", so a record or container literal, whose own type is the record
+  or the container, was never entered:
+
+  ```hek
+  on @game.announced(game_id) { game_id } => Pick { who: 42 }.who   // checked clean
+  ```
+
+  The field access forwards a `Developer`, the `Pick` under it does not, and the written id inside
+  it was never looked at. Chained into rule 18 a `fill` then filed a row under developer 42, an id
+  no event claimed and no key was minted for, which is the whole of what rule 17 exists to prevent;
+  `Box { ids: [42] }.ids.first()` is the same shape through a list, and a `fn` returning such a
+  record was opaque in the same way. The walk is now entered on **containment** and accuses on
+  **identity**, so a comparison inside a subject-typed subtree is still pruned and the honest
+  spellings still check. All four corpora pass unchanged, so the wider refusal costs nothing.
+
 ### Added
 
 - **A subject key part may be read through a fold, with an explicit skip** (`docs/folds.md` rules 18

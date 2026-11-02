@@ -387,6 +387,24 @@ inline the read. `Uuid.derive` into a subject and arithmetic are refused by the 
 **A filter is not refused**: `on @game.announced(game_id, developer_id: 7)` compares records
 rather than writing one.
 
+**A box is not a wall, and the check is over positions.** It enters any position whose type
+could still hand a subject to the result, and accuses one that *is* a subject, so a
+comparison is not examined (`shop_id == 5` is a `Bool`) while a record or container holding
+one is:
+
+```hek
+on @game.announced(game_id) { game_id } => Pick { who: 42 }.who       // refused
+on @game.announced(game_id) { game_id } => Box { ids: [42] }.ids.first()   // refused
+on @game.announced(game_id) { developer_id } => [developer_id, 42].first()   // refused
+on @game.announced(game_id) { developer_id } => Pick { who: developer_id }.who   // fine
+```
+
+The third is why it is the **position** rather than the node: a list takes its element type
+from the first element, so the `42` is lowered as a plain `Int` and only the position says
+it is a developer id. A fold **declaring** a record or list that holds a subject is checked
+the same way, so `-> Snap? = none` with `Snap { who: 42, n: 1 }` is refused and the `n: 1`
+beside it is not.
+
 **A command may write one and a fold may not.** A command is where ids enter the system: its
 caller may send the same number, and the runtime mints a subject key for whatever id first
 appears, so refusing the literal there closes nothing and would forbid a house account.
