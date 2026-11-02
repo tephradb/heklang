@@ -2312,3 +2312,67 @@ fn the_plaintext_still_has_to_match() {
         "customer[7].latest_city: expected \"Bath\", got \"Bristol\""
     );
 }
+
+/// **Every feature of one batch at once**, which is the check the per-feature tests cannot
+/// make: each of them holds its own feature still while it exercises one thing, and what
+/// breaks in practice is two of them meeting. Here a `fill` asserts the single-row table
+/// beside a keyed row, an indexed optional column folds through `max` against a backdated
+/// record, `distinct` runs inside a comprehension, and a key read through another fold with
+/// `else skip` files the row it belongs in, all in one derived read model.
+#[test]
+fn the_whole_read_model_holds_together() {
+    let source = "subject Game(Int)
+subject User(Int)
+subject Developer(Int)
+
+event @game.announced { game_id: Game, developer_id: Developer }
+event @game.purchased { game_id: Game, user_id: User, cents: Int, at: Timestamp }
+event @game.played { game_id: Game, user_id: User, at: Timestamp, unlocked: List(Int) }
+
+fold GameDeveloper(game_id: Game) -> Developer? = none {
+  on @game.announced(game_id) { developer_id } => developer_id
+}
+
+fold UserLastSeen(user_id: User) -> seen: Timestamp? @index = none {
+  on @game.purchased(user_id) { at } => seen.max(at)
+  on @game.played(user_id) { at } => seen.max(at)
+}
+
+fold UserAchievements(user_id: User) -> held: List(Int) = [] {
+  on @game.played(user_id) { unlocked } =>
+    held.concat([a for a in unlocked.distinct() if !held.contains(a)])
+}
+
+fold DeveloperGross(developer_id: Developer) -> total: Int @index = 0 {
+  on @game.purchased { game_id, cents }
+    key developer_id = GameDeveloper { game_id } else skip => total + cents
+}
+
+fold StoreUnits() -> n: Int = 0 {
+  on @game.purchased => n + 1
+}
+
+test \"every feature of this batch at once\" {
+  given @game.announced { game_id: 1, developer_id: 10 }
+  given @game.purchased { game_id: 1, user_id: 7, cents: 2000, at: \"2026-03-05T00:00:00Z\" }
+  given @game.played { game_id: 1, user_id: 7, at: \"2026-01-01T00:00:00Z\", unlocked: [3, 3, 9] }
+
+  fill
+
+  // The single-row table, with no subscript because it has no key.
+  expect global { store_units: 1 }
+  // `max` kept the newer moment although the older record came second, and `distinct`
+  // dropped the repeated unlock while keeping written order.
+  expect user[7] { user_last_seen: \"2026-03-05T00:00:00Z\", user_achievements: [3, 9] }
+  // And the key was read out of another fold, as of the record.
+  expect developer[10] { developer_gross: 2000 }
+}
+";
+    let program = parse(source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+    let results = run_tests(&program);
+    assert!(
+        matches!(only(&results).outcome, TestOutcome::Passed),
+        "{:?}",
+        only(&results).outcome
+    );
+}

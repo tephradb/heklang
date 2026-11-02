@@ -3115,6 +3115,174 @@ fold Monthly(month: String) -> cents: Int = 0 {
     );
 }
 
+// ---------------------------------------------------------------------------------
+// Rule 20: an index on a fold's column.
+
+/// Both shapes, and the one a port asked for twice: the column alone, and the column led
+/// by a run of the key. An **optional** column is indexable, which is not a corner: one of
+/// the two columns this rule was asked for is a review's write time kept by the first
+/// write, so it is a `Timestamp?`.
+#[test]
+fn an_index_declares_that_a_column_may_be_sorted() {
+    let source = "\
+subject Game(Int)
+subject User(Int)
+
+event @game.purchased { game_id: Game, cents: Int }
+event @review.voted { game_id: Game, user_id: User }
+event @review.written { game_id: Game, user_id: User, at: Timestamp }
+
+fold GameUnits(game_id: Game) -> n: Int @index = 0 {
+  on @game.purchased(game_id) => n + 1
+}
+
+fold ReviewHelpful(game_id: Game, user_id: User) -> n: Int @index(game_id) @index = 0 {
+  on @review.voted(game_id, user_id) => n + 1
+}
+
+fold ReviewWrittenAt(game_id: Game, user_id: User) -> written: Timestamp? @index(game_id) = none {
+  on @review.written(game_id, user_id) { at } => written.unwrap_or(at)
+}
+";
+    let program = program(source);
+    let declared = |name: &str| {
+        program
+            .fold(name)
+            .expect("the fold")
+            .indexes
+            .iter()
+            .map(|index| index.params.join(", "))
+            .collect::<Vec<String>>()
+    };
+    assert_eq!(declared("GameUnits"), [""]);
+    // Written order, because a compound index's column order is what decides which
+    // questions it can answer.
+    assert_eq!(declared("ReviewHelpful"), ["game_id", ""]);
+    assert_eq!(declared("ReviewWrittenAt"), ["game_id"]);
+}
+
+/// **The ordering gate is the comparison table**, the same line that decides whether `max`
+/// and `min` exist, so there is one answer to "can this be sorted on". That refuses a
+/// collection column and a sealed one without either needing a rule of its own, which is
+/// what the two asks for this feature came in as.
+#[test]
+fn an_index_needs_a_column_that_orders() {
+    for (ret, seed, arm, expected) in [
+        (
+            "tags: List(String)",
+            "[]",
+            "tags.push(note)",
+            "List(String)",
+        ),
+        ("Bool", "false", "true", "Bool"),
+        ("blob: Json", "Json.empty", "blob", "Json"),
+        ("id: Uuid", "ID", "id", "Uuid"),
+    ] {
+        let source = format!(
+            "\
+const ID: Uuid = \"0190d1a1-0000-7000-8000-000000000001\"
+
+event @note.made {{ shop_id: Int, note: String }}
+
+fold Held(shop_id: Int) -> {ret} @index = {seed} {{
+  on @note.made(shop_id) {{ note }} => {arm}
+}}
+"
+        );
+        let message = error(&source);
+        assert!(
+            message.contains(expected) && message.contains("does not order"),
+            "for `{ret}`: {message}"
+        );
+    }
+}
+
+/// And a sealed column says the other reason, because the type under the seal may order
+/// perfectly well: what cannot is the ciphertext a store holds.
+#[test]
+fn a_sealed_column_cannot_be_indexed() {
+    let source = "\
+subject Customer(Int)
+
+event @note.made { customer_id: Customer, note: String @subject(customer_id) }
+
+fold Held(customer_id: Customer) -> Sealed(String, Customer) @index = \"\" {
+  on @note.made(customer_id) { note } => note
+}
+";
+    assert!(error(source).contains("is sealed"), "{}", error(source));
+    assert!(
+        hint(source).contains("opening every row to compare two"),
+        "{}",
+        hint(source)
+    );
+}
+
+/// The three shape errors, each pointing at the annotation. An unknown name, an exact
+/// repeat, and an annotation a fold's value does not take.
+#[test]
+fn an_index_is_checked_where_it_is_written() {
+    for (annotation, expected) in [
+        ("@index(nope)", "has no parameter `nope`"),
+        ("@index(shop_id, shop_id)", "leads this index twice"),
+        ("@index @index", "declares `@index` twice"),
+        (
+            "@index(shop_id) @index(shop_id)",
+            "declares `@index(shop_id)` twice",
+        ),
+        ("@sorted", "unknown annotation `@sorted`"),
+    ] {
+        let source = format!(
+            "\
+event @note.made {{ shop_id: Int }}
+
+fold Held(shop_id: Int) -> n: Int {annotation} = 0 {{
+  on @note.made(shop_id) => n + 1
+}}
+"
+        );
+        let message = error(&source);
+        assert!(message.contains(expected), "for `{annotation}`: {message}");
+    }
+}
+
+/// **A leading run of the key, in key order**, and the order is the layout's rather than
+/// the parameter list's: parts are sorted by subject containment and then alphabetically,
+/// so a name that is a real parameter can still fail to lead. Checked once the whole
+/// program is in hand for exactly that reason.
+#[test]
+fn an_index_leads_with_a_run_of_the_key() {
+    let source = |annotation: &str| {
+        format!(
+            "\
+subject Game(Int)
+subject User(Int)
+
+event @review.voted {{ game_id: Game, user_id: User }}
+
+fold ReviewHelpful(game_id: Game, user_id: User) -> n: Int {annotation} = 0 {{
+  on @review.voted(game_id, user_id) => n + 1
+}}
+"
+        )
+    };
+    // `(game, user)` is the key order, so the prefixes are these.
+    for annotation in ["@index", "@index(game_id)", "@index(game_id, user_id)"] {
+        program(&source(annotation));
+    }
+    for annotation in ["@index(user_id)", "@index(user_id, game_id)"] {
+        let message = error(&source(annotation));
+        assert!(
+            message.contains("does not lead the key of table `game__user`"),
+            "for `{annotation}`: {message}"
+        );
+        assert!(
+            message.contains("(game, user)"),
+            "the key is named: {message}"
+        );
+    }
+}
+
 /// **A box is not a wall.** Rule 17 pruned its walk on "is this node's own type the
 /// subject", so a record or container literal, whose own type is the record or the
 /// container, was never entered and a written id inside one escaped: `Pick { who: 42 }.who`
@@ -3172,6 +3340,31 @@ record Box {{
     program(&source(
         "fold Honest(game_id: Game) -> Developer? = none {\n  on @game.announced(game_id) { developer_id } => Pick { who: developer_id }.who\n}\n\nfold Counted(game_id: Game) -> n: Int = 0 {\n  on @game.announced(game_id) { developer_id } => if developer_id == 5 { n + 1 } else { n }\n}",
     ));
+}
+
+/// **An index on a fold no column is kept for is refused**, for the reason a column whose
+/// type does not order is: the author wrote a declaration expecting an effect it cannot
+/// have. It is rule 15's refusal of a lookup on an unstored fold, one declaration over, and
+/// it names the key part no event supplies, since that is what has to change.
+#[test]
+fn an_index_needs_a_column_to_be_about() {
+    let message = error(
+        "\
+event @note.made { shop_id: Int }
+
+fold Held(shop_id: Int, period: String) -> n: Int @index = 0 {
+  on @note.made(shop_id) => n + 1
+}
+",
+    );
+    assert!(
+        message.contains("is not stored, so there is no column to index"),
+        "{message}"
+    );
+    assert!(
+        message.contains("no event supplies `period`"),
+        "it names the part that has to change: {message}"
+    );
 }
 
 /// **The declared type is asked by containment too**, which is the other half of the box

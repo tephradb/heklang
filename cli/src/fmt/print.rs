@@ -657,7 +657,17 @@ impl<'a> Printer<'a> {
         // so a comment against one is that node's and never reaches here.
         let (leading, kids) = self.parted(node);
         let body = kids[kids.len() - 1];
-        let middle = &kids[2..kids.len() - 1];
+        // **The annotations come out by kind before anything is counted.** `@index` sits
+        // between the type and the seed, so leaving it in the run made a two-child header
+        // look like a three-child one: the type was printed as the accumulator, the
+        // annotation as the type, and the seed was dropped, which wrote `-> n = Int {`
+        // over a declaration that had a seed. The same failure the comment above describes,
+        // reached by a new child rather than by a comment, which is the argument for
+        // telling children apart by kind wherever this node's count is load-bearing.
+        let (annotations, middle): (Vec<Node<'a>>, Vec<Node<'a>>) = kids[2..kids.len() - 1]
+            .iter()
+            .copied()
+            .partition(|kid| kid.kind() == "annotation");
         // `-> acc: T = seed` against `-> T = seed`: three children or two.
         let (acc, ty, seed) = match middle.len() {
             3 => (Some(middle[0]), middle[1], middle[2]),
@@ -674,6 +684,10 @@ impl<'a> Printer<'a> {
             parts.push(Doc::text(": "));
         }
         parts.push(self.node(ty));
+        for annotation in annotations {
+            parts.push(Doc::text(" "));
+            parts.push(self.node(annotation));
+        }
         parts.push(Doc::text(" = "));
         parts.push(self.node(seed));
         parts.push(Doc::text(" "));

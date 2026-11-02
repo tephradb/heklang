@@ -1549,3 +1549,68 @@ refuses an accumulator's name that no arm reads.
 
 `skip` is a soft keyword, claimed only after `else` in a `key` clause, and the two tokens
 tell it from an `if`'s `else`, which is always followed by `{` or `if`.
+
+## 20. `@index` says a column may be sorted on
+
+A read model's shape is declared, and how it can be *read* is part of that shape. `@index` on
+a fold's value says a store may sort on the stored column:
+
+```hek
+fold GameUnits(game_id: Game) -> n: Int @index = 0 {              // index (game_units)
+  on @game.purchased(game_id) => n + 1
+}
+
+fold ReviewHelpful(game_id: Game, user_id: User) -> n: Int @index(game_id) = 0 {
+  on @review.voted(game_id, user_id) => n + 1                     // index (game, review_helpful)
+}
+```
+
+The annotation sits **after the type**, where every other annotation in the language sits: an
+entity field is `customer_id: Int @index` and a parameter is `shop_id: Shop @subject(..)`.
+
+**The parameters it names lead the index and the column itself is implied last.** `@index`
+alone is the column on its own, which answers "the best sellers across the catalogue";
+`@index(game_id)` is `(game, review_helpful)`, which answers "this game's most helpful
+reviews". A host reads them off `Column::indexes` as **key positions** rather than as the
+names written here, because what an index can answer is decided by the order its columns sit
+in and that order is the table's rather than the parameter list's.
+
+**Five rules, and each one is somebody's mistake caught early:**
+
+- **The names are the fold's own parameters.** Anything else is refused where it is written.
+- **The fold has to be stored at all.** A fold no column is kept for has nothing to index, and the
+  refusal names the key part no event supplies, since that is what has to change. It is rule 15's
+  refusal of a lookup on an unstored fold, one declaration over.
+- **They are a leading run of the table's key, in key order.** `@index(user_id)` on a table
+  keyed `(game, user)` is refused even though `user_id` is a real parameter. A store can
+  serve any subset, so this is a restriction chosen at this end: an index whose leading
+  columns are a prefix of the table key is the one shape a cursor pages without sorting
+  again, which is the argument `docs/projectors.md` rule 8 already makes for a compound
+  index's column order. The key's order is the layout's (a subject part leads a plain one,
+  and the rest are alphabetical), which is why this is checked once the whole program is in
+  hand and not at the declaration.
+- **The column's type has to order.** Read off `types::comparable` against `>`, the same line
+  that decides whether `max` and `min` exist, so there is one answer to "can this be sorted"
+  and it cannot drift from the operators. That refuses a `List` or `Map` column, which lives
+  in a side table and has no order, and a `Json` or `Bool` one, without any of them needing a
+  rule of its own. **Through one optional**, the way `max` reads through one: a column that is
+  absent sometimes still orders among the rows that hold a value, and where the absent rows
+  land is the store's to say and to document. A review's write time kept by its first write
+  is a `Timestamp?`, and it is one of the two columns this rule was asked for.
+- **A sealed column is refused**, with its own reason rather than the type's: a store holds
+  the ciphertext, so sorting would mean opening every row to compare two, which is the thing a
+  sealed column exists to avoid. Index something derived from it instead.
+
+**An exact repeat on one fold is refused** and nothing else is a duplicate. `@index` beside
+`@index(game_id)` is two indexes, and so is `@index(game_id)` on two columns of one table,
+because the column is the last position of each: `(game, a)` and `(game, b)` answer two
+questions.
+
+An index is in the fold's **own** digest hash and not in its signature hash, exactly as an
+entity's `index (a, b)` is: adding one changes what a store builds and what a reader may sort
+on, and changes nothing a caller passes or reads back. `hek check --tables` prints each one as
+the index a store would build, which is the form the annotation does not say on its face.
+
+**Nothing in the interpreter reads it**, which is true of a projector's indexes too. A fold's
+value is the same value whether or not a store can sort on it; this is a declaration about the
+read surface, and `docs/host.md` is where it is picked up.

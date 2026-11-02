@@ -2139,3 +2139,90 @@ fold Monthly(month: String) -> cents: Int = 0 {
     assert!(packed.contains("(computed month "), "{packed}");
     assert!(!packed.contains("skip"), "{packed}");
 }
+
+/// **Rule 20: an index moves the column's hash and not its signature.** Adding one changes
+/// what a store has to build and what a reader may sort on, and changes nothing a caller
+/// passes or reads back, so it belongs in the local form exactly as an entity's `index (a,
+/// b)` does.
+#[test]
+fn an_index_moves_a_folds_hash_and_not_its_signature() {
+    let before = with_events(SPEND);
+    let after = with_events(
+        "fold LifetimeSpend(customer_id: Customer) -> spend: Money(2) @index = 0 {
+           on @order.placed(customer_id) { total } => spend + total
+         }",
+    );
+    let (before, after) = (
+        entry(&before, "LifetimeSpend"),
+        entry(&after, "LifetimeSpend"),
+    );
+    assert_ne!(
+        before.hash, after.hash,
+        "a store has an index to build that it did not have"
+    );
+    assert_eq!(
+        before.signature_hash, after.signature_hash,
+        "its table, key order and type did not change, so the column stays where it is"
+    );
+}
+
+/// And a fold declaring none packs byte for byte as it did, which is what keeps every
+/// hash in a program that uses nothing here where it was.
+#[test]
+fn a_fold_with_no_index_packs_as_it_did() {
+    let packed = with_events(SPEND).packed();
+    assert!(
+        !packed.contains("(index"),
+        "no index node is emitted for a program that declares none: {packed}"
+    );
+}
+
+/// How far an index leads is part of the declaration, because what a store can page
+/// without sorting again differs between the two. Both are legal here, since each is a
+/// leading run of `(customer, order)`.
+#[test]
+fn how_far_an_index_leads_is_part_of_the_declaration() {
+    let fold = |annotation: &str| {
+        format!(
+            "fold Pair(customer_id: Customer, order_id: Uuid) -> n: Int {annotation} = 0 {{
+               on @order.placed(customer_id, order_id) => n + 1
+             }}"
+        )
+    };
+    differs(
+        &fold("@index(customer_id)"),
+        &fold("@index(customer_id, order_id)"),
+        "one index pages a customer's rows and the other pages one order's",
+    );
+    differs(
+        &fold("@index"),
+        &fold("@index(customer_id)"),
+        "the column alone is not the column under a customer",
+    );
+    same(
+        &fold("@index(customer_id)"),
+        &fold("@index(customer_id)"),
+        "and the same declaration packs the same way twice",
+    );
+}
+
+/// And the `index` node reads back out of a stored form, which the round-trip test above
+/// cannot say because the demo program declares none. A stored digest is what a catalog
+/// compares against, so a node that packs and does not parse would make the first program
+/// to use this feature unreadable there.
+#[test]
+fn an_index_reads_back_from_a_packed_form() {
+    let digest = with_events(
+        "fold LifetimeSpend(customer_id: Customer, order_id: Uuid) -> spend: Money(2) @index(customer_id) @index = 0 {
+           on @order.placed(customer_id, order_id) { total } => spend + total
+         }",
+    );
+    let read = Digest::from_packed(&digest.packed()).expect("its own output parses");
+    assert_eq!(read.entries(), digest.entries());
+    assert_eq!(read.hash(), digest.hash());
+    let packed = entry(&digest, "LifetimeSpend").form.packed();
+    assert!(
+        packed.contains("(index customer_id) (index)"),
+        "both indexes are there, in written order: {packed}"
+    );
+}

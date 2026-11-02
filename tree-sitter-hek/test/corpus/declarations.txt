@@ -419,3 +419,73 @@ fn t_order(order_id: Int, total: Money(3)) -> @order.placed {
               (identifier))
             (field_initializer
               (identifier))))))))
+
+================================================================================
+an index on a fold's value
+================================================================================
+
+fold GameUnits(game_id: Game) -> n: Int @index = 0 {
+  on @game.purchased(game_id) => n + 1
+}
+
+fold ReviewHelpful(game_id: Game, user_id: User) -> n: Int @index(game_id) = 0 {
+  on @review.voted(game_id, user_id) => n + 1
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fold_definition
+    name: (type_identifier)
+    parameters: (parameters
+      (parameter
+        name: (identifier)
+        type: (type
+          (type_identifier))))
+    accumulator: (identifier)
+    type: (fold_type
+      (type
+        (primitive_type)))
+    (annotation
+      (annotation_name))
+    seed: (integer_literal)
+    body: (fold_body
+      (fold_arm
+        (slice_reference
+          path: (event_path)
+          (filter
+            field: (identifier)))
+        value: (binary_expression
+          left: (identifier)
+          right: (integer_literal)))))
+  (fold_definition
+    name: (type_identifier)
+    parameters: (parameters
+      (parameter
+        name: (identifier)
+        type: (type
+          (type_identifier)))
+      (parameter
+        name: (identifier)
+        type: (type
+          (type_identifier))))
+    accumulator: (identifier)
+    type: (fold_type
+      (type
+        (primitive_type)))
+    (annotation
+      (annotation_name)
+      (annotation_arguments
+        (identifier)))
+    seed: (integer_literal)
+    body: (fold_body
+      (fold_arm
+        (slice_reference
+          path: (event_path)
+          (filter
+            field: (identifier))
+          (filter
+            field: (identifier)))
+        value: (binary_expression
+          left: (identifier)
+          right: (integer_literal))))))

@@ -724,6 +724,23 @@ fn fold(def: &Fold, reads: &[(String, Hash)]) -> Sexp {
     // Declared rather than read off the accumulator, for the reason a `fn`'s is: the
     // splice runs after parsing, so a caller's body is lowered before this body exists.
     parts.push(node("returns", [ty(&def.ret)]));
+    // Rule 20, beside the return type it annotates, and by the **parameter** names the
+    // author wrote rather than the key positions a host reads: the same choice `params`
+    // above makes, and the two have to agree, since renaming a parameter already moves
+    // this hash through `params`. Written order within an index, because a compound
+    // index's column order is what decides which questions it answers; written order
+    // across them for the same reason `arms` keeps one, and absent when there are none, so
+    // a fold declaring no index packs byte for byte as it did.
+    //
+    // It is in the local form and therefore in `hash`, not in `signature_hash`: adding an
+    // index changes what a store has to build and what a reader may sort on, and changes
+    // nothing a caller passes or reads back.
+    for index in &def.indexes {
+        parts.push(node(
+            "index",
+            index.params.iter().map(|param| atom(param.clone())),
+        ));
+    }
     // Before the stage, because an arm reads these slots and a slot is numbered by first
     // appearance. One list for the whole fold rather than one per arm, which is how the IR
     // holds it (`docs/folds.md` rule 12): every arm sees the same envelope, and a

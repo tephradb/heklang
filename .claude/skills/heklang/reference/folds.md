@@ -437,3 +437,42 @@ by-key read passes it over, and in particular it does **not** land under the see
 It works on any computed part, not only a lookup, and a part whose value is never absent is
 refused because the `else skip` could not fire. `skip` is soft, claimed only after `else` in
 a `key` clause.
+
+## 11. `@index` says a column may be sorted on
+
+```hek
+fold GameUnits(game_id: Game) -> n: Int @index = 0 {              // index (game_units)
+  on @game.purchased(game_id) => n + 1
+}
+
+fold ReviewHelpful(game_id: Game, user_id: User) -> n: Int @index(game_id) = 0 {
+  on @review.voted(game_id, user_id) => n + 1                     // index (game, review_helpful)
+}
+```
+
+After the **type**, where every annotation in the language sits. The parameters it names lead
+the index and the column is implied last, so a bare `@index` is "best sellers across the
+catalogue" and `@index(game_id)` is "this game's most helpful reviews". A host serves
+`order_by` only over what is declared, as it does for a projector's `@index`.
+
+Four refusals:
+
+- a name that is not one of the fold's own parameters;
+- a fold no column is kept for, which has nothing to index at all;
+- names that are not a **leading run of the table's key, in key order**. The key's order is
+  the layout's (a subject part leads a plain one, then alphabetical), so `@index(user_id)` on
+  `(game, user)` is refused even though `user_id` is a real parameter. `hek check --tables`
+  prints the key;
+- a column type that does not **order**, which is the same `>` gate `max` and `min` use, so a
+  `List`, `Map`, `Json` or `Bool` column is refused by it. It reads through one optional, so a
+  `Timestamp?` column is indexable and where the absent rows sort is the store's to document;
+- a **sealed** column, because a store holds the ciphertext: index something derived from it.
+
+An exact repeat on one fold is refused, and nothing else is a duplicate: `@index` beside
+`@index(game_id)` is two indexes, and so is `@index(game_id)` on two columns of one table,
+since the column is the last position of each.
+
+`hek check --tables` prints `(sorts by (game, review_helpful))`. The index is in the fold's own
+digest hash and not in its signature hash, and nothing in the interpreter reads it: a fold's
+value is the same value whether or not a store can sort on it.
+

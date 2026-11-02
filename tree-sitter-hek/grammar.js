@@ -200,6 +200,10 @@ module.exports = grammar({
         '->',
         optional(seq(field('accumulator', $.identifier), ':')),
         field('type', $.fold_type),
+        // `@index` and `@index(param, ..)`, in the position every other annotation in this
+        // grammar sits: after the type it annotates, as `entity_field` and `parameter`
+        // have it. See docs/folds.md rule 20.
+        repeat($.annotation),
         '=',
         field('seed', $._expression),
         field('body', $.fold_body),

@@ -162,6 +162,23 @@ pub struct Column {
     /// does, so it is what the digest records, what a rebuild has to replay alongside, and
     /// what `hek check --tables` prints.
     pub reads: Vec<Ident>,
+    /// The indexes this column declares (`docs/folds.md` rule 20), each as the **key
+    /// positions** that lead it, in the table's key order, with the column itself implied
+    /// last. Empty for almost every column.
+    ///
+    /// Positions into [`Table::key`] rather than the parameter names the author wrote,
+    /// because what an index can answer is decided by the order its columns sit in, and
+    /// that order is the table's rather than the parameter list's. A reader turning names
+    /// back into positions reimplements [`part_names`] and the key sort to do it. So
+    /// `@index(game_id)` on a table keyed `(game, user)` is `[0]`, which a host reads as
+    /// the index `(game, <this column>)`.
+    ///
+    /// **Two folds of one table declaring the same leading parts is not a duplicate**, and
+    /// needs nothing done about it: the column is the last position of the index, so
+    /// `@index(game_id)` on two columns of `(game, user)` is `(game, a)` and `(game, b)`,
+    /// which are two indexes answering two questions. An exact repeat on one fold is
+    /// refused where it is written instead.
+    pub indexes: Vec<Vec<usize>>,
     /// The events this column folds, first written first, each once.
     pub events: Vec<EventPath>,
     /// One per `on`, in source order.
@@ -307,11 +324,31 @@ pub fn layout(program: &Program) -> Layout {
             .map(|(at, _)| fold.params[*at].name.clone())
             .collect();
         let key: Vec<KeyPart> = key.into_iter().map(|(_, part)| part).collect();
+        // Rule 20: the key positions each index leads with. Mapped through `args`, which is
+        // the one place the parameter-per-position pairing is written down, so this needs
+        // no second reading of `part_names` or of the key's sort.
+        //
+        // An index naming something that is not a parameter is dropped **whole** rather
+        // than shortened, because a shorter index is a different index and would answer
+        // questions this one cannot. The parser makes that unreachable; `layout` also runs
+        // over programs nothing parsed.
+        let indexes: Vec<Vec<usize>> = fold
+            .indexes
+            .iter()
+            .filter_map(|index| {
+                index
+                    .params
+                    .iter()
+                    .map(|param| args.iter().position(|arg| arg == param))
+                    .collect::<Option<Vec<usize>>>()
+            })
+            .collect();
         let column = Column {
             name: snake_case(&fold.name),
             fold: fold.name.clone(),
             ty: fold.ret.clone(),
             args,
+            indexes,
             reads: program.reads(&fold.name),
             events: events_of(&arms),
             arms,

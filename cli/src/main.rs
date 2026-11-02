@@ -608,7 +608,33 @@ fn tables(program: &Program) {
                         .join(", ")
                 ),
             };
-            println!("    {named:width$}  <- {}{through}", events.join(", "));
+            // Rule 20, printed as the index a store builds rather than as the annotation
+            // the author wrote: the column is the last position, and the leading parts are
+            // key parts in key order, which is the one thing `@index(game_id)` does not
+            // say on its face.
+            let sorted = match column.indexes.is_empty() {
+                true => String::new(),
+                false => format!(
+                    "  (sorts by {})",
+                    column
+                        .indexes
+                        .iter()
+                        .map(|index| {
+                            let mut parts: Vec<&str> = index
+                                .iter()
+                                .map(|&at| table.key[at].name.as_str())
+                                .collect();
+                            parts.push(column.name.as_str());
+                            format!("({})", parts.join(", "))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            };
+            println!(
+                "    {named:width$}  <- {}{through}{sorted}",
+                events.join(", ")
+            );
         }
     }
     if !layout.unstored.is_empty() {

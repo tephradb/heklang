@@ -653,3 +653,57 @@ fold PlacedAtFloor(shop_id: Shop, floor: Money(2)) -> n: Int = 0 {
          the value the fold declares, which is the same fit the interpreter makes"
     );
 }
+
+/// Rule 20: the key **positions** each index leads with, in the table's key order, with
+/// the column itself implied last. Positions rather than the parameter names the author
+/// wrote, because what an index can answer is decided by the order its columns sit in and
+/// that order is the table's: `@index(game_id)` written on either of these is `[0]`,
+/// whichever way round the parameters were declared.
+#[test]
+fn an_index_is_recorded_as_key_positions() {
+    let source = app("
+fold First(from_id: Region, to_id: Region) -> n: Int @index(from_id) = 0 {
+  on @transfer.recorded(from_id, to_id) => n + 1
+}
+
+fold Second(to_id: Region, from_id: Region) -> n: Int @index(from_id, to_id) = 0 {
+  on @transfer.recorded(from_id, to_id) => n + 1
+}
+
+fold Third(from_id: Region, to_id: Region) -> n: Int @index = 0 {
+  on @transfer.recorded(from_id, to_id) => n + 1
+}
+");
+
+    let layout = read(&source);
+    // One table, since a key is a set of parts and not an argument list.
+    assert_eq!(tables(&source), ["from__to  first, second, third"]);
+    let indexes = |name: &str| layout.column(name).expect("the column").1.indexes.clone();
+    assert_eq!(indexes("First"), [vec![0]]);
+    assert_eq!(indexes("Second"), [vec![0, 1]]);
+    // The column alone, which is the whole of a bare `@index`.
+    assert_eq!(indexes("Third"), [Vec::<usize>::new()]);
+}
+
+/// **And reserving that name cannot itself collide**, which is what doing the rename inside
+/// the clash loop got wrong: the list was computed in front of the loop, so a table renamed
+/// *to* a name another one already held came out sharing it, and nothing said so. That is
+/// the exact failure the clash list exists to prevent, so the reservation happens first and
+/// these two are then an ordinary clash.
+#[test]
+fn reserving_the_single_row_tables_name_cannot_collide() {
+    let source = app("
+fold Placed(global: Int) -> n: Int = 0 {
+  on @order.placed(order_id: global) => n + 1
+}
+
+fold Cancelled(global_int: Int) -> n: Int = 0 {
+  on @order.cancelled(order_id: global_int) => n + 1
+}
+");
+
+    assert_eq!(
+        tables(&source),
+        ["global_int  placed", "global_int_int  cancelled"]
+    );
+}

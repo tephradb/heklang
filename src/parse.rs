@@ -8,10 +8,10 @@ use crate::inline;
 use crate::ir::{
     Absent, Action, Arm, BinOp, Bind, Builtin, Command, ComputedKey, ConstDef, Delivery, Effect,
     EntityDef, EntityField, EnumDef, EnvField, EventDef, EventPath, Expect, Expr, ExprId, Exprs,
-    FieldDef, Filter, Fold, Function, Given, Guard, Handler, Ident, Index, Iter, Literal, Lookup,
-    MessagePart, Number, Param, Pos, Program, Projector, RecordDef, RecordField, RefusalDef,
-    RefusalParam, ReplySpec, Return, SecretDef, Setup, Slot, Span, Stage, Stmt, SubjectDef, Test,
-    Type, UnOp, Update,
+    FieldDef, Filter, Fold, FoldIndex, Function, Given, Guard, Handler, Ident, Index, Iter,
+    Literal, Lookup, MessagePart, Number, Param, Pos, Program, Projector, RecordDef, RecordField,
+    RefusalDef, RefusalParam, ReplySpec, Return, SecretDef, Setup, Slot, Span, Stage, Stmt,
+    SubjectDef, Test, Type, UnOp, Update,
 };
 use crate::lex::{Keyword, Spanned, Sym, Token, lex};
 use crate::scaled::{self, MAX_SCALE, Rounding};
@@ -1018,6 +1018,7 @@ impl Parser {
         self.check_recursion(&program)?;
         self.check_guards(&program)?;
         self.check_lookups(&program)?;
+        self.check_indexes(&program)?;
         self.check_duplicate_folds()?;
         self.check_query_only(&program)?;
         self.check_cycles(&program)?;
@@ -1549,7 +1550,7 @@ impl Parser {
                 )));
         }
 
-        let (_, ret) = self.fold_result()?;
+        let (_, ret, _) = self.fold_result()?;
         self.folds.push(Signature {
             name,
             params,
@@ -1573,7 +1574,7 @@ impl Parser {
     /// rejected, so a seal never appears under a constructor. It creates no seal either,
     /// since only `@subject` on an event field does that; this names one that came out of
     /// the log. See `docs/folds.md` rule 7.
-    fn fold_result(&mut self) -> Result<(Option<Ident>, Type), Diagnostic> {
+    fn fold_result(&mut self) -> Result<(Option<Ident>, Type, Vec<FoldIndex>), Diagnostic> {
         self.expect_sym(Sym::To)?;
         // `acc: T` against a bare `T`, told apart by the colon. A type is never followed
         // by one here, so a single token of lookahead settles it.
@@ -1589,7 +1590,63 @@ impl Parser {
             None
         };
         let ty = self.sealed_type()?;
-        Ok((acc, ty))
+        let indexes = self.fold_indexes()?;
+        Ok((acc, ty, indexes))
+    }
+
+    /// `@index` and `@index(param, ..)` after the return type, which is where an annotation
+    /// sits on an entity field and on a parameter.
+    ///
+    /// **Read here so both passes consume it.** The signature pass discards what comes
+    /// back, but it has to get past the tokens: it skips the seed with `skip_value`, and an
+    /// annotation left in front of the `=` is not a seed.
+    ///
+    /// Only the shape is checked here. Whether the names are parameters is checked where
+    /// the parameter list is in hand, and whether they lead the key in key order is checked
+    /// once the whole program is, because only the layout knows that order.
+    fn fold_indexes(&mut self) -> Result<Vec<FoldIndex>, Diagnostic> {
+        let mut indexes = Vec::new();
+        while let Token::Path(segments) = self.peek().clone() {
+            let at = self.span_here();
+            self.bump();
+            let [annotation] = segments.as_slice() else {
+                return Err(self.err(
+                    Code::BadAnnotation,
+                    "an annotation name cannot contain `.`",
+                    at,
+                ));
+            };
+            if annotation != "index" {
+                return Err(self
+                    .err(
+                        Code::UnknownAnnotation,
+                        format!("unknown annotation `@{annotation}`"),
+                        at,
+                    )
+                    .with_hint("a fold's value takes `@index` and nothing else"));
+            }
+            let mut params = Vec::new();
+            if self.eat_sym(Sym::LParen) {
+                while !self.at_sym(Sym::RParen) {
+                    let at = self.span_here();
+                    let param = self.expect_ident()?;
+                    if params.contains(&param) {
+                        return Err(self.err(
+                            Code::DuplicateField,
+                            format!("`{param}` leads this index twice"),
+                            at,
+                        ));
+                    }
+                    params.push(param);
+                    if !self.eat_sym(Sym::Comma) {
+                        break;
+                    }
+                }
+                self.expect_sym(Sym::RParen)?;
+            }
+            indexes.push(FoldIndex { params, span: at });
+        }
+        Ok(indexes)
     }
 
     /// `Sealed(T, Subject)`, or anything [`Parser::type_ref`] takes. Only a fold's return
@@ -4132,7 +4189,7 @@ impl Parser {
         for (param, ty) in self.param_list(None)? {
             lower.b.param(&param, ty);
         }
-        let (acc, ret) = self.fold_result()?;
+        let (acc, ret, indexes) = self.fold_result()?;
         self.expect_sym(Sym::Assign)?;
         // What `decl_params` sets after its own brace. A fold's body holds no `let`, so
         // its one consumer cannot fire in here, but leaving it at whatever the previous
@@ -4158,7 +4215,99 @@ impl Parser {
                     "a named fold declares a slice of the log, so it needs an arm; a value computed from arguments alone is a `fn`",
                 ));
         }
-        Ok(lower.b.finish_fold(ret, slot, at))
+        let mut fold = lower.b.finish_fold(ret, slot, at);
+        self.index_names(&fold, &indexes)?;
+        fold.indexes = indexes;
+        Ok(fold)
+    }
+
+    /// Rule 20's checks that need only the fold: every name is one of its parameters, and
+    /// the column's type is one that **orders**.
+    ///
+    /// The ordering gate is `types::comparable` against `>`, the same line that decides
+    /// whether `max` and `min` exist, so there is one answer to "can this be sorted" and
+    /// a collection column and a sealed one are refused by it rather than by a list of
+    /// their own. An index that cannot be sorted on is a declaration written for an effect
+    /// it cannot have, since what a host serves from one is `order_by`.
+    ///
+    /// Whether the names **lead the key in key order** is not here: the order is the
+    /// layout's and the layout needs the whole program.
+    fn index_names(&self, fold: &Fold, indexes: &[FoldIndex]) -> Result<(), Diagnostic> {
+        for index in indexes {
+            // **Through one optional**, the way `max` and `min` read through one: a column
+            // that is sometimes absent still orders among the rows that hold a value, and
+            // where the absent ones land is the store's to say. That is not a corner: one
+            // of the two columns this rule was asked for is a `Timestamp?`, a review's
+            // write time kept by the first write.
+            // Read through one optional, and **the message reads through the same one**: a
+            // `Sealed(String, Shop)?` column is refused for the seal and not for the
+            // String under it, which is what two separate matches on `fold.ret` got wrong.
+            let column = match &fold.ret {
+                Type::Opt(inner) => inner.as_ref(),
+                ret => ret,
+            };
+            if !types::comparable(BinOp::Gt, column, column) {
+                let (why, hint) = match column {
+                    Type::Sealed(..) => (
+                        format!(
+                            "fold `{}` is sealed, so a store holds its ciphertext and there is no order to sort it in",
+                            fold.name
+                        ),
+                        "sorting it would mean opening every row to compare two, which is the thing a sealed column exists to avoid: index a column derived from it instead",
+                    ),
+                    // The **declared** type in the message, which is what the author wrote,
+                    // while the branch above is chosen by the type under any optional,
+                    // which is where the reason lives.
+                    _ => (
+                        format!(
+                            "fold `{}` is {}, which does not order, so its column cannot be sorted",
+                            fold.name,
+                            a(&fold.ret)
+                        ),
+                        "`@index` declares that a host may sort on the column, so the value has to be one `<` and `>` accept: an Int, a Decimal, a Money, a String, a Timestamp, or a subject over one of those",
+                    ),
+                };
+                return Err(self
+                    .err(Code::FoldRestriction, why, index.span)
+                    .with_hint(hint));
+            }
+            // An exact repeat only. `@index` beside `@index(game_id)` is two indexes, and
+            // two folds of one table leading with the same parts are two indexes as well,
+            // because the column itself is the last position of each.
+            if indexes
+                .iter()
+                .filter(|held| held.params == index.params)
+                .count()
+                > 1
+            {
+                return Err(self.err(
+                    Code::DuplicateField,
+                    match index.params.is_empty() {
+                        true => format!("fold `{}` declares `@index` twice", fold.name),
+                        false => format!(
+                            "fold `{}` declares `@index({})` twice",
+                            fold.name,
+                            index.params.join(", ")
+                        ),
+                    },
+                    index.span,
+                ));
+            }
+            for param in &index.params {
+                if !fold.params.iter().any(|held| &held.name == param) {
+                    return Err(self
+                        .err(
+                            Code::NotDeclared,
+                            format!("fold `{}` has no parameter `{param}`", fold.name),
+                            index.span,
+                        )
+                        .with_hint(
+                            "`@index` names the fold's own parameters, which are the key parts the index leads with",
+                        ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The seed, the accumulator and the arms. Split out so [`Parser::fold_item`] can
@@ -12042,6 +12191,107 @@ impl Parser {
                         None => error,
                     });
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Rule 20's remaining check: an `@index` leads with a **leading run of the table's
+    /// key, in key order**.
+    ///
+    /// Here rather than at the declaration because the key's order is the layout's, not the
+    /// author's: parts are ordered by subject containment and then alphabetically
+    /// ([`tables::layout`]), so `@index(user_id)` on `(game_id: Game, user_id: User)` names
+    /// a real parameter and still does not lead that key. The fold alone cannot say so.
+    ///
+    /// **A leading run rather than any subset**, which is a restriction this end chose: a
+    /// host can serve either, and an index whose leading columns are a prefix of the table
+    /// key is the one shape it can page without a second sort. That is the argument
+    /// `docs/projectors.md` rule 8 already makes for a compound index's column order.
+    fn check_indexes(&self, program: &Program) -> Result<(), Diagnostic> {
+        let layout = tables::layout(program);
+        for def in &program.folds {
+            if def.indexes.is_empty() {
+                continue;
+            }
+            // **A fold no column is kept for has nothing to index**, and that is refused
+            // rather than ignored, for the reason a column whose type does not order is: the
+            // author wrote a declaration expecting an effect it cannot have. It is the same
+            // refusal rule 15 gives a lookup on an unstored fold, one declaration over.
+            let Some((table, _)) = layout.column(&def.name) else {
+                let unmatched = layout
+                    .unstored
+                    .iter()
+                    .find(|at| at.fold == def.name)
+                    .map(|at| at.unmatched.join(", "));
+                let why = match &unmatched {
+                    Some(unmatched) => format!("no event supplies `{unmatched}`"),
+                    None => "no column is kept for it".to_string(),
+                };
+                let error = self
+                    .err(
+                        Code::FoldRestriction,
+                        format!(
+                            "`{}` is not stored, so there is no column to index: {why}",
+                            def.name
+                        ),
+                        def.indexes[0].span,
+                    )
+                    .with_hint(
+                        "an index is a declaration about a stored column, and `hek check --tables` lists what is kept and what is not",
+                    );
+                return Err(match &def.module {
+                    Some(module) => error.in_file(module),
+                    None => error,
+                });
+            };
+            let parts = tables::part_names(def.params.iter().map(|param| (&param.name, &param.ty)));
+            for index in &def.indexes {
+                let leading: Vec<&str> = index
+                    .params
+                    .iter()
+                    .map(|param| {
+                        let at = def
+                            .params
+                            .iter()
+                            .position(|held| &held.name == param)
+                            .expect("`index_names` checked every name is a parameter");
+                        parts[at].as_str()
+                    })
+                    .collect();
+                let key: Vec<&str> = table.key.iter().map(|part| part.name.as_str()).collect();
+                if key.starts_with(&leading) {
+                    continue;
+                }
+                let written: Vec<String> = index
+                    .params
+                    .iter()
+                    .map(|param| format!("`{param}`"))
+                    .collect();
+                let error = self
+                    .err(
+                        Code::FoldRestriction,
+                        format!(
+                            "`@index({})` does not lead the key of table `{}`, which is ({})",
+                            index.params.join(", "),
+                            table.name,
+                            key.join(", ")
+                        ),
+                        index.span,
+                    )
+                    .with_hint(format!(
+                        "an index leads with a run of the key from its start, in that order, because that is what a store can page without sorting again. {} {} ({}), and the key's order is the layout's rather than the parameter list's: a subject part leads a plain one, and the rest are alphabetical",
+                        written.join(" and "),
+                        match written.len() == 1 {
+                            true => "names the key part",
+                            false => "name the key parts",
+                        },
+                        leading.join(", ")
+                    ));
+                return Err(match &def.module {
+                    Some(module) => error.in_file(module),
+                    None => error,
+                });
             }
         }
         Ok(())

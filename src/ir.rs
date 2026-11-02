@@ -1039,6 +1039,26 @@ pub struct Fold {
     /// **Non-empty makes the fold query-only**, which is what [`Fold::query_only`] is
     /// for. See `docs/folds.md` rule 12.
     pub envelope: Vec<EnvBind>,
+    /// The `@index` annotations on the return type, in written order. Empty for almost
+    /// every fold, and for every inline one: an inline fold is spliced away before there
+    /// is a column to index.
+    pub indexes: Vec<FoldIndex>,
+    pub span: Span,
+}
+
+/// One `@index` on a fold's value, which declares that the stored column can be **sorted**
+/// on (`docs/folds.md` rule 20).
+///
+/// The parameters it names lead the index and the column itself is implied last, so
+/// `@index(game_id)` on `ReviewHelpful(game_id, user_id)` is the index `(game, n)`. A host
+/// reads it off [`crate::tables::Column::indexes`] as key positions rather than from here,
+/// because what leads an index has to be stated in the table's key order and only the
+/// layout knows that order.
+#[derive(Debug, Clone)]
+pub struct FoldIndex {
+    /// The fold's own parameter names, in written order. Empty for a bare `@index`, which
+    /// is the column alone.
+    pub params: Vec<Ident>,
     pub span: Span,
 }
 

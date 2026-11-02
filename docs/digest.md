@@ -213,6 +213,15 @@ A moved **signature** of a looked-up fold moves the dependent's `hash` and not i
 column type have not changed, so it is a column to refold in place rather than one to rebuild
 differently.
 
+**A fold's `@index` is in its local form too** (`docs/folds.md` rule 20), as `(index <param> ..)`
+after `returns`, by the parameter names the author wrote and in written order, since a compound
+index's column order decides which questions it answers. The same side of rule 8's split as an
+entity's `index (a, b)`, and for the same reason: adding one changes what a store has to build and
+what a reader may sort on, and changes nothing a caller passes or reads back, so it moves `hash` and
+leaves `signature_hash` where it was. By parameter rather than by key position because `params`
+above is by name and the two have to agree; renaming a parameter already moves both through that
+section. A fold declaring none emits no node, so `hek-digest 6` stands here as well.
+
 ## 8. Every entry carries its own hash
 
 `Digest::entries` is one `Entry` per declaration, each with the kind, the name it is known by, its

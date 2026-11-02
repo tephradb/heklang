@@ -117,6 +117,18 @@ either way. It is the answer to "why does editing `GameGenre`
 refold `genre_units`", and the same list is `Column::reads`: what the digest records so the
 dependent's hash moves, and what `Layout::closure` adds to a rebuild.
 
+**A column that may be sorted on says so too**, which is `docs/folds.md` rule 20:
+
+```
+    review_helpful: Int  <- @review.voted  (sorts by (game, review_helpful))
+```
+
+Printed as the index a store would build rather than as the annotation the author wrote, which is
+the one thing `@index(game_id)` does not say on its face: the parameters it names become key parts
+in the table's key order, and the column itself is the last position. That is also exactly what
+`Column::indexes` holds, as positions into the table's key, so a host reading this listing and a
+host reading the layout see one answer.
+
 **A key part and a column may not take one name**, and that one is refused rather than
 disambiguated. `fold Shop(shop_id: Shop)` wants a table whose key column and whose only
 value column are both `shop`, which nothing can create, and unlike the two cases above the

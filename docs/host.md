@@ -382,6 +382,20 @@ in order needs to do nothing for that, and a host applying them out of order get
 a way nothing can detect. And `Column::reads` is the dependency, transitively: it is what
 `Layout::closure` adds to a rebuild, and what tells a catalog that editing one fold refolds another.
 
+**A column may declare that it can be sorted on** (`docs/folds.md` rule 20), and
+`Column::indexes` is what a host builds its DDL and its `order_by` surface from. Each entry is the
+**key positions** that lead the index, in the table's key order, with the column itself implied
+last: `[0]` on a table keyed `(game, user)` is the index `(game, <this column>)`, and an empty entry
+is the column on its own. Positions rather than names, because what an index can answer is decided
+by the order its columns sit in, and that order is the table's rather than the parameter list's.
+
+Two things a host has to decide for itself, because nothing here can. **An optional column may be
+indexed**, so where the absent rows sort is the store's choice and belongs in its own documentation:
+heklang refuses to *order* an optional, which is why `>` does, and an index on one declares that the
+present rows order among themselves. And **nothing in the interpreter reads this**, as nothing reads
+a projector's indexes: a fold's value is the same value whether or not a store can sort on it, so an
+index is a promise about the read surface and never about the fold.
+
 **`Tables::only` is for a rebuild, and `apply` is wrong for one twice over.** A column is rebuilt by
 replaying the log into it, and `apply` runs every arm of every column over that replay: the columns
 that are already correct do the work again for nothing, and a body that can `fail` or overflow fails

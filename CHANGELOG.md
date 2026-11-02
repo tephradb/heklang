@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`@index` on a fold's value says the column may be sorted on** (`docs/folds.md` rule 20):
+
+  ```hek
+  fold GameUnits(game_id: Game) -> n: Int @index = 0 { .. }                        // (game_units)
+  fold ReviewHelpful(game_id: Game, user_id: User) -> n: Int @index(game_id) = 0 { .. }
+  ```
+
+  How a read model can be *read* is part of its declared shape, and a host serves `order_by` only
+  over what is declared, exactly as it does for a projector's `@index`. The parameters it names lead
+  the index and the column itself is implied last, so the second of those is `(game,
+  review_helpful)`: a game page's most helpful reviews. The annotation sits after the type, where
+  every other annotation in the language sits.
+
+  Five refusals: a name that is not one of the fold's parameters, a fold no column is kept for,
+  names that are not a **leading run
+  of the table's key in key order** (a cursor pages a prefix without sorting again, which is the
+  argument a compound index's column order already makes), a column type that does not **order**,
+  and a sealed column, whose reason is its own since a store holds the ciphertext. The ordering gate
+  is `types::comparable` against `>`, the same line that decides whether `max` and `min` exist, so
+  one answer serves both and a `List`, `Map`, `Json` or `Bool` column needs no rule of its own. It
+  reads through one optional, because a column that is sometimes absent still orders among the rows
+  that hold a value, and a review's write time kept by its first write is a `Timestamp?`.
+
+  A host reads them off `Column::indexes` as key positions, and `hek check --tables` prints each as
+  `(sorts by (game, review_helpful))`, which is the form the annotation does not say on its face. An
+  index is in the fold's own digest hash and not in its signature hash.
+
 - **`List.distinct()`** (`docs/stdlib.md`), the first of each in written order:
 
   ```hek

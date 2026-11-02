@@ -674,6 +674,9 @@ impl Builder {
             exprs: self.exprs,
             stage: self.stages.pop().unwrap_or_default(),
             envelope: self.envelope,
+            // Set by the parser after this, because only a named fold can carry one and
+            // an inline fold goes through here too.
+            indexes: Vec::new(),
             span,
         }
     }
