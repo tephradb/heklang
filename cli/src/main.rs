@@ -9,11 +9,13 @@
 //! `check_files` rather than `parse_files`, because a run reports every mistake it found
 //! rather than only the first. `docs/cli.md` has the granularity.
 
+use std::collections::HashSet;
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::mem;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
 use heklang::{
@@ -30,11 +32,11 @@ hek: check heklang sources, run their tests, format them and digest them
 
 usage:
   hek [check|test|fmt|digest] [--boundaries] [--tables] [--check]
-      [--packed|--hash|--json] [--tests] [path|-]
+      [--packed|--hash|--json] [--tests] [path..|-]
 
-  check   parse every `.hk` file under `path` as one program
+  check   parse every `.hk` file under the paths as one program
   test    the same, then run every `test` declaration in it
-  fmt     rewrite every `.hk` file under `path` canonically
+  fmt     rewrite every `.hk` file under the paths canonically
   digest  print what that program does, with everything else taken away
 
   --boundaries  print what each command guards, transitively
@@ -47,12 +49,17 @@ usage:
 
 `hek fmt -` formats one module from stdin onto stdout, which is what an editor
 wants; it fails rather than printing nothing when the module does not parse.
-`hek digest -` reads one module the same way.
+`hek digest -` reads one module the same way. `-` and a path cannot both be given:
+a run reads stdin or the paths, and naming both used to read stdin and discard the
+paths without a word.
 
-`path` is a directory or a single `.hk` file, and defaults to the current
-directory. With no command `hek` does both `check` and `test`. Every file under
-`path` is one module of one program, and declaration order across them does not
-matter.
+Each `path` is a directory or a single `.hk` file, and with none given the
+current directory is used. With no command `hek` does both `check` and `test`.
+
+Every file under every path is one module of one single program, and declaration
+order across them does not matter, so `hek check lib folds` is the same program
+as `hek check .` over a tree holding only those two. A file named twice, or named
+inside a directory already given, is read once.
 ";
 
 fn main() -> ExitCode {
@@ -72,7 +79,12 @@ fn main() -> ExitCode {
 fn run() -> Result<bool, String> {
     let mut args = env::args().skip(1);
     let mut command = Command::Both;
-    let mut root: Option<PathBuf> = None;
+    // **Every path, not the last one.** A single `Option` here meant each path silently
+    // overwrote the one before it, so `hek check lib folds` checked `folds` alone and
+    // reported the types under `lib` as unknown, and `hek check folds lib` checked `lib`
+    // alone and **exited zero** having looked at none of the fold declarations. A check
+    // that passes by discarding its arguments is worse than one that refuses them.
+    let mut roots: Vec<PathBuf> = Vec::new();
     let mut asked_for_boundaries = false;
     let mut asked_for_tables = false;
     let mut checking = false;
@@ -105,14 +117,14 @@ fn run() -> Result<bool, String> {
             "--tests" => with_tests = true,
             // Before the unknown-option arm below, which would otherwise claim it.
             "-" => reading_stdin = true,
-            "check" if root.is_none() => command = Command::Check,
-            "test" if root.is_none() => command = Command::Test,
-            "fmt" if root.is_none() => command = Command::Fmt,
-            "digest" if root.is_none() => command = Command::Digest,
+            "check" if roots.is_empty() => command = Command::Check,
+            "test" if roots.is_empty() => command = Command::Test,
+            "fmt" if roots.is_empty() => command = Command::Fmt,
+            "digest" if roots.is_empty() => command = Command::Digest,
             other if other.starts_with('-') => {
                 return Err(format!("unknown option `{other}`; try `hek --help`"));
             }
-            other => root = Some(PathBuf::from(other)),
+            other => roots.push(PathBuf::from(other)),
         }
     }
 
@@ -127,6 +139,20 @@ fn run() -> Result<bool, String> {
     }
 
     if reading_stdin {
+        // **The same silent discard, one argument over.** `-` reads one module from stdin
+        // and a path names files on disk, so a run cannot be both, and `hek fmt - lib`
+        // formatted stdin and said nothing about `lib`. Found by looking for siblings of
+        // the last-path-wins bug rather than stopping at the one that was reported.
+        if !roots.is_empty() {
+            let named: Vec<String> = roots
+                .iter()
+                .map(|root| root.display().to_string())
+                .collect();
+            return Err(format!(
+                "`-` reads one module from stdin, so there is nothing for `{}` to mean; pass the paths or `-`, not both",
+                named.join("`, `")
+            ));
+        }
         match command {
             Command::Fmt => return format_stdin(checking),
             // A module is a whole program (`docs/modules.md`: there is no header item),
@@ -142,25 +168,10 @@ fn run() -> Result<bool, String> {
         }
     }
 
-    let root = root.unwrap_or_else(|| PathBuf::from("."));
-    // A single file is a whole program too (`docs/modules.md`: there is no header item),
-    // so pointing at one is worth allowing rather than making the caller name its
-    // directory and pick up its neighbours.
-    let (root, paths) = if root.is_dir() {
-        let paths = sources(&root)?;
-        if paths.is_empty() {
-            return Err(format!("no `.hk` files under `{}`", root.display()));
-        }
-        (root, paths)
-    } else if root.extension().is_some_and(|ext| ext == "hk") {
-        let parent = root.parent().unwrap_or(Path::new(".")).to_path_buf();
-        (parent, vec![root])
-    } else {
-        return Err(format!(
-            "`{}` is not a directory or a `.hk` file",
-            root.display()
-        ));
-    };
+    if roots.is_empty() {
+        roots.push(PathBuf::from("."));
+    }
+    let (root, paths) = collect(&roots)?;
 
     if command == Command::Fmt {
         return format(&root, &paths, checking);
@@ -675,6 +686,99 @@ fn counts(program: &Program) -> String {
     parts.join(", ")
 }
 
+/// Every `.hk` file the given paths name, and the directory their labels are read
+/// against.
+///
+/// **Several paths are one program**, which is what a module being a diagnostic label
+/// rather than a namespace already means (`docs/modules.md`): `hek check lib folds` is the
+/// same program as `hek check .` over a tree holding only those two. A directory
+/// contributes everything under it and a `.hk` file contributes itself, and the two mix,
+/// because a single file is a whole program too.
+///
+/// **Deduplicated, because naming a file twice is not declaring it twice.** `hek check lib
+/// lib/folds/order.hk` is a caller being explicit about a file inside a directory it
+/// already asked for, and reading it twice would report every declaration in it as a
+/// duplicate of itself. Compared by canonical path, so `lib/x.hk` and `./lib/x.hk` are one
+/// file; first-named order is kept, and `sources` sorts within each directory, so a run
+/// reports the same way twice.
+///
+/// The label root is the **common ancestor** of what was asked for, so a module is still
+/// labelled by its path inside the project rather than by its path on this disk. For one
+/// directory or one file that is exactly what it was before.
+fn collect(roots: &[PathBuf]) -> Result<(PathBuf, Vec<PathBuf>), String> {
+    let mut paths = Vec::new();
+    let mut bases = Vec::new();
+    for root in roots {
+        if root.is_dir() {
+            let found = sources(root)?;
+            // **Per path, not over the total.** Checking only whether the combined list is
+            // empty is the same silent pass this function was written to fix, one argument
+            // over: `hek check lib folds commands` with `folds` renamed away would check two
+            // directories and exit zero, saying nothing about the third.
+            if found.is_empty() {
+                return Err(format!("no `.hk` files under `{}`", root.display()));
+            }
+            paths.extend(found);
+            bases.push(root.clone());
+        } else if root.extension().is_some_and(|ext| ext == "hk") {
+            paths.push(root.clone());
+            bases.push(root.parent().unwrap_or(Path::new(".")).to_path_buf());
+        } else {
+            return Err(format!(
+                "`{}` is not a directory or a `.hk` file",
+                root.display()
+            ));
+        }
+    }
+
+    let mut seen = HashSet::new();
+    paths.retain(|path| seen.insert(path.canonicalize().unwrap_or_else(|_| path.clone())));
+    // Unreachable now that each directory answers for itself above, since a `.hk` path
+    // contributes itself and a directory contributes at least one file. Kept as the one
+    // thing this function must never do, which is hand back nothing to check.
+    if paths.is_empty() {
+        let named: Vec<String> = roots
+            .iter()
+            .map(|root| root.display().to_string())
+            .collect();
+        return Err(format!("no `.hk` files under `{}`", named.join("`, `")));
+    }
+    Ok((ancestor(&bases), paths))
+}
+
+/// The deepest directory all of these are inside, which is what module labels are read
+/// against. One base answers itself, which is what keeps a single directory or a single
+/// file labelled exactly as it was.
+///
+/// Canonical where it can be, so a relative and an absolute path to one place agree. Where
+/// nothing is shared this walks up to the root, and a label is then a long path rather than
+/// a wrong one.
+fn ancestor(bases: &[PathBuf]) -> PathBuf {
+    let Some((first, rest)) = bases.split_first() else {
+        return PathBuf::from(".");
+    };
+    // **As the caller wrote them, and never canonicalised.** `label` strips this prefix off
+    // a path, and `sources` builds those paths by joining onto the root it was given, so the
+    // two have to be in one space or the strip silently never happens. Canonicalising here
+    // was exactly that bug: with relative arguments the root came out absolute, every
+    // `strip_prefix` fell through to the whole path, and `hek check lib/folds lib/events`
+    // labelled a module `lib/folds/a.hk` where this is documented to give `folds/a.hk`.
+    //
+    // Mixing a relative and an absolute path therefore shares nothing and a label is the
+    // path as given, which is the honest answer rather than a wrong short one.
+    let mut shared: Vec<&OsStr> = first.components().map(Component::as_os_str).collect();
+    for base in rest {
+        let base: Vec<&OsStr> = base.components().map(Component::as_os_str).collect();
+        let common = shared
+            .iter()
+            .zip(&base)
+            .take_while(|(ours, theirs)| ours == theirs)
+            .count();
+        shared.truncate(common);
+    }
+    shared.iter().collect()
+}
+
 /// Every `.hk` file under `root`, sorted so a run reports the same way twice. Hidden
 /// directories and `target` are skipped: a build directory holding a vendored `.hk`
 /// would otherwise join the program and collide with the source it was copied from.
@@ -819,9 +923,23 @@ fn underline(sources: &[(String, String)], err: &Diagnostic) -> Option<String> {
 
 /// The name an error is reported under: relative to the root, so a diagnostic reads
 /// `commands/place_order.hk:12:3` rather than carrying the whole absolute path.
+/// What a diagnostic calls the module: its path inside the project.
+///
+/// **The fallback is load-bearing, not defensive.** `root` is the common ancestor of what
+/// was asked for and is canonical once there is more than one path (`ancestor`), while a
+/// path is kept as the caller spelled it. So `hek check lib folds` from inside the project
+/// strips nothing, and the label is `lib/folds/order.hk`, which is what the caller would
+/// have got from `hek check .` anyway. Canonicalising the paths too would make `strip_prefix`
+/// always succeed and every label absolute-rooted, which is the worse answer: a label is
+/// read by a person standing where they ran the command.
 fn label(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
+    let rest = path.strip_prefix(root).unwrap_or(path);
+    // A `.` the caller typed is not part of a module's name. `sources` joins onto the root
+    // it was given, so `hek check . lib` shares nothing between its two bases and would
+    // otherwise label a module `./commands/a.hk` where `hek check .` gives
+    // `commands/a.hk`. Whole components only, so a real `.claude/` is untouched.
+    rest.strip_prefix(".")
+        .unwrap_or(rest)
         .to_string_lossy()
         .into_owned()
 }

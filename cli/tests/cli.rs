@@ -1305,3 +1305,270 @@ command Ping(shop_id: Int) {
     let want = "  Ping every @shop.connected, @shop.pinged\n";
     assert!(text.contains(want), "wanted\n{want}\ngot\n{text}");
 }
+
+/// **Several paths are one program, and every one of them is read.** A single `Option`
+/// held the path, so each argument silently overwrote the one before it: `hek check lib
+/// folds` checked `folds` alone and reported the types declared under `lib` as unknown,
+/// which is how a port found this, and `hek check folds lib` checked `lib` alone and
+/// **exited zero** having looked at none of the fold declarations. A check that passes by
+/// discarding its arguments is worse than one that refuses them.
+///
+/// Either order, because a module is a diagnostic label rather than a namespace and
+/// declaration order across files does not matter.
+#[test]
+fn several_paths_are_one_program() {
+    let root = project(
+        "several-paths",
+        &[
+            ("lib/order.hk", EVENTS),
+            ("commands/place.hk", COMMAND),
+            ("tests/place.hk", PASSING),
+        ],
+    );
+    let path = |part: &str| root.join(part).to_str().expect("a utf-8 path").to_string();
+    for order in [
+        ["lib", "commands", "tests"],
+        ["tests", "commands", "lib"],
+        ["commands", "lib", "tests"],
+    ] {
+        let args: Vec<String> = ["check".to_string()]
+            .into_iter()
+            .chain(order.iter().map(|part| path(part)))
+            .collect();
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        let output = hek(&borrowed);
+        assert!(
+            output.status.success(),
+            "for {order:?}: {}{}",
+            stdout(&output),
+            stderr(&output)
+        );
+        assert!(
+            stdout(&output).contains("checked 3 files"),
+            "for {order:?}: {}",
+            stdout(&output)
+        );
+    }
+}
+
+/// **Naming a file twice is not declaring it twice.** A caller being explicit about a file
+/// inside a directory it already asked for, or listing one twice, would otherwise have
+/// every declaration in it reported as a duplicate of itself. Compared by canonical path,
+/// so a relative and an absolute spelling of one file are one file.
+#[test]
+fn a_file_named_twice_is_read_once() {
+    let root = project(
+        "named-twice",
+        &[("lib/order.hk", EVENTS), ("commands/place.hk", COMMAND)],
+    );
+    let path = |part: &str| root.join(part).to_str().expect("a utf-8 path").to_string();
+    for args in [
+        vec!["check".to_string(), path("lib"), path("lib/order.hk")],
+        vec![
+            "check".to_string(),
+            path("lib/order.hk"),
+            path("lib/order.hk"),
+            path("commands"),
+        ],
+        vec![
+            "check".to_string(),
+            root.to_str().expect("a utf-8 path").to_string(),
+            path("commands/place.hk"),
+        ],
+    ] {
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        let output = hek(&borrowed);
+        assert!(
+            output.status.success(),
+            "for {args:?}: {}{}",
+            stdout(&output),
+            stderr(&output)
+        );
+        assert!(
+            !stdout(&output).contains("declared twice") && !stdout(&output).contains("already"),
+            "for {args:?}: nothing is a duplicate of itself: {}",
+            stdout(&output)
+        );
+    }
+}
+
+/// A diagnostic is labelled by the module's path inside the project, and with several
+/// paths that is read against the deepest directory all of them share. So the label is
+/// what it would have been had the caller named their common parent, rather than a path
+/// on this disk.
+#[test]
+fn a_label_is_read_against_the_common_ancestor() {
+    let root = project(
+        "label-ancestor",
+        &[
+            ("lib/order.hk", EVENTS),
+            (
+                "commands/place.hk",
+                "command Place(order_id: Int) {\n  emit @order.nope { order_id }\n}\n",
+            ),
+        ],
+    );
+    let path = |part: &str| root.join(part).to_str().expect("a utf-8 path").to_string();
+    let output = hek(&["check", &path("lib"), &path("commands")]);
+    let text = stdout(&output);
+    assert!(
+        text.contains("commands/place.hk:"),
+        "labelled inside the project: {text}"
+    );
+    assert!(
+        !text.contains(root.to_str().expect("a utf-8 path")),
+        "and not by its path on this disk: {text}"
+    );
+}
+
+/// **The label is read against the common ancestor for relative paths too**, which is the
+/// case the test above cannot see: it builds absolute paths, and the root was canonicalised
+/// while the paths were not, so `strip_prefix` silently never matched and every label came
+/// out as the whole path given. Run from inside the project, which is how a person types it.
+#[test]
+fn a_relative_path_is_labelled_against_the_common_ancestor() {
+    let root = project(
+        "relative-ancestor",
+        &[
+            ("lib/order.hk", EVENTS),
+            (
+                "commands/place.hk",
+                "command Place(order_id: Int) {\n  emit @order.nope { order_id }\n}\n",
+            ),
+        ],
+    );
+    let inside = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_hek"))
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .expect("run hek");
+        String::from_utf8(output.stdout).expect("utf-8 output")
+    };
+
+    // What naming the parent gives, which is what naming its two children has to give.
+    let whole = inside(&["check", "."]);
+    assert!(
+        whole.contains("commands/place.hk:"),
+        "the baseline: {whole}"
+    );
+    for args in [
+        vec!["check", "lib", "commands"],
+        vec!["check", "commands", "lib"],
+        // `.` beside a subdirectory of itself shares nothing, so the `.` has to come off
+        // the label rather than ride along as part of the module's name.
+        vec!["check", ".", "lib"],
+    ] {
+        let text = inside(&args);
+        assert!(text.contains("commands/place.hk:"), "for {args:?}: {text}");
+        assert!(
+            !text.contains("lib/commands/") && !text.contains("./commands/"),
+            "for {args:?}: no prefix rides along: {text}"
+        );
+    }
+}
+
+/// **A directory that contributes no `.hk` file is named, wherever it sits.** Only checking
+/// whether the *combined* list came out empty is the same silent pass as the last-path-wins
+/// loop, one argument over: `hek check lib folds commands` with `folds` renamed away would
+/// check two directories, say nothing about the third, and exit zero.
+#[test]
+fn an_empty_directory_among_several_is_named() {
+    let root = project(
+        "empty-among-several",
+        &[("lib/order.hk", EVENTS), ("commands/place.hk", COMMAND)],
+    );
+    fs::create_dir_all(root.join("folds")).expect("create the empty directory");
+    let path = |part: &str| root.join(part).to_str().expect("a utf-8 path").to_string();
+    for args in [
+        vec![
+            "check".to_string(),
+            path("lib"),
+            path("folds"),
+            path("commands"),
+        ],
+        vec!["check".to_string(), path("folds"), path("lib")],
+        vec!["check".to_string(), path("lib"), path("folds")],
+    ] {
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        let output = hek(&borrowed);
+        assert!(
+            !output.status.success(),
+            "for {args:?}: it passed by discarding one: {}",
+            stdout(&output)
+        );
+        assert!(
+            stderr(&output).contains("no `.hk` files under `")
+                && stderr(&output).contains("folds`"),
+            "for {args:?}: {}",
+            stderr(&output)
+        );
+    }
+}
+
+/// And a path that is neither a directory nor a `.hk` file is named **wherever it sits**.
+/// Written with the bad path first on purpose: last, it was the only one that survived the
+/// overwriting and so was the only one ever looked at, and `hek check nope.txt lib` used to
+/// succeed by discarding the mistake.
+#[test]
+fn a_path_that_is_neither_is_named() {
+    let root = project("neither", &[("lib/order.hk", EVENTS)]);
+    let path = root.join("lib").to_str().expect("a utf-8 path").to_string();
+    for args in [
+        vec!["check", "nope.txt", &path],
+        vec!["check", &path, "nope.txt"],
+    ] {
+        let output = hek(&args);
+        assert!(
+            !output.status.success(),
+            "for {args:?}: {}",
+            stdout(&output)
+        );
+        assert!(
+            stderr(&output).contains("`nope.txt` is not a directory or a `.hk` file"),
+            "for {args:?}: {}",
+            stderr(&output)
+        );
+    }
+}
+
+/// **`-` and a path cannot both be meant**, and this is the last-path-wins bug one argument
+/// over: `-` reads one module from stdin, so `hek fmt - lib` formatted stdin and said
+/// nothing at all about `lib`. Found by looking for siblings of the reported bug rather
+/// than stopping at it.
+#[test]
+fn stdin_and_a_path_are_refused_together() {
+    let root = project("stdin-and-path", &[("lib/order.hk", EVENTS)]);
+    let path = root.join("lib").to_str().expect("a utf-8 path").to_string();
+    for args in [
+        vec!["fmt", "-", &path],
+        vec!["fmt", &path, "-"],
+        vec!["digest", "--hash", "-", &path],
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_hek"))
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn hek");
+        child
+            .stdin
+            .as_mut()
+            .expect("a stdin pipe")
+            .write_all(EVENTS.as_bytes())
+            .expect("write the module");
+        let output = child.wait_with_output().expect("run hek");
+
+        assert!(
+            !output.status.success(),
+            "for {args:?}: {}",
+            stdout(&output)
+        );
+        assert!(
+            stderr(&output).contains("pass the paths or `-`, not both"),
+            "for {args:?}: {}",
+            stderr(&output)
+        );
+    }
+}

@@ -1,7 +1,7 @@
 # `hek`
 
-The command-line checker. It reads every `.hk` file under a directory as one program,
-reports the first thing wrong with it, and runs the `test` declarations it found.
+The command-line checker. It reads every `.hk` file under the paths it is given as one
+program, reports the first thing wrong with it, and runs the `test` declarations it found.
 
 ```
 $ hek
@@ -21,18 +21,44 @@ pass   an email that already placed an order is refused
 
 ```
 hek [check|test|fmt|digest] [--boundaries] [--tables] [--check]
-    [--packed|--hash|--json] [--tests] [path|-]
+    [--packed|--hash|--json] [--tests] [path..|-]
 ```
 
 | Command | Does |
 | --- | --- |
-| `hek check` | parses every `.hk` file under `path` as one program |
+| `hek check` | parses every `.hk` file under the paths as one program |
 | `hek test` | the same, then runs every `test` declaration |
 | `hek` | both |
-| `hek fmt` | rewrites every `.hk` file under `path` canonically |
+| `hek fmt` | rewrites every `.hk` file under the paths canonically |
 | `hek digest` | prints what that program does, with everything else taken away |
 
-`path` is a directory or a single `.hk` file, and defaults to the current directory.
+Each `path` is a directory or a single `.hk` file, and with none given the current directory
+is used.
+
+**Several paths are one program**, which is what a module being a diagnostic label rather
+than a namespace already means (`docs/modules.md`): `hek check lib folds` is the same program
+as `hek check .` over a tree holding only those two, and declaration order across the files
+does not matter. A file named twice, or named inside a directory already given, is read
+**once**, because naming a file twice is not declaring it twice. A path that is neither a
+directory nor a `.hk` file is named wherever it sits in the list.
+
+That is a fix rather than a feature. A single slot held the path, so each argument silently
+overwrote the one before it: `hek check lib folds` checked `folds` alone and reported the
+types declared under `lib` as unknown, which is how a port found it, and `hek check folds lib`
+checked `lib` alone and **exited zero** having looked at none of the fold declarations. A
+`hek check` in CI naming three directories checked one of them and passed.
+
+A diagnostic is labelled by the module's path inside the project, which with several paths is
+read against the deepest directory all of them share **as they were written**: `hek check
+lib/folds lib/events` labels a module `folds/order.hk`, which is what naming `lib` would have
+given. Written and not canonicalised, because the label is stripped off the path the caller's
+own argument was joined onto, and comparing the two in different spaces means the strip
+silently never happens. Mixing a relative path with an absolute one therefore shares nothing,
+and a label is then the path as given, which is a long answer rather than a wrong one.
+
+A directory that holds no `.hk` file is named wherever it sits, rather than passing because
+another path contributed some: `hek check lib folds commands` with `folds` renamed away is a
+run that would otherwise check two directories and exit zero.
 
 `--boundaries` adds one line per command naming what it guards and what it reads, transitively
 (`docs/guards.md`). It is asked for rather than printed, because `check` is a pass/fail
@@ -180,19 +206,26 @@ Nothing is printed on the way, so `hek digest --packed hek/ | sha256sum` agrees 
 `hek digest --hash hek/`. A program that does not check has no digest form, so the diagnostics go to
 stderr and the status is 1. `hek digest -` reads one module from stdin, like `fmt -`.
 
+**`-` and a path cannot both be given.** A run reads stdin or the paths, so there is nothing for a
+path to mean beside `-`, and naming both used to read stdin and discard the paths without a word.
+That is the same silent discard as the last-path-wins arg loop above, one argument over, and it was
+found by looking for siblings of it rather than stopping at the one that was reported.
+
 Exit status is 0 when everything parsed and every test passed, and 1 otherwise. `check`
 is the pre-commit form: a failing test does not fail it, because a test that fails is a
 program that parsed. Plain `hek fmt` holds to the same cut: it fails only on a file it could
 not read as hek at all, not on one it changed.
 
-## Everything under `path` is one program
+## Everything under the paths is one program
 
 There is no project file, no manifest and no list of sources. A module is a diagnostic
 label rather than a namespace (`docs/modules.md`), declaration order does not matter, and
 nothing has to be declared on behalf of anything else, so "every `.hk` file here" is a
 complete description of a program and there is nothing left for a manifest to say.
 
-A single file is a whole program for the same reason, which is why pointing at one works.
+A single file is a whole program for the same reason, which is why pointing at one works,
+and so is a handful of directories: the paths are a way of saying which files, not a set of
+separate programs to check one after another.
 
 Two directories are skipped: anything beginning with `.`, and `target`. A build directory
 holding a copied `.hk` file would otherwise join the program and collide with the source

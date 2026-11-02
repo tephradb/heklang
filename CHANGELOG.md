@@ -33,6 +33,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answer it differently, and it names the fold that has to change rather than the one that was
   asked for, because they are usually not the same fold.
 
+- **`hek check` read only the last path it was given.** A single slot held it, so each argument
+  silently overwrote the one before it. `hek check lib folds` checked `folds` alone and reported
+  the types declared under `lib` as unknown, which is how a port found it; `hek check folds lib`
+  checked `lib` alone and **exited zero** having looked at none of the fold declarations, so a
+  `hek check` in CI naming three directories checked one of them and passed. A check that passes by
+  discarding its arguments is worse than one that refuses them.
+
+  Several paths are now one program, which is what a module being a diagnostic label rather than a
+  namespace already means: `hek check lib folds` is the same program as `hek check .` over a tree
+  holding only those two. Directories and `.hk` files mix. A file named twice, or named inside a
+  directory already given, is read **once**, since naming a file twice is not declaring it twice.
+  A diagnostic is labelled against the deepest directory all the paths share as they were written,
+  so `hek check lib/folds lib/events` labels a module `folds/order.hk`. A path that is neither a
+  directory nor a `.hk` file is named wherever it sits in the list rather than only when it happened
+  to be last, and so is a directory that holds no `.hk` file: checking only whether the combined
+  list came out empty would let `hek check lib folds commands` pass with `folds` renamed away.
+
+  The same silent discard was one argument over and is refused rather than fixed: `-` reads one
+  module from stdin, so `hek fmt - lib` formatted stdin and said nothing at all about `lib`. A run
+  cannot be both, so it now says so. Found by looking for siblings of the reported bug.
 
 ### Added
 
