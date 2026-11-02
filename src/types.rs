@@ -250,6 +250,11 @@ pub fn method_sig(receiver: &Type, method: &str) -> Option<Sig> {
         // one element, or a whole list of them. Exact rather than coercing, because a
         // `List(T)` does not fill a `List(T?)` anywhere else either.
         (Type::List(_), "concat") => sig(vec![receiver.clone()], receiver.clone()),
+        // Gated by nothing, which is what `contains` and `remove` are: all three are the
+        // element type's equality, and equality is total where ordering is not. It is not
+        // one of the absent list in `docs/stdlib.md` section 5 either, for the reason
+        // `sum` is not: it takes no arm.
+        (Type::List(_), "distinct") => sig(Vec::new(), receiver.clone()),
 
         (Type::Map(key, value), "get") => sig(
             vec![key.as_ref().clone()],

@@ -96,6 +96,7 @@ of the calls an author would otherwise write.
 | `contains(T)` | `Bool` | |
 | `len()` | `Int` | |
 | `is_empty()` | `Bool` | |
+| `distinct()` | `List(T)` | the first of each, in written order |
 | `sum()` | `T` | only where `T + T` is a `T`: `Int`, `Decimal(n)`, `Money(n)` |
 
 `push`, `concat` and `remove` build a new list rather than mutating one, which is what keeps a fold
@@ -103,6 +104,15 @@ arm's result a new state and keeps a value nothing can change once it is handed 
 removes **every** equal element, not the first, so it is idempotent the way a map's is. `concat` is
 `push`'s other half: one element, or a whole list of them, and the element types have to agree
 exactly because a `List(T)` does not fill a `List(T?)` here any more than it does anywhere else.
+
+`distinct` keeps the **first** of each, so the order is the order the elements were written in. That
+is the order a comprehension over the result then reads in, and the only order a list has to offer:
+there is no `sort`, so picking any other here would be a sort arriving by a side door. It is gated by
+nothing, which is what `contains` and `remove` are: all three are the element type's equality, and
+equality is total where ordering is not, so a list of records or of booleans dedupes as readily as
+one of ids. A scan rather than a set, because a set would need a hash or an order that not every
+value has; that is the same cost as the `contains` inside a comprehension it replaces, which is how
+it was written before, in two helper `fn`s with a comprehension nested in one of them.
 
 `sum` is the one reduction, and its row is read off the operator table above rather than written as
 a list of its own, so the two cannot drift: a type with no `+` has no `sum`, and the error says so.
@@ -391,6 +401,17 @@ Each of these is a decision with an argument behind it, not a gap waiting to be 
   iteration order is already defined, and `sum` covers the one reduction a large program actually
   reached for. A general `fold` would take an arbitrary arm to serve what was, across 19,300 lines,
   three sums and one concat, and an arbitrary arm over `Money` is where an amount learns to round.
+  **`sum` and `distinct` are not exceptions to that line**: neither takes an arm, so neither is a
+  place a rounding rule or an ordering could be written. `distinct` is in the language because
+  faking it took two `fn`s and a comprehension nested in one of them.
+- **No `Map` literal**, and the brace form is not it: `{ ... }` is a JSON object (section 2), and a
+  JSON object's key is a string. A literal that only accepted string keys would serve one of the
+  five map-typed read models a real port has and none of the other four, which are `Map(Int, _)`,
+  and reaching those means a grammar that takes a non-string key. Half of it is worse than none of
+  it, so `Map.empty.set(k, v)` chains and says the type it is building.
+- **No `last`, `take` or `drop` on a list.** Each was asked for by a port whose list folds existed
+  to hold a timeline, and a fold's history read is what those become; a list bounded by taking its
+  tail is a log kept in a column.
 - **No set type and no tuple type.** `Map(K, Bool)` covers membership and a record covers two values
   that travel together. The one place a port wanted a set it wanted an ordered one, which is a list.
 - **No `x.expect("reason")`.** `unwrap_or` and narrowing cover it without a panic.
@@ -400,6 +421,16 @@ Each of these is a decision with an argument behind it, not a gap waiting to be 
   ones month-end clamping is an argument about, and the calendar fields plus `from_parts` make them
   writable as a `fn`. The fixed-length units are in the language, because they have no clamping
   question: see the `Timestamp` table above.
+- **No date helpers**, meaning no `date()`, no day of week and no ISO week. The one a second port
+  asked for would have saved two three-line `fn`s: `"{at.year()}-{at.month().pad(2)}-{at.day().pad(2)}"`
+  is the whole of it, and `Int.pad` exists to make exactly that correct. Day of week and ISO week
+  were wanted by a simulator's calendar and never by the application it drove, which is the
+  difference between a helper and a library.
+- **No `Int` to `Decimal(n)` or `Money(n)` conversion.** A literal resolves directly to either, a
+  typed `Int` does not fill one (section 3 of `docs/types.md`), and `Int * Money(n)` is in the
+  operator table for the arithmetic. Asked for twice and attempted neither time: the port that
+  raised it had kept every amount as `Int` cents from the start, so there was no code to design
+  from. The `Money` half is also the currency argument in `docs/money.md`.
 - **No regular expressions.** Nothing in a real port wanted one that `contains`, `starts_with` and
   `after_last` did not cover.
 - **No `Money` conversion and no rate type.** All of it needs currency back in the type, and

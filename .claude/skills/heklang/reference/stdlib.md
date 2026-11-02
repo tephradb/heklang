@@ -79,11 +79,18 @@ otherwise write.
 | `contains(T)` | `Bool` | |
 | `len()` | `Int` | |
 | `is_empty()` | `Bool` | |
+| `distinct()` | `List(T)` | the first of each, in written order |
 | `sum()` | `T` | only `Int`, `Decimal(n)`, `Money(n)` |
 
 `push`, `concat` and `remove` build a new list rather than mutating one. `remove` removes **every**
 equal element, so it is idempotent. There is no indexing. `concat` takes a whole `List(T)` at the
 same element type exactly: a `List(T)` does not join a `List(T?)`.
+
+`distinct` keeps the **first** of each, so the order is written order, which is what a comprehension
+over the result reads in. It is gated by nothing, the way `contains` and `remove` are: all three are
+the element type's equality, and equality is total where ordering is not. It is a scan, so it costs
+what the `contains` inside a comprehension costs; the point is that faking it took two `fn`s with a
+comprehension nested in one of them. `[a for a in xs.distinct() if ..]` is the shape.
 
 `sum` exists exactly where `+` does, so a `List(String)` or a `List(Int?)` has none and the error
 says so. The element type is the result type: same scale in and out, an empty list is that type's

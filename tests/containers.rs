@@ -235,6 +235,47 @@ fn remove_drops_every_equal_element() {
     assert_eq!(items(&twice), [2], "removing again changes nothing");
 }
 
+/// **The first of each, so the order is the order they were written in.** That is the
+/// order a comprehension over the result reads in, and the only order a list has to
+/// offer: there is no `sort`, so inventing one here would be the sort arriving by a side
+/// door.
+#[test]
+fn distinct_keeps_the_first_of_each() {
+    let event = fired("", &emitting("[3, 1, 3, 2, 1].distinct()"), vec![]);
+    assert_eq!(items(&event), [3, 1, 2]);
+
+    // The same equality `contains` and `remove` use, so a list with nothing repeated
+    // comes back as it was and calling it twice changes nothing.
+    let already = fired("", &emitting("[1, 2, 3].distinct().distinct()"), vec![]);
+    assert_eq!(items(&already), [1, 2, 3]);
+
+    let empty = fired(
+        NO_ITEMS,
+        &emitting("no_items.distinct()"),
+        vec![empty_list()],
+    );
+    assert_eq!(items(&empty), [] as [i64; 0]);
+}
+
+/// Gated by nothing, which is what `contains` and `remove` are: all three are the element
+/// type's equality, and equality is total where ordering is not. So it works on the types
+/// `max` and `min` refuse, and on a nested list, where equality is the whole list's.
+#[test]
+fn distinct_needs_only_equality() {
+    for (expr, expected) in [
+        (r#"["a", "b", "a"].distinct().len()"#, "2"),
+        (r#"[true, false, true].distinct().len()"#, "2"),
+        (r#"[[1, 2], [1, 2], [2, 1]].distinct().len()"#, "2"),
+    ] {
+        let body = describing(&format!(r#""{{{expr}}}""#));
+        assert_eq!(
+            label(&fired(NO_ITEMS, &body, vec![empty_list()])),
+            expected,
+            "for `{expr}`"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------------
 // Map.
 

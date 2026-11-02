@@ -4466,6 +4466,27 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
                 items,
             })
         }
+        (Value::List { inner, items }, "distinct") => {
+            expect_arity(method, 0, &args)?;
+            // **The first of each, so the order is the order they were written in**, which
+            // is what a comprehension over the result then reads in and what `keys` and
+            // `values` already promise for a map.
+            //
+            // A scan rather than a set: the equality is the element type's own, the one
+            // `contains` and `remove` use, and a set would need a hash or an order that
+            // every value does not have. It is the same cost as the `contains` inside a
+            // comprehension that this replaces, in one call instead of two helper `fn`s.
+            let mut kept: Vec<Value> = Vec::with_capacity(items.len());
+            for item in items {
+                if !kept.contains(item) {
+                    kept.push(item.clone());
+                }
+            }
+            Ok(Value::List {
+                inner: inner.clone(),
+                items: kept,
+            })
+        }
         (Value::List { inner, items }, "remove") => {
             expect_arity(method, 1, &args)?;
             // Every equal element, not the first, which makes it idempotent the way

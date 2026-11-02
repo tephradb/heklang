@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`List.distinct()`** (`docs/stdlib.md`), the first of each in written order:
+
+  ```hek
+  [a for a in unlocked.distinct() if a >= 0 && a < ACHIEVEMENTS && !held.contains(a)]
+  ```
+
+  Gated by nothing, which is what `contains` and `remove` are: all three are the element type's
+  equality, and equality is total where ordering is not. First-occurrence order rather than any
+  other, because there is no `sort` and picking one here would be a sort arriving by a side door.
+  It is a scan rather than a set, since a set needs a hash or an order not every value has, so it
+  costs what the `contains` inside a comprehension already cost. What it replaces is two helper
+  `fn`s with a comprehension nested in one of them, written to fake it.
+
+  `docs/stdlib.md` section 5 now also writes down why `last`, `take` and `drop` are not here, and
+  why there is no date helper, no `Int` to `Decimal(n)` and no map literal, each asked for with its
+  measured case or its lack of one.
+
 - **`max` and `min`, on an ordered value and on an optional one** (`docs/stdlib.md`):
 
   ```hek
