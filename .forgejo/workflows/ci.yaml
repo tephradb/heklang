@@ -64,7 +64,8 @@ jobs:
       # generator-version artefacts, so this gate also pins the tool: a runner on a
       # different tree-sitter fails the diff on a grammar that is perfectly in sync. The
       # version is printed first so that failure names itself rather than reading as a
-      # stale commit. Committed with 0.26.9.
+      # stale commit. Committed with 0.26.11; `devenv.nix` sets `TREE_SITTER_ABI_VERSION`
+      # so a bare `generate` in the dev shell cannot regress the committed ABI.
       - run: |
           cd tree-sitter-hek
           tree-sitter --version
