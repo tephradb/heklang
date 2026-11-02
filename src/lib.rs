@@ -23,8 +23,8 @@ pub use host::{
     Query, Recorded, Request, Rows, Secrets,
 };
 pub use interp::{
-    Cells, Counts, Effectful, Error, ErrorKind, Execution, Interpreter, Invocation, Outcome,
-    Projection, Rebuild, Row, Store, Tables, partition_key,
+    Cells, Counts, Effectful, Error, ErrorKind, Execution, Interpreter, Invocation, OnStep,
+    Outcome, Projection, Rebuild, Row, Store, Tables, partition_key,
 };
 pub use ir::{
     Absent, Action, Arm, BinOp, Bind, Builtin, Command, ConstDef, Delivery, Effect, EntityDef,

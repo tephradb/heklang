@@ -1653,3 +1653,314 @@ fn a_skipped_record_is_written_under_no_key_by_either_driver() {
         "a skipped record counts under no key, not under the one an absent part reduces to"
     );
 }
+
+// ---------------------------------------------------------------------------------
+// A fold's history: the accumulator after each record.
+
+/// **The last step is the stored value**, which is the obligation that makes a history read
+/// worth anything: a reader showing a timeline and a reader showing the current value have
+/// to agree. Asserted against `fold_stored` at the same bound rather than against a
+/// hand-written number, so the two cannot be right about different things.
+#[test]
+fn the_last_step_is_what_the_column_holds() {
+    let source = "event @wallet.topped_up { user_id: Int, cents: Int }
+event @wallet.spent { user_id: Int, cents: Int }
+
+fold WalletBalance(user_id: Int) -> held: Int = 0 {
+  on @wallet.topped_up(user_id) { cents } => held + cents
+  on @wallet.spent(user_id) { cents } => held - cents
+}
+";
+    let program = program(source);
+    let mut interpreter = Interpreter::new(&program);
+    for (path, cents) in [
+        ("wallet.topped_up", 1000),
+        ("wallet.spent", 250),
+        ("wallet.topped_up", 500),
+    ] {
+        given(
+            &mut interpreter,
+            path,
+            [("user_id", Value::Int(1)), ("cents", Value::Int(cents))],
+        );
+    }
+
+    let head = interpreter.host().records().len() as u64;
+    let mut steps: Vec<(u64, Value)> = Vec::new();
+    let last = interpreter
+        .fold_steps(
+            "WalletBalance",
+            [("user_id", Value::Int(1))],
+            head,
+            &mut |record, value| {
+                steps.push((record.position, value.clone()));
+                Ok(())
+            },
+        )
+        .expect("the steps fold");
+
+    assert_eq!(
+        steps,
+        vec![
+            (0, Value::Int(1000)),
+            (1, Value::Int(750)),
+            (2, Value::Int(1250)),
+        ]
+    );
+    let stored = interpreter
+        .fold_stored("WalletBalance", [("user_id", Value::Int(1))], head)
+        .expect("the column refolds");
+    assert_eq!(steps.last().map(|(_, value)| value.clone()), Some(stored));
+    assert_eq!(last, Value::Int(1250));
+
+    // A head of zero is a log with nothing in it, so there is nothing to step through and
+    // the answer is the seed. `fold_stored` takes the same number the same way.
+    let mut none = 0;
+    let seed = interpreter
+        .fold_steps(
+            "WalletBalance",
+            [("user_id", Value::Int(1))],
+            0,
+            &mut |_, _| {
+                none += 1;
+                Ok(())
+            },
+        )
+        .expect("the seed folds");
+    assert_eq!((none, seed), (0, Value::Int(0)));
+}
+
+/// **A record that moved nothing is still a step**, and that is deliberate: a reader diffing
+/// consecutive values is what decides which positions are changes, and "the value after this
+/// record" is a fact about every record the query delivered. Deciding it here would decide it
+/// for every caller, and a caller wanting only the changes has the values to compare.
+#[test]
+fn a_record_that_changed_nothing_is_still_reported() {
+    let source = "event @wallet.topped_up { user_id: Int, cents: Int }
+
+fold WalletBalance(user_id: Int) -> held: Int = 0 {
+  on @wallet.topped_up(user_id) { cents } => held + cents
+}
+";
+    let program = program(source);
+    let mut interpreter = Interpreter::new(&program);
+    for cents in [1000, 0, 500] {
+        given(
+            &mut interpreter,
+            "wallet.topped_up",
+            [("user_id", Value::Int(1)), ("cents", Value::Int(cents))],
+        );
+    }
+
+    let mut steps: Vec<Value> = Vec::new();
+    interpreter
+        .fold_steps(
+            "WalletBalance",
+            [("user_id", Value::Int(1))],
+            3,
+            &mut |_, value| {
+                steps.push(value.clone());
+                Ok(())
+            },
+        )
+        .expect("the steps fold");
+    assert_eq!(
+        steps,
+        vec![Value::Int(1000), Value::Int(1000), Value::Int(1500)],
+        "the zero top-up is a step whose value did not move"
+    );
+}
+
+/// **A ranged column is refused**, because this is exactly where the two drivers are defined
+/// to disagree: `a_key_minted_after_a_ranged_record_does_not_see_it` above has the sink
+/// answering 11 and a refold answering 21 for one key over one log. A by-key history would
+/// report the refold's steps, so it would show a move the stored column never made, which is
+/// the wrongness a history read exists to remove. `Column::ranges` is the same question
+/// asked once.
+#[test]
+fn a_ranged_column_has_no_history() {
+    let source = "event @shop.uninstalled { shop_id: Int }
+event @order.placed { shop_id: Int, order_id: Int }
+
+fold OrderClosed(shop_id: Int, order_id: Int) -> Bool = false {
+  on @order.placed(shop_id, order_id) => false
+  on @shop.uninstalled(shop_id) => true
+}
+
+fold OrderSeen(shop_id: Int, order_id: Int) -> n: Int = 0 {
+  on @order.placed(shop_id, order_id) => n + 1
+}
+";
+    let program = program(source);
+    let interpreter = Interpreter::new(&program);
+    let err = interpreter
+        .fold_steps(
+            "OrderClosed",
+            [("shop_id", Value::Int(1)), ("order_id", Value::Int(9))],
+            0,
+            &mut |_, _| Ok(()),
+        )
+        .expect_err("a ranged column has no history");
+    let message = err.to_string();
+    assert!(message.contains("leaves a key part open"), "got: {message}");
+    assert!(
+        message.contains("steps the stored column never took"),
+        "the reason is the disagreement, not the cost: {message}"
+    );
+
+    // And the column beside it, on the same key, does have one: the refusal is per column
+    // and not per table.
+    interpreter
+        .fold_steps(
+            "OrderSeen",
+            [("shop_id", Value::Int(1)), ("order_id", Value::Int(9))],
+            0,
+            &mut |_, _| Ok(()),
+        )
+        .expect("every arm pins the whole key");
+
+    // The same question a host asks once, rather than per request.
+    let tables = Tables::new(&program);
+    let ranges = |fold: &str| tables.layout().column(fold).expect("the column").1.ranges();
+    assert!(ranges("OrderClosed"));
+    assert!(!ranges("OrderSeen"));
+}
+
+/// **A computed key and a lookup are allowed**, which is the other half of the ranged-arm
+/// refusal and deliberately not symmetrical with it. Those two *agree* between the drivers,
+/// which is the claim this whole file exists to make, so what they cost is time and not
+/// correctness: the lookup is folded again at every candidate record. A caller can decide
+/// about a cost. It cannot decide about a wrong answer, which is why the one case where the
+/// drivers differ is the one case refused.
+#[test]
+fn a_computed_key_and_a_lookup_both_have_a_history() {
+    let source = "event @workshop.opened { workshop_id: Int, title: String }
+event @seat.booked { workshop_id: Int, at_month: String, paid: Int }
+
+fold WorkshopTitle(workshop_id: Int) -> String = \"untitled\" {
+  on @workshop.opened(workshop_id) { title } => title
+}
+
+fold MonthlyRevenue(workshop_id: Int, month: String) -> taken: Int = 0 {
+  on @seat.booked(workshop_id) { at_month, paid } key month = at_month => taken + paid
+}
+
+fold TitleRevenue(title: String) -> taken: Int = 0 {
+  on @seat.booked { workshop_id, paid } key title = WorkshopTitle { workshop_id } =>
+    taken + paid
+}
+";
+    let program = program(source);
+    let mut interpreter = Interpreter::new(&program);
+    given(
+        &mut interpreter,
+        "workshop.opened",
+        [
+            ("workshop_id", Value::Int(1)),
+            ("title", Value::str("Rust")),
+        ],
+    );
+    for paid in [40, 60] {
+        given(
+            &mut interpreter,
+            "seat.booked",
+            [
+                ("workshop_id", Value::Int(1)),
+                ("at_month", Value::str("2020-01")),
+                ("paid", Value::Int(paid)),
+            ],
+        );
+    }
+
+    let head = interpreter.host().records().len() as u64;
+    let steps = |fold: &str, args: Vec<(&'static str, Value)>| {
+        let mut seen: Vec<Value> = Vec::new();
+        let last = interpreter
+            .fold_steps(fold, args, head, &mut |_, value| {
+                seen.push(value.clone());
+                Ok(())
+            })
+            .unwrap_or_else(|err| panic!("{fold}: {err}"));
+        (seen, last)
+    };
+
+    // The computed part is compared per record, so only this bucket's records are steps.
+    let (computed, last) = steps(
+        "MonthlyRevenue",
+        vec![
+            ("workshop_id", Value::Int(1)),
+            ("month", Value::str("2020-01")),
+        ],
+    );
+    assert_eq!(computed, vec![Value::Int(40), Value::Int(100)]);
+    assert_eq!(last, Value::Int(100));
+
+    // And the lookup is answered as of each record, which is what makes the first booking
+    // land under the title the workshop already had.
+    let (looked_up, last) = steps("TitleRevenue", vec![("title", Value::str("Rust"))]);
+    assert_eq!(looked_up, vec![Value::Int(40), Value::Int(100)]);
+    assert_eq!(last, Value::Int(100));
+
+    // Both agree with the stored read at the same bound, which is the obligation.
+    for (fold, args) in [
+        (
+            "MonthlyRevenue",
+            vec![
+                ("workshop_id", Value::Int(1)),
+                ("month", Value::str("2020-01")),
+            ],
+        ),
+        ("TitleRevenue", vec![("title", Value::str("Rust"))]),
+    ] {
+        let stored = interpreter
+            .fold_stored(fold, args, head)
+            .unwrap_or_else(|err| panic!("{fold}: {err}"));
+        assert_eq!(stored, Value::Int(100), "{fold}");
+    }
+}
+
+/// A **query-only** column has a history like any other, and a port's price timeline is one:
+/// an arm binding the envelope with `as e` is what makes a column hold when something
+/// happened, and that is exactly the column a reader wants a timeline of. The read is not a
+/// decision, which is the same allowance a test's `fold` action has.
+#[test]
+fn a_query_only_column_has_a_history() {
+    let source = "event @game.priced { game_id: Int, cents: Int }
+
+fold GamePricedAt(game_id: Int) -> Timestamp? = none {
+  on @game.priced as e (game_id) => e.at
+}
+";
+    let program = program(source);
+    let mut interpreter = Interpreter::new(&program);
+    for cents in [1000, 1200] {
+        given(
+            &mut interpreter,
+            "game.priced",
+            [("game_id", Value::Int(1)), ("cents", Value::Int(cents))],
+        );
+    }
+
+    let mut steps: Vec<Value> = Vec::new();
+    let last = interpreter
+        .fold_steps(
+            "GamePricedAt",
+            [("game_id", Value::Int(1))],
+            2,
+            &mut |_, value| {
+                steps.push(value.clone());
+                Ok(())
+            },
+        )
+        .expect("a query-only column steps");
+    // The harness stamps one minute per event from 2020-01-01T00:00:00Z, so these are the
+    // first two positions and the last step is what the column holds.
+    assert_eq!(
+        steps,
+        vec![
+            Value::some(Value::Timestamp(1_577_836_800_000_000)),
+            Value::some(Value::Timestamp(1_577_836_860_000_000)),
+        ]
+    );
+    assert_eq!(steps.last().cloned(), Some(last));
+}

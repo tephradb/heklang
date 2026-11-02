@@ -476,3 +476,21 @@ since the column is the last position of each.
 digest hash and not in its signature hash, and nothing in the interpreter reads it: a fold's
 value is the same value whether or not a store can sort on it.
 
+## 12. A column's history
+
+`Interpreter::fold_steps` is `fold_stored` with a visitor: it reports the accumulator after
+each record it folds, in log order. That is what a host serves a column's history from, and
+it replaces the list fold an application writes to keep a timeline, which duplicates the arms
+of the fold it shadows and grows without bound.
+
+**A column with a range arm has no history**, and that is the one refusal. An arm leaving a
+key part open covers the keys the table held when each record arrived, so a by-key read and
+the sink are defined to disagree (a key minted after a ranged record never sees it, and the
+sink's answer is the definition). A history read of one would show a move the stored column
+never made. `Column::ranges` is the same question asked once.
+
+A **computed key** and a **lookup** are served. Those agree between the drivers, so what they
+cost is time rather than correctness: the lookup is folded again at every candidate record.
+
+Writing `.hk` files, this is only worth knowing for one reason: **do not write a list fold to
+keep a timeline.** Fold the value, and let the history read answer "what was it before".

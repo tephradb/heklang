@@ -382,6 +382,29 @@ in order needs to do nothing for that, and a host applying them out of order get
 a way nothing can detect. And `Column::reads` is the dependency, transitively: it is what
 `Layout::closure` adds to a rebuild, and what tells a catalog that editing one fold refolds another.
 
+**`Interpreter::fold_steps` is how a host serves a column's history**: `fold_stored` with a visitor,
+called once per record the fold's own query delivers, in log order, with that record and the value
+as of it. Diffing consecutive values gives the positions where the column changed, the value before
+and after, and the record that did it; a record that moved nothing is reported too, because that is
+a fact about it and the filtering is the host's. The bound and the sealed hand-back are
+`fold_stored`'s, so `head` of `0` yields no steps and a `Value::Sealed` arrives untouched for the
+store to shred on its own read.
+
+It **refuses a column with a range arm**, for the boundary two paragraphs up: the by-key read and the
+sink disagree there, the sink is the definition, and a history that showed the refold's steps would
+show moves the column never made. `Column::ranges` answers the same question once, at startup, so a
+host need not learn it from a failed request. A computed key and a lookup are served, and are only
+quadratic.
+
+**There is no lower bound, and that is not an omission.** `head` is an upper bound, so "as of
+position N" is `fold_steps(.., N + 1, ..)`. There is no `from`, because the value after a record
+depends on every record before it: a fold started in the middle would report a first step that is
+the seed plus a tail, which is not what the column ever held. So a host paging a history folds from
+zero and filters the steps it reports, and a lower bound on a *page* is a filter on the visitor
+rather than a bound on the fold. For a long-lived key that is a scan of the key's own records per
+request, which is the same cost a by-key read already has and the reason a store serves the current
+value from the table instead.
+
 **A column may declare that it can be sorted on** (`docs/folds.md` rule 20), and
 `Column::indexes` is what a host builds its DDL and its `order_by` surface from. Each entry is the
 **key positions** that lead the index, in the table's key order, with the column itself implied

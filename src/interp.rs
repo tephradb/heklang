@@ -39,6 +39,10 @@ pub enum ErrorKind {
     UnknownProjector(String),
     UnknownEffect(String),
     UnknownFold(String),
+    /// [`Interpreter::fold_steps`] on a column some arm of which is a range update. A
+    /// by-key read of one does not agree with the stored value (`docs/folds.md` section
+    /// 11), so there is no history to report rather than a slow one.
+    NoHistory(String),
     NoSuchPosition(u64),
     /// Rule 12: terminal rather than a wedge, because no retry recovers erased data.
     /// The message names the erase as possibly non-local, which it usually is: rule 9
@@ -190,6 +194,10 @@ impl fmt::Display for ErrorKind {
             ErrorKind::UnknownProjector(name) => write!(f, "unknown projector `{name}`"),
             ErrorKind::UnknownEffect(name) => write!(f, "unknown effect `{name}`"),
             ErrorKind::UnknownFold(name) => write!(f, "unknown fold `{name}`"),
+            ErrorKind::NoHistory(name) => write!(
+                f,
+                "`{name}` has an arm that leaves a key part open, so it has no history: a range covers the keys the table held when each record arrived, and reading it by key would report steps the stored column never took"
+            ),
             ErrorKind::NoSuchPosition(position) => write!(f, "no event at position {position}"),
             ErrorKind::Erased { field, subject, id } => write!(
                 f,
@@ -1745,6 +1753,7 @@ impl<'a, H: Host> Interpreter<'a, H> {
                             0,
                             Some(position),
                             &mut frame,
+                            None,
                         )?;
                     }
                 }
@@ -2027,6 +2036,63 @@ impl<'a, H: Host> Interpreter<'a, H> {
             .map_err(|err| err.in_module(module))
     }
 
+    /// The same read as [`fold_stored`](Self::fold_stored), reporting the accumulator
+    /// **after each record it folds**, which is what a fold's history is made of.
+    ///
+    /// `visit` is called once per record the fold's own query delivers, in log order, with
+    /// that record and the value as of it. A reader diffing consecutive values gets the
+    /// positions where the column changed, the value before and after, and the record that
+    /// did it. Records that moved nothing are reported too: a purchase that passes through
+    /// a balance's arm without changing it is a fact about that record either way, and
+    /// deciding it here would be deciding for every caller.
+    ///
+    /// The bound and the sealed hand-back are `fold_stored`'s, for its reasons: `head` is a
+    /// log length, so `0` yields no steps at all, and a `Value::Sealed` arrives untouched
+    /// because the store holds the ciphertext and shreds on its own read.
+    ///
+    /// **There is no lower bound**, and that is not an omission: the value after a record
+    /// depends on every record before it, so a fold started in the middle would report a
+    /// first step that is the seed plus a tail and was never what the column held. A caller
+    /// paging a history folds from zero and filters what it reports.
+    ///
+    /// **A column with a range arm is refused**, and that is the one restriction. A refold
+    /// is a function of a key and the whole log, so it applies every ranged record to every
+    /// key, while the sink walks forward and applies one only to the rows that exist: a key
+    /// minted after a ranged record never sees it, and `docs/folds.md` section 11 settles
+    /// that the sink's answer is the definition. So a by-key history of such a column would
+    /// report a step the stored column never took, which is the wrongness a history read
+    /// exists to remove rather than to introduce. [`Column::ranges`] is the same question
+    /// asked once, for a host that wants to know before a request arrives.
+    ///
+    /// The check derives the layout per call, which is deliberate rather than overlooked: a
+    /// refusal a caller has to remember to ask for is not a refusal, and the derivation is
+    /// noise beside the log scan this then does. A host that wants the answer without the
+    /// scan has `Column::ranges` off the layout it already holds for the sink.
+    ///
+    /// **A computed key and a lookup are allowed**, which is the other half of that line and
+    /// not a symmetrical one: those two *agree* between the drivers, which is what
+    /// `tests/sink.rs` exists to prove. They are merely quadratic, since the lookup is
+    /// folded again at every candidate record, and a cost is the caller's to decide about
+    /// where a wrong answer is not.
+    pub fn fold_steps(
+        &self,
+        name: &str,
+        args: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
+        head: u64,
+        visit: OnStep<'_>,
+    ) -> Result<Value, Error> {
+        let def = self.fold_def(name)?;
+        let module = def.module.as_deref();
+        let layout = tables::layout(self.program);
+        if let Some((_, column)) = layout.column(name)
+            && column.ranges()
+        {
+            return Err(Error::new(ErrorKind::NoHistory(name.to_string())).in_module(module));
+        }
+        folding(self.program, &self.host, def, args, Some(head), Some(visit))
+            .map_err(|err| err.in_module(module))
+    }
+
     fn fold_def(&self, name: &str) -> Result<&'a Fold, Error> {
         self.program
             .fold(name)
@@ -2045,7 +2111,7 @@ impl<'a, H: Host> Interpreter<'a, H> {
         args: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
         head: Option<u64>,
     ) -> Result<Value, Error> {
-        folding(self.program, &self.host, def, args, head)
+        folding(self.program, &self.host, def, args, head, None)
     }
 
     /// One attempt: a DCB conflict leaves as [`ErrorKind::Conflict`] for the host to do
@@ -2228,6 +2294,7 @@ fn execute(
                             from,
                             at.checked_sub(1),
                             &mut frame,
+                            None,
                         )?;
                     }
                     // Rule 13: the live slices only. A slice whose key gate failed folded
@@ -2367,6 +2434,7 @@ fn folding(
     def: &Fold,
     args: impl IntoIterator<Item = (impl Into<Ident>, Value)>,
     head: Option<u64>,
+    steps: Option<OnStep<'_>>,
 ) -> Result<Value, Error> {
     // A fold's body is arms only: `Builder::stmt` is the one path onto either half of a
     // stage and a fold parser never reaches it, so an IR that grew statements here is a
@@ -2410,6 +2478,12 @@ fn folding(
             0,
             head.map(|head| head - 1),
             &mut frame,
+            // The accumulator's slot is known here and nowhere below, which is why it
+            // travels with the callback rather than being looked up in the driver.
+            steps.map(|visit| Steps {
+                slot: def.slot,
+                visit,
+            }),
         )?;
     }
     // Always set, because the seed above wrote it.
@@ -2450,7 +2524,7 @@ impl Asof<'_> {
             .ok_or_else(|| Error::new(ErrorKind::UnknownFold(name.to_string())))?;
         match self {
             Asof::Replay { log, upto } => {
-                folding(program, *log, def, args.iter().cloned(), Some(*upto))
+                folding(program, *log, def, args.iter().cloned(), Some(*upto), None)
             }
             Asof::Stored { layout, columns } => {
                 // Always found: the parser refuses a lookup of a fold `layout` keeps no
@@ -2642,6 +2716,26 @@ fn narrowing(resolved: &[Resolved]) -> Vec<Predicate> {
 /// between it and the slices an invariant three places had to keep; now there is one
 /// construction and nothing to assert. `from` and `upto` are the one thing a caller still
 /// decides, because the range is the one latitude `docs/host.md` section 4 does not give.
+/// What [`Interpreter::fold_steps`] is called back with: one record the fold folded and the
+/// accumulator as of it, in log order.
+///
+/// Named rather than written out at each of the three places it appears, which is also what
+/// gives it somewhere to say that an `Err` from it stops the fold: a visitor that cannot take
+/// the next step is the caller going away, not a fold that failed.
+pub type OnStep<'a> = &'a mut dyn FnMut(&Record, &Value) -> Result<(), Error>;
+
+/// What a history read adds to the by-key driver: the accumulator reported after each
+/// record, which is the one thing a fold otherwise never says out loud.
+///
+/// The slot travels with the callback because the driver does not otherwise know which of
+/// the frame's slots is the answer: it folds whatever the stage says and `folding` is where
+/// [`Fold::slot`] is in hand.
+struct Steps<'a> {
+    slot: Slot,
+    visit: OnStep<'a>,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn fold(
     program: &Program,
     exprs: &Exprs,
@@ -2650,6 +2744,7 @@ fn fold(
     from: u64,
     upto: Option<u64>,
     frame: &mut Frame,
+    mut steps: Option<Steps<'_>>,
 ) -> Result<(), Error> {
     // `zip` below truncates, so a resolved list shorter than the slices would match a
     // stage against another stage's predicates and bind the wrong events into its slots.
@@ -2761,6 +2856,15 @@ fn fold(
                 let value = fitted_at(value, &update.ty, exprs.span(update.value))?;
                 frame.set(update.slot, value)?;
             }
+        }
+        // **After every slice, and for every record the query delivered**, including one
+        // that matched no arm or was skipped by a computed key: those are the records whose
+        // step did not move the value, and a reader diffing consecutive values is what
+        // decides they are not changes. Reporting them is cheaper than deciding here, and
+        // "the value after this record" is a fact about every record either way.
+        if let Some(steps) = steps.as_mut() {
+            let held = frame.get(steps.slot)?.clone();
+            (steps.visit)(record, &held)?;
         }
         Ok(())
     };

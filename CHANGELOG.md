@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Interpreter::fold_steps`, a by-key read that reports the value after each record**
+  (`docs/folds.md` section 11). It is `fold_stored` with a visitor, and it is what a host serves a
+  column's **history** from: diffing consecutive values gives the positions where the column
+  changed, the value before and after, and the record that did it. It replaces the list fold an
+  application writes to keep a timeline, which duplicates the arms of the fold it shadows, grows
+  without bound and rewrites the whole list on every write. A record that moved nothing is reported
+  too, because that is a fact about it and the filtering is the caller's.
+
+  **A column with a range arm is refused**, and that is the one restriction. An arm leaving a key
+  part open covers the keys the table held when each record arrived, so the by-key read and the sink
+  are *defined* to disagree (section 11: a key minted after a ranged record never sees it, and the
+  sink's answer is the definition). A history read of one would report a step the stored column
+  never took, which is the wrongness the feature exists to remove. `Column::ranges` is the same
+  question asked once, for a host that wants to know before a request arrives.
+
+  **A computed key and a lookup are allowed**, which is deliberately not symmetrical: those two
+  agree between the drivers, which is what `tests/sink.rs` proves, so what they cost is time rather
+  than correctness. A caller can decide about a cost and cannot decide about a wrong answer.
+
 - **`@index` on a fold's value says the column may be sorted on** (`docs/folds.md` rule 20):
 
   ```hek

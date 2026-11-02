@@ -782,6 +782,29 @@ agree with each other. What they differ from is `Interpreter::fold` and `fold_st
 a store fills a column through the sink rather than mixing the two. An author who wants the refold's
 answer does not write a range: an arm pinning the whole key means the same thing under both.
 
+**`Interpreter::fold_steps` is the fourth door, and it is `fold_stored` with a visitor.** It reports
+the accumulator after each record it folds, in log order, which is what a fold's *history* is made
+of: a reader diffing consecutive values gets the positions where the column changed, the value
+before and after, and the record that did it. It replaces the list fold an application writes to
+keep a timeline, which duplicates the arms of the fold it shadows, grows without bound and rewrites
+the whole list on every write.
+
+A record that moved nothing is reported too, and that is the caller's to filter: "the value after
+this record" is a fact about every record the query delivered, and deciding which ones count would
+decide it for everyone.
+
+**A column with a range arm is refused**, and the paragraph above is why. The two drivers are
+defined to disagree there and the sink's answer is the definition, so a by-key history of such a
+column would report a step the stored column never took: `Seen(1, 8)` would show the `+ 10` that
+order 8 never received. That is the wrongness a history read exists to remove. `Column::ranges` is
+the same question asked once, for a host that wants to know before a request arrives.
+
+**A computed key and a lookup are allowed**, which is not symmetrical with that and is not meant to
+be. Those two *agree* between the drivers, which is what `tests/sink.rs` exists to prove; what they
+cost is time, since the lookup is folded again at every candidate record. A caller can decide about
+a cost and cannot decide about a wrong answer, so the one case where the drivers differ is the one
+case refused.
+
 `Interpreter::fold_stored`'s bound **is a head and not a position**, which is the one number a store
 has: `Log::head` answers
 where the next append lands, a command pins its read to one, and a checkpoint records one. It first

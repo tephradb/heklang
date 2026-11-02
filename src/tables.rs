@@ -232,6 +232,26 @@ impl ArmMatch {
     }
 }
 
+impl Column {
+    /// Whether some arm of this column is a **range update**: one that leaves a key part
+    /// open and therefore writes every key the table holds when the record arrives.
+    ///
+    /// **It is the one thing that makes a by-key read of this column disagree with the
+    /// stored value**, and `docs/folds.md` section 11 has the argument: a refold is a
+    /// function of a key and the whole log, so it applies every ranged record to every
+    /// key, while the sink walks forward and can only apply one to the rows that exist. A
+    /// key minted *after* a ranged record never sees it, and the sink's answer is the
+    /// definition.
+    ///
+    /// So this is what [`crate::Interpreter::fold_steps`] refuses on, and a host can ask it
+    /// once at startup to know which columns have no history to serve.
+    pub fn ranges(&self) -> bool {
+        self.arms
+            .iter()
+            .any(|arm| !arm.fields.iter().all(ArmMatch::pinned))
+    }
+}
+
 /// A fold that cannot be kept, because part of its key is not something an event
 /// supplies.
 #[derive(Debug, Clone)]
