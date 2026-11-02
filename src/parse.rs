@@ -6990,26 +6990,38 @@ impl Parser {
             return Err(err);
         };
 
-        // **The single-row table is a value, so it is asserted as one.** A fold with no
-        // parameters folds to one thing, and `fold Name {}` with `expect <value>` already
-        // says it exactly; a row expectation over it would be a subscript with nothing in
-        // it. Refused rather than spelled `global[]`, and the grammar agrees: a bare name
-        // followed by a block is a record literal, so an optional subscript would make
-        // one input derivable two ways.
-        if table.key.is_empty() {
-            return Err(self
-                .err(
-                    Code::TestShape,
-                    format!("`{name}` holds one row, so there is no row to name"),
-                    at,
-                )
-                .with_hint(
-                    "a fold with no parameters is a value rather than a table: assert it with the \
-                     `fold` action, as `fold Name {}` and `expect <value>`",
-                ));
-        }
-
-        let keys = self.table_subscript(lower, &table)?;
+        // **The single-row table has no key, so it is written without one.** A row
+        // expectation over it would be a subscript with nothing in it, so there is no
+        // subscript: `expect global { a: 1, b: 2 }`. The columns are the point, since a
+        // fold with no parameters is otherwise only readable through the `fold` action,
+        // which takes one `expect` per test and so costs a test per column over a
+        // scenario one `fill` has already set up.
+        //
+        // `global` is a literal in the grammar rather than an identifier followed by an
+        // optional subscript, because `expect Shape { a: 1 }` is a record literal under
+        // the `fold` action and a `_type_name` is an aliased `identifier`: an optional
+        // subscript would make one input derivable two ways. That costs a record type
+        // spelled `global` its place after `expect`, which is the cost `nothing` and
+        // `skipped` already carry in the same position.
+        let keys = match table.key.is_empty() {
+            // **Nothing to be absent.** A keyed row exists once an arm mints its key, and
+            // `expect no` asks whether one ever was; a table with no key has none to mint,
+            // and its row holds the seeds from the start.
+            true if absent => {
+                return Err(self
+                    .err(
+                        Code::TestShape,
+                        format!("`{name}` has no key, so there is no key to be without"),
+                        at,
+                    )
+                    .with_hint(
+                        "a fold with no parameters folds to its seed rather than to nothing, so \
+                         `expect global { .. }` asserts the seed",
+                    ));
+            }
+            true => Vec::new(),
+            false => self.table_subscript(lower, &table)?,
+        };
         if absent {
             return Ok(Expect::NoRow {
                 entity: name,

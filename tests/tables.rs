@@ -281,6 +281,49 @@ fold OrdersPlaced() -> placed: Int = 0 {
     assert!(layout.tables[0].key.is_empty());
 }
 
+/// **And it keeps that name whatever clashes with it.** Two key signatures can derive one
+/// name and the clash-breaker rebuilds each from its parts and their types, which for the
+/// empty key joins to nothing: both tables went through it and the one with no key came
+/// out called `""`. Renaming the other one is what resolves the clash anyway, and a name
+/// is what the module doc promises a runtime will build a table from.
+///
+/// Reachable rather than theoretical: a part is named for its parameter, so a fold keyed
+/// on one called `global` derives the same name as the single-row table.
+#[test]
+fn the_single_row_table_keeps_its_name_through_a_clash() {
+    let source = app("
+fold OrdersPlaced() -> placed: Int = 0 {
+  on @order.placed() => placed + 1
+}
+
+fold ScopePlaced(global: Int) -> placed: Int = 0 {
+  on @order.placed(order_id: global) => placed + 1
+}
+");
+
+    assert_eq!(
+        tables(&source),
+        ["global  orders_placed", "global_int  scope_placed"]
+    );
+}
+
+/// **And a keyed table never takes that name even with nothing to clash with**, which is
+/// the half a clash list cannot see: with no parameterless fold in the program there is
+/// nothing to rename against, so this table kept `global` outright. A test asserts the
+/// single-row table by that word rather than by a subscript, so the grammar reads it as a
+/// keyword, and `expect global[7]` was a row expectation `hek check` accepted and `hek fmt`
+/// could not parse: the file could never be formatted.
+#[test]
+fn a_keyed_table_never_takes_the_single_row_tables_name() {
+    let source = app("
+fold ScopePlaced(global: Int) -> placed: Int = 0 {
+  on @order.placed(order_id: global) => placed + 1
+}
+");
+
+    assert_eq!(tables(&source), ["global_int  scope_placed"]);
+}
+
 /// **Some arm, not every arm.** An arm matching a subset of the key is a range update
 /// over the parts it leaves open, so the fold is still kept. This is `SetupCodeBlocked`'s
 /// shape, the live one in the ported application.

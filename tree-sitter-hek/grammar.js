@@ -423,12 +423,26 @@ module.exports = grammar({
     fixture_expectation: ($) =>
       seq(field('fixture', $.call_expression), $.field_initializer_list),
 
+    // The subscript is mandatory in the first shape and `global` is a literal in the
+    // second, which is what keeps the two apart from `record_literal`: making the
+    // subscript optional would make `expect Shape { a: 1 }` derivable two ways, since a
+    // `_type_name` is an aliased `identifier` and nothing here can tell the cases apart
+    // by spelling. The word is the whole shape instead, so the lexer decides, which is
+    // the same device `nothing` and `skipped` use one choice up (docs/testing.md
+    // section 9).
     row_expectation: ($) =>
-      seq(
-        optional('no'),
-        field('entity', $.identifier),
-        $.subscript,
-        optional($.field_initializer_list),
+      choice(
+        seq(
+          optional('no'),
+          field('entity', $.identifier),
+          $.subscript,
+          optional($.field_initializer_list),
+        ),
+        // `no` is accepted here and refused by the parser, which is the looser-grammar
+        // split this file takes everywhere: a shape the checker has a good message for is
+        // better parsed and diagnosed than failed on a syntax error, since `hek fmt` can
+        // then still read the file.
+        seq(optional('no'), 'global', optional($.field_initializer_list)),
       ),
 
     // ------------------------------------------------------------------ statements

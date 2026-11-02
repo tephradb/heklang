@@ -580,12 +580,26 @@ impl<'a> Printer<'a> {
         if self.has_token(node, "no") {
             parts.push(Doc::text("no "));
         }
-        parts.push(self.node(kids[0]));
-        // The subscript prints its own brackets and sits against the name with no space,
-        // so it goes through `node` like any other child rather than being assembled
-        // here. That is also what keeps a comment written among the keys inside them.
-        parts.push(self.node(kids[1]));
-        for &kid in &kids[2..] {
+        // **The single-row table is the word and nothing else**, and the word is an
+        // anonymous token, so it is not among the kids at all and `kids[0]` is already
+        // whatever follows it. Written as a branch rather than an index, because the
+        // indexes below are what would have panicked on it.
+        let rest = match self.has_token(node, "global") {
+            true => {
+                parts.push(Doc::text("global"));
+                &kids[..]
+            }
+            false => {
+                parts.push(self.node(kids[0]));
+                // The subscript prints its own brackets and sits against the name with no
+                // space, so it goes through `node` like any other child rather than being
+                // assembled here. That is also what keeps a comment written among the
+                // keys inside them.
+                parts.push(self.node(kids[1]));
+                &kids[2..]
+            }
+        };
+        for &kid in rest {
             parts.push(Doc::text(" "));
             parts.push(self.node(kid));
         }

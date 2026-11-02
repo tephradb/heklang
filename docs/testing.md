@@ -66,10 +66,15 @@ action and in `expect invoke` alike. Parentheses stay positional.
 
 ### `test` is the only word this construct reserves
 
-`given`, `respond`, `erased`, `run`, `project`, `deliver`, `expect`, `no`, `nothing` and `skipped`
-are claimed **only inside a test body**. `secret` is the one word this construct shares with a
-declaration rather than reserving for itself (`docs/effects.md` rule 16), and it is soft in both
-places, so a field or a parameter of that name stays writable. The `fold` action costs no name
+`given`, `respond`, `erased`, `run`, `project`, `deliver`, `expect`, `no`, `nothing`, `skipped` and
+`global` are claimed **only inside a test body**. `secret` is the one word this construct shares with
+a declaration rather than reserving for itself (`docs/effects.md` rule 16), and it is soft in both
+places, so a field or a parameter of that name stays writable.
+
+Three of them, `nothing`, `skipped` and `global`, are claimed in one position rather than throughout:
+directly after `expect`, where each would otherwise be readable as an expression. So a record type
+spelled `global` cannot be asserted under the `fold` action, which section 9 explains and which is
+the same cost `nothing` has carried since this construct existed. The `fold` action costs no name
 either, for the opposite reason: it is the keyword a fold is already declared with, and whether the
 name after it binds a local tells the two apart. A construct that only tests use should cost no name anywhere
 else, and an entity field called `given` or a command parameter called `no` stays writable. This is
@@ -454,6 +459,7 @@ the first caller rather than a private path into the fold.
 | --- | --- |
 | `expect <table>[key] { column: value, ... }` | the row exists and the listed columns match |
 | `expect no <table>[key]` | no key like that was ever written |
+| `expect global { column: value, ... }` | the single-row table's listed columns match |
 
 `fill` follows the whole given log into the derived read model: a read model is a named fold kept
 for every key, so `tables::layout` derives the table set from the program's folds and there is one
@@ -493,11 +499,33 @@ That is section 8's "a key no event touched folds to the seed rather than to not
 row. `expect nothing` is therefore refused here, as it is under `project` and `fold`: the question
 it would be asking is whether a key exists, and `expect no` asks it.
 
-**A fold with no parameters has no row to name.** It folds to one value, `fold Name {}` with
-`expect <value>` says it exactly, and a row of the single-row `global` table would be a subscript
-with nothing in it. Refused rather than spelled `global[]`, and the grammar agrees: a bare name
-followed by a block is a record literal, so an optional subscript would make one input derivable two
-ways.
+**A fold with no parameters has no key, so its row is written without one:**
+
+```hek
+expect global { store_units: 3, store_gross: 2600 }
+```
+
+The single-row `global` table holds every parameterless fold as a column, and this is how a `fill`
+asserts them. **Several columns in one expectation is the point.** The other way in is the `fold`
+action, which takes exactly one `expect` per test (section 8), so a program with eight
+parameterless folds costs eight tests over a scenario one `fill` has already set up. A port with
+exactly that shape had **no tests at all** on its eight store-wide totals for that reason.
+
+**Its row is there from the start**, which is the half that differs from a keyed one. A keyed row
+appears when an arm mints its key and `expect no <table>[key]` asks whether one ever did; a table
+with no key has none to mint, so `expect no global` is refused where it is written and every column
+of a log that moved none of them still reads as its seed.
+
+**`global` is a word this construct claims, and the spelling is forced.** It is a literal in the
+grammar rather than a name followed by an optional subscript, because a `_type_name` is an aliased
+`identifier`: with the subscript optional, `expect Shape { a: 1 }` under the `fold` action would be
+derivable two ways, as a record literal and as a row of a table called `Shape`. So the word decides
+instead, which costs a record type spelled `global` its place after `expect`. That is the cost
+`nothing` and `skipped` already carry in the same position, and section 1 has the list.
+
+The name is the language's own rather than an author's, and `layout` keeps it that way: where a fold
+keyed on a part that happens to be called `global` derives the same name, the **other** table is the
+one renamed.
 
 **A query-only fold is readable here**, for the reason section 8 gives: a test is not a decision,
 and the harness's envelope is one minute per event from 2020-01-01T00:00:00Z.

@@ -572,7 +572,13 @@ fn check_fill<H: Host>(
             .iter()
             .find(|table| &table.name == entity)
             .ok_or_else(|| format!("no derived table `{entity}`"))?;
-        let present = cells.rows(entity).any(|held| held == key.as_slice());
+        // **The single-row table's row is always there**, because there is no key to mint
+        // it: a keyed row appears when an arm writes it and `expect no` asks whether one
+        // ever did, while a fold with no parameters folds to its seed from the start. The
+        // sink does write it at the empty key as soon as an arm fires, so this only
+        // matters for the program whose events none of those columns fold, where every
+        // column reads as its seed through the fallback below.
+        let present = table.key.is_empty() || cells.rows(entity).any(|held| held == key.as_slice());
 
         if let Expect::NoRow { .. } = wanted {
             if present {

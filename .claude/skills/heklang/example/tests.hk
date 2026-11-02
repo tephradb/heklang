@@ -211,6 +211,11 @@ test "a booked seat fills the row it is keyed by" {
   // A column no arm wrote is at its seed rather than missing, which is the one way a
   // derived row reads differently from a projector's.
   expect workshop[RUST] { workshop_seats_left: 1, workshop_revenue: 40.00 }
+
+  // The single-row table, written with no subscript because it has no key. One `fill`
+  // asserts the keyed rows and the store-wide totals together, which is the whole reason
+  // this form exists: the `fold` action takes one `expect` per test.
+  expect global { seats_booked: 1 }
 }
 
 // The computed key part, read back by the bucket it computed. The harness stamps one

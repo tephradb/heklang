@@ -407,3 +407,43 @@ test "an order carries its total" {
           (subscript
             key: (integer_literal)
             key: (integer_literal)))))))
+
+================================================================================
+the single-row table, whose name is the language's own
+================================================================================
+
+
+test "the store's own totals" {
+  given @game.purchased { game_id: 7, cents: 2000 }
+
+  fill
+
+  expect global { store_units: 1, store_gross: 2000 }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (test_declaration
+    name: (string
+      (string_content))
+    body: (test_body
+      (given_clause
+        path: (event_path)
+        (field_initializer_list
+          (field_initializer
+            name: (identifier)
+            value: (integer_literal))
+          (field_initializer
+            name: (identifier)
+            value: (integer_literal))))
+      (fill_clause)
+      (expect_clause
+        (row_expectation
+          (field_initializer_list
+            (field_initializer
+              name: (identifier)
+              value: (integer_literal))
+            (field_initializer
+              name: (identifier)
+              value: (integer_literal))))))))

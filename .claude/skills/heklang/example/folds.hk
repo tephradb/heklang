@@ -77,3 +77,11 @@ fold TitleRevenue(title: String) -> taken: Money(2) = 0 {
   on @seat.booked { workshop_id, paid } key title = WorkshopTitle { workshop_id } =>
     taken + paid
 }
+
+// No parameters, so this is one value for the whole log and `layout` keeps it in the
+// single-row `global` table. A `fill` asserts it as `expect global { .. }`, with no
+// subscript because there is no key.
+fold SeatsBooked() -> n: Int = 0 {
+  on @seat.booked => n + 1
+  on @seat.released => n - 1
+}

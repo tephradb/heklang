@@ -326,6 +326,26 @@ pub fn layout(program: &Program) -> Layout {
         }
     }
 
+    // **`global` is reserved for the single-row table, and that is settled before the
+    // clash list below rather than inside it.** A keyed table never keeps that name even
+    // when nothing else wants it: with no parameterless fold in the program there is
+    // nothing to clash with, so `fold ScopeSeen(global: Int)` kept `global` outright, and a
+    // test asserts the single-row table by that word (`docs/testing.md` section 9), so the
+    // grammar reads it as a keyword and `expect global[7]` could be checked and never
+    // formatted. The name is reserved here rather than refused, because what an author
+    // wrote is a parameter and the collision is in a name this module derives.
+    //
+    // **Before the clash list, because this rename can itself collide.** Done inside the
+    // loop below, over a list computed in front of it, a program with a `global` part and a
+    // `global_int` part came out with two different tables both called `global_int` and
+    // nothing said so, which is the exact failure the clash list exists to prevent. Renamed
+    // first, those two are an ordinary clash and the machinery below tells them apart.
+    for table in &mut tables {
+        if table.name == GLOBAL && !table.key.is_empty() {
+            table.name = disambiguated(&table.key);
+        }
+    }
+
     // Two key signatures can derive one name, because a part is told apart by name and
     // type and a name is only the names joined: `(day: String)` and `(day: Int)` are two
     // tables both called `day`. Rare enough that no program has done it, and a runtime
@@ -343,13 +363,14 @@ pub fn layout(program: &Program) -> Layout {
         .map(|table| table.name.clone())
         .collect();
     for table in &mut tables {
-        if clashes.contains(&table.name) {
-            table.name = table
-                .key
-                .iter()
-                .map(|part| format!("{}_{}", part.name, type_tag(&part.ty)))
-                .collect::<Vec<_>>()
-                .join("__");
+        // **The single-row table keeps its name whatever clashes with it**, because it has
+        // no parts to put a type into and `disambiguated` would leave it with no name at
+        // all: the join is over the key parts, and it has none. It is reachable, since the
+        // loop above renames a keyed table *to* a name another one may already hold, and
+        // before this guard the keyless table went through here and came out as the empty
+        // string, which is not a name a runtime can build a table from.
+        if !table.key.is_empty() && clashes.contains(&table.name) {
+            table.name = disambiguated(&table.key);
         }
     }
 
@@ -563,9 +584,25 @@ fn type_tag(ty: &Type) -> String {
     }
 }
 
+/// The name the single-row table always has, and which a keyed table is therefore never
+/// allowed to keep: a test asserts that table by this word rather than by a subscript, so
+/// the grammar reads it as a keyword and a keyed table of the same name would be
+/// unformattable. See `docs/testing.md` section 9.
+pub(crate) const GLOBAL: &str = "global";
+
+/// The clash-breaking name: every key part with its type, which is what tells two keys
+/// apart that share their part names. Empty for the single-row table, which is why the
+/// callers guard on a non-empty key.
+fn disambiguated(key: &[KeyPart]) -> String {
+    key.iter()
+        .map(|part| format!("{}_{}", part.name, type_tag(&part.ty)))
+        .collect::<Vec<_>>()
+        .join("__")
+}
+
 fn table_name(key: &[KeyPart]) -> String {
     match key.is_empty() {
-        true => "global".to_string(),
+        true => GLOBAL.to_string(),
         false => key
             .iter()
             .map(|part| part.name.as_str())

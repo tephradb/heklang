@@ -1833,6 +1833,85 @@ fn a_column_no_arm_wrote_reads_as_its_seed() {
     );
 }
 
+/// **The single-row table is written without a subscript**, because it has no key to put
+/// in one. Several columns in one expectation is the point: a fold with no parameters is
+/// otherwise readable only through the `fold` action, which takes one `expect` per test,
+/// so eight of them cost eight tests over a scenario one `fill` has already set up.
+#[test]
+fn a_fill_asserts_the_single_row_table() {
+    let results = fold_verdicts(
+        "fold PlansSold() -> sold: Int = 0 {
+  on @plan.sold() => sold + 1
+}
+
+fold TakingsEverywhere() -> earned: Money(2) = 0 {
+  on @plan.sold() { price } => earned + price
+}
+
+test \"the whole catalogue's takings sit beside one plan's\" {
+  given @plan.created { plan_id: 7, title: \"Pro\", price: 10.00 }
+  given @plan.sold { plan_id: 7, price: 10.00 }
+  given @plan.sold { plan_id: 9, price: 2.50 }
+
+  fill
+
+  expect global { plans_sold: 2, takings_everywhere: 12.50 }
+  expect plan[7] { plan_revenue: 10.00 }
+}",
+    );
+    assert!(
+        matches!(only(&results).outcome, TestOutcome::Passed),
+        "{:?}",
+        only(&results).outcome
+    );
+}
+
+/// And its row is there from the start, which is the half that differs from a keyed one. A
+/// keyed row appears when an arm mints its key; a table with no key has none to mint, so a
+/// log that moved none of its columns still reads every one of them as its seed.
+#[test]
+fn the_single_row_table_reads_its_seeds_with_no_events() {
+    let results = fold_verdicts(
+        "fold PlansSold() -> sold: Int = 0 {
+  on @plan.sold() => sold + 1
+}
+
+test \"a store that has sold nothing has sold nothing\" {
+  fill
+
+  expect global { plans_sold: 0 }
+}",
+    );
+    assert!(
+        matches!(only(&results).outcome, TestOutcome::Passed),
+        "{:?}",
+        only(&results).outcome
+    );
+}
+
+/// So there is nothing for `expect no` to ask about, and it is refused where it is
+/// written. `expect no plan[9]` asks whether a key was ever minted, and this table has no
+/// key; its row holds the seeds whatever the log says.
+#[test]
+fn the_single_row_table_has_no_key_to_be_without() {
+    let message = fold_err(
+        "fold PlansSold() -> sold: Int = 0 {
+  on @plan.sold() => sold + 1
+}
+
+test \"nothing to be absent\" {
+  fill
+
+  expect no global
+}",
+    );
+    assert!(
+        message.contains("no key, so there is no key to be without"),
+        "got: {message}"
+    );
+    assert!(message.contains("asserts the seed"), "got: {message}");
+}
+
 /// A query-only fold is readable here for the reason it is readable under `fold`: a test
 /// is not a decision, and the harness's envelope is one minute per event from
 /// 2020-01-01T00:00:00Z.
@@ -1967,35 +2046,53 @@ fn expect_nothing_is_refused_under_a_fill() {
     );
 }
 
-/// **The single-row table is a value, so it is asserted as one.** A fold with no
-/// parameters folds to one thing and the `fold` action says it exactly; a row of it would
-/// be a subscript with nothing in it. The grammar agrees, since a bare name followed by a
-/// block is a record literal.
+/// **The single-row table has no key, so it is written without one**, and `global` is a
+/// literal in the grammar rather than a name with an optional subscript. That is what
+/// keeps `expect Shape { a: 1 }` from being derivable two ways: a `_type_name` is an
+/// aliased `identifier`, so nothing could tell a record literal from a row of a table
+/// whose subscript was left out. It costs a record type spelled `global` its place after
+/// `expect`, which is the cost `nothing` and `skipped` already carry there.
+///
+/// Asserted by parsing both in one program, because the pair is the claim.
 #[test]
-fn the_keyless_table_has_no_row_to_name() {
+fn the_keyless_table_is_written_without_a_subscript() {
     let source = format!(
         "{PRELUDE}
+record Shape {{
+  a: Int,
+}}
+
 fold PlansSold() -> n: Int = 0 {{
   on @plan.sold() => n + 1
 }}
 
-test \"two sales\" {{
+fold ShapeOf() -> Shape = Shape {{ a: 0 }} {{
+  on @plan.sold() {{ plan_id }} => Shape {{ a: plan_id }}
+}}
+
+test \"one sale\" {{
   given @plan.sold {{ plan_id: 7, price: 10.00 }}
   fill
-  expect global {{ plans_sold: 2 }}
+  expect global {{ plans_sold: 1 }}
+}}
+
+test \"a record literal is still a record literal\" {{
+  given @plan.sold {{ plan_id: 7, price: 10.00 }}
+  fold ShapeOf {{}}
+  expect Shape {{ a: 7 }}
 }}"
     );
-    let message = parse(&source)
-        .expect_err("a row of the single-row table is refused")
-        .text();
-    assert!(
-        message.contains("`global` holds one row, so there is no row to name"),
-        "{message}"
-    );
-    assert!(
-        message.contains("`fold Name {}` and `expect <value>`"),
-        "the hint points at the action that does say it: {message}"
-    );
+    let program = parse(&source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+    let results = run_tests(&program);
+    assert_eq!(results.len(), 2);
+    for result in &results {
+        assert!(
+            matches!(result.outcome, TestOutcome::Passed),
+            "{}: {:?}",
+            result.name,
+            result.outcome
+        );
+    }
 }
 
 // ------------------------------- a world whose key store really is a key store

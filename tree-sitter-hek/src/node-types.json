@@ -4671,7 +4671,7 @@
     "fields": {
       "entity": {
         "multiple": false,
-        "required": true,
+        "required": false,
         "types": [
           {
             "type": "identifier",
@@ -4682,7 +4682,7 @@
     },
     "children": {
       "multiple": true,
-      "required": true,
+      "required": false,
       "types": [
         {
           "type": "field_initializer_list",
@@ -5567,6 +5567,10 @@
   },
   {
     "type": "given",
+    "named": false
+  },
+  {
+    "type": "global",
     "named": false
   },
   {

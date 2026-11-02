@@ -26,6 +26,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   why there is no date helper, no `Int` to `Decimal(n)` and no map literal, each asked for with its
   measured case or its lack of one.
 
+- **A `fill` asserts the single-row table** (`docs/testing.md` section 9):
+
+  ```hek
+  expect global { store_units: 3, store_gross: 2600 }
+  ```
+
+  A fold with no parameters has no key, so its row is written without one. **Several columns in one
+  expectation is the point**: the other way in is the `fold` action, which takes exactly one `expect`
+  per test, so a port with eight store-wide totals had **no tests at all** on them rather than eight
+  tests over a scenario one `fill` already set up. The row is there from the start, since there is no
+  key to mint, so every column of a log that moved none of them reads as its seed and `expect no
+  global` is refused where it is written.
+
+  The previous refusal was a spelling argument and it was right about the spelling: `global[]` would
+  be a subscript with nothing in it. So there is no subscript. `global` is a literal in the grammar
+  rather than a name with an optional subscript, because a `_type_name` is an aliased `identifier`
+  and an optional one would make `expect Shape { a: 1 }` derivable two ways. It is therefore a word
+  claimed directly after `expect`, as `nothing` and `skipped` already are.
+
 - **`max` and `min`, on an ordered value and on an optional one** (`docs/stdlib.md`):
 
   ```hek
@@ -98,6 +117,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `(game_id) =>`. The trailing break is now guarded on the loop having printed something. The test
   beside it had `as e` in every case, so the loop always printed and the variant was invisible; the
   new multi-path shape reaches it the same way.
+
+- **A keyed table could take the single-row table's name.** `global` is the name `layout` gives the
+  table a parameterless fold is kept in, and a fold keyed on a part that happens to be called
+  `global` derived the same name with nothing to clash against. A test asserts the single-row table
+  by that word, so the grammar reads it as a keyword: `expect global[7]` was a row expectation
+  `hek check` accepted and `hek fmt` could not parse, so the file could never be formatted. The name
+  is now reserved, and the keyed table takes its type-tagged form. The reservation happens before the
+  clash list is computed rather than inside the loop over it, because the rename can itself collide:
+  a program with a `global` part and a `global_int` part otherwise came out with two different
+  tables both called `global_int`, which is the failure the clash list exists to prevent.
+
+- **The single-row table could come out with no name at all.** Two key signatures can derive one
+  name, and `layout`'s clash-breaker rebuilds each from its key parts and their types, which for the
+  empty key joins to the empty string. Both tables went through it, so a program with a parameterless
+  fold *and* a fold keyed on a part called `global` left `hek check --tables` printing `TABLE` with a
+  blank name, and a name is what the module doc promises a runtime will build a table from. The
+  single-row table now keeps `global` whatever clashes with it, which resolves the clash anyway since
+  renaming the other one is what distinguishes them. Found while making that name writable in a test.
 
 ### Added
 

@@ -36,9 +36,10 @@ action.
 may not share a name inside one program.
 
 `given`, `respond`, `erased`, `secret`, `run`, `project`, `deliver`, `fill`, `expect`, `no`,
-`nothing` and `skipped` are claimed **only inside a test body**, so an entity field called `given` or
-a parameter called `no` stays writable elsewhere. `test` is the only word this construct reserves
-outright. The `fold` action is the keyword a declaration already starts with, and nothing is
+`nothing`, `skipped` and `global` are claimed **only inside a test body**, so an entity field called
+`given` or a parameter called `no` stays writable elsewhere. The last three are claimed in one
+position only, directly after `expect`, where each would otherwise read as an expression. `test` is
+the only word this construct reserves outright. The `fold` action is the keyword a declaration already starts with, and nothing is
 ambiguous: a statement's `fold` binds a local and the action does not, so `=` against `{` decides
 it.
 
@@ -277,6 +278,7 @@ not a decision, and the envelope is exactly predictable under the harness: one m
 | --- | --- |
 | `expect <table>[key] { column: value, ... }` | the row exists and the listed columns match |
 | `expect no <table>[key]` | no key like that was ever written |
+| `expect global { column: value, ... }` | the single-row table's listed columns match |
 
 ```hek
 test "a cancellation nets off the order's total" {
@@ -309,9 +311,20 @@ expect plan[7] { plan_revenue: 0, plan_last_sold_at: none }
 `expect nothing` is therefore refused here, as under `project` and `fold`: the question it would ask
 is whether a key exists, and `expect no` asks it.
 
-**A fold with no parameters has no row to name.** It folds to one value, `fold Name {}` with `expect
-<value>` says it exactly, and a row of the single-row `global` table would be a subscript with
-nothing in it. Refused, with a pointer at the `fold` action.
+**A fold with no parameters has no key, so its row is written without one:**
+
+```hek
+expect global { store_units: 3, store_gross: 2600 }
+```
+
+Several columns in one expectation is the point: the `fold` action takes one `expect` per test, so
+eight parameterless folds otherwise cost eight tests over a scenario one `fill` already sets up.
+
+Its row is there from the start, since there is no key to mint, so `expect no global` is refused and
+a log that moved none of its columns reads every one as its seed. `global` is claimed as a word
+directly after `expect`, like `nothing` and `skipped`: a record type spelled `global` cannot be
+asserted under the `fold` action, which is what keeps `expect Shape { a: 1 }` from being derivable
+two ways.
 
 Sealed columns and query-only columns behave as in sections 6 and 8: opened through the world's key
 store, and readable here.
