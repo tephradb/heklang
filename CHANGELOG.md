@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://git.tqwewe.com/tephra/heklang/compare/heklang-v0.11.1...heklang-v0.12.0) - 2026-11-02
+
+### Added
+
+- a by-key read reports the value after each record
+- @index on a fold's value says the column may be sorted on
+- a fill asserts the single-row table, whose name is now reserved
+- a list drops its duplicates with distinct
+- max and min, on an ordered value and on an optional one
+- a subject key part is read through a fold, and else skip says what absent means
+- a fold may not invent a subject id, so a key lookup can produce one
+- a fold arm may list several event paths, lowered to the arms written out
+- a fold arm leaves an empty filter list out, and --boundaries names what reads everything
+- a fold arm's value may read another fold, as of the record
+- a fold arm may read a key part out of another fold, as of the record
+- a restricted sink, so a rebuild replays only the columns it is rebuilding
+- a fold arm may compute a key part from the record it folds
+- a record applied to the derived read model, and fill as a fifth test action
+- a named fold earns a digest entry, and a store has a read to fill a column from
+- a fold arm may match a key part the event does not carry
+- a fold is a fourth test action, so a named fold's value can be asserted
+- a fold arm may bind the envelope, which makes the fold query-only
+- a named fold is a column, so hek check --tables derives the read model
+- an entity's key may be several columns
+- one inline fold written twice is an error, so a named fold is never optional by accident
+- a fold can be declared once and read by name
+
+### Fixed
+
+- the committed grammar is generated at abi 14, which the dev shell now pins
+- hek check reads every path it is given, as one program
+- a column keyed through a ranged one has no history
+- a seal cannot be an argument to a method
+- hek fmt no longer writes a blank line in a fold arm
+- a fold may not invent a subject id wherever one can be written
+- a parenthesised receiver is not a declared position, and three refusals point right
+- a comprehension's filter restores the binder count before it fails
+- a fold arm's value lookup packs after the key clauses it runs after
+- a fold arm's key clause breaks onto a line of its own, not its value
+- one column's arms apply in written order, and a range covers only what it can
+- a fold arm's key clause places its comments and breaks between its parts
+- a computed key part is plaintext, and its arm's whole predicate is checked first
+- the digest sorts a fold arm's key clauses, so reordering them is not a change
+- a computed key part and its arm's key are kept apart, so both drivers answer
+- regenerate the grammar at abi 14, which the committed parser pins
+- a test compares a sealed column through the world's key store
+- a stored fold's bound is a head, and a column may not be named after its own key part
+- eight findings from a branch review, and an if expression's optional arms
+- four holes in a named fold that the inline form did not have
+- a statement below a guard runs after the guard decides
+
+### Other
+
+- unset RUSTC_WRAPPER rather than emptying it, so cc-rs stops wrapping too
+- the semver-checks scratch tree sits outside the checkout, not inside it
+- release-plz builds its semver-checks scratch tree on disk, not the private tmpfs
+- release-plz runs cargo-semver-checks without the runner's sccache
+- Merge branch 'named-folds'
+- the heklang skill knows stored folds, the read model and the fill action
+- bump devenv, nixpkgs and rust-overlay
+
 ### Fixed
 
 - **A column keyed through a ranged one was served a history that contradicts the store.**

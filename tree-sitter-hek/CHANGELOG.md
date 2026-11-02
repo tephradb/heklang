@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.4](https://git.tqwewe.com/tephra/heklang/compare/tree-sitter-hek-v0.6.3...tree-sitter-hek-v0.6.4) - 2026-11-02
+
+### Added
+
+- @index on a fold's value says the column may be sorted on
+- a fill asserts the single-row table, whose name is now reserved
+- a subject key part is read through a fold, and else skip says what absent means
+- a fold may not invent a subject id, so a key lookup can produce one
+- a fold arm may list several event paths, lowered to the arms written out
+- a fold arm leaves an empty filter list out, and --boundaries names what reads everything
+- a fold arm's value may read another fold, as of the record
+- a fold arm may read a key part out of another fold, as of the record
+- a fold arm may compute a key part from the record it folds
+- a record applied to the derived read model, and fill as a fifth test action
+- a fold arm may match a key part the event does not carry
+- a fold is a fourth test action, so a named fold's value can be asserted
+- a fold arm may bind the envelope, which makes the fold query-only
+- an entity's key may be several columns
+- a fold can be declared once and read by name
+
+### Fixed
+
+- the committed grammar is generated at abi 14, which the dev shell now pins
+- regenerate the grammar at abi 14, which the committed parser pins
+
 ### Added
 
 - `fold_definition`, the module-scope named fold, with `fold_body` for its arm run and
