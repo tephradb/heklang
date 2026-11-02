@@ -297,6 +297,25 @@ pub fn method_sig(receiver: &Type, method: &str) -> Option<Sig> {
         // a wrong key rather than a wrong-looking one. See `docs/strings.md`.
         (Type::Int, "pad") => sig(vec![Type::Int], Type::String),
 
+        // **The selection a comparison licenses**, gated on the same `comparable` the
+        // operators go through so the two cannot drift: a type with no `>` has no `max`,
+        // and the refusal is the one `>` already gives. That is the device `List.sum`
+        // uses against the arithmetic table, for the same reason.
+        //
+        // The optional receiver is first and is the one a real port asked for. Ordering
+        // an optional is refused because an absent value is neither before nor after
+        // anything, but *selecting* with one absent side has an answer: there is one
+        // value, so it is the answer. The result is a bare `T` precisely because the
+        // argument is present, which is what lets a "latest so far" arm fold into a
+        // `T?` accumulator and never narrow. A present receiver gives what the bare
+        // method gives, so narrowing changes nothing here.
+        (Type::Opt(inner), "max" | "min") if comparable(BinOp::Gt, inner, inner) => {
+            sig(vec![inner.as_ref().clone()], inner.as_ref().clone())
+        }
+        (receiver, "max" | "min") if comparable(BinOp::Gt, receiver, receiver) => {
+            sig(vec![receiver.clone()], receiver.clone())
+        }
+
         (Type::Outcome, "ok") => sig(Vec::new(), Type::Bool),
         (Type::Outcome, "code" | "message") => sig(Vec::new(), Type::opt(Type::String)),
         // The argument is declared `String`, which is what makes a bare refusal name

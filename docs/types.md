@@ -151,6 +151,13 @@ it does at a write. An absent value is unequal to every present one, so where `s
 absent value is neither before nor after anything: `sku > "house"` is an error that says so.
 `docs/optionals.md` has the argument and the shape of the lift.
 
+**`max` and `min` on an optional are not a hole in that**, and they are worth reading beside it. They
+are gated on this table, so they exist on exactly the types `<` and `>` accept, and `T?.max(T)`
+answers a bare `T`. The question is different from the one ordering refuses: `>` asks which of two
+values is bigger and an absent one has no place in that order, while `max` asks which of two to
+**keep**, and with one side absent there is one value to keep. `docs/stdlib.md` has the signature and
+why the argument is bare.
+
 **Arithmetic on sealed content is rejected.** A sum of it is plaintext derived from it, so `reveal`
 comes first, the same rule that already covers interpolation and comparison.
 

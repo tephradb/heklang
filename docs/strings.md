@@ -155,7 +155,7 @@ characters than they took, because `ß` uppercases to `SS` and `İ` lowercases t
 `body.truncate(3).upper()` is six characters on `"ßßßßß"` and `body.upper().truncate(3)` is three.
 Write the bound at the end of the chain.
 
-**It is on `String`, not on `String?`.** An optional has three methods and this is not one of them
+**It is on `String`, not on `String?`.** An optional has four methods and this is not one of them
 (`docs/optionals.md`), so a `String? @max(n)` field is met by getting to the string first:
 `text.unwrap_or("").truncate(n)` when absent may become empty, and narrowing then truncating when it
 may not.

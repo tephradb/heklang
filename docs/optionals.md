@@ -4,15 +4,16 @@
 and no zero-means-nothing: `docs/projectors.md`'s zero-value table exists to argue against sentinels,
 and an optional is what it argues for.
 
-Three methods read one:
+Four methods read one:
 
-| Method | Returns |
-| --- | --- |
-| `x.is_some()` | `Bool` |
-| `x.is_none()` | `Bool` |
-| `x.unwrap_or(fallback)` | `T` |
+| Method | Returns | |
+| --- | --- | --- |
+| `x.is_some()` | `Bool` | |
+| `x.is_none()` | `Bool` | |
+| `x.unwrap_or(fallback)` | `T` | |
+| `x.max(other)`, `x.min(other)` | `T` | where `T` orders (`docs/stdlib.md`) |
 
-`unwrap_or` is total, and that is the whole set. There is no `unwrap`, no `?` operator and no
+Every one of them is total, and that is the whole set. There is no `unwrap`, no `?` operator and no
 default-on-absent coercion, because each of those is a way to read an absent value without having
 written down what to do about it.
 
@@ -130,6 +131,12 @@ if node.string("apiType") != "cart_transform" {      // true when there is no ap
 Ordering does not follow. An absent value is neither before nor after anything, so `<`, `<=`, `>` and
 `>=` reject an optional and say why. `unwrap_or` gives it a place in the order, or a branch that
 proves it present makes it bare.
+
+**`max` and `min` are in the table above all the same**, and the difference is worth being exact
+about. `>` asks which of two values is bigger, and an absent one has no place in that order, so there
+is no answer to give. `max` asks which of the two to **keep**, and with one side absent there is one
+value to keep. So `seen.max(at)` is not `>` with a hole patched: it is a different question whose
+answer happens to be total. It gives back a bare `T`, because the argument is present.
 
 **Nothing about the absent case is new.** `x == y` between two optionals, and `x == none`, both
 already answered this question: an `Opt` holding nothing equals an `Opt` holding nothing and nothing

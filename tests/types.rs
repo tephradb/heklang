@@ -804,7 +804,7 @@ fn a_method_must_exist_on_its_receiver() {
             "text.frobnicate()",
             "no method `frobnicate` on String",
         ),
-        (", n: Int", "n.min(1)", "no method `min` on Int"),
+        (", n: Int", "n.abs()", "no method `abs` on Int"),
         (
             ", xs: List(String)",
             "xs.set(1, \"a\")",
@@ -821,6 +821,114 @@ fn a_method_must_exist_on_its_receiver() {
             message.starts_with(expected),
             "for `{value}`, got: {message}"
         );
+    }
+}
+
+/// `max` and `min` are gated on section 2's comparison table rather than listed, so the
+/// set they exist on is exactly the set `>` accepts. Every row of it, because a selection
+/// that silently covers one fewer type than the operator it is read off is the drift the
+/// gating exists to prevent. `List.sum` is gated on the arithmetic table the same way.
+#[test]
+fn a_selection_exists_where_the_comparison_does() {
+    for (field, params, expr, arg, expected) in [
+        ("id", ", a: Int", "a.max(id)", Value::Int(7), Value::Int(7)),
+        ("id", ", a: Int", "a.min(id)", Value::Int(7), Value::Int(1)),
+        (
+            "name",
+            ", a: String",
+            "a.max(\"b\")",
+            Value::str("c"),
+            Value::str("c"),
+        ),
+        (
+            "name",
+            ", a: String",
+            "a.min(\"b\")",
+            Value::str("c"),
+            Value::str("b"),
+        ),
+        (
+            "at",
+            ", a: Timestamp",
+            "a.max(\"2020-01-01T00:00:00Z\")",
+            Value::Timestamp(1_893_456_000_000_000),
+            Value::Timestamp(1_893_456_000_000_000),
+        ),
+        (
+            "total",
+            ", a: Money(2)",
+            "a.max(2.50)",
+            Value::money(100, 2),
+            Value::money(250, 2),
+        ),
+        (
+            "rate",
+            ", a: Decimal(4)",
+            "a.min(0.5000)",
+            Value::decimal(9000, 4),
+            Value::decimal(5000, 4),
+        ),
+        // A subject orders exactly where the scalar its ids are does, which is the same
+        // read-through that lets one be a key, so it has the selection too.
+        (
+            "id",
+            ", a: Int",
+            "a.max(id).max(a)",
+            Value::Int(3),
+            Value::Int(3),
+        ),
+    ] {
+        let found = fired(params, field, expr, vec![("a", arg)]);
+        assert_eq!(found, expected, "for `{expr}`");
+    }
+}
+
+/// And nowhere else. The message is the one any unknown method gets rather than a case of
+/// its own, because that is what it is: the table answers `None` and nothing was added to
+/// say so a second way.
+#[test]
+fn a_selection_does_not_exist_where_the_comparison_does_not() {
+    for (params, expr, expected) in [
+        (", a: Uuid, b: Uuid", "a.max(b)", "no method `max` on Uuid"),
+        (", a: Bool, b: Bool", "a.max(b)", "no method `max` on Bool"),
+        (", a: Json, b: Json", "a.min(b)", "no method `min` on Json"),
+        (
+            ", a: List(String), b: List(String)",
+            "a.max(b)",
+            "no method `max` on List(String)",
+        ),
+        (
+            ", a: Facts, b: Facts",
+            "a.max(b)",
+            "no method `max` on Facts",
+        ),
+        (
+            ", a: Status, b: Status",
+            "a.max(b)",
+            "no method `max` on Status",
+        ),
+    ] {
+        let message = err(&emitting(params, "name", expr));
+        assert!(message.starts_with(expected), "for `{expr}`: {message}");
+    }
+}
+
+/// Scales never meet here either, for the reason they never meet in `+` or in `>`: the
+/// argument is declared as the receiver's own type, so a rescale has nowhere to happen
+/// silently and an `Int` does not slide into a `Money(2)`.
+#[test]
+fn a_selection_meets_at_one_scale() {
+    for (params, expr, expected) in [
+        (", a: Money(2), b: Money(3)", "a.max(b)", "found Money(3)"),
+        (
+            ", a: Decimal(4), b: Decimal(2)",
+            "a.min(b)",
+            "found Decimal(2)",
+        ),
+        (", a: Money(2), b: Int", "a.max(b)", "found Int"),
+    ] {
+        let message = err(&emitting(params, "name", expr));
+        assert!(message.contains(expected), "for `{expr}`: {message}");
     }
 }
 

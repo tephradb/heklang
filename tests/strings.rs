@@ -485,14 +485,15 @@ fn a_case_conversion_after_a_truncate_can_outgrow_the_bound() {
     );
 }
 
-/// An optional has three methods and this is not one of them, so a `String? @max(n)`
+/// An optional's methods are a short list and this is not on it, so a `String? @max(n)`
 /// field is met by getting to the string first.
 #[test]
 fn truncate_is_not_a_method_on_an_optional() {
     assert_eq!(
         err("text: String?", "text.truncate(3)"),
-        "no method `truncate` on String?; an optional has `is_some()`, `is_none()` and \
-         `unwrap_or(fallback)`, and `truncate` is a question for what it holds"
+        "no method `truncate` on String?; an optional has `is_some()`, `is_none()`, \
+         `unwrap_or(fallback)` and, where it holds something that orders, `max` and `min`; \
+         `truncate` is a question for what it holds"
     );
     assert_eq!(
         built(

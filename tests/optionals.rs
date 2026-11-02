@@ -585,3 +585,197 @@ fold CapReachedAt(shop_id: Shop) -> at: Timestamp? = none {
     // the harness's epoch, and the accumulator holds against the third.
     assert_eq!(folded, Value::some(Value::Timestamp(1_577_836_860_000_000)));
 }
+
+/// **An absent value is "no value yet", and selecting with one has an answer.** Ordering
+/// an optional is refused because an absent value is neither before nor after anything,
+/// but `max` is not asking which is bigger: it is asking which to keep, and with one side
+/// absent there is one value to keep. The result is a bare value precisely because the
+/// argument is present, which is what lets a "latest so far" arm fold into a `T?` and
+/// never narrow.
+///
+/// The shape is a real port's, and the backdated record is why it is not a replace: a log
+/// is not ordered by the times its events carry, so the second record here is older than
+/// the first.
+#[test]
+fn a_selection_on_an_optional_treats_absent_as_no_value_yet() {
+    let source = "subject User(Int)
+
+event @game.played { user_id: User, played_at: Timestamp }
+
+fold UserLastSeen(user_id: User) -> seen: Timestamp? = none {
+  on @game.played(user_id) { played_at } => seen.max(played_at)
+}
+
+fold UserFirstSeen(user_id: User) -> seen: Timestamp? = none {
+  on @game.played(user_id) { played_at } => seen.min(played_at)
+}
+";
+    let program = parse(source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+    let mut interpreter = Interpreter::new(&program);
+    let newer = 1_893_456_000_000_000;
+    let older = 1_577_836_800_000_000;
+    for at in [newer, older] {
+        interpreter.append(Event::new(
+            EventPath::new(["game", "played"]),
+            [
+                ("user_id".to_string(), Value::Int(1)),
+                ("played_at".to_string(), Value::Timestamp(at)),
+            ],
+        ));
+    }
+
+    let folded = |fold: &str, user: i64| {
+        interpreter
+            .fold(fold, [("user_id".to_string(), Value::Int(user))])
+            .expect("folded")
+    };
+    // The seed took the first record's value with nothing to compare it against, and the
+    // older second record did not displace it.
+    assert_eq!(
+        folded("UserLastSeen", 1),
+        Value::some(Value::Timestamp(newer))
+    );
+    assert_eq!(
+        folded("UserFirstSeen", 1),
+        Value::some(Value::Timestamp(older))
+    );
+    // A key no event touched folds to the seed, and the seed is still absent: nothing
+    // here invents a moment to compare against.
+    assert_eq!(folded("UserLastSeen", 9), Value::none(Type::Timestamp));
+}
+
+/// A present receiver answers what the bare method answers, which is the property that
+/// makes narrowing invisible here: `at.max(x)` means one thing whether or not a branch
+/// above it has proved `at` present. Both spellings are folded and compared, because a
+/// table that typed them the same while the interpreter answered differently would pass
+/// every check this file otherwise makes.
+#[test]
+fn a_selection_reads_the_same_through_a_narrowing() {
+    let arm = |body: &str| {
+        format!(
+            "event @x.happened {{ at: Timestamp }}
+
+fold Latest() -> seen: Timestamp? = none {{
+  on @x.happened {{ at }} => {body}
+}}
+"
+        )
+    };
+    let folded = |body: &str| {
+        let source = arm(body);
+        let program = parse(&source).unwrap_or_else(|err| panic!("for `{body}`: {err}"));
+        let mut interpreter = Interpreter::new(&program);
+        for at in [1_893_456_000_000_000i64, 1_577_836_800_000_000] {
+            interpreter.append(Event::new(
+                EventPath::new(["x", "happened"]),
+                [("at".to_string(), Value::Timestamp(at))],
+            ));
+        }
+        interpreter
+            .fold("Latest", Vec::<(String, Value)>::new())
+            .expect("folded")
+    };
+
+    let through_the_optional = folded("seen.max(at)");
+    let through_a_narrowing = folded("if seen != none { seen.max(at) } else { at }");
+    let the_long_way = folded("seen.unwrap_or(at).max(at)");
+    assert_eq!(through_the_optional, through_a_narrowing);
+    assert_eq!(through_the_optional, the_long_way);
+    assert_eq!(
+        through_the_optional,
+        Value::some(Value::Timestamp(1_893_456_000_000_000))
+    );
+}
+
+/// The argument is the bare type and not the optional one, so two optionals is a type
+/// error with the way out on it. Deliberate rather than an omission: a selection between
+/// two values that may both be absent answers an optional, and an arm taking one would be
+/// back to narrowing, which is the thing this removes.
+#[test]
+fn a_selection_on_an_optional_still_takes_a_bare_argument() {
+    let source = "event @x.happened { at: Timestamp?, other: Timestamp? }
+
+fold Latest() -> seen: Timestamp? = none {
+  on @x.happened { at, other } => at.max(other)
+}
+";
+    let message = parse(source)
+        .expect_err("expected this to be rejected")
+        .text();
+    assert!(
+        message.contains("expected Timestamp, found Timestamp?"),
+        "got: {message}"
+    );
+    assert!(message.contains("unwrap_or"), "got: {message}");
+}
+
+/// Every type the selection exists on, through an optional, because the argument is fitted
+/// against the receiver's **inner** type and that is a different code path from the bare
+/// method's. The two subject flavours are here for the same reason: a subject orders
+/// through the scalar its ids are, so its values arrive as that scalar and the fit has to
+/// read through the declaration to accept one.
+#[test]
+fn an_optional_selection_covers_every_type_that_orders() {
+    let source = "subject Shop(Int)
+subject Tag(String)
+
+event @sale.made { shop_id: Shop, tag_id: Tag, total: Money(2), rate: Decimal(4) }
+
+fold TopSale(shop_id: Shop) -> most: Money(2)? = none {
+  on @sale.made(shop_id) { total } => most.max(total)
+}
+
+fold LowRate(shop_id: Shop) -> least: Decimal(4)? = none {
+  on @sale.made(shop_id) { rate } => least.min(rate)
+}
+
+fold HighestShop() -> which: Shop? = none {
+  on @sale.made { shop_id } => which.max(shop_id)
+}
+
+fold LastTag() -> which: Tag? = none {
+  on @sale.made { tag_id } => which.max(tag_id)
+}
+";
+    let program = parse(source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));
+    let mut interpreter = Interpreter::new(&program);
+    for (shop, tag, total, rate) in [(1i64, "a", 1000i64, 5000i64), (4, "z", 250, 9000)] {
+        interpreter.append(Event::new(
+            EventPath::new(["sale", "made"]),
+            [
+                ("shop_id".to_string(), Value::Int(shop)),
+                ("tag_id".to_string(), Value::str(tag)),
+                ("total".to_string(), Value::money(total, 2)),
+                ("rate".to_string(), Value::decimal(rate, 4)),
+            ],
+        ));
+    }
+
+    let folded = |fold: &str, args: Vec<(String, Value)>| {
+        interpreter
+            .fold(fold, args)
+            .unwrap_or_else(|err| panic!("{fold}: {err}"))
+    };
+    let shop = vec![("shop_id".to_string(), Value::Int(1))];
+    // The scale in is the scale out, which is the whole reason the argument is declared as
+    // the receiver's own type rather than widened to it.
+    assert_eq!(
+        folded("TopSale", shop.clone()),
+        Value::some(Value::money(1000, 2))
+    );
+    assert_eq!(
+        folded("LowRate", shop),
+        Value::some(Value::decimal(5000, 4))
+    );
+    // `same` rather than `==` for the two subjects, which is the comparison a test
+    // expectation itself makes: the accumulator is declared `Shop?`, so it holds an `Opt`
+    // whose inner type is the subject while its content is the scalar the ids are.
+    assert!(
+        folded("HighestShop", Vec::new()).same(&Value::some(Value::Int(4))),
+        "the highest shop id"
+    );
+    assert!(
+        folded("LastTag", Vec::new()).same(&Value::some(Value::str("z"))),
+        "the last tag"
+    );
+}

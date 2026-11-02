@@ -186,11 +186,12 @@ enums share is an error naming both.
 `T?` is the only way a value is allowed to be absent. There is no null, no
 empty-string-means-nothing, no zero-means-nothing, no `unwrap`, no `?` operator and no `.expect()`.
 
-| Method | Returns |
-| --- | --- |
-| `x.is_some()` | `Bool` |
-| `x.is_none()` | `Bool` |
-| `x.unwrap_or(fallback)` | `T` |
+| Method | Returns | |
+| --- | --- | --- |
+| `x.is_some()` | `Bool` | |
+| `x.is_none()` | `Bool` | |
+| `x.unwrap_or(fallback)` | `T` | |
+| `x.max(other)`, `x.min(other)` | `T` | where `T` orders; absent keeps the argument |
 
 **Not for a field younger than the log.** Adding a field to an event leaves every event already in the
 log without one, and `T?` does make those readable, but then every handler deals forever with an

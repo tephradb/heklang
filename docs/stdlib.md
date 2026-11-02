@@ -76,12 +76,13 @@ one, and an object literal is legal anywhere a `Json` is expected.
 
 ### `T?`
 
-| Method | Returns |
-| --- | --- |
-| `unwrap_or(T)` | `T` |
-| `is_some()`, `is_none()` | `Bool` |
+| Method | Returns | |
+| --- | --- | --- |
+| `unwrap_or(T)` | `T` | |
+| `is_some()`, `is_none()` | `Bool` | |
+| `max(T)`, `min(T)` | `T` | where `T` orders; see below |
 
-Three, and there is no `expect`. `docs/optionals.md` also has narrowing, which is what removes most
+Four, and there is no `expect`. `docs/optionals.md` also has narrowing, which is what removes most
 of the calls an author would otherwise write.
 
 ### `List(T)`
@@ -213,6 +214,45 @@ handlers cannot crash the runtime cannot also have that. The number is the wides
 declaration carries, and a width past the longest string a field could hold is not a field's shape any
 more. The error says so, rather than blaming arithmetic. `truncate` needs no such rule, because it can
 only shrink.
+
+### `max` and `min`
+
+| Method | Returns | |
+| --- | --- | --- |
+| `max(T)`, `min(T)` | `T` | on any `T` that orders, and on a `T?` |
+
+**One row, because the receiver is read off the comparison table rather than listed.** A type that
+`<` and `>` accept has `max` and `min`, which is `Int`, `Decimal(s)`, `Money(n)`, `String`,
+`Timestamp` and the subject types whose ids are one of those; a type they refuse has neither, and the
+error is the ordinary "no method `max` on Uuid". That is the device `List.sum` uses against the
+arithmetic table, for the same reason: a second list of types is a second list to get wrong.
+
+The argument is declared as the receiver's own type, so **scales never meet** here any more than they
+do in `+` or `>`: `Money(2).max(Money(3))` names both, and a typed `Int` does not slide into a
+`Money(2)`.
+
+**The optional receiver is the one a real port asked for**, and it is not a lift of `>`. Ordering an
+optional is refused because an absent value is neither before nor after anything, so `at > other` has
+no answer to give. `max` asks a different question: not which is bigger but **which to keep**, and
+with one side absent there is one value to keep. So `seen.max(played_at)` on a `Timestamp?` answers
+the argument where `seen` is absent, and the result is a bare `T` precisely because the argument is
+present:
+
+```hek
+fold UserLastSeen(user_id: User) -> seen: Timestamp? = none {
+  on @game.played(user_id) { played_at } => seen.max(played_at)
+}
+```
+
+That is the whole shape, and it is why the result is not optional: a "latest so far" accumulator
+folds a bare value into its `T?` by the ordinary rule and never narrows. Before this it was a
+three-line `fn` over `unwrap_or` and a comparison, called from sixteen arms of one application. A
+*present* receiver answers what the bare method answers, so a branch that has already narrowed one
+changes nothing about what the call means.
+
+**The argument is bare and not optional**, which is deliberate. A selection between two values that
+may both be absent answers an optional, and an arm taking one is back to narrowing, which is the
+thing this removes. Two optionals is a type error with `unwrap_or` named on it.
 
 ### `Outcome`
 

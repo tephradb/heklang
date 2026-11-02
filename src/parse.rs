@@ -8939,7 +8939,7 @@ fn no_method(receiver: &Type, name: &str) -> (String, Option<String>) {
             "a String is always there, so `is_empty()` is the question. Absence is what a String? is for".to_string(),
         ),
         (Type::Opt(_), _) => Some(format!(
-            "an optional has `is_some()`, `is_none()` and `unwrap_or(fallback)`, and `{name}` is a question for what it holds"
+            "an optional has `is_some()`, `is_none()`, `unwrap_or(fallback)` and, where it holds something that orders, `max` and `min`; `{name}` is a question for what it holds"
         )),
         // Named because its absence is a decision rather than an oversight, and the
         // author who reached for it is the one the decision is addressed to.
@@ -8969,12 +8969,12 @@ fn no_method(receiver: &Type, name: &str) -> (String, Option<String>) {
             a(&Type::opt(receiver.clone()))
         )),
         (Type::Timestamp, _) => Some(
-            "a Timestamp has `year()`, `month()`, `day()`, `hour()`, `minute()`, `second()` and the fixed-length `add_seconds`, `add_minutes`, `add_hours` and `add_days`".to_string(),
+            "a Timestamp has `year()`, `month()`, `day()`, `hour()`, `minute()`, `second()`, the fixed-length `add_seconds`, `add_minutes`, `add_hours` and `add_days`, and `max` and `min`".to_string(),
         ),
         // The one `Int` method, so an author who reached for a second is told there is
         // no arithmetic hiding behind a name: the operators are the arithmetic.
         (Type::Int, _) => Some(
-            "an Int has `pad(width)` and nothing else. The arithmetic is the operators, and text is interpolation".to_string(),
+            "an Int has `pad(width)`, `max` and `min`, and nothing else. The arithmetic is the operators, and text is interpolation".to_string(),
         ),
         _ => None,
     };

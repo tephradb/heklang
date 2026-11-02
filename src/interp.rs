@@ -1,3 +1,4 @@
+use std::cmp;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error;
 use std::fmt;
@@ -4045,6 +4046,36 @@ fn unary(op: UnOp, value: Value) -> Result<Value, ErrorKind> {
     }
 }
 
+/// How two values order, or `None` for a pair that does not order at all.
+///
+/// **The one place ordering is decided**, so `<` and `>` and `max` and `min` cannot come
+/// to disagree: `types::comparable` is the checker's half of this list and this is the
+/// runtime's, and a type that ordered in one and not the other would be a method whose
+/// signature says it works and whose body raises. Scales do not meet here, for the reason
+/// they do not meet in arithmetic.
+fn ordering(lhs: &Value, rhs: &Value) -> Option<cmp::Ordering> {
+    Some(match (lhs, rhs) {
+        (Value::Int(a), Value::Int(b)) => a.cmp(b),
+        (
+            Value::Decimal { units: a, scale },
+            Value::Decimal {
+                units: b,
+                scale: other,
+            },
+        ) if scale == other => a.cmp(b),
+        (
+            Value::Money { units: a, scale },
+            Value::Money {
+                units: b,
+                scale: other,
+            },
+        ) if scale == other => a.cmp(b),
+        (Value::Str(a), Value::Str(b)) => a.cmp(b),
+        (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b),
+        _ => return None,
+    })
+}
+
 fn binary(op: BinOp, lhs: Value, rhs: Value) -> Result<Value, ErrorKind> {
     match op {
         BinOp::Eq | BinOp::Ne => {
@@ -4059,32 +4090,11 @@ fn binary(op: BinOp, lhs: Value, rhs: Value) -> Result<Value, ErrorKind> {
             Ok(Value::Bool(if op == BinOp::Eq { equal } else { !equal }))
         }
         BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-            let ordering = match (&lhs, &rhs) {
-                (Value::Int(a), Value::Int(b)) => a.cmp(b),
-                (
-                    Value::Decimal { units: a, scale },
-                    Value::Decimal {
-                        units: b,
-                        scale: other,
-                    },
-                ) if scale == other => a.cmp(b),
-                (
-                    Value::Money { units: a, scale },
-                    Value::Money {
-                        units: b,
-                        scale: other,
-                    },
-                ) if scale == other => a.cmp(b),
-                (Value::Str(a), Value::Str(b)) => a.cmp(b),
-                (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b),
-                _ => {
-                    return Err(ErrorKind::BadOperands {
-                        op,
-                        lhs: lhs.ty(),
-                        rhs: rhs.ty(),
-                    });
-                }
-            };
+            let ordering = ordering(&lhs, &rhs).ok_or_else(|| ErrorKind::BadOperands {
+                op,
+                lhs: lhs.ty(),
+                rhs: rhs.ty(),
+            })?;
             Ok(Value::Bool(match op {
                 BinOp::Lt => ordering.is_lt(),
                 BinOp::Le => ordering.is_le(),
@@ -4656,6 +4666,36 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
             let zeros = width.saturating_sub(digits.len() + sign.len());
             Ok(Value::str(format!("{sign}{}{digits}", "0".repeat(zeros))))
         }
+        // The optional receiver, before the general one below it: an absent value is "no
+        // value yet", so the argument is the answer. That is the whole of the `fn` a port
+        // wrote sixteen call sites of, and it is why the result is a bare value.
+        (Value::Opt { inner, value }, "max" | "min") => {
+            expect_arity(method, 1, &args)?;
+            let other = args.into_iter().next().ok_or(ErrorKind::MalformedIr)?;
+            if !other.has_type(inner) {
+                return Err(ErrorKind::TypeMismatch {
+                    expected: inner.clone(),
+                    found: other.ty(),
+                });
+            }
+            match value {
+                Some(held) => selected(method, held, other),
+                // **Asked of the argument, because an absent receiver has no value to ask
+                // it of.** Without this the absent branch is the one that answers where
+                // the checker refused, and which it did would depend on whether the row
+                // happened to hold anything.
+                None if ordering(&other, &other).is_some() => Ok(other),
+                None => Err(ErrorKind::UnknownMethod {
+                    ty: receiver.ty(),
+                    method: method.to_string(),
+                }),
+            }
+        }
+        (held, "max" | "min") => {
+            expect_arity(method, 1, &args)?;
+            let other = args.into_iter().next().ok_or(ErrorKind::MalformedIr)?;
+            selected(method, held, other)
+        }
         (Value::Invoked(outcome), "ok") => {
             expect_arity(method, 0, &args)?;
             Ok(Value::Bool(outcome.ok()))
@@ -4685,6 +4725,36 @@ fn call_method(receiver: Value, method: &str, args: Vec<Value>) -> Result<Value,
             method: method.to_string(),
         }),
     }
+}
+
+/// `max` or `min` of two values that order, which is what both receivers come down to.
+///
+/// The checker has already refused a receiver that does not order and an argument that is
+/// not the receiver's type, so both errors here are defences rather than paths a program
+/// reaches. They are told apart by asking whether the receiver orders against *itself*: a
+/// receiver that does not is the method not existing, and one that does with an argument
+/// that does not is the argument's type, which is the same split `unwrap_or` makes.
+fn selected(method: &str, held: &Value, other: Value) -> Result<Value, ErrorKind> {
+    let Some(ordering) = ordering(held, &other) else {
+        if ordering(held, held).is_none() {
+            return Err(ErrorKind::UnknownMethod {
+                ty: held.ty(),
+                method: method.to_string(),
+            });
+        }
+        return Err(ErrorKind::TypeMismatch {
+            expected: held.ty(),
+            found: other.ty(),
+        });
+    };
+    let keep_held = match method {
+        "max" => ordering.is_ge(),
+        _ => ordering.is_le(),
+    };
+    Ok(match keep_held {
+        true => held.clone(),
+        false => other,
+    })
 }
 
 /// A map subscript. The restriction to orderable types is checked at parse time, so

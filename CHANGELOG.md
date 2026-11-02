@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`max` and `min`, on an ordered value and on an optional one** (`docs/stdlib.md`):
+
+  ```hek
+  fold UserLastSeen(user_id: User) -> seen: Timestamp? = none {
+    on @game.played(user_id) { played_at } => seen.max(played_at)
+  }
+  ```
+
+  The receiver is read off the comparison table rather than listed, so they exist on exactly the
+  types `<` and `>` accept and a type those refuse gets the ordinary "no method `max` on Uuid". The
+  argument is the receiver's own type, so scales do not meet here either. That is the device
+  `List.sum` already uses against the arithmetic table.
+
+  **The optional receiver is the half a port asked for, and it is not a lift of `>`.** Ordering an
+  optional stays refused, because an absent value is neither before nor after anything. `max` asks
+  which of two values to *keep* rather than which is bigger, and with one side absent there is one
+  to keep, so `T?.max(T)` answers a bare `T` and a "latest so far" arm folds into its `T?` without
+  narrowing. It replaces a three-line `fn` over `unwrap_or` and a comparison that sixteen arms of
+  one application called, written because a log is not ordered by the times its events carry and a
+  replace is therefore wrong. The argument stays bare: a selection between two possibly-absent
+  values answers an optional, which is back to narrowing.
+
 ### Fixed
 
 - **Rule 17 could be bypassed three ways, all of them "the id is not where the check looked".** The

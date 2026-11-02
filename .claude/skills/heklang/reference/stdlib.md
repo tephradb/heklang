@@ -59,12 +59,13 @@ author writes one branch rather than two. There is no `get`, no dynamic field ac
 
 ### `T?`
 
-| Method | Returns |
-| --- | --- |
-| `unwrap_or(T)` | `T` |
-| `is_some()`, `is_none()` | `Bool` |
+| Method | Returns | |
+| --- | --- | --- |
+| `unwrap_or(T)` | `T` | |
+| `is_some()`, `is_none()` | `Bool` | |
+| `max(T)`, `min(T)` | `T` | where `T` orders; see below |
 
-Three, and there is no `unwrap` and no `expect`. Narrowing removes most of the calls an author would
+Four, and there is no `unwrap` and no `expect`. Narrowing removes most of the calls an author would
 otherwise write.
 
 ### `List(T)`
@@ -154,6 +155,36 @@ a string longer, so an unbounded width reaching it from a request would allocate
 It is `truncate`'s pair: one bounds a string above, one below, both count the characters `len` counts,
 and neither reports that the value already fitted. `truncate` hands the string straight back; `pad`
 writes the number's own text, and its result is a `String` either way.
+
+### `max` and `min`
+
+| Method | Returns | |
+| --- | --- | --- |
+| `max(T)`, `min(T)` | `T` | on any `T` that orders, and on a `T?` |
+
+The receiver is read off the comparison table rather than listed: a type `<` and `>` accept has both,
+a type they refuse has neither and gets "no method `max` on Uuid". So it is `Int`, `Decimal(s)`,
+`Money(n)`, `String`, `Timestamp` and the subject types whose ids are one of those. The argument is
+the receiver's own type, so `Money(2).max(Money(3))` names both and a typed `Int` does not slide into
+a `Money(2)`.
+
+**On a `T?` the absent side is "no value yet", so the answer is the argument and the result is bare:**
+
+```hek
+fold UserLastSeen(user_id: User) -> seen: Timestamp? = none {
+  on @game.played(user_id) { played_at } => seen.max(played_at)
+}
+```
+
+That is not a lift of `>`, which stays refused on an optional. `>` asks which of two values is
+bigger, and an absent one has no place in that order; `max` asks which of two to **keep**, and with
+one side absent there is one to keep. The result is a bare `T` because the argument is present, which
+is what lets this arm fold into its `T?` and never narrow. A present receiver answers what the bare
+method answers, so narrowing above the call changes nothing.
+
+The argument is bare and not optional on purpose: a selection between two possibly-absent values
+answers an optional, and an arm taking one is back to narrowing. Two optionals is a type error
+naming `unwrap_or`.
 
 ### `Outcome`
 
