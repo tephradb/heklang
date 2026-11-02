@@ -855,7 +855,12 @@ impl<'a> Printer<'a> {
         // comments included, since only *leading* comments go to the path list.
         let mut tail = Vec::new();
         let mut fresh = hanging;
+        // Whether this loop printed anything, which is what the trailing break below is
+        // guarded on. `fresh` cannot answer it: with no binding and no comment here it is
+        // still whatever `hanging` was, and the path list has already ended its own line.
+        let mut printed = false;
         for kid in bound {
+            printed = true;
             if kid.kind() == "comment" {
                 if !fresh {
                     tail.push(Doc::Hardline);
@@ -879,7 +884,11 @@ impl<'a> Printer<'a> {
             ]));
             fresh = false;
         }
-        if fresh {
+        // **A line of its own after a comment this loop printed**, and only then. Pushed on
+        // `fresh` alone it fired for a path list that ended on a comment with no binding
+        // after it, where `path_list` had already broken the line, and the second break was
+        // a blank line in the middle of an arm: `on @a.x` / `// c` / blank / `(game_id) =>`.
+        if fresh && printed {
             tail.push(Doc::Hardline);
         }
         // **A separator only where nothing else supplies one.** A binding brings its own,

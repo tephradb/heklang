@@ -856,6 +856,50 @@ command Ping(shop_id: Int) {
     assert_eq!(once, twice, "not a fixed point:\n{once}\n---\n{twice}");
 }
 
+/// **And with no binding after the comment at all**, which is the variant the test above
+/// cannot see: it has `as e` in both folds, so the binding loop always printed something
+/// and ended its own line. With nothing after the comment, the loop printed nothing and the
+/// trailing break fired anyway on top of the one the path list had already pushed, which is
+/// a blank line in the middle of an arm. One path and several, since the new multi-path
+/// shape reaches it the same way.
+#[test]
+fn a_comment_ending_a_path_list_adds_no_blank_line() {
+    let source = "event @a.x { game_id: Int }
+event @b.x { game_id: Int }
+
+fold One(game_id: Int) -> n: Int = 0 {
+  on @a.x // c
+    (game_id) => n + 1
+}
+
+fold Several(game_id: Int) -> n: Int = 0 {
+  on @a.x, @b.x // d
+    (game_id) => n + 1
+}
+";
+    let once = hek::fmt::format(source).expect("the source parses");
+    for comment in ["// c", "// d"] {
+        assert!(
+            once.lines().any(|line| line.trim() == comment),
+            "{comment} is on a line of its own:\n{once}"
+        );
+    }
+    assert!(
+        !once.contains("\n\n    ("),
+        "no blank line between the comment and the filter list:\n{once}"
+    );
+    assert!(
+        once.contains("// c\n    (game_id)"),
+        "the filter list follows the comment directly:\n{once}"
+    );
+    assert!(
+        once.contains("// d\n    (game_id)"),
+        "and the same with several paths:\n{once}"
+    );
+    let twice = hek::fmt::format(&once).expect("formatted output parses");
+    assert_eq!(once, twice, "not a fixed point:\n{once}\n---\n{twice}");
+}
+
 /// And a path list that broke takes no space before the filter list: the break has already
 /// separated the paths, so the space that keeps `@a, @b (x)` readable while flat would be a
 /// stray one at the head of a continuation line.

@@ -42,6 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **identity**, so a comparison inside a subject-typed subtree is still pruned and the honest
   spellings still check. All four corpora pass unchanged, so the wider refusal costs nothing.
 
+- **`hek fmt` wrote a blank line in the middle of a fold arm.** A slice whose path list ended on a
+  comment with no `as` binding after it got two line breaks: `path_list` pushes one when it has
+  hung, and the binding loop pushed another on a flag that was still whatever the path list left it
+  at, since with nothing to print the loop never cleared it. `on @a.x` / `// c` / blank /
+  `(game_id) =>`. The trailing break is now guarded on the loop having printed something. The test
+  beside it had `as e` in every case, so the loop always printed and the variant was invisible; the
+  new multi-path shape reaches it the same way.
+
 ### Added
 
 - **A subject key part may be read through a fold, with an explicit skip** (`docs/folds.md` rules 18
