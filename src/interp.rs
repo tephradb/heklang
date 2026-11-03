@@ -1130,10 +1130,10 @@ impl<'a> Tables<'a> {
         let mut key: Vec<Option<Key>> = Vec::with_capacity(table.key.len());
         for (part, matched) in table.key.iter().zip(&arm.fields) {
             let value = match matched {
-                ArmMatch::Field(named) => {
-                    let value = field(&record.event, named)?.clone();
-                    fitted_at(value, &part.ty, Span::default())?
-                }
+                ArmMatch::Field(named) => match keyed(record, named, &part.ty)? {
+                    Some(value) => value,
+                    None => return Ok((Vec::new(), read)),
+                },
                 // Rule 13: not on the event at all, and resolved against an empty frame.
                 ArmMatch::Fixed(id) => tables::fixed(self.program, &column.fold, part, *id)?,
                 // **The inverse of what a by-key read does with the same expression.**
@@ -1268,7 +1268,10 @@ impl<'a> Tables<'a> {
             .zip(&column.args)
         {
             let value = match matched {
-                ArmMatch::Field(named) => field(&record.event, named)?.clone(),
+                ArmMatch::Field(named) => match keyed(record, named, &part.ty)? {
+                    Some(value) => value,
+                    None => return Ok(false),
+                },
                 ArmMatch::Fixed(id) => tables::fixed(self.program, &column.fold, part, *id)?,
                 // The two rule 14 refuses a conjunct for reading, so neither is needed.
                 ArmMatch::Computed(_) | ArmMatch::Open => continue,
@@ -3371,6 +3374,28 @@ fn fitted(value: Value, ty: &Type) -> Result<Value, ErrorKind> {
         expected: ty.clone(),
         found: value.ty(),
     })
+}
+
+/// The event field that fills one key part, or `None` when this record has no key there.
+///
+/// **A bare key part over an optional field is a slice filter read the other way round.**
+/// `resolve` fits a filter value to the field's declared type, so a by-key read at `fo: 3`
+/// folds the records holding `some(3)` and never one holding `none`. The sink mints the
+/// key from the record instead, so it unwraps a present value and writes nothing for an
+/// absent one, which is the two drivers giving one answer.
+fn keyed(record: &Record, named: &Ident, ty: &Type) -> Result<Option<Value>, Error> {
+    let value = match (ty, field(&record.event, named)?.clone()) {
+        (Type::Opt(_), value) => value,
+        (_, Value::Opt { value: None, .. }) => return Ok(None),
+        (
+            _,
+            Value::Opt {
+                value: Some(held), ..
+            },
+        ) => *held,
+        (_, value) => value,
+    };
+    fitted_at(value, ty, Span::default()).map(Some)
 }
 
 pub(crate) fn fitted_at(value: Value, ty: &Type, span: Span) -> Result<Value, Error> {

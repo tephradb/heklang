@@ -59,6 +59,12 @@ the callee's `.is_none()` died at run time on a clean `hek check`; that one is w
 instead, at the call site, which is the only place that knows both types. Both were silent in the
 worst way: the first changed what a decision was made on and reported nothing at all.
 
+**A slice filter has a second driver, and it reads the rule backwards.** A stored fold's sink has no
+argument to wrap: it mints the key part *from* the record. So where a bare `Int` parameter is filled
+from an `Int?` field, the sink unwraps `some(3)` into the key `3` and writes nothing for `none`,
+which is exactly the set a by-key read at `fo: 3` folds. It used to fit the `Int?` to the `Int`
+part, fail, and stop every table in the host on a program `hek check` passed.
+
 **An `if` expression's arms failed differently from all five, and the difference is the point.**
 The others were positions the rule had never reached. Here it reached both arms and worked: each
 was checked against the target and each accepted the bare value. What refused the program was the

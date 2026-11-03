@@ -15,7 +15,7 @@
 //! records after the keys they cover, which is what lets `agrees` hold over all of them.
 
 use heklang::{
-    Cells, Event, EventPath, Interpreter, Key, Log, Program, Tables, Value, parse, value,
+    Cells, Event, EventPath, Interpreter, Key, Log, Program, Tables, Type, Value, parse, value,
 };
 
 /// `@a.b { field: value }`, so a `given` in prose and a `given` in a test read alike.
@@ -396,6 +396,52 @@ fold Interesting(id: Int) -> n: Int = 0 {
         cells.get("id", &[Key::Int(1)], "interesting"),
         Some(&Value::Int(1))
     );
+}
+
+#[test]
+fn a_bare_key_part_over_an_optional_field_skips_an_absent_one() {
+    // The sink's half of a slice filter fitted to an optional field: a by-key read at
+    // `fo: 3` folds `some(3)` and never `none`, so the sink unwraps one and writes nothing
+    // for the other. It raised on both, and a sink error stops every table in a host.
+    // `ByKind` is the arm `narrowed` checks first, which bound the field the same way.
+    let source = "subject Shop(Int)
+event @x.failed { shop_id: Shop, fo: Int?, kind: String }
+
+fold FoFailures(shop_id: Shop, fo: Int) -> n: Int = 0 {
+  on @x.failed(shop_id, fo) => n + 1
+}
+
+fold ByKind(shop_id: Shop, fo: Int, k: String) -> n: Int = 0 {
+  on @x.failed(shop_id, fo) { kind } key k = kind => n + 1
+}
+";
+    let program = program(source);
+    let mut interpreter = Interpreter::new(&program);
+    for fo in [Value::some(Value::Int(3)), Value::none(Type::Int)] {
+        given(
+            &mut interpreter,
+            "x.failed",
+            [
+                ("shop_id", Value::Int(1)),
+                ("fo", fo),
+                ("kind", Value::str("a")),
+            ],
+        );
+    }
+    let cells = agrees(&program, &interpreter);
+    assert_eq!(
+        cells.get("shop__fo", &[Key::Int(1), Key::Int(3)], "fo_failures"),
+        Some(&Value::Int(1))
+    );
+    assert_eq!(
+        cells.get(
+            "shop__fo__k",
+            &[Key::Int(1), Key::Int(3), Key::Str("a".into())],
+            "by_kind"
+        ),
+        Some(&Value::Int(1))
+    );
+    assert_eq!(cells.rows("shop__fo").count(), 1, "none mints no key");
 }
 
 #[test]
