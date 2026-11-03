@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://git.tqwewe.com/tephra/heklang/compare/tree-sitter-hek-v0.6.4...tree-sitter-hek-v0.7.0) - 2026-11-03
+
+### Added
+
+- [**breaking**] derived tables have no author-visible name, tests and indexes address folds
+
 ## [0.6.4](https://git.tqwewe.com/tephra/heklang/compare/tree-sitter-hek-v0.6.3...tree-sitter-hek-v0.6.4) - 2026-11-02
 
 ### Added

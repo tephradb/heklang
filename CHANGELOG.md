@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0](https://git.tqwewe.com/tephra/heklang/compare/heklang-v0.12.0...heklang-v0.13.0) - 2026-11-03
+
+### Added
+
+- [**breaking**] derived tables have no author-visible name, tests and indexes address folds
+
+### Fixed
+
+- a stored fold mints a bare key part from an optional field, skipping none
+
+### Other
+
+- the heklang skill addresses stored folds by name
+- an optional field filling a bare key part skips none
+
 ## [0.12.0](https://git.tqwewe.com/tephra/heklang/compare/heklang-v0.11.1...heklang-v0.12.0) - 2026-11-02
 
 ### Added
