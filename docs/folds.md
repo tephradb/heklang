@@ -1593,6 +1593,17 @@ refuses an accumulator's name that no arm reads.
 `skip` is a soft keyword, claimed only after `else` in a `key` clause, and the two tokens
 tell it from an `if`'s `else`, which is always followed by `{` or `if`.
 
+**An optional event field filling a bare key part skips without being asked.** In
+`fold Failures(shop_id: Shop, fo: Int)` an arm `on @x.failed(shop_id, fo)` over a field
+declared `fo: Int?` needs no `key` clause and no `else skip`: a record holding `some(3)` is
+written under `fo: 3`, and one holding `none` is written under no key, exactly as the clause
+would have it. It is the same answer the by-key read gives, since a filter's value is fitted
+to the field's type and `3` matches only `some(3)` (`docs/optionals.md`). Nothing in the
+signature says so, which is why it is written here: the key is `Int` while the field is not,
+and `hek check` accepts that because it is well defined rather than because the field is
+always present. Spell it as a `key` clause only when the part is computed or read through
+another fold.
+
 ## 20. `@index` says a column may be sorted on
 
 A read model's shape is declared, and how it can be *read* is part of that shape. `@index` on
