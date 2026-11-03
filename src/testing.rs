@@ -539,14 +539,20 @@ fn check_project(
     Ok(None)
 }
 
-/// The listed columns of each named row of the derived read model, or its absence.
+/// What the sink holds for each named fold at each key, or that it holds nothing.
 ///
-/// The same assertions `check_project` makes and against the same `Value::same`, because
-/// a derived table's row is the thing a projector's row was. What differs is the absent
-/// column: an entity has no field it was never given, while a **fold** over no matching
-/// events folds to its seed, so a column nothing wrote still has a value and a test may
-/// assert it. `fold_stored` at a head of zero is that seed, which keeps the answer the
-/// fold's own rather than a second reading of the declaration.
+/// The same comparison `check_project` makes, `Value::same`, because a stored fold is the
+/// thing a projector's column was. What differs is the unwritten value: an entity has no
+/// field it was never given, while a **fold** over no matching events folds to its seed,
+/// so a key nothing wrote still has a value and a test may assert it. `fold_stored` at a
+/// head of zero is that seed, which keeps the answer the fold's own rather than a second
+/// reading of the declaration.
+///
+/// **Written means written by this fold.** A sibling fold of the same table minting the
+/// key makes a row, and `expect no` still holds for every fold of it that wrote nothing
+/// there: otherwise the answer would depend on which folds share a table, which is the
+/// grouping a test is not meant to see. A ranged arm still writes a key a sibling minted,
+/// which is the sink's range rule and `docs/testing.md` section 9 says so.
 fn check_fill<H: Host>(
     values: &mut Values<'_>,
     tables: &Tables<'_>,
@@ -555,78 +561,75 @@ fn check_fill<H: Host>(
     expect: &[Expect],
 ) -> Result<Option<String>, String> {
     for wanted in expect {
-        let (entity, keys) = match wanted {
-            Expect::Row { entity, keys, .. } | Expect::NoRow { entity, keys, .. } => (entity, keys),
+        let (fold, args) = match wanted {
+            Expect::Stored { fold, args, .. } | Expect::Unwritten { fold, args, .. } => {
+                (fold, args)
+            }
             other => {
                 return Ok(Some(format!(
-                    "a fill produces rows of the derived read model, not {}",
+                    "a fill keeps stored folds, not {}",
                     describe(other)
                 )));
             }
         };
-        let key = subscript(values, keys)?;
-        // Always found: the parser resolved the name against the same layout.
-        let table = tables
+        // Always found: the parser resolved the fold against the same layout.
+        let (table, column) = tables
             .layout()
-            .tables
-            .iter()
-            .find(|table| &table.name == entity)
-            .ok_or_else(|| format!("no derived table `{entity}`"))?;
-        // **The single-row table's row is always there**, because there is no key to mint
-        // it: a keyed row appears when an arm writes it and `expect no` asks whether one
-        // ever did, while a fold with no parameters folds to its seed from the start. The
-        // sink does write it at the empty key as soon as an arm fires, so this only
-        // matters for the program whose events none of those columns fold, where every
-        // column reads as its seed through the fallback below.
-        let present = table.key.is_empty() || cells.rows(entity).any(|held| held == key.as_slice());
-
-        if let Expect::NoRow { .. } = wanted {
-            if present {
-                return Ok(Some(format!("{entity}[{}] is present", show(&key))));
-            }
-            continue;
-        }
-        if !present {
-            return Ok(Some(format!("{entity}[{}] is absent", show(&key))));
-        }
-        let Expect::Row { fields, .. } = wanted else {
-            continue;
-        };
-        for (name, value) in fields {
-            let column = table
-                .columns
+            .column(fold)
+            .ok_or_else(|| format!("`{fold}` is not stored"))?;
+        // The arguments in the table's key order, which is `Column::args`'s.
+        let mut key: Vec<Key> = Vec::with_capacity(column.args.len());
+        let mut written: Vec<String> = Vec::with_capacity(args.len());
+        for (param, part) in column.args.iter().zip(&table.key) {
+            let (_, id) = args
                 .iter()
-                .find(|column| &column.name == name)
-                .ok_or_else(|| format!("table `{entity}` has no column `{name}`"))?;
-            let wanted = values.at(*value, Some(&column.ty))?;
-            let held = match cells.get(entity, &key, name) {
-                Some(held) => held.clone(),
-                None => {
-                    let args: Vec<(Ident, Value)> = column
-                        .args
-                        .iter()
-                        .cloned()
-                        .zip(key.iter().map(crate::interp::key_as_value))
-                        .collect();
-                    interpreter
-                        .fold_stored(&column.fold, args, 0)
-                        .map_err(|err: Error| err.to_string())?
+                .find(|(name, _)| name == param)
+                .ok_or_else(|| format!("`{fold}` needs `{param}`"))?;
+            let value = values.at(*id, Some(&part.ty))?;
+            written.push(format!("{param}: {}", crate::value::text(&value)));
+            key.push(key_of(value)?);
+        }
+        let named = match written.is_empty() {
+            true => fold.to_string(),
+            false => format!("{fold} {{ {} }}", written.join(", ")),
+        };
+        let stored = cells.get(&table.id, &key, &column.name);
+
+        let value = match wanted {
+            Expect::Unwritten { .. } => {
+                if stored.is_some() {
+                    return Ok(Some(format!("{named} was written")));
                 }
-            };
-            // Opened before comparing, because a stored sealed column holds the log's own
-            // ciphertext and the test wrote the plaintext. Under the harness the two are
-            // already the same string; against a world that really encrypts they are not,
-            // and that is the only place this shows.
-            let mut held = held;
-            opened(interpreter.host(), &mut held, || format!("{entity}.{name}"))
-                .map_err(|err: Error| err.to_string())?;
-            if !held.same(&wanted) {
-                let held = shown(&held);
-                return Ok(Some(format!(
-                    "{entity}[{}].{name}: expected {wanted}, got {held}",
-                    show(&key)
-                )));
+                continue;
             }
+            Expect::Stored { value, .. } => *value,
+            _ => continue,
+        };
+        let wanted = values.at(value, Some(&column.ty))?;
+        let held = match stored {
+            Some(held) => held.clone(),
+            None => {
+                let args: Vec<(Ident, Value)> = column
+                    .args
+                    .iter()
+                    .cloned()
+                    .zip(key.iter().map(crate::interp::key_as_value))
+                    .collect();
+                interpreter
+                    .fold_stored(&column.fold, args, 0)
+                    .map_err(|err: Error| err.to_string())?
+            }
+        };
+        // Opened before comparing, because a stored sealed column holds the log's own
+        // ciphertext and the test wrote the plaintext. Under the harness the two are
+        // already the same string; against a world that really encrypts they are not,
+        // and that is the only place this shows.
+        let mut held = held;
+        opened(interpreter.host(), &mut held, || named.clone())
+            .map_err(|err: Error| err.to_string())?;
+        if !held.same(&wanted) {
+            let held = shown(&held);
+            return Ok(Some(format!("{named}: expected {wanted}, got {held}")));
         }
     }
     Ok(None)
@@ -920,7 +923,7 @@ impl<'a> Values<'a> {
 }
 
 fn key_of(value: Value) -> Result<Key, String> {
-    Key::from_value(&value).ok_or_else(|| format!("`{value}` cannot be an entity key"))
+    Key::from_value(&value).ok_or_else(|| format!("`{value}` cannot be a key"))
 }
 
 /// A whole key as a message shows it: `7` for one column, `1, "2026-10"` for two, which
@@ -991,6 +994,8 @@ fn describe(expect: &Expect) -> String {
         Expect::Reject { .. } => "reject".to_string(),
         Expect::Row { entity, .. } => format!("a `{entity}` row"),
         Expect::NoRow { entity, .. } => format!("no `{entity}` row"),
+        Expect::Stored { fold, .. } => format!("`{fold}`"),
+        Expect::Unwritten { fold, .. } => format!("no `{fold}`"),
         Expect::Http { verb, .. } => verb.name().to_string(),
         Expect::Invoke { command, .. } => format!("invoke {command}"),
         Expect::Erase { subject, .. } => format!("erase {subject}"),

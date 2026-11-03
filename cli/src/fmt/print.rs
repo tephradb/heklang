@@ -573,34 +573,22 @@ impl<'a> Printer<'a> {
         self.trailed(&trailing, Doc::concat(parts))
     }
 
-    /// `[no] Entity[key] { fields }`.
+    /// `[no] Entity[key] { fields }`, or `no Fold { args }` under `fill`.
     fn row(&self, node: Node<'a>) -> Doc<'a> {
         let (trailing, kids) = self.split(node);
         let mut parts = Vec::new();
         if self.has_token(node, "no") {
             parts.push(Doc::text("no "));
         }
-        // **The single-row table is the word and nothing else**, and the word is an
-        // anonymous token, so it is not among the kids at all and `kids[0]` is already
-        // whatever follows it. Written as a branch rather than an index, because the
-        // indexes below are what would have panicked on it.
-        let rest = match self.has_token(node, "global") {
-            true => {
-                parts.push(Doc::text("global"));
-                &kids[..]
+        parts.push(self.node(kids[0]));
+        for &kid in &kids[1..] {
+            // The subscript prints its own brackets and sits against the name with no
+            // space, so it goes through `node` like any other child rather than being
+            // assembled here. That is also what keeps a comment written among the keys
+            // inside them. A fold's arguments are the one other child, and take a space.
+            if kid.kind() != "subscript" {
+                parts.push(Doc::text(" "));
             }
-            false => {
-                parts.push(self.node(kids[0]));
-                // The subscript prints its own brackets and sits against the name with no
-                // space, so it goes through `node` like any other child rather than being
-                // assembled here. That is also what keeps a comment written among the
-                // keys inside them.
-                parts.push(self.node(kids[1]));
-                &kids[2..]
-            }
-        };
-        for &kid in rest {
-            parts.push(Doc::text(" "));
             parts.push(self.node(kid));
         }
         self.trailed(&trailing, Doc::concat(parts))

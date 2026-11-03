@@ -1801,7 +1801,8 @@ fn a_fill_asserts_a_row_of_the_derived_read_model() {
 
   fill
 
-  expect plan[7] { plan_revenue: 20.00, plan_title: \"Pro\" }
+  expect PlanRevenue { plan_id: 7 } == 20.00
+  expect PlanTitle { plan_id: 7 } == \"Pro\"
 }",
     );
     assert!(
@@ -1823,7 +1824,8 @@ fn a_column_no_arm_wrote_reads_as_its_seed() {
 
   fill
 
-  expect plan[7] { plan_revenue: 0, plan_last_sold_at: none }
+  expect PlanRevenue { plan_id: 7 } == 0
+  expect PlanLastSoldAt { plan_id: 7 } == none
 }",
     );
     assert!(
@@ -1855,8 +1857,9 @@ test \"the whole catalogue's takings sit beside one plan's\" {
 
   fill
 
-  expect global { plans_sold: 2, takings_everywhere: 12.50 }
-  expect plan[7] { plan_revenue: 10.00 }
+  expect PlansSold == 2
+  expect TakingsEverywhere == 12.50
+  expect PlanRevenue { plan_id: 7 } == 10.00
 }",
     );
     assert!(
@@ -1879,7 +1882,7 @@ fn the_single_row_table_reads_its_seeds_with_no_events() {
 test \"a store that has sold nothing has sold nothing\" {
   fill
 
-  expect global { plans_sold: 0 }
+  expect PlansSold == 0
 }",
     );
     assert!(
@@ -1902,7 +1905,7 @@ fn the_single_row_table_has_no_key_to_be_without() {
 test \"nothing to be absent\" {
   fill
 
-  expect no global
+  expect no PlansSold
 }",
     );
     assert!(
@@ -1924,7 +1927,7 @@ fn a_fill_reads_a_query_only_column_too() {
 
   fill
 
-  expect plan[7] { plan_last_sold_at: \"2020-01-01T00:01:00Z\" }
+  expect PlanLastSoldAt { plan_id: 7 } == \"2020-01-01T00:01:00Z\"
 }",
     );
     assert!(
@@ -1942,7 +1945,7 @@ fn expect_no_row_is_a_key_nothing_minted() {
 
   fill
 
-  expect no plan[9]
+  expect no PlanTitle { plan_id: 9 }
 }",
     );
     assert!(
@@ -1957,10 +1960,10 @@ fn expect_no_row_is_a_key_nothing_minted() {
 
   fill
 
-  expect no plan[7]
+  expect no PlanTitle { plan_id: 7 }
 }",
     );
-    assert_eq!(why(only(&present)), "plan[7] is present");
+    assert_eq!(why(only(&present)), "PlanTitle { plan_id: 7 } was written");
 }
 
 #[test]
@@ -1971,62 +1974,114 @@ fn a_mismatch_names_the_table_the_key_and_the_column() {
 
   fill
 
-  expect plan[7] { plan_revenue: 99.00 }
+  expect PlanRevenue { plan_id: 7 } == 99.00
 }",
     );
     assert_eq!(
         why(only(&results)),
-        "plan[7].plan_revenue: expected 99.00, got 10.00"
+        "PlanRevenue { plan_id: 7 }: expected 99.00, got 10.00"
     );
 }
 
 #[test]
-fn a_table_the_read_model_does_not_hold_is_refused_with_the_ones_it_does() {
+fn a_fold_the_program_does_not_declare_is_refused() {
     let message = fold_err(
         "test \"a typo\" {
   given @plan.sold { plan_id: 7, price: 10.00 }
   fill
-  expect plans[7] { plan_revenue: 10.00 }
+  expect PlanRevenu { plan_id: 7 } == 10.00
 }",
     );
     assert!(
-        message.contains("no derived table is called `plans`"),
-        "{message}"
-    );
-    assert!(
-        message.contains("it holds plan"),
-        "the hint lists the read model: {message}"
-    );
-}
-
-#[test]
-fn a_column_the_table_does_not_hold_is_refused() {
-    let message = fold_err(
-        "test \"a typo\" {
-  given @plan.sold { plan_id: 7, price: 10.00 }
-  fill
-  expect plan[7] { plan_takings: 10.00 }
-}",
-    );
-    assert!(
-        message.contains("table `plan` has no column `plan_takings`"),
+        message.contains("fold `PlanRevenu` is not declared"),
         "{message}"
     );
 }
 
+/// The arguments are the `fold` action's, so they are checked the same way: by name
+/// against the fold's own parameters, and every one of them required.
 #[test]
-fn a_fill_takes_the_whole_key_and_says_so() {
+fn a_fill_takes_the_folds_own_arguments_and_says_so() {
     let message = fold_err(
-        "test \"a key and a half\" {
+        "test \"a misnamed key\" {
   given @plan.sold { plan_id: 7, price: 10.00 }
   fill
-  expect plan[7, 9] { plan_revenue: 10.00 }
+  expect PlanRevenue { plan: 7 } == 10.00
 }",
     );
     assert!(
-        message.contains("`plan` has a 1-part key, so a subscript takes 1 value, found 2"),
+        message.contains("`PlanRevenue` has no parameter `plan`"),
         "{message}"
     );
+
+    let message = fold_err(
+        "test \"half a key\" {
+  given @plan.sold { plan_id: 7, price: 10.00 }
+  fill
+  expect PlanRevenue {} == 10.00
+}",
+    );
+    assert!(
+        message.contains("`PlanRevenue` needs `plan_id`"),
+        "{message}"
+    );
+}
+
+/// **`no` is per fold, and a sibling writing the key does not count.** `PlanTitle` and
+/// `PlanRevenue` share a table, so a created plan has a row; revenue was still never
+/// written there. Asked of the row, this would fail or pass depending on which folds the
+/// layout happened to group, which is the thing a test is not meant to see.
+#[test]
+fn expect_no_is_a_key_this_fold_never_wrote() {
+    let results = fold_verdicts(
+        "test \"created and never sold\" {
+  given @plan.created { plan_id: 7, title: \"Pro\", price: 10.00 }
+
+  fill
+
+  expect no PlanRevenue { plan_id: 7 }
+  expect PlanTitle { plan_id: 7 } == \"Pro\"
+}",
+    );
+    assert!(
+        matches!(only(&results).outcome, TestOutcome::Passed),
+        "{:?}",
+        only(&results).outcome
+    );
+}
+
+/// A fold no event can key is kept nowhere, so a `fill` has nothing to say about it and
+/// the refusal points at the read that does.
+#[test]
+fn a_fold_that_is_not_stored_is_refused_under_a_fill() {
+    let message = fold_err(
+        "fold Unkeyed(region: String) -> n: Int = 0 {
+  on @plan.sold() => n + 1
+}
+
+test \"nothing kept\" {
+  fill
+  expect Unkeyed { region: \"eu\" } == 0
+}",
+    );
+    assert!(
+        message.contains("`Unkeyed` is not stored, so a `fill` keeps nothing for it"),
+        "{message}"
+    );
+}
+
+/// **A missing `==` says what it wanted.** The bare form reads like a row expectation from
+/// before, so the message names both shapes this position takes.
+#[test]
+fn a_stored_fold_expectation_needs_its_value() {
+    let message = fold_err(
+        "test \"no value\" {
+  given @plan.sold { plan_id: 7, price: 10.00 }
+  fill
+  expect PlanRevenue { plan_id: 7 }
+}",
+    );
+    assert!(message.contains("expected `==`"), "{message}");
 }
 
 /// `expect nothing` is about a sequence that is empty, and a fill produces rows. The
@@ -2073,7 +2128,7 @@ fold ShapeOf() -> Shape = Shape {{ a: 0 }} {{
 test \"one sale\" {{
   given @plan.sold {{ plan_id: 7, price: 10.00 }}
   fill
-  expect global {{ plans_sold: 1 }}
+  expect PlansSold == 1
 }}
 
 test \"a record literal is still a record literal\" {{
@@ -2243,7 +2298,7 @@ fn a_filled_sealed_column_is_matched_on_its_plaintext() {
 
   fill
 
-  expect customer[7] { latest_city: \"Bristol\" }
+  expect LatestCity { customer_id: 7 } == \"Bristol\"
 }",
     );
     assert!(
@@ -2285,7 +2340,7 @@ fn an_erased_subject_leaves_a_filled_sealed_column_absent() {
 
   fill
 
-  expect customer[7] { latest_city: none }
+  expect LatestCity { customer_id: 7 } == none
 }",
     );
     assert!(
@@ -2304,12 +2359,12 @@ fn the_plaintext_still_has_to_match() {
 
   fill
 
-  expect customer[7] { latest_city: \"Bath\" }
+  expect LatestCity { customer_id: 7 } == \"Bath\"
 }",
     );
     assert_eq!(
         why(only(&results)),
-        "customer[7].latest_city: expected \"Bath\", got \"Bristol\""
+        "LatestCity { customer_id: 7 }: expected \"Bath\", got \"Bristol\""
     );
 }
 
@@ -2359,13 +2414,14 @@ test \"every feature of this batch at once\" {
 
   fill
 
-  // The single-row table, with no subscript because it has no key.
-  expect global { store_units: 1 }
+  // A fold with no parameters, written bare because it has no key.
+  expect StoreUnits == 1
   // `max` kept the newer moment although the older record came second, and `distinct`
   // dropped the repeated unlock while keeping written order.
-  expect user[7] { user_last_seen: \"2026-03-05T00:00:00Z\", user_achievements: [3, 9] }
+  expect UserLastSeen { user_id: 7 } == \"2026-03-05T00:00:00Z\"
+  expect UserAchievements { user_id: 7 } == [3, 9]
   // And the key was read out of another fold, as of the record.
-  expect developer[10] { developer_gross: 2000 }
+  expect DeveloperGross { developer_id: 10 } == 2000
 }
 ";
     let program = parse(source).unwrap_or_else(|err| panic!("expected this to parse: {err}"));

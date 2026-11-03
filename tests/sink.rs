@@ -32,6 +32,26 @@ fn given<'a>(
     ));
 }
 
+/// The storage id of the table whose key parts join to `parts` with `__`, `""` for the
+/// keyless one. A table has no name an author writes, but these tests assert where the
+/// sink put a row and so need its address, and the part names say which one at a glance.
+fn named(program: &Program, parts: &str) -> String {
+    heklang::layout(program)
+        .tables
+        .into_iter()
+        .find(|table| {
+            table
+                .key
+                .iter()
+                .map(|part| part.name.as_str())
+                .collect::<Vec<_>>()
+                .join("__")
+                == parts
+        })
+        .unwrap_or_else(|| panic!("no table is keyed ({parts})"))
+        .id
+}
+
 fn program(source: &str) -> Program {
     match parse(source) {
         Ok(program) => program,
@@ -56,7 +76,7 @@ fn agrees(program: &Program, interpreter: &Interpreter<'_>) -> Cells {
 
     let head = interpreter.host().records().len() as u64;
     for table in &tables.layout().tables {
-        let keys: Vec<Vec<Key>> = cells.rows(&table.name).map(<[Key]>::to_vec).collect();
+        let keys: Vec<Vec<Key>> = cells.rows(&table.id).map(<[Key]>::to_vec).collect();
         for key in &keys {
             for column in &table.columns {
                 let args: Vec<(String, Value)> = column
@@ -68,11 +88,11 @@ fn agrees(program: &Program, interpreter: &Interpreter<'_>) -> Cells {
                 let refolded = interpreter
                     .fold_stored(&column.fold, args.clone(), head)
                     .expect("the column refolds");
-                match cells.get(&table.name, key, &column.name) {
+                match cells.get(&table.id, key, &column.name) {
                     Some(held) => assert!(
                         held.same(&refolded),
                         "{}[{key:?}].{} held {held} and refolds to {refolded}",
-                        table.name,
+                        table.id,
                         column.name
                     ),
                     // A column another column's key minted and this one never wrote is at
@@ -86,7 +106,7 @@ fn agrees(program: &Program, interpreter: &Interpreter<'_>) -> Cells {
                         assert!(
                             seed.same(&refolded),
                             "{}[{key:?}].{} is unwritten, so it reads as the seed {seed}, but refolds to {refolded}",
-                            table.name,
+                            table.id,
                             column.name
                         );
                     }
@@ -201,20 +221,24 @@ fn a_record_applied_leaves_every_column_where_refolding_would() {
     // together still fail.
     let order = |shop, id| vec![Key::Int(shop), Key::Int(id)];
     assert_eq!(
-        cells.get("shop__order", &order(1, 7), "order_total"),
+        cells.get(&named(&program, "shop__order"), &order(1, 7), "order_total"),
         Some(&Value::money(30_000, 2)),
         "400.00 placed and 100.00 refunded"
     );
     assert_eq!(
-        cells.get("shop__order", &order(1, 7), "order_closed"),
+        cells.get(
+            &named(&program, "shop__order"),
+            &order(1, 7),
+            "order_closed"
+        ),
         Some(&Value::Bool(true))
     );
     assert_eq!(
-        cells.get("shop__order", &order(1, 9), "order_total"),
+        cells.get(&named(&program, "shop__order"), &order(1, 9), "order_total"),
         Some(&Value::money(15_000, 2))
     );
     assert_eq!(
-        cells.get("shop", &[Key::Int(1)], "shop_orders"),
+        cells.get(&named(&program, "shop"), &[Key::Int(1)], "shop_orders"),
         Some(&Value::Int(2)),
         "two of the shop's three placed orders are its own"
     );
@@ -222,13 +246,13 @@ fn a_record_applied_leaves_every_column_where_refolding_would() {
     // event, so the `manual` hold is in no row at all rather than in a row keyed `manual`.
     assert_eq!(
         cells.get(
-            "shop__kind__order",
+            &named(&program, "shop__kind__order"),
             &[Key::Int(1), Key::Str("fixed".into()), Key::Int(7)],
             "holds_of_kind"
         ),
         Some(&Value::Int(1))
     );
-    assert_eq!(cells.len("shop__kind__order"), 1);
+    assert_eq!(cells.len(&named(&program, "shop__kind__order")), 1);
 }
 
 #[test]
@@ -257,7 +281,7 @@ fold HoldsOfKind(order_id: Int, kind: String) -> n: Int = 0 {
     let cells = agrees(&program, &interpreter);
     assert_eq!(
         cells.get(
-            "kind__order",
+            &named(&program, "kind__order"),
             &[Key::Str("fixed".into()), Key::Int(7)],
             "holds_of_kind"
         ),
@@ -313,12 +337,20 @@ fold OrdersTouched(shop_id: Shop, order_id: Int) -> n: Int = 0 {
     let cells = agrees(&program, &interpreter);
 
     assert_eq!(
-        cells.get("shop__order", &[Key::Int(1), Key::Int(9)], "orders_touched"),
+        cells.get(
+            &named(&program, "shop__order"),
+            &[Key::Int(1), Key::Int(9)],
+            "orders_touched"
+        ),
         Some(&Value::Int(1)),
         "the key this record minted is in the range it ranged over"
     );
     assert_eq!(
-        cells.get("shop__order", &[Key::Int(1), Key::Int(7)], "orders_touched"),
+        cells.get(
+            &named(&program, "shop__order"),
+            &[Key::Int(1), Key::Int(7)],
+            "orders_touched"
+        ),
         Some(&Value::Int(2)),
         "one cancellation of its own, and one placement over the shop"
     );
@@ -350,7 +382,7 @@ fold LatestEmail(customer_id: Customer) -> Sealed(String, Customer)? = none {
     let cells = agrees(&program, &interpreter);
 
     let held = cells
-        .get("customer", &[Key::Int(7)], "latest_email")
+        .get(&named(&program, "customer"), &[Key::Int(7)], "latest_email")
         .expect("the column is filled");
     assert!(
         matches!(
@@ -382,7 +414,7 @@ fold Interesting(id: Int) -> n: Int = 0 {
     );
     let cells = agrees(&program, &interpreter);
     assert!(
-        cells.is_empty("id"),
+        cells.is_empty(&named(&program, "id")),
         "the filter failed, so there is no row at all"
     );
 
@@ -393,7 +425,7 @@ fold Interesting(id: Int) -> n: Int = 0 {
     );
     let cells = agrees(&program, &interpreter);
     assert_eq!(
-        cells.get("id", &[Key::Int(1)], "interesting"),
+        cells.get(&named(&program, "id"), &[Key::Int(1)], "interesting"),
         Some(&Value::Int(1))
     );
 }
@@ -430,18 +462,26 @@ fold ByKind(shop_id: Shop, fo: Int, k: String) -> n: Int = 0 {
     }
     let cells = agrees(&program, &interpreter);
     assert_eq!(
-        cells.get("shop__fo", &[Key::Int(1), Key::Int(3)], "fo_failures"),
+        cells.get(
+            &named(&program, "shop__fo"),
+            &[Key::Int(1), Key::Int(3)],
+            "fo_failures"
+        ),
         Some(&Value::Int(1))
     );
     assert_eq!(
         cells.get(
-            "shop__fo__k",
+            &named(&program, "shop__fo__k"),
             &[Key::Int(1), Key::Int(3), Key::Str("a".into())],
             "by_kind"
         ),
         Some(&Value::Int(1))
     );
-    assert_eq!(cells.rows("shop__fo").count(), 1, "none mints no key");
+    assert_eq!(
+        cells.rows(&named(&program, "shop__fo")).count(),
+        1,
+        "none mints no key"
+    );
 }
 
 #[test]
@@ -490,8 +530,15 @@ fold Happenings() -> n: Int = 0 {
     given(&mut interpreter, "a.happened", [("id", Value::Int(1))]);
     given(&mut interpreter, "a.happened", [("id", Value::Int(2))]);
     let cells = agrees(&program, &interpreter);
-    assert_eq!(cells.get("global", &[], "happenings"), Some(&Value::Int(2)));
-    assert_eq!(cells.len("global"), 1, "a keyless fold has one value");
+    assert_eq!(
+        cells.get(&named(&program, ""), &[], "happenings"),
+        Some(&Value::Int(2))
+    );
+    assert_eq!(
+        cells.len(&named(&program, "")),
+        1,
+        "a keyless fold has one value"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -555,19 +602,35 @@ fn a_computed_key_part_writes_the_row_the_record_belongs_to() {
 
     let row = |shop, month: &str| vec![Key::Int(shop), Key::Str(month.into())];
     assert_eq!(
-        cells.get("shop__month", &row(1, "2026-03"), "usage_counted"),
+        cells.get(
+            &named(&program, "shop__month"),
+            &row(1, "2026-03"),
+            "usage_counted"
+        ),
         Some(&Value::Int(7)),
         "both of March's records, and neither of April's or the other shop's"
     );
     assert_eq!(
-        cells.get("shop__month", &row(1, "2026-04"), "usage_counted"),
+        cells.get(
+            &named(&program, "shop__month"),
+            &row(1, "2026-04"),
+            "usage_counted"
+        ),
         Some(&Value::Int(9))
     );
     assert_eq!(
-        cells.get("shop__month", &row(2, "2026-03"), "usage_counted"),
+        cells.get(
+            &named(&program, "shop__month"),
+            &row(2, "2026-03"),
+            "usage_counted"
+        ),
         Some(&Value::Int(100))
     );
-    assert_eq!(cells.len("shop__month"), 3, "three buckets, not one");
+    assert_eq!(
+        cells.len(&named(&program, "shop__month")),
+        3,
+        "three buckets, not one"
+    );
 }
 
 #[test]
@@ -578,7 +641,7 @@ fn a_computed_part_is_pinned_so_the_table_is_keyed_by_it() {
         .layout()
         .tables
         .iter()
-        .find(|table| table.name == "shop__month")
+        .find(|table| table.id == named(&program, "shop__month"))
         .expect("the fold is storable");
     assert_eq!(
         table
@@ -652,12 +715,15 @@ fn a_restricted_apply_leaves_a_column_outside_its_closure_untouched() {
         .expect("the sink applies every record it is given");
 
     assert_eq!(
-        cells.get("box", &[Key::Int(1)], "tick_count"),
+        cells.get(&named(&program, "box"), &[Key::Int(1)], "tick_count"),
         Some(&Value::Int(3))
     );
     // Not its seed and not its value: the arm never ran, so the cell was never written.
     // That is the whole of what a rebuild of one column asks for.
-    assert_eq!(cells.get("box", &[Key::Int(1)], "tick_doubled"), None);
+    assert_eq!(
+        cells.get(&named(&program, "box"), &[Key::Int(1)], "tick_doubled"),
+        None
+    );
 }
 
 #[test]
@@ -689,20 +755,20 @@ fn a_restricted_apply_over_every_fold_is_the_unrestricted_one() {
     // the store back and so the one a skipped column could corrupt.
     let whole = agrees(&program, &interpreter);
     for table in &tables.layout().tables {
-        let keys: Vec<Vec<Key>> = whole.rows(&table.name).map(<[Key]>::to_vec).collect();
+        let keys: Vec<Vec<Key>> = whole.rows(&table.id).map(<[Key]>::to_vec).collect();
         assert_eq!(
-            restricted.len(&table.name),
+            restricted.len(&table.id),
             keys.len(),
             "{} holds a different number of rows",
-            table.name
+            table.id
         );
         for key in &keys {
             for column in &table.columns {
                 assert_eq!(
-                    restricted.get(&table.name, key, &column.name),
-                    whole.get(&table.name, key, &column.name),
+                    restricted.get(&table.id, key, &column.name),
+                    whole.get(&table.id, key, &column.name),
                     "{}[{key:?}].{}",
-                    table.name,
+                    table.id,
                     column.name
                 );
             }
@@ -748,7 +814,10 @@ fold TicksSince(at: Timestamp) -> n: Int = 0 {
             rebuild.apply(record, &mut cells)
         })
         .expect("a fold with no column is nothing to apply");
-    assert!(cells.is_empty("box"), "`TickCount` was not among them");
+    assert!(
+        cells.is_empty(&named(&program, "box")),
+        "`TickCount` was not among them"
+    );
 }
 
 #[test]
@@ -756,7 +825,7 @@ fn the_layout_names_the_table_and_column_one_fold_is_kept_in() {
     let program = program(SHOP);
     let layout = heklang::layout(&program);
     let (table, column) = layout.column("HoldsOfKind").expect("it is kept");
-    assert_eq!(table.name, "shop__kind__order");
+    assert_eq!(table.id, named(&program, "shop__kind__order"));
     assert_eq!(column.name, "holds_of_kind");
     assert!(
         layout.column("holds_of_kind").is_none(),
@@ -808,7 +877,7 @@ fn a_restricted_apply_still_mints_the_keys_a_range_arm_covers() {
     let whole = agrees(&program, &interpreter);
     let key = [Key::Int(7), Key::Int(1)];
     assert_eq!(
-        whole.get("order__shop", &key, "order_closed"),
+        whole.get(&named(&program, "order__shop"), &key, "order_closed"),
         Some(&Value::Bool(true)),
         "the order was minted before the shop was uninstalled, so the range covers it"
     );
@@ -822,8 +891,8 @@ fn a_restricted_apply_still_mints_the_keys_a_range_arm_covers() {
         })
         .expect("the sink applies every record it is given");
     assert_eq!(
-        part.get("order__shop", &key, "order_closed"),
-        whole.get("order__shop", &key, "order_closed"),
+        part.get(&named(&program, "order__shop"), &key, "order_closed"),
+        whole.get(&named(&program, "order__shop"), &key, "order_closed"),
         "a restricted rebuild of a ranged column answers what the whole sink does"
     );
 }
@@ -862,7 +931,7 @@ fn the_closure_names_the_columns_a_rebuild_has_to_prepare() {
     let mut live = agrees(&program, &interpreter);
     let key = [Key::Int(7), Key::Int(1)];
     assert_eq!(
-        live.get("order__shop", &key, "order_total"),
+        live.get(&named(&program, "order__shop"), &key, "order_total"),
         Some(&Value::Int(1))
     );
     interpreter
@@ -872,7 +941,7 @@ fn the_closure_names_the_columns_a_rebuild_has_to_prepare() {
         })
         .expect("the sink applies every record it is given");
     assert_eq!(
-        live.get("order__shop", &key, "order_total"),
+        live.get(&named(&program, "order__shop"), &key, "order_total"),
         Some(&Value::Int(2)),
         "folded a second time onto what it already held, which is what `folds` warns about"
     );
@@ -997,7 +1066,7 @@ fn a_computed_key_part_reaches_the_same_row_through_both_drivers() {
     // The envelope binding, through a pure `fn`: the harness stamps 2020-01-01.
     assert_eq!(
         cells.get(
-            "month__shop",
+            &named(&program, "month__shop"),
             &[Key::Str("2020-01".into()), Key::Int(1)],
             "usage_counted"
         ),
@@ -1006,7 +1075,7 @@ fn a_computed_key_part_reaches_the_same_row_through_both_drivers() {
     // A `const`, a bind and a comprehension over a bound list: 5 + 100 + 2.
     assert_eq!(
         cells.get(
-            "bucket__shop",
+            &named(&program, "bucket__shop"),
             &[Key::Int(107), Key::Int(1)],
             "tagged_units"
         ),
@@ -1030,11 +1099,19 @@ fn the_sink_does_not_evaluate_a_key_for_a_record_the_arm_rejects() {
     let cells = agrees(&program, &interpreter);
 
     assert_eq!(
-        cells.get("rate__shop", &[Key::Int(20), Key::Int(1)], "rated"),
+        cells.get(
+            &named(&program, "rate__shop"),
+            &[Key::Int(20), Key::Int(1)],
+            "rated"
+        ),
         Some(&Value::Int(5)),
         "the paid record alone, at 100 / 5"
     );
-    assert_eq!(cells.len("rate__shop"), 1, "the free record is in no row");
+    assert_eq!(
+        cells.len(&named(&program, "rate__shop")),
+        1,
+        "the free record is in no row"
+    );
 
     // **The whole predicate, not the conjuncts that read nothing.** `Matching` pins
     // `kind` from the field of that name and then narrows again on `tags: [kind]`, which
@@ -1043,7 +1120,7 @@ fn the_sink_does_not_evaluate_a_key_for_a_record_the_arm_rejects() {
     // free record's tags are not `["free"]`, so the arm does not match it, and the sink
     // divided by its zero units anyway.
     assert!(
-        cells.is_empty("kind__rate__shop"),
+        cells.is_empty(&named(&program, "kind__rate__shop")),
         "no record has tags equal to its own kind"
     );
 }
@@ -1078,7 +1155,11 @@ fn one_columns_arms_apply_in_written_order() {
     );
     let cells = agrees(&program, &interpreter);
     assert_eq!(
-        cells.get("order__shop", &[Key::Int(7), Key::Int(1)], "seen"),
+        cells.get(
+            &named(&program, "order__shop"),
+            &[Key::Int(7), Key::Int(1)],
+            "seen"
+        ),
         Some(&Value::Int(1)),
         "the ranged arm resets and the pinned arm counts, in that order"
     );
@@ -1104,7 +1185,11 @@ fold Seen(shop_id: Int, order_id: Int) -> n: Int = 0 {
     );
     let cells = agrees(&program, &interpreter);
     assert_eq!(
-        cells.get("order__shop", &[Key::Int(7), Key::Int(1)], "seen"),
+        cells.get(
+            &named(&program, "order__shop"),
+            &[Key::Int(7), Key::Int(1)],
+            "seen"
+        ),
         Some(&Value::Int(0)),
         "the pinned arm counts and the ranged arm resets, in that order"
     );
@@ -1187,23 +1272,39 @@ fold OtherKind(shop_id: Int, order_id: Int, kind: String) -> n: Int = 0 {
 
     let key = |order, kind: &str| vec![Key::Str(kind.into()), Key::Int(order), Key::Int(1)];
     assert_eq!(
-        cells.0.get("kind__order__shop", &key(7, "a"), "of_kind"),
+        cells.0.get(
+            &named(&program, "kind__order__shop"),
+            &key(7, "a"),
+            "of_kind"
+        ),
         Some(&Value::Int(201)),
         "its own arm once, and the range of both `\"a\"` records"
     );
     assert_eq!(
-        cells.0.get("kind__order__shop", &key(9, "a"), "of_kind"),
+        cells.0.get(
+            &named(&program, "kind__order__shop"),
+            &key(9, "a"),
+            "of_kind"
+        ),
         Some(&Value::Int(101)),
         "minted by the third record, so only its own range reaches it"
     );
     // Offered to the range and not written by it: the key it carries is not the one the
     // arm pins.
     assert_eq!(
-        cells.0.get("kind__order__shop", &key(8, "b"), "of_kind"),
+        cells.0.get(
+            &named(&program, "kind__order__shop"),
+            &key(8, "b"),
+            "of_kind"
+        ),
         None
     );
     assert_eq!(
-        cells.0.get("kind__order__shop", &key(8, "b"), "other_kind"),
+        cells.0.get(
+            &named(&program, "kind__order__shop"),
+            &key(8, "b"),
+            "other_kind"
+        ),
         Some(&Value::Int(1))
     );
 }
@@ -1251,12 +1352,20 @@ fold Seen(shop_id: Int, order_id: Int) -> n: Int = 0 {
 
     // Order 7 exists for both records, so it takes both ranges and its own count.
     assert_eq!(
-        cells.get("order__shop", &[Key::Int(7), Key::Int(1)], "seen"),
+        cells.get(
+            &named(&program, "order__shop"),
+            &[Key::Int(7), Key::Int(1)],
+            "seen"
+        ),
         Some(&Value::Int(21))
     );
     // Order 8 is minted by the second record, so the first record's range passed it by.
     assert_eq!(
-        cells.get("order__shop", &[Key::Int(8), Key::Int(1)], "seen"),
+        cells.get(
+            &named(&program, "order__shop"),
+            &[Key::Int(8), Key::Int(1)],
+            "seen"
+        ),
         Some(&Value::Int(11))
     );
     // And this is the difference, stated rather than discovered: a refold applies both.
@@ -1337,7 +1446,11 @@ fn a_key_read_through_another_fold_agrees_with_a_refold() {
 
     let cells = agrees(&program, &interpreter);
     assert_eq!(
-        cells.get("genre", &[Key::Str("rpg".into())], "genre_units"),
+        cells.get(
+            &named(&program, "genre"),
+            &[Key::Str("rpg".into())],
+            "genre_units"
+        ),
         Some(&Value::Int(1)),
         "the first sale, under the genre the game had when it sold"
     );
@@ -1351,7 +1464,11 @@ fn a_key_read_through_another_fold_agrees_with_a_refold() {
     // other keys through a fold that captures the sale, so that what the lookup answers
     // cannot move afterwards.
     assert_eq!(
-        cells.get("genre", &[Key::Str("shooter".into())], "genre_units"),
+        cells.get(
+            &named(&program, "genre"),
+            &[Key::Str("shooter".into())],
+            "genre_units"
+        ),
         Some(&Value::Int(0)),
         "the second sale, and the refund of the first"
     );
@@ -1417,12 +1534,20 @@ fn a_restricted_replay_of_a_keyed_column_is_the_whole_sink() {
     // the closure it would have read `GameGenre`'s seed and filed the sale under
     // `"unknown"`, which is the silent wrong answer the closure exists to prevent.
     assert_eq!(
-        part.get("genre", &[Key::Str("rpg".into())], "genre_units"),
+        part.get(
+            &named(&program, "genre"),
+            &[Key::Str("rpg".into())],
+            "genre_units"
+        ),
         Some(&Value::Int(1))
     );
     assert!(
-        part.get("genre", &[Key::Str("unknown".into())], "genre_units")
-            .is_none()
+        part.get(
+            &named(&program, "genre"),
+            &[Key::Str("unknown".into())],
+            "genre_units"
+        )
+        .is_none()
     );
 }
 
@@ -1467,12 +1592,20 @@ fn a_lookup_reads_the_log_strictly_before_the_record() {
 
     let cells = agrees(&program, &interpreter);
     assert_eq!(
-        cells.get("genre", &[Key::Str("unknown".into())], "genre_listings"),
+        cells.get(
+            &named(&program, "genre"),
+            &[Key::Str("unknown".into())],
+            "genre_listings"
+        ),
         Some(&Value::Int(1)),
         "the first listing is counted before it has a genre to be counted under"
     );
     assert_eq!(
-        cells.get("genre", &[Key::Str("rpg".into())], "genre_listings"),
+        cells.get(
+            &named(&program, "genre"),
+            &[Key::Str("rpg".into())],
+            "genre_listings"
+        ),
         Some(&Value::Int(1)),
         "the second reads what the first left"
     );
@@ -1527,7 +1660,7 @@ fn a_value_read_through_another_fold_agrees_with_a_refold() {
 
     let cells = agrees(&program, &interpreter);
     assert_eq!(
-        cells.get("shop", &[Key::Int(1)], "edits_requested"),
+        cells.get(&named(&program, "shop"), &[Key::Int(1)], "edits_requested"),
         Some(&Value::Int(1)),
         "the real order's edit, and not the test order's"
     );
@@ -1570,7 +1703,7 @@ fold Counted(x: Int) -> n: Int = 0 {
 
     let cells = agrees(&program, &interpreter);
     assert_eq!(
-        cells.get("x", &[Key::Int(1)], "counted"),
+        cells.get(&named(&program, "x"), &[Key::Int(1)], "counted"),
         Some(&Value::Int(11)),
         "the first record sets the flag and is counted before it: 1, then 10"
     );
@@ -1619,7 +1752,11 @@ fold Counted(shop_id: Shop, order_id: Int) -> n: Int = 0 {
     // because it is the record setting it: `+ 10` at each, not `+ 100`.
     for order in [7, 8] {
         assert_eq!(
-            cells.get("shop__order", &[Key::Int(1), Key::Int(order)], "counted"),
+            cells.get(
+                &named(&program, "shop__order"),
+                &[Key::Int(1), Key::Int(order)],
+                "counted"
+            ),
             Some(&Value::Int(11)),
             "one placement and one sweep, at order {order}"
         );
@@ -1677,12 +1814,19 @@ fn a_skipped_record_is_written_under_no_key_by_either_driver() {
 
     let cells = agrees(&program, &interpreter);
     assert_eq!(
-        cells.get("developer", &[Key::Int(7)], "developer_gross"),
+        cells.get(
+            &named(&program, "developer"),
+            &[Key::Int(7)],
+            "developer_gross"
+        ),
         Some(&Value::Int(500)),
         "the announced game's sale is filed under its developer"
     );
     // **No row at all**, which is the claim: not a zero, not a row under the seed.
-    let rows: Vec<Vec<Key>> = cells.rows("developer").map(<[Key]>::to_vec).collect();
+    let rows: Vec<Vec<Key>> = cells
+        .rows(&named(&program, "developer"))
+        .map(<[Key]>::to_vec)
+        .collect();
     assert_eq!(rows, [vec![Key::Int(7)]], "and the skipped sale wrote none");
 
     // And the by-key driver has to agree about a key the sink never minted, which is the
@@ -2102,7 +2246,11 @@ fold NotesByDiscount(taken: Int) -> n: Int = 0 {
         })
         .expect("the sink applies every record");
     assert_eq!(
-        cells.get("taken", &[Key::Int(0)], "notes_by_discount"),
+        cells.get(
+            &named(&program, "taken"),
+            &[Key::Int(0)],
+            "notes_by_discount"
+        ),
         Some(&Value::Int(1)),
         "the sink used the discount the store held"
     );

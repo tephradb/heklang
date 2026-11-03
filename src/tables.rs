@@ -9,6 +9,7 @@
 //! [`layout`] returns, and the runtime creates the real tables from the same rules, which
 //! is why the rules live in the library rather than in the CLI.
 
+use crate::digest;
 use crate::interp::{Error, ErrorKind, eval_pure, fitted_at};
 use crate::ir::{EventPath, Expr, ExprId, Exprs, Filter, Fold, Ident, Program, Slot, Type};
 use crate::parse::snake_case;
@@ -140,9 +141,13 @@ impl Layout {
 /// One key signature and every fold kept for it.
 #[derive(Debug, Clone)]
 pub struct Table {
-    /// The key parts joined with `__`, or `global` for the single-row table a fold with
-    /// no parameters is kept in.
-    pub name: String,
+    /// The table's identity, which a store names its physical table after: `t_` and a
+    /// short hash of [`Self::key`]'s names and types, so it depends on this signature alone
+    /// and adding a fold elsewhere cannot move it.
+    ///
+    /// **Not an address.** No author writes or reads it: a test, a route and a listing name
+    /// a fold, and every fold is in exactly one table, so [`Layout::column`] is the way in.
+    pub id: String,
     pub key: Vec<KeyPart>,
     /// Alphabetical by column name.
     pub columns: Vec<Column>,
@@ -403,6 +408,10 @@ pub fn layout(program: &Program) -> Layout {
                     .iter()
                     .map(|param| args.iter().position(|arg| arg == param))
                     .collect::<Option<Vec<usize>>>()
+                    .map(|mut positions| {
+                        positions.sort_unstable();
+                        positions
+                    })
             })
             .collect();
         let column = Column {
@@ -418,65 +427,17 @@ pub fn layout(program: &Program) -> Layout {
         match tables.iter_mut().find(|table| same(&table.key, &key)) {
             Some(table) => table.columns.push(column),
             None => tables.push(Table {
-                name: table_name(&key),
+                id: digest::table_id(key.iter().map(|part| (part.name.as_str(), &part.ty))),
                 key,
                 columns: vec![column],
             }),
         }
     }
 
-    // **`global` is reserved for the single-row table, and that is settled before the
-    // clash list below rather than inside it.** A keyed table never keeps that name even
-    // when nothing else wants it: with no parameterless fold in the program there is
-    // nothing to clash with, so `fold ScopeSeen(global: Int)` kept `global` outright, and a
-    // test asserts the single-row table by that word (`docs/testing.md` section 9), so the
-    // grammar reads it as a keyword and `expect global[7]` could be checked and never
-    // formatted. The name is reserved here rather than refused, because what an author
-    // wrote is a parameter and the collision is in a name this module derives.
-    //
-    // **Before the clash list, because this rename can itself collide.** Done inside the
-    // loop below, over a list computed in front of it, a program with a `global` part and a
-    // `global_int` part came out with two different tables both called `global_int` and
-    // nothing said so, which is the exact failure the clash list exists to prevent. Renamed
-    // first, those two are an ordinary clash and the machinery below tells them apart.
-    for table in &mut tables {
-        if table.name == GLOBAL && !table.key.is_empty() {
-            table.name = disambiguated(&table.key);
-        }
-    }
-
-    // Two key signatures can derive one name, because a part is told apart by name and
-    // type and a name is only the names joined: `(day: String)` and `(day: Int)` are two
-    // tables both called `day`. Rare enough that no program has done it, and a runtime
-    // keying on the name would silently serve one table for both, so the type goes into
-    // the name of each rather than into a diagnostic nothing could act on.
-    let clashes: Vec<String> = tables
-        .iter()
-        .filter(|table| {
-            tables
-                .iter()
-                .filter(|other| other.name == table.name)
-                .count()
-                > 1
-        })
-        .map(|table| table.name.clone())
-        .collect();
-    for table in &mut tables {
-        // **The single-row table keeps its name whatever clashes with it**, because it has
-        // no parts to put a type into and `disambiguated` would leave it with no name at
-        // all: the join is over the key parts, and it has none. It is reachable, since the
-        // loop above renames a keyed table *to* a name another one may already hold, and
-        // before this guard the keyless table went through here and came out as the empty
-        // string, which is not a name a runtime can build a table from.
-        if !table.key.is_empty() && clashes.contains(&table.name) {
-            table.name = disambiguated(&table.key);
-        }
-    }
-
-    // The name breaks a tie, so that two keys alike in their part names but not their
+    // The id breaks a tie, so that two keys alike in their part names but not their
     // types still have one order. Without it the two fall back on declaration order,
     // which is the one thing a layout is not allowed to depend on.
-    tables.sort_by(|a, b| parts(a).cmp(&parts(b)).then_with(|| a.name.cmp(&b.name)));
+    tables.sort_by(|a, b| parts(a).cmp(&parts(b)).then_with(|| a.id.cmp(&b.id)));
     for table in &mut tables {
         table.columns.sort_by(|a, b| a.name.cmp(&b.name));
     }
@@ -655,59 +616,6 @@ fn plain_name(param: &str) -> String {
         .filter(|rest| !rest.is_empty())
         .unwrap_or(param)
         .to_string()
-}
-
-/// A type as an **identifier**, for the clash-breaking table name above.
-///
-/// `Type`'s own rendering is for a reader: `Money(2)`, `String?`, `String @subject(Shop)`.
-/// Putting that through `snake_case` left `(`, `)`, `?` and `, ` in a name the module doc
-/// promises a runtime will create a table from, so the shape is spelled out here instead.
-/// Injective where `Display` is, because the disambiguation it feeds exists precisely to
-/// tell two types apart.
-fn type_tag(ty: &Type) -> String {
-    match ty {
-        Type::Opt(inner) => format!("{}_opt", type_tag(inner)),
-        Type::Money(scale) => format!("money_{scale}"),
-        Type::Decimal(scale) => format!("decimal_{scale}"),
-        Type::List(inner) => format!("list_{}", type_tag(inner)),
-        Type::Map(key, value) => format!("map_{}_{}", type_tag(key), type_tag(value)),
-        Type::Sealed(inner, subject) => {
-            format!("sealed_{}_{}", type_tag(inner), snake_case(subject))
-        }
-        Type::Subject(sub) => snake_case(&sub.name),
-        Type::Enum(name) | Type::Record(name) => snake_case(name),
-        Type::Event(path) => snake_case(&path.to_string().replace(['@', '.'], "_")),
-        // Bool, Int, String, Uuid, Timestamp, Rounding, Json, Response, Outcome: each
-        // renders as one capitalised word, which is already an identifier.
-        plain => snake_case(&plain.to_string()),
-    }
-}
-
-/// The name the single-row table always has, and which a keyed table is therefore never
-/// allowed to keep: a test asserts that table by this word rather than by a subscript, so
-/// the grammar reads it as a keyword and a keyed table of the same name would be
-/// unformattable. See `docs/testing.md` section 9.
-pub(crate) const GLOBAL: &str = "global";
-
-/// The clash-breaking name: every key part with its type, which is what tells two keys
-/// apart that share their part names. Empty for the single-row table, which is why the
-/// callers guard on a non-empty key.
-fn disambiguated(key: &[KeyPart]) -> String {
-    key.iter()
-        .map(|part| format!("{}_{}", part.name, type_tag(&part.ty)))
-        .collect::<Vec<_>>()
-        .join("__")
-}
-
-fn table_name(key: &[KeyPart]) -> String {
-    match key.is_empty() {
-        true => GLOBAL.to_string(),
-        false => key
-            .iter()
-            .map(|part| part.name.as_str())
-            .collect::<Vec<_>>()
-            .join("__"),
-    }
 }
 
 /// The events a column folds, first written first, each once. Two arms on one event is

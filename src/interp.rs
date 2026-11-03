@@ -1212,7 +1212,7 @@ impl<'a> Tables<'a> {
                 // rule 13 conjunct is bound from whatever key came back, so the gate goes
                 // dead, and a dead gate here is a `malformed ir` that aborts the record
                 // rather than a key to skip.
-                let mut found = columns.keys(&table.name, &pinned)?;
+                let mut found = columns.keys(&table.id, &pinned)?;
                 found.retain(|key| covers(&pinned, key));
                 found.extend(minted.iter().filter(|key| covers(&pinned, key)).cloned());
                 found.sort();
@@ -1431,7 +1431,7 @@ impl<'a> Tables<'a> {
         // read, which is what makes an erasure after the fill observable without
         // refolding anything.
         match folded {
-            Some(folded) => columns.set(&table.name, key, &column.name, folded),
+            Some(folded) => columns.set(&table.id, key, &column.name, folded),
             // No arm of this column writes this key, which `applying` does not ask for.
             None => Ok(()),
         }
@@ -1462,7 +1462,7 @@ impl<'a> Tables<'a> {
         // value are one thing (`docs/folds.md` section 11). Read **once** for the row,
         // not once per arm, which is what folding a row's arms together buys besides
         // getting their order right.
-        let held = match columns.value(&table.name, key, &column.name)? {
+        let held = match columns.value(&table.id, key, &column.name)? {
             Some(value) => value,
             None => {
                 let var = def
@@ -2566,7 +2566,7 @@ impl Asof<'_> {
                     };
                     key.push(part);
                 }
-                match columns.value(&table.name, &key, &column.name)? {
+                match columns.value(&table.id, &key, &column.name)? {
                     Some(value) => Ok(value),
                     // An absent row is the fold's seed, as it is everywhere else
                     // (`docs/folds.md` section 11). Its parameters are bound first,

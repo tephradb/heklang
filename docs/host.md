@@ -348,8 +348,9 @@ of `Host`, a key is a sequence that must order lexicographically, it reads as we
 
 **Per program rather than per projector.** Nothing declares a derived table: a read model is a named
 fold kept for every key, so `tables::layout` derives the whole set from the program's folds and
-there is one of them. `table` and `column` are that layout's own names, which is what keeps `hek
-check --tables` and the real tables from disagreeing about what an author is looking at.
+there is one of them. `table` is `Table::id` and `column` is `Column::name`, both that layout's, so
+a host never derives a name of its own. Neither is an author's address: an author names a fold, and
+`Layout::column` turns the fold into this pair.
 
 **It reads for a sharper reason than `Rows` does.** A `patch` reads the row to fill its stored
 loads; a fold's accumulator **is** the stored column, so without `value` there is nothing to fold
@@ -409,10 +410,11 @@ value from the table instead.
 
 **A column may declare that it can be sorted on** (`docs/folds.md` rule 20), and
 `Column::indexes` is what a host builds its DDL and its `order_by` surface from. Each entry is the
-**key positions** that lead the index, in the table's key order, with the column itself implied
-last: `[0]` on a table keyed `(game, user)` is the index `(game, <this column>)`, and an empty entry
-is the column on its own. Positions rather than names, because what an index can answer is decided
-by the order its columns sit in, and that order is the table's rather than the parameter list's.
+**set** of key positions that lead the index, sorted into the table's key order, with the column
+itself implied last: `[1]` on a table keyed `(game, user)` is the index `(user, <this column>)`, and
+an empty entry is the column on its own. Build the lead in that sorted order, and serve a sort when
+the parts a read pins are **exactly** that set: the lead is a set to the author, so the order inside
+it is the store's and never part of what a reader asks for.
 
 Two things a host has to decide for itself, because nothing here can. **An optional column may be
 indexed**, so where the absent rows sort is the store's choice and belongs in its own documentation:

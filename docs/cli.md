@@ -20,7 +20,7 @@ pass   an email that already placed an order is refused
 ## Usage
 
 ```
-hek [check|test|fmt|digest] [--boundaries] [--tables] [--check]
+hek [check|test|fmt|digest] [--boundaries] [--tables] [--ids] [--check]
     [--packed|--hash|--json] [--tests] [path..|-]
 ```
 
@@ -88,7 +88,7 @@ diagnostic an author learns to ignore is worse than a line they can look at when
 
 `--tables` prints the read model the program's named folds imply. Nothing declares it: a
 fold already says what a value is, which events change it and what it is keyed by, so a
-fold is a column, its parameters are the key, and a table is the folds that share one.
+fold is a column, its parameters are the key, and the folds that share a key share a row.
 Asked for rather than printed, for the reason `--boundaries` is.
 
 ```
@@ -96,18 +96,26 @@ $ hek check --tables
 checked 9 files
   5 events, 2 commands, 4 folds, 1 subject, 7 tests
 
-  TABLE shop  (shop: Shop)  1 column
-    shop_installed: Bool       <- @shop.installed, @shop.uninstalled
+  (shop: Shop)
+    ShopInstalled: Bool       <- @shop.installed, @shop.uninstalled
 
-  TABLE shop__order  (shop: Shop, order: Int)  2 columns
-    order_cancelled: Bool      <- @order.cancelled
-    order_total: Money(2)      <- @order.placed
+  (shop: Shop, order: Int)
+    OrderCancelled: Bool      <- @order.cancelled
+    OrderTotal: Money(2)      <- @order.placed
 ```
+
+**A group has no name, and that is the point.** Every stored fold is in exactly one group, so
+the fold's own name is a sufficient address: a test, a route and this listing all name folds.
+A name derived from the key was the one thing adding an unrelated fold could change, since
+two keys that joined to one name were both renamed apart, and it put a word in front of an
+author that nothing they wrote spelled. `--ids` adds each group's storage id beside its key (and implies `--tables`),
+for someone looking at the store itself: `t_` and sixteen hex digits of a hash over the key's
+part names and types (`Table::id`), which depends on that key alone.
 
 A key part is named by its subject when it has one and by its parameter otherwise, with
 one trailing `_id` taken off. Subject parts lead, ordered so a parent sits above the
-children whose keys wrap under it; plain parts follow alphabetically. A table sorts below
-every table it narrows, which is what puts a one-column table next to the forty-column one
+children whose keys wrap under it; plain parts follow alphabetically. A group sorts below
+every group it narrows, which is what puts a one-fold group next to the forty-fold one
 it should probably have been part of.
 
 **Where two parts would take one name**, by repeating a subject or by spelling it two ways,
@@ -116,10 +124,6 @@ to)`. Never by position. A counter over declaration order made two folds declari
 pair in opposite orders into one table whose key columns meant different parameters in
 each, and a suffix is spellable, so `_1` collided with a parameter already called that.
 A parameter is the one name unique within a fold, so it cannot do either.
-
-**Two key signatures can still want one table name**, because a name is only its parts'
-names joined and a part is told apart by name *and* type. `(day: String)` and `(day: Int)`
-are two tables, so each takes the part types into its name: `day_string` and `day_int`.
 
 **A part's name is not callable, so a column also records the parameters it came from.**
 `Column::args` is the parameter per key position in the table's key order, which is what
@@ -130,37 +134,36 @@ it, and gets `missing argument` for every fold the first time it is slightly wro
 column and not per table, because one key signature is reached by parameters of different
 names: `(shop_id: Shop)` and `(shop: Shop)` are one key.
 
-**A column that reads another says so**, which is `docs/folds.md` rules 15 and 16:
+**A fold that reads another says so**, which is `docs/folds.md` rules 15 and 16:
 
 ```
-    genre_units: Int  <- @game.purchased, @game.refunded  (reads game_genre, receipt_game)
+    GenreUnits: Int  <- @game.purchased, @game.refunded  (reads GameGenre, ReceiptGame)
 ```
 
-Named as **columns** because that is what the rest of the listing is, and transitive, so a chain
-shows every link rather than the one the arm wrote. "reads" rather than "keyed through", because a
-fold may be read for a key part (rule 15) or for a value (rule 16) and the dependency is the same
-either way. It is the answer to "why does editing `GameGenre`
-refold `genre_units`", and the same list is `Column::reads`: what the digest records so the
-dependent's hash moves, and what `Layout::closure` adds to a rebuild.
+Transitive, so a chain shows every link rather than the one the arm wrote. "reads" rather than
+"keyed through", because a fold may be read for a key part (rule 15) or for a value (rule 16) and
+the dependency is the same either way. It is the answer to "why does editing `GameGenre` refold
+`GenreUnits`", and the same list is `Column::reads`: what the digest records so the dependent's
+hash moves, and what `Layout::closure` adds to a rebuild.
 
-**A column that may be sorted on says so too**, which is `docs/folds.md` rule 20:
+**A fold that may be sorted on says so too**, which is `docs/folds.md` rule 20:
 
 ```
-    review_helpful: Int  <- @review.voted  (sorts by (game, review_helpful))
+    ReviewHelpful: Int  <- @review.voted  (sorts by (game, ReviewHelpful))
 ```
 
-Printed as the index a store would build rather than as the annotation the author wrote, which is
-the one thing `@index(game_id)` does not say on its face: the parameters it names become key parts
-in the table's key order, and the column itself is the last position. That is also exactly what
-`Column::indexes` holds, as positions into the table's key, so a host reading this listing and a
-host reading the layout see one answer.
+Printed as the index a store would build rather than as the annotation the author wrote: the
+parameters it names become key parts, **in the key's order whatever order they were written in**,
+and the fold's own value is the last position. That is also exactly what `Column::indexes` holds,
+as sorted positions into the key, so a host reading this listing and a host reading the layout see
+one answer.
 
-**A key part and a column may not take one name**, and that one is refused rather than
-disambiguated. `fold Shop(shop_id: Shop)` wants a table whose key column and whose only
-value column are both `shop`, which nothing can create, and unlike the two cases above the
-author has somewhere to go: a fold is named for the value and not for the entity
-(`docs/folds.md` rule 1), so `ShopInstalled` is the name and `shop_installed` the column.
-The refusal is the parser's, and it reads the same derivation this listing does.
+**A key part and a fold's column may not take one name**, and that one is refused rather than
+disambiguated. `fold Shop(shop_id: Shop)` wants a row whose key column and whose only value
+column are both `shop`, which nothing can create, and unlike the case above the author has
+somewhere to go: a fold is named for the value and not for the entity (`docs/folds.md` rule 1),
+so `ShopInstalled` is the name. The refusal is the parser's, and it reads the same derivation
+this listing does.
 
 A fold whose key no event supplies cannot be kept, and is listed at the end instead:
 

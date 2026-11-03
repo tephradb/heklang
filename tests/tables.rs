@@ -18,7 +18,8 @@ fn read(source: &str) -> Layout {
     layout(&program(source))
 }
 
-/// One line per table, `name  column, column`, which is the whole of what a layout says
+/// One line per table, `part__part  column, column` (`()` for the keyless one), which is
+/// the whole of what a layout says
 /// about grouping.
 fn tables(source: &str) -> Vec<String> {
     read(source)
@@ -30,7 +31,12 @@ fn tables(source: &str) -> Vec<String> {
                 .iter()
                 .map(|column| column.name.as_str())
                 .collect();
-            format!("{}  {}", table.name, columns.join(", "))
+            let key: Vec<&str> = table.key.iter().map(|part| part.name.as_str()).collect();
+            let key = match key.is_empty() {
+                true => "()".to_string(),
+                false => key.join("__"),
+            };
+            format!("{key}  {}", columns.join(", "))
         })
         .collect()
 }
@@ -186,7 +192,6 @@ fold TransferSeen(to_id: Region, from_id: Region) -> Bool = false {
         .map(|part| part.name.as_str())
         .collect();
     assert_eq!(parts, ["from", "to"]);
-    assert_eq!(layout.tables[0].name, "from__to");
 }
 
 /// **The bug position caused.** Two folds declaring one pair in opposite orders are one
@@ -269,7 +274,7 @@ fold Cancelled(shop_id: Shop, order: Int) -> Bool = false {
 
 /// A fold with no parameters is one value for the whole log, so it is kept in one row.
 #[test]
-fn a_fold_with_no_parameters_is_the_global_table() {
+fn a_fold_with_no_parameters_is_the_keyless_table() {
     let source = app("
 fold OrdersPlaced() -> placed: Int = 0 {
   on @order.placed() => placed + 1
@@ -277,51 +282,8 @@ fold OrdersPlaced() -> placed: Int = 0 {
 ");
 
     let layout = read(&source);
-    assert_eq!(tables(&source), ["global  orders_placed"]);
+    assert_eq!(tables(&source), ["()  orders_placed"]);
     assert!(layout.tables[0].key.is_empty());
-}
-
-/// **And it keeps that name whatever clashes with it.** Two key signatures can derive one
-/// name and the clash-breaker rebuilds each from its parts and their types, which for the
-/// empty key joins to nothing: both tables went through it and the one with no key came
-/// out called `""`. Renaming the other one is what resolves the clash anyway, and a name
-/// is what the module doc promises a runtime will build a table from.
-///
-/// Reachable rather than theoretical: a part is named for its parameter, so a fold keyed
-/// on one called `global` derives the same name as the single-row table.
-#[test]
-fn the_single_row_table_keeps_its_name_through_a_clash() {
-    let source = app("
-fold OrdersPlaced() -> placed: Int = 0 {
-  on @order.placed() => placed + 1
-}
-
-fold ScopePlaced(global: Int) -> placed: Int = 0 {
-  on @order.placed(order_id: global) => placed + 1
-}
-");
-
-    assert_eq!(
-        tables(&source),
-        ["global  orders_placed", "global_int  scope_placed"]
-    );
-}
-
-/// **And a keyed table never takes that name even with nothing to clash with**, which is
-/// the half a clash list cannot see: with no parameterless fold in the program there is
-/// nothing to rename against, so this table kept `global` outright. A test asserts the
-/// single-row table by that word rather than by a subscript, so the grammar reads it as a
-/// keyword, and `expect global[7]` was a row expectation `hek check` accepted and `hek fmt`
-/// could not parse: the file could never be formatted.
-#[test]
-fn a_keyed_table_never_takes_the_single_row_tables_name() {
-    let source = app("
-fold ScopePlaced(global: Int) -> placed: Int = 0 {
-  on @order.placed(order_id: global) => placed + 1
-}
-");
-
-    assert_eq!(tables(&source), ["global_int  scope_placed"]);
 }
 
 /// **Some arm, not every arm.** An arm matching a subset of the key is a range update
@@ -497,11 +459,10 @@ fold OrderCancelled(shop_id: Shop, order_id: Int) -> Bool = false {
     );
 }
 
-/// Two key signatures can derive one name, because a part is told apart by name and type
-/// and a name is only the names joined. No program has done it, and a runtime keying on
-/// the name would serve one table for both, so each takes the type into its name.
+/// Two keys alike in their part names and not their types are two tables, and their ids
+/// differ because the type is in what the id hashes.
 #[test]
-fn two_keys_that_differ_only_by_type_do_not_share_a_name() {
+fn two_keys_that_differ_only_by_type_do_not_share_an_id() {
     let source = app("
 fold Early(day: String) -> Bool = false {
   on @usage.seen(on_day: day) => true
@@ -513,12 +474,85 @@ fold Late(day: Int) -> Bool = false {
 ");
 
     let layout = read(&source);
-    let names: Vec<&str> = layout
+    assert_eq!(layout.tables.len(), 2);
+    assert_ne!(layout.tables[0].id, layout.tables[1].id);
+}
+
+/// A subject part is filed under its id type, so changing that type changes how every key of
+/// the table is encoded and has to move the id, although the part's name and subject do not.
+#[test]
+fn a_subject_part_carries_its_id_type_into_the_table_id() {
+    let id = |ty: &str| {
+        let source = format!(
+            "subject Shop({ty})\nevent @shop.installed {{ shop_id: Shop }}\nfold Installed(shop_id: Shop) -> Bool = false {{\n  on @shop.installed(shop_id) => true\n}}\n"
+        );
+        let layout = read(&source);
+        layout.tables[0].id.clone()
+    };
+    assert_ne!(id("Int"), id("String"));
+}
+
+/// **A table's id is its own key's and nothing else's**, which is what the old derived
+/// name was not: two keys that joined to one name were both renamed, so adding a fold
+/// could move a table nobody touched. It is also never an author's: nothing a program
+/// declares is spelled like one.
+#[test]
+fn a_table_id_depends_on_its_own_key_alone() {
+    let alone = read(&app("
+fold Placed(shop_id: Shop, order_id: Int) -> n: Int = 0 {
+  on @order.placed(shop_id, order_id) => n + 1
+}
+"));
+    let beside = read(&app("
+fold Placed(shop_id: Shop, order_id: Int) -> n: Int = 0 {
+  on @order.placed(shop_id, order_id) => n + 1
+}
+
+fold PlacedByCode(shop_id: Shop, order_id: String) -> n: Int = 0 {
+  on @shop.blocked(shop_id, code: order_id) => n + 1
+}
+
+fold Total() -> n: Int = 0 {
+  on @order.placed() => n + 1
+}
+"));
+    let (table, _) = alone.column("Placed").expect("kept");
+    let (same, _) = beside.column("Placed").expect("kept");
+    assert_eq!(table.id, same.id);
+
+    assert!(table.id.starts_with("t_"));
+    assert_eq!(table.id.len(), 18);
+    assert!(table.id[2..].chars().all(|c| c.is_ascii_hexdigit()));
+
+    let ids: Vec<&str> = beside
         .tables
         .iter()
-        .map(|table| table.name.as_str())
+        .map(|table| table.id.as_str())
         .collect();
-    assert_eq!(names, ["day_int", "day_string"]);
+    let mut unique = ids.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(ids.len(), unique.len(), "three keys, three ids");
+}
+
+/// A part spelled `global` is an ordinary part. The word was reserved for the keyless table
+/// while a test addressed that table by it, and nothing addresses a table any more.
+#[test]
+fn a_part_called_global_is_an_ordinary_part() {
+    let source = app("
+fold OrdersPlaced() -> placed: Int = 0 {
+  on @order.placed() => placed + 1
+}
+
+fold ScopePlaced(global: Int) -> placed: Int = 0 {
+  on @order.placed(order_id: global) => placed + 1
+}
+");
+
+    assert_eq!(
+        tables(&source),
+        ["()  orders_placed", "global  scope_placed"]
+    );
 }
 
 /// A key part no event carries, from `docs/folds.md` rule 13's `param == value`. The
@@ -683,27 +717,4 @@ fold Third(from_id: Region, to_id: Region) -> n: Int @index = 0 {
     assert_eq!(indexes("Second"), [vec![0, 1]]);
     // The column alone, which is the whole of a bare `@index`.
     assert_eq!(indexes("Third"), [Vec::<usize>::new()]);
-}
-
-/// **And reserving that name cannot itself collide**, which is what doing the rename inside
-/// the clash loop got wrong: the list was computed in front of the loop, so a table renamed
-/// *to* a name another one already held came out sharing it, and nothing said so. That is
-/// the exact failure the clash list exists to prevent, so the reservation happens first and
-/// these two are then an ordinary clash.
-#[test]
-fn reserving_the_single_row_tables_name_cannot_collide() {
-    let source = app("
-fold Placed(global: Int) -> n: Int = 0 {
-  on @order.placed(order_id: global) => n + 1
-}
-
-fold Cancelled(global_int: Int) -> n: Int = 0 {
-  on @order.cancelled(order_id: global_int) => n + 1
-}
-");
-
-    assert_eq!(
-        tables(&source),
-        ["global_int  placed", "global_int_int  cancelled"]
-    );
 }

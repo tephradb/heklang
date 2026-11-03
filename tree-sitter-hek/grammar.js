@@ -427,13 +427,12 @@ module.exports = grammar({
     fixture_expectation: ($) =>
       seq(field('fixture', $.call_expression), $.field_initializer_list),
 
-    // The subscript is mandatory in the first shape and `global` is a literal in the
-    // second, which is what keeps the two apart from `record_literal`: making the
-    // subscript optional would make `expect Shape { a: 1 }` derivable two ways, since a
-    // `_type_name` is an aliased `identifier` and nothing here can tell the cases apart
-    // by spelling. The word is the whole shape instead, so the lexer decides, which is
-    // the same device `nothing` and `skipped` use one choice up (docs/testing.md
-    // section 9).
+    // A projector's row, with a mandatory subscript, and a stored fold's absence under
+    // `fill`, with a mandatory `no`. Each needs its mark: without either, `expect Shape {
+    // a: 1 }` would be derivable both as this and as a `record_literal`, since a
+    // `_type_name` is an aliased `identifier`. A stored fold's *value* needs no rule of its
+    // own: `expect Total { shop_id: 1 } == 3` is already an `_expression`, and the parser
+    // reads the left side as a fold by looking the name up (docs/testing.md section 9).
     row_expectation: ($) =>
       choice(
         seq(
@@ -442,11 +441,9 @@ module.exports = grammar({
           $.subscript,
           optional($.field_initializer_list),
         ),
-        // `no` is accepted here and refused by the parser, which is the looser-grammar
-        // split this file takes everywhere: a shape the checker has a good message for is
-        // better parsed and diagnosed than failed on a syntax error, since `hek fmt` can
-        // then still read the file.
-        seq(optional('no'), 'global', optional($.field_initializer_list)),
+        // The braces are optional for a fold with no parameters, which the parser then
+        // refuses: it has no key to be without, and that message beats a syntax error.
+        seq('no', field('fold', $.identifier), optional($.field_initializer_list)),
       ),
 
     // ------------------------------------------------------------------ statements

@@ -4271,12 +4271,13 @@ impl Parser {
                     .err(Code::FoldRestriction, why, index.span)
                     .with_hint(hint));
             }
-            // An exact repeat only. `@index` beside `@index(game_id)` is two indexes, and
+            // A repeat as a set, since the lead is a set of key parts: `@index(a, b)` and
+            // `@index(b, a)` are one index. `@index` beside `@index(game_id)` is two, and
             // two folds of one table leading with the same parts are two indexes as well,
             // because the column itself is the last position of each.
             if indexes
                 .iter()
-                .filter(|held| held.params == index.params)
+                .filter(|held| same_set(&held.params, &index.params))
                 .count()
                 > 1
             {
@@ -7090,17 +7091,14 @@ impl Parser {
         })
     }
 
-    /// A row of the derived read model: `expect shop__order[42, 9001] { total: 10.00 }`.
+    /// One stored fold at one key: `expect OrderTotal { shop_id: 1, order_id: 9001 } == 40.00`,
+    /// or `expect no OrderTotal { .. }` for a key no arm of it ever wrote.
     ///
-    /// The same shape a projector's row expectation takes and deliberately so, because
-    /// these are the same assertions: retiring a projector turned a row of N columns into
-    /// N `fold` tests, and this turns them back. The listed columns only, for the reason
-    /// section 6 gives, which a derived table makes sharper rather than weaker: one of
-    /// them is 97 columns wide.
-    ///
-    /// The table is named by `layout`, which is where `hek check --tables` prints it, and
-    /// a column is the `snake_case` of its fold's name. Both are checked here, so a typo
-    /// is a `hek check` error rather than a test that fails at run time.
+    /// **Addressed by the fold, never by a table.** Every stored fold is one column of one
+    /// table, so the fold is a sufficient address, and which other folds share its row is
+    /// the layout's business: a table name an author writes is one adding an unrelated fold
+    /// can change. The arguments are the `fold` action's, so the two ways a test reads a
+    /// fold are spelled alike, and a fold with no parameters is written bare.
     fn table_expectation(
         &mut self,
         lower: &mut Lower,
@@ -7109,146 +7107,76 @@ impl Parser {
     ) -> Result<Expect, Diagnostic> {
         let absent = self.eat_soft("no");
         let at = self.span_here();
-        let name = self.expect_ident()?;
-        let Some(table) = self
-            .derived(program)
-            .tables
-            .iter()
-            .find(|table| table.name == name)
-            .cloned()
-        else {
-            let mut err = self.err(
-                Code::UnknownMember,
-                format!("no derived table is called `{name}`"),
+        let fold = self.expect_ident()?;
+        let Some(def) = program.fold(&fold) else {
+            return Err(self.err(
+                Code::NotDeclared,
+                format!("fold `{fold}` is not declared"),
                 at,
-            );
-            // A fold whose key no event supplies is not kept, and naming its table is the
-            // likeliest way to get here, so the listing says which tables there are.
-            let known: Vec<&str> = self
-                .derived(program)
-                .tables
-                .iter()
-                .map(|table| table.name.as_str())
-                .collect();
-            if !known.is_empty() {
-                err = err.with_hint(format!(
-                    "`hek check --tables` prints the read model; it holds {}",
-                    known.join(", ")
-                ));
-            }
-            return Err(err);
+            ));
         };
-
-        // **The single-row table has no key, so it is written without one.** A row
-        // expectation over it would be a subscript with nothing in it, so there is no
-        // subscript: `expect global { a: 1, b: 2 }`. The columns are the point, since a
-        // fold with no parameters is otherwise only readable through the `fold` action,
-        // which takes one `expect` per test and so costs a test per column over a
-        // scenario one `fill` has already set up.
-        //
-        // `global` is a literal in the grammar rather than an identifier followed by an
-        // optional subscript, because `expect Shape { a: 1 }` is a record literal under
-        // the `fold` action and a `_type_name` is an aliased `identifier`: an optional
-        // subscript would make one input derivable two ways. That costs a record type
-        // spelled `global` its place after `expect`, which is the cost `nothing` and
-        // `skipped` already carry in the same position.
-        let keys = match table.key.is_empty() {
-            // **Nothing to be absent.** A keyed row exists once an arm mints its key, and
-            // `expect no` asks whether one ever was; a table with no key has none to mint,
-            // and its row holds the seeds from the start.
-            true if absent => {
+        let (params, ret) = (def.params.clone(), def.ret.clone());
+        // A fold no event can key is not kept, so there is nothing a `fill` put anywhere
+        // for it. The `fold` action still reads it, by scanning.
+        if self.derived(program).column(&fold).is_none() {
+            return Err(self
+                .err(
+                    Code::TestShape,
+                    format!("`{fold}` is not stored, so a `fill` keeps nothing for it"),
+                    at,
+                )
+                .with_hint(format!(
+                    "`hek check --tables` says why; `fold {fold} {{ .. }}` reads it by scanning"
+                )));
+        }
+        let args = match self.at_sym(Sym::LBrace) || !params.is_empty() {
+            true => self.named_args(lower, &params, &fold)?,
+            false => Vec::new(),
+        };
+        if absent {
+            // **Nothing to be absent.** A keyed value is written once an arm mints its key;
+            // a fold with no parameters has no key to mint and reads as its seed from the
+            // start.
+            if params.is_empty() {
                 return Err(self
                     .err(
                         Code::TestShape,
-                        format!("`{name}` has no key, so there is no key to be without"),
+                        format!("`{fold}` has no key, so there is no key to be without"),
                         at,
                     )
-                    .with_hint(
+                    .with_hint(format!(
                         "a fold with no parameters folds to its seed rather than to nothing, so \
-                         `expect global { .. }` asserts the seed",
-                    ));
+                         `expect {fold} == ..` asserts the seed"
+                    )));
             }
-            true => Vec::new(),
-            false => self.table_subscript(lower, &table)?,
-        };
-        if absent {
-            return Ok(Expect::NoRow {
-                entity: name,
-                keys,
-                span,
-            });
+            return Ok(Expect::Unwritten { fold, args, span });
         }
-        self.expect_sym(Sym::LBrace)?;
-        let mut fields: Vec<(Ident, ExprId)> = Vec::new();
-        while !self.at_sym(Sym::RBrace) {
-            let at = self.span_here();
-            let column = self.expect_ident()?;
-            let Some(declared) = table.columns.iter().find(|held| held.name == column) else {
-                return Err(self.err(
-                    Code::UnknownMember,
-                    format!("table `{name}` has no column `{column}`"),
-                    at,
-                ));
-            };
-            if fields.iter().any(|(seen, _)| seen == &column) {
-                return Err(self.err(
-                    Code::DuplicateField,
-                    format!("`{column}` is given twice"),
-                    at,
-                ));
-            }
-            self.expect_sym(Sym::Colon)?;
-            let value = self.expr(lower, Some(declared.ty.clone()))?;
-            fields.push((column, value));
-            if !self.eat_sym(Sym::Comma) {
-                break;
-            }
+        if !self.eat_sym(Sym::Eq) {
+            return self.fail_hint(
+                Code::TestShape,
+                format!(
+                    "expected `==` and the value `{fold}` holds, found {}",
+                    self.peek()
+                ),
+                format!("`expect no {fold} {{ .. }}` asserts a key it never wrote"),
+            );
         }
-        self.expect_sym(Sym::RBrace)?;
-        Ok(Expect::Row {
-            entity: name,
-            keys,
-            fields,
+        // An operand of `==` and not a whole expression, which is how tree-sitter reads this
+        // line: there it is a `binary_expression`, so `== a || b` is `(.. == a) || b`, and the
+        // two readers have to agree on where the value ends. Parenthesise a value with a
+        // looser operator in it.
+        let start = self.here();
+        let value = self.add_expr(lower, Some(ret.clone()))?;
+        let at = self.span_from(start);
+        self.check_secret(lower, value, &ret, at);
+        self.check_seal(lower, value, &ret, at);
+        self.check_type(lower, value, &ret, at);
+        Ok(Expect::Stored {
+            fold,
+            args,
+            value,
             span,
         })
-    }
-
-    /// The whole key in the table's key order, which is what `--tables` prints beside the
-    /// name. `subscript` is the same thing over an entity's `@key` columns.
-    fn table_subscript(
-        &mut self,
-        lower: &mut Lower,
-        table: &tables::Table,
-    ) -> Result<Vec<ExprId>, Diagnostic> {
-        let bracket = self.span_here();
-        let mut keys: Vec<ExprId> = Vec::new();
-        self.expect_sym(Sym::LBracket)?;
-        while !self.at_sym(Sym::RBracket) {
-            let expected = table.key.get(keys.len()).map(|part| part.ty.clone());
-            keys.push(self.expr(lower, expected)?);
-            if !self.eat_sym(Sym::Comma) {
-                break;
-            }
-        }
-        self.expect_sym(Sym::RBracket)?;
-        if keys.len() != table.key.len() {
-            let parts: Vec<&str> = table.key.iter().map(|part| part.name.as_str()).collect();
-            let wanted = parts.len();
-            let found = keys.len();
-            let plural = if wanted == 1 { "" } else { "s" };
-            return Err(self
-                .err(
-                    Code::Arity,
-                    format!(
-                        "`{}` has a {wanted}-part key, so a subscript takes {wanted} \
-                         value{plural}, found {found}",
-                        table.name
-                    ),
-                    bracket,
-                )
-                .with_hint(format!("write `{}[{}]`", table.name, parts.join(", "))));
-        }
-        Ok(keys)
     }
 
     /// Rule 7: one entry of the effect's trace.
@@ -12196,18 +12124,12 @@ impl Parser {
         Ok(())
     }
 
-    /// Rule 20's remaining check: an `@index` leads with a **leading run of the table's
-    /// key, in key order**.
+    /// Rule 20's remaining check: an `@index` is on a stored column.
     ///
-    /// Here rather than at the declaration because the key's order is the layout's, not the
-    /// author's: parts are ordered by subject containment and then alphabetically
-    /// ([`tables::layout`]), so `@index(user_id)` on `(game_id: Game, user_id: User)` names
-    /// a real parameter and still does not lead that key. The fold alone cannot say so.
-    ///
-    /// **A leading run rather than any subset**, which is a restriction this end chose: a
-    /// host can serve either, and an index whose leading columns are a prefix of the table
-    /// key is the one shape it can page without a second sort. That is the argument
-    /// `docs/projectors.md` rule 8 already makes for a compound index's column order.
+    /// Here rather than at the declaration because whether a fold is stored is the
+    /// layout's answer, which needs every arm. The lead is a **set** of key parts and any
+    /// set is servable: a store indexes those parts and then the column, so nothing about
+    /// the layout's key order reaches an author.
     fn check_indexes(&self, program: &Program) -> Result<(), Diagnostic> {
         let layout = tables::layout(program);
         for def in &program.folds {
@@ -12218,7 +12140,7 @@ impl Parser {
             // rather than ignored, for the reason a column whose type does not order is: the
             // author wrote a declaration expecting an effect it cannot have. It is the same
             // refusal rule 15 gives a lookup on an unstored fold, one declaration over.
-            let Some((table, _)) = layout.column(&def.name) else {
+            if layout.column(&def.name).is_none() {
                 let unmatched = layout
                     .unstored
                     .iter()
@@ -12240,54 +12162,6 @@ impl Parser {
                     .with_hint(
                         "an index is a declaration about a stored column, and `hek check --tables` lists what is kept and what is not",
                     );
-                return Err(match &def.module {
-                    Some(module) => error.in_file(module),
-                    None => error,
-                });
-            };
-            let parts = tables::part_names(def.params.iter().map(|param| (&param.name, &param.ty)));
-            for index in &def.indexes {
-                let leading: Vec<&str> = index
-                    .params
-                    .iter()
-                    .map(|param| {
-                        let at = def
-                            .params
-                            .iter()
-                            .position(|held| &held.name == param)
-                            .expect("`index_names` checked every name is a parameter");
-                        parts[at].as_str()
-                    })
-                    .collect();
-                let key: Vec<&str> = table.key.iter().map(|part| part.name.as_str()).collect();
-                if key.starts_with(&leading) {
-                    continue;
-                }
-                let written: Vec<String> = index
-                    .params
-                    .iter()
-                    .map(|param| format!("`{param}`"))
-                    .collect();
-                let error = self
-                    .err(
-                        Code::FoldRestriction,
-                        format!(
-                            "`@index({})` does not lead the key of table `{}`, which is ({})",
-                            index.params.join(", "),
-                            table.name,
-                            key.join(", ")
-                        ),
-                        index.span,
-                    )
-                    .with_hint(format!(
-                        "an index leads with a run of the key from its start, in that order, because that is what a store can page without sorting again. {} {} ({}), and the key's order is the layout's rather than the parameter list's: a subject part leads a plain one, and the rest are alphabetical",
-                        written.join(" and "),
-                        match written.len() == 1 {
-                            true => "names the key part",
-                            false => "name the key parts",
-                        },
-                        leading.join(", ")
-                    ));
                 return Err(match &def.module {
                     Some(module) => error.in_file(module),
                     None => error,
@@ -12891,6 +12765,16 @@ fn upper_first(name: &str) -> String {
 /// applications ported so far is already exactly this.
 fn refusal_code(name: &str) -> String {
     snake_case(name)
+}
+
+/// Two `@index` leads as sets, which is what a lead is (`docs/folds.md` rule 20). Sorted
+/// and deduplicated rather than compared by containment, so a repeat inside one lead could
+/// not make the comparison one-sided even if it ever got past `index_names`.
+fn same_set(a: &[Ident], b: &[Ident]) -> bool {
+    fn set(of: &[Ident]) -> BTreeSet<&Ident> {
+        of.iter().collect()
+    }
+    set(a) == set(b)
 }
 
 /// A declared name in snake_case, which is how every name heklang derives rather than

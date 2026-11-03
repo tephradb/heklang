@@ -31,7 +31,7 @@ const USAGE: &str = "\
 hek: check heklang sources, run their tests, format them and digest them
 
 usage:
-  hek [check|test|fmt|digest] [--boundaries] [--tables] [--check]
+  hek [check|test|fmt|digest] [--boundaries] [--tables] [--ids] [--check]
       [--packed|--hash|--json] [--tests] [path..|-]
 
   check   parse every `.hk` file under the paths as one program
@@ -41,6 +41,7 @@ usage:
 
   --boundaries  print what each command guards, transitively
   --tables      print the read model the named folds imply
+  --ids         `--tables`, with each group's storage id
   --check       with `fmt`, name what would change and write nothing
   --packed      with `digest`, print the canonical form the hash covers
   --hash        with `digest`, print only the hash
@@ -87,6 +88,7 @@ fn run() -> Result<bool, String> {
     let mut roots: Vec<PathBuf> = Vec::new();
     let mut asked_for_boundaries = false;
     let mut asked_for_tables = false;
+    let mut asked_for_ids = false;
     let mut checking = false;
     let mut reading_stdin = false;
     let mut view = View::Expanded;
@@ -101,6 +103,10 @@ fn run() -> Result<bool, String> {
             }
             "--boundaries" => asked_for_boundaries = true,
             "--tables" => asked_for_tables = true,
+            "--ids" => {
+                asked_for_tables = true;
+                asked_for_ids = true;
+            }
             "--check" => checking = true,
             "--json" => {
                 view = View::Json;
@@ -217,7 +223,7 @@ fn run() -> Result<bool, String> {
         boundaries(&program);
     }
     if asked_for_tables {
-        tables(&program);
+        tables(&program, asked_for_ids);
     }
 
     if command == Command::Check {
@@ -558,54 +564,54 @@ fn push_once(name: &str, out: &mut Vec<String>) -> bool {
     true
 }
 
-/// The read model the named folds imply: one table per distinct key, one column per fold
-/// kept for it, and the folds that cannot be kept at all.
+/// The read model the named folds imply: the stored folds grouped by the key they share,
+/// and the folds that cannot be kept at all.
 ///
 /// A fold says what a value is, which events change it and what it is keyed by, so the
-/// tables are derived rather than declared and this is the only place to read them off.
-/// `src/tables.rs` works them out; this prints them.
+/// grouping is derived rather than declared and this is the only place to read it off.
+/// `src/tables.rs` works it out; this prints it.
+///
+/// **Named by fold and never by table.** A group has no name an author writes: a test, a
+/// route and this listing all address a fold. The key is printed in the order a store
+/// keeps it, which is what an `@index` sort is read against, and `--ids` adds the storage
+/// id for someone looking at the store itself.
 ///
 /// **Asked for, not printed by default**, for the reason [`boundaries`] is. And a listing
 /// rather than a diagnostic: a fold that cannot be kept is a perfectly good fold, since
 /// nothing yet says every fold has to be storable.
-fn tables(program: &Program) {
+fn tables(program: &Program, ids: bool) {
     let layout = heklang::layout(program);
     if layout.tables.is_empty() && layout.unstored.is_empty() {
         return;
     }
     for table in &layout.tables {
-        let key = match table.key.is_empty() {
-            true => "no key".to_string(),
-            false => table
-                .key
-                .iter()
-                .map(|part| format!("{}: {}", part.name, part.ty))
-                .collect::<Vec<_>>()
-                .join(", "),
+        let key = table
+            .key
+            .iter()
+            .map(|part| format!("{}: {}", part.name, part.ty))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let id = match ids {
+            true => format!("  {}", table.id),
+            false => String::new(),
         };
-        let n = table.columns.len();
-        let s = if n == 1 { "" } else { "s" };
-        println!("\n  TABLE {}  ({key})  {n} column{s}", table.name);
+        println!("\n  ({key}){id}");
         // One column, so the event lists start together however long the names are. The
         // events are what a reader scans for, and a ragged left edge on them is the one
         // thing that made the same listing hard to read before.
         let width = table
             .columns
             .iter()
-            .map(|column| column.name.len() + column.ty.to_string().len() + 2)
+            .map(|column| column.fold.len() + column.ty.to_string().len() + 2)
             .max()
             .unwrap_or(0);
         for column in &table.columns {
-            let named = format!("{}: {}", column.name, column.ty);
+            let named = format!("{}: {}", column.fold, column.ty);
             let events: Vec<String> = column.events.iter().map(EventPath::to_string).collect();
-            // The folds this column reads (rules 15 and 16), named as **columns** because
-            // that is what the rest of this listing is: a reader looking at `genre_units`
-            // and wondering why editing `GameGenre` refolds it is looking for `game_genre`
-            // here. Transitive, so a chain shows every link rather than only the one the
-            // arm wrote, and "reads" rather than "keyed through" because a fold may be
-            // read for a key part or for a value and the dependency is the same either way.
-            // Looked up through the layout rather than derived again here, so the name
-            // printed is the one the column above it was printed under.
+            // The folds this one reads (rules 15 and 16), transitively, so a chain shows
+            // every link rather than only the one the arm wrote, and "reads" rather than
+            // "keyed through" because a fold may be read for a key part or for a value and
+            // the dependency is the same either way.
             let through = match column.reads.is_empty() {
                 true => String::new(),
                 false => format!(
@@ -613,16 +619,13 @@ fn tables(program: &Program) {
                     column
                         .reads
                         .iter()
-                        .filter_map(|fold| layout.column(fold))
-                        .map(|(_, read)| read.name.as_str())
+                        .map(|fold| fold.as_str())
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
             };
             // Rule 20, printed as the index a store builds rather than as the annotation
-            // the author wrote: the column is the last position, and the leading parts are
-            // key parts in key order, which is the one thing `@index(game_id)` does not
-            // say on its face.
+            // the author wrote: the lead in key order, then the fold.
             let sorted = match column.indexes.is_empty() {
                 true => String::new(),
                 false => format!(
@@ -635,7 +638,7 @@ fn tables(program: &Program) {
                                 .iter()
                                 .map(|&at| table.key[at].name.as_str())
                                 .collect();
-                            parts.push(column.name.as_str());
+                            parts.push(column.fold.as_str());
                             format!("({})", parts.join(", "))
                         })
                         .collect::<Vec<_>>()

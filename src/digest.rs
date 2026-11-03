@@ -494,6 +494,29 @@ fn listed(entries: &[Entry]) -> Json {
     )
 }
 
+/// The identity of one derived table: `t_` and the first sixteen hex digits of a SHA-256
+/// over its key signature, each part's name and type in key order.
+///
+/// **Over the table's own signature and nothing else**, so adding a fold elsewhere can never
+/// move it, and **without [`VERSION`]**, so a digest bump does not rename every table. Only
+/// a change to how [`ty`] spells one of its part types does, which moves exactly the tables
+/// whose rows that change would have to be rebuilt for anyway. The key with no parts hashes
+/// `(table)`, which is a constant.
+pub(crate) fn table_id<'a>(key: impl IntoIterator<Item = (&'a str, &'a Type)>) -> String {
+    // A subject's id type too, which `ty` leaves to the subject's own entry: here it is
+    // how every key of the part is encoded, so `Order(Int)` becoming `Order(Uuid)` has to
+    // move the table.
+    let parts = key.into_iter().map(|(name, part)| {
+        let mut held = vec![atom(name), ty(part)];
+        if let Type::Subject(sub) = part {
+            held.push(ty(&sub.id));
+        }
+        node("part", held)
+    });
+    let hash = Hash::of(&node("table", parts).packed()).to_string();
+    format!("t_{}", &hash[..16])
+}
+
 fn node(head: &str, rest: impl IntoIterator<Item = Sexp>) -> Sexp {
     Sexp::of(head, rest)
 }
@@ -727,10 +750,11 @@ fn fold(def: &Fold, reads: &[(String, Hash)]) -> Sexp {
     // Rule 20, beside the return type it annotates, and by the **parameter** names the
     // author wrote rather than the key positions a host reads: the same choice `params`
     // above makes, and the two have to agree, since renaming a parameter already moves
-    // this hash through `params`. Written order within an index, because a compound
-    // index's column order is what decides which questions it answers; written order
-    // across them for the same reason `arms` keeps one, and absent when there are none, so
-    // a fold declaring no index packs byte for byte as it did.
+    // this hash through `params`. Written order within an index although a lead is a set:
+    // sorting it would move the hash of every fold that writes one out of order, which is
+    // a `VERSION` bump, so reordering a lead over-reports a change that builds the same
+    // index. Written order across them for the same reason `arms` keeps one, and absent
+    // when there are none, so a fold declaring no index packs byte for byte as it did.
     //
     // It is in the local form and therefore in `hash`, not in `signature_hash`: adding an
     // index changes what a store has to build and what a reader may sort on, and changes
@@ -1300,6 +1324,19 @@ impl<'a> Frame<'a> {
             Expect::Folded { value, .. } => {
                 let value = self.expr(*value);
                 node("value", [value])
+            }
+            Expect::Stored {
+                fold, args, value, ..
+            } => {
+                let mut parts = vec![atom(fold.clone())];
+                parts.extend(self.keyed(args));
+                parts.push(node("value", [self.expr(*value)]));
+                node("stored", parts)
+            }
+            Expect::Unwritten { fold, args, .. } => {
+                let mut parts = vec![atom(fold.clone())];
+                parts.extend(self.keyed(args));
+                node("unwritten", parts)
             }
         }
     }

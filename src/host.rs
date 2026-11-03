@@ -301,9 +301,10 @@ pub trait Rows {
 /// record would start from the seed.
 ///
 /// A column is addressed by three things, and two of them are strings a store did not
-/// choose: `table` and `column` are [`layout`](crate::tables::layout)'s own names, which
-/// is what keeps `hek check --tables` and the real tables from disagreeing about what an
-/// author is looking at. A key is a sequence, one [`Key`] per part in the table's key
+/// choose: `table` is [`Table::id`](crate::Table::id) and `column` is
+/// [`Column::name`](crate::Column::name), both [`layout`](crate::tables::layout)'s. Neither
+/// is an author's address: an author names a fold, and [`Layout::column`](crate::Layout::column)
+/// turns that into these two. A key is a sequence, one [`Key`] per part in the table's key
 /// order, exactly as a row's address is.
 ///
 /// **An absent value and an absent key are one thing, deliberately.** `value` answering

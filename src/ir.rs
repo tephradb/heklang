@@ -2137,6 +2137,23 @@ pub enum Expect {
     Skipped {
         span: Span,
     },
+    /// `expect Name { args } == value` under `fill`: what the sink holds for one stored
+    /// fold at one key, addressed by the fold and its own parameters. Which table the
+    /// fold shares is the layout's business and never the test's.
+    Stored {
+        fold: Ident,
+        args: Vec<(Ident, ExprId)>,
+        value: ExprId,
+        span: Span,
+    },
+    /// `expect no Name { args }` under `fill`: no arm of this fold ever wrote that key. A
+    /// sibling fold of the same table writing it does not count, which is what keeps the
+    /// grouping out of the answer.
+    Unwritten {
+        fold: Ident,
+        args: Vec<(Ident, ExprId)>,
+        span: Span,
+    },
     /// `expect <value>` under a `fold` action: the value the fold folded to.
     ///
     /// A bare value is safe only because the action gates it. Under `run`, `project` and

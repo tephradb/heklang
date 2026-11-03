@@ -4688,6 +4688,16 @@
             "named": true
           }
         ]
+      },
+      "fold": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
       }
     },
     "children": {
@@ -5577,10 +5587,6 @@
   },
   {
     "type": "given",
-    "named": false
-  },
-  {
-    "type": "global",
     "named": false
   },
   {

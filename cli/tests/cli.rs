@@ -648,30 +648,48 @@ fold OrderTotal(shop_id: Shop, order_id: Int) -> sum: Money(2) = 0.00 {
 #[test]
 fn check_prints_the_table_layout_when_asked() {
     let root = project("tables", &[("app.hk", TABLES)]);
-    let output = hek(&["check", "--tables", root.to_str().expect("a utf-8 path")]);
+    let path = root.to_str().expect("a utf-8 path");
+    let output = hek(&["check", "--tables", path]);
 
     assert!(output.status.success(), "{}", stderr(&output));
     let text = stdout(&output);
     assert!(
-        text.contains("TABLE shop  (shop: Shop)  1 column"),
-        "the key renders with its types and the count is singular: {text}"
+        text.contains("\n  (shop: Shop)\n"),
+        "a group is its key with types, and has no name: {text}"
     );
     assert!(
-        text.contains("shop_installed: Bool"),
-        "a column is the fold's name in snake_case: {text}"
+        text.contains("ShopInstalled: Bool"),
+        "a fold is listed by its own name: {text}"
     );
     assert!(
         text.contains("<- @shop.installed, @shop.uninstalled"),
         "and what feeds it, first written first: {text}"
     );
     assert!(
-        text.contains("TABLE shop__order  (shop: Shop, order: Int)  1 column"),
+        text.contains("\n  (shop: Shop, order: Int)\n"),
         "a key sorts below the key it extends: {text}"
     );
     assert!(
-        text.find("TABLE shop ").expect("the shop table")
-            < text.find("TABLE shop__order").expect("the order table"),
+        text.find("(shop: Shop)\n").expect("the shop group")
+            < text
+                .find("(shop: Shop, order: Int)")
+                .expect("the order group"),
         "{text}"
+    );
+    assert!(!text.contains("t_"), "no storage id unless asked: {text}");
+
+    let output = hek(&["check", "--tables", "--ids", path]);
+    let text = stdout(&output);
+    assert!(
+        text.contains("(shop: Shop)  t_"),
+        "`--ids` adds it beside the key: {text}"
+    );
+
+    let output = hek(&["check", "--ids", path]);
+    let text = stdout(&output);
+    assert!(
+        text.contains("(shop: Shop)  t_"),
+        "`--ids` alone implies `--tables`: {text}"
     );
 }
 

@@ -142,7 +142,7 @@ second account of the rules, and it names the parameter the part came from:
 
 The fix is the one the paragraph above already asks for, which is why this is the rule rather than a
 renaming scheme: a key part is what the row is, and a column is what is true of it. A fold with no
-parameters has no part to collide with, so `fold Shop()` over the single-row `global` table is fine.
+parameters has no part to collide with, so `fold Shop()` over the keyless table is fine.
 
 This is `docs/guards.md` rule 1 read for values instead of propositions, and it is the whole of what
 keeps the construct from growing aggregates. One value out means there is nothing to put fields on,
@@ -1314,12 +1314,12 @@ the log per element.
 
 ### Seen from the read side
 
-`hek check --tables` prints the dependency, so a reader can see why editing one column refolds
+`hek check --tables` prints the dependency, so a reader can see why editing one fold refolds
 another:
 
 ```
-  TABLE genre  (genre: Genre)  1 column
-    genre_units: Int  <- @game.purchased, @game.refunded  (reads game_genre, receipt_game)
+  (genre: Genre)
+    GenreUnits: Int  <- @game.purchased, @game.refunded  (reads GameGenre, ReceiptGame)
 ```
 
 Transitive, so a chain shows every link. `Column::reads` is that list, and three things read it:
@@ -1599,12 +1599,12 @@ A read model's shape is declared, and how it can be *read* is part of that shape
 a fold's value says a store may sort on the stored column:
 
 ```hek
-fold GameUnits(game_id: Game) -> n: Int @index = 0 {              // index (game_units)
+fold GameUnits(game_id: Game) -> n: Int @index = 0 {              // index (GameUnits)
   on @game.purchased(game_id) => n + 1
 }
 
 fold ReviewHelpful(game_id: Game, user_id: User) -> n: Int @index(game_id) = 0 {
-  on @review.voted(game_id, user_id) => n + 1                     // index (game, review_helpful)
+  on @review.voted(game_id, user_id) => n + 1                     // index (game, ReviewHelpful)
 }
 ```
 
@@ -1613,25 +1613,24 @@ entity field is `customer_id: Int @index` and a parameter is `shop_id: Shop @sub
 
 **The parameters it names lead the index and the column itself is implied last.** `@index`
 alone is the column on its own, which answers "the best sellers across the catalogue";
-`@index(game_id)` is `(game, review_helpful)`, which answers "this game's most helpful
-reviews". A host reads them off `Column::indexes` as **key positions** rather than as the
-names written here, because what an index can answer is decided by the order its columns sit
-in and that order is the table's rather than the parameter list's.
+`@index(game_id)` is `(game, ReviewHelpful)`, which answers "this game's most helpful
+reviews". A host reads them off `Column::indexes` as **key positions**, sorted into the key's
+order, rather than as the names written here.
 
-**Five rules, and each one is somebody's mistake caught early:**
+**The parameters are a set.** `@index(user_id, game_id)` is `@index(game_id, user_id)`, and
+`@index(user_id)` is as good as `@index(game_id)` although `user` is not the key's first part.
+A store indexes the named parts and then the column, which serves a read that pins exactly those
+parts whatever the key's order, so the key's order is never something an author has to know. It
+used to have to be a leading run of the key in key order, which made the layout's ordering (subject
+parts first, the rest alphabetical) a rule every author of an index had to learn and a hint every
+refusal had to explain.
+
+**Four rules, and each one is somebody's mistake caught early:**
 
 - **The names are the fold's own parameters.** Anything else is refused where it is written.
 - **The fold has to be stored at all.** A fold no column is kept for has nothing to index, and the
   refusal names the key part no event supplies, since that is what has to change. It is rule 15's
   refusal of a lookup on an unstored fold, one declaration over.
-- **They are a leading run of the table's key, in key order.** `@index(user_id)` on a table
-  keyed `(game, user)` is refused even though `user_id` is a real parameter. A store can
-  serve any subset, so this is a restriction chosen at this end: an index whose leading
-  columns are a prefix of the table key is the one shape a cursor pages without sorting
-  again, which is the argument `docs/projectors.md` rule 8 already makes for a compound
-  index's column order. The key's order is the layout's (a subject part leads a plain one,
-  and the rest are alphabetical), which is why this is checked once the whole program is in
-  hand and not at the declaration.
 - **The column's type has to order.** Read off `types::comparable` against `>`, the same line
   that decides whether `max` and `min` exist, so there is one answer to "can this be sorted"
   and it cannot drift from the operators. That refuses a `List` or `Map` column, which lives
@@ -1644,10 +1643,11 @@ in and that order is the table's rather than the parameter list's.
   the ciphertext, so sorting would mean opening every row to compare two, which is the thing a
   sealed column exists to avoid. Index something derived from it instead.
 
-**An exact repeat on one fold is refused** and nothing else is a duplicate. `@index` beside
-`@index(game_id)` is two indexes, and so is `@index(game_id)` on two columns of one table,
-because the column is the last position of each: `(game, a)` and `(game, b)` answer two
-questions.
+**A repeat on one fold is refused, as a set**, and nothing else is a duplicate:
+`@index(game_id, user_id)` beside `@index(user_id, game_id)` is one index written twice.
+`@index` beside `@index(game_id)` is two indexes, and so is `@index(game_id)` on two folds of
+one key, because the fold's own value is the last position of each: `(game, a)` and `(game, b)`
+answer two questions.
 
 An index is in the fold's **own** digest hash and not in its signature hash, exactly as an
 entity's `index (a, b)` is: adding one changes what a store builds and what a reader may sort

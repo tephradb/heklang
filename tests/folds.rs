@@ -2482,7 +2482,14 @@ fold ShippedTo(order_id: Int) -> {ret} = none {{
     let program = program(&source("Sealed(String, Customer)?"));
     let layout = heklang::layout(&program);
     let (table, column) = layout.column("ShippedTo").expect("kept");
-    assert_eq!(table.name, "order");
+    assert_eq!(
+        table
+            .key
+            .iter()
+            .map(|part| part.name.as_str())
+            .collect::<Vec<_>>(),
+        ["order"]
+    );
     assert_eq!(column.reads, vec!["LatestEmail".to_string()]);
     assert_eq!(
         column.ty,
@@ -3246,12 +3253,12 @@ fold Held(shop_id: Int) -> n: Int {annotation} = 0 {{
     }
 }
 
-/// **A leading run of the key, in key order**, and the order is the layout's rather than
-/// the parameter list's: parts are sorted by subject containment and then alphabetically,
-/// so a name that is a real parameter can still fail to lead. Checked once the whole
-/// program is in hand for exactly that reason.
+/// **A lead is a set of key parts, in any order and from anywhere in the key.** It used to
+/// have to be a leading run in the layout's key order, which made that order something an
+/// author had to know. A store indexes the lead and then the column, which any set serves,
+/// so the layout hands the positions back sorted into key order whatever was written.
 #[test]
-fn an_index_leads_with_a_run_of_the_key() {
+fn an_index_leads_with_any_set_of_key_parts() {
     let source = |annotation: &str| {
         format!(
             "\
@@ -3266,21 +3273,24 @@ fold ReviewHelpful(game_id: Game, user_id: User) -> n: Int {annotation} = 0 {{
 "
         )
     };
-    // `(game, user)` is the key order, so the prefixes are these.
-    for annotation in ["@index", "@index(game_id)", "@index(game_id, user_id)"] {
-        program(&source(annotation));
+    // `(game, user)` is the key order.
+    for (annotation, positions) in [
+        ("@index", vec![]),
+        ("@index(game_id)", vec![0]),
+        ("@index(user_id)", vec![1]),
+        ("@index(game_id, user_id)", vec![0, 1]),
+        ("@index(user_id, game_id)", vec![0, 1]),
+    ] {
+        let program = program(&source(annotation));
+        let layout = heklang::layout(&program);
+        let (_, column) = layout.column("ReviewHelpful").expect("kept");
+        assert_eq!(column.indexes, [positions], "for `{annotation}`");
     }
-    for annotation in ["@index(user_id)", "@index(user_id, game_id)"] {
-        let message = error(&source(annotation));
-        assert!(
-            message.contains("does not lead the key of table `game__user`"),
-            "for `{annotation}`: {message}"
-        );
-        assert!(
-            message.contains("(game, user)"),
-            "the key is named: {message}"
-        );
-    }
+    let message = error(&source("@index(game_id, user_id) @index(user_id, game_id)"));
+    assert!(
+        message.contains("twice"),
+        "one set, written twice: {message}"
+    );
 }
 
 /// **A box is not a wall.** Rule 17 pruned its walk on "is this node's own type the

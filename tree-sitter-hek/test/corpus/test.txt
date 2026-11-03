@@ -358,17 +358,16 @@ test "an edit keeps the rest of the order" {
             (decimal_literal)))))))
 
 ================================================================================
-a fill action, and a row of the derived read model
+a fill action, and a stored fold addressed by name
 ================================================================================
-
 
 test "an order carries its total" {
   given @order.placed { shop_id: 1, order_id: 9001, total: 42.50 }
 
   fill
 
-  expect shop__order[1, 9001] { order_total: 42.50 }
-  expect no shop__order[1, 9002]
+  expect OrderTotal { shop_id: 1, order_id: 9001 } == 42.50
+  expect no OrderTotal { shop_id: 1, order_id: 9002 }
 }
 
 --------------------------------------------------------------------------------
@@ -392,33 +391,38 @@ test "an order carries its total" {
             value: (decimal_literal))))
       (fill_clause)
       (expect_clause
+        (binary_expression
+          left: (record_literal
+            name: (type_identifier)
+            (field_initializer_list
+              (field_initializer
+                name: (identifier)
+                value: (integer_literal))
+              (field_initializer
+                name: (identifier)
+                value: (integer_literal))))
+          right: (decimal_literal)))
+      (expect_clause
         (row_expectation
-          entity: (identifier)
-          (subscript
-            key: (integer_literal)
-            key: (integer_literal))
+          fold: (identifier)
           (field_initializer_list
             (field_initializer
               name: (identifier)
-              value: (decimal_literal)))))
-      (expect_clause
-        (row_expectation
-          entity: (identifier)
-          (subscript
-            key: (integer_literal)
-            key: (integer_literal)))))))
+              value: (integer_literal))
+            (field_initializer
+              name: (identifier)
+              value: (integer_literal))))))))
 
 ================================================================================
-the single-row table, whose name is the language's own
+a fold with no parameters is written bare
 ================================================================================
-
 
 test "the store's own totals" {
   given @game.purchased { game_id: 7, cents: 2000 }
 
   fill
 
-  expect global { store_units: 1, store_gross: 2000 }
+  expect StoreUnits == 1
 }
 
 --------------------------------------------------------------------------------
@@ -439,11 +443,6 @@ test "the store's own totals" {
             value: (integer_literal))))
       (fill_clause)
       (expect_clause
-        (row_expectation
-          (field_initializer_list
-            (field_initializer
-              name: (identifier)
-              value: (integer_literal))
-            (field_initializer
-              name: (identifier)
-              value: (integer_literal))))))))
+        (binary_expression
+          left: (identifier)
+          right: (integer_literal))))))
