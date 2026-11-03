@@ -1,15 +1,14 @@
 // The other read side, and the one to reach for first. A named fold says what one value
-// is, which events change it and what it is keyed by, and the table follows: these five
-// folds are two tables, because `workshop` and `(workshop, attendee)` are two key
-// signatures. Run `hek check --tables` over this directory to see them.
+// is, which events change it and what it is keyed by, and the storage follows: folds of
+// one key share a row, so `workshop` and `(attendee, workshop)` are two groups. Run
+// `hek check --tables` over this directory to see them. A test or a route names the fold.
 //
 // Nothing here declares a table, a column or an index. Compare `projector.hk`, which
 // declares an entity and then copies fields onto it: the same values, with the schema
 // written by hand and a handler to keep in step with it.
 
-// The column is `workshop_seats_left`, which is this name in snake_case. Named for the
-// value and not for the entity, so it is not `Workshop`: one value out, and a command
-// reading it conflicts on exactly these two slices.
+// Named for the value and not for the entity, so it is not `Workshop`: one value out, and
+// a command reading it conflicts on exactly these two slices.
 fold WorkshopSeatsLeft(workshop_id: Uuid) -> left: Int = 0 {
   on @workshop.opened(workshop_id) { seats } => seats
   on @seat.booked(workshop_id) => left - 1
@@ -21,10 +20,10 @@ fold WorkshopRevenue(workshop_id: Uuid) -> taken: Money(2) = 0 {
   on @seat.released(workshop_id) => taken
 }
 
-// A second key signature, so a second table, and `--tables` calls it
-// `attendee__workshop` rather than `workshop__attendee`: a part is named for its
-// **subject** when its type has one, and subject parts lead. Guessing a derived name is
-// how you get it wrong; `hek check --tables` is how you read it.
+// A second key signature, so a second group. `--tables` prints its key as
+// `(attendee, workshop)` rather than `(workshop, attendee)`: a part is named for its
+// **subject** when its type has one, and subject parts lead. No author writes that order:
+// a test passes `AttendeeSeats { workshop_id, attendee_id }` by name.
 fold AttendeeSeats(workshop_id: Uuid, attendee_id: Attendee) -> held: Int = 0 {
   on @seat.booked(workshop_id, attendee_id) => held + 1
   on @seat.released(workshop_id, attendee_id) => held - 1
@@ -71,16 +70,15 @@ fold WorkshopTitle(workshop_id: Uuid) -> String = "untitled" {
 
 // Strictly before the record, so a seat booked before the workshop was opened counts
 // under `"untitled"` rather than under a title it did not have yet. `hek check --tables`
-// prints `(reads workshop_title)` against this column, which is how a reader sees
+// prints `(reads WorkshopTitle)` against this fold, which is how a reader sees
 // why editing `WorkshopTitle` refolds this one.
 fold TitleRevenue(title: String) -> taken: Money(2) = 0 {
   on @seat.booked { workshop_id, paid } key title = WorkshopTitle { workshop_id } =>
     taken + paid
 }
 
-// No parameters, so this is one value for the whole log and `layout` keeps it in the
-// single-row `global` table. A `fill` asserts it as `expect global { .. }`, with no
-// subscript because there is no key.
+// No parameters, so this is one value for the whole log, kept in a single row. A `fill`
+// asserts it as `expect SeatsBooked == 1`, with no arguments because there is no key.
 fold SeatsBooked() -> n: Int = 0 {
   on @seat.booked => n + 1
   on @seat.released => n - 1

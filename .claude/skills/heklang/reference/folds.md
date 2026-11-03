@@ -28,11 +28,15 @@ by, so:
 | --- | --- |
 | the fold's **parameters** | the key |
 | the fold itself | **one column** |
-| folds sharing one key signature | **one table**, a row per key |
+| folds sharing one key signature | **one row** per key, together |
 
 That is the whole of it, and it is why the read side of an application is folds rather than
 projectors. A projector declares an entity and copies fields onto it; a fold says what one value is
 and the layout follows.
+
+**A stored fold is addressed by its own name, never by a table.** The groups have no names an author
+writes: a test says `expect OrderTotal { shop_id: 1, order_id: 9001 } == 40.00` (`testing.md`) and a
+host route names the fold. Every stored fold is in exactly one group, so its name is enough.
 
 `hek check --tables` prints what a program implies:
 
@@ -41,20 +45,21 @@ $ hek check --tables
 checked 1 file
   3 events, 5 folds, 2 subjects
 
-  TABLE shop  (shop: Shop)  1 column
-    shop_order_ids: List(Int)  <- @order.placed
+  (shop: Shop)
+    ShopOrderIds: List(Int)  <- @order.placed
 
-  TABLE shop__order  (shop: Shop, order: Int)  3 columns
-    order_email: String @subject(Customer)?  <- @order.contact.recorded
-    order_seen_at: Timestamp?                <- @order.placed
-    order_total: Money(2)                    <- @order.placed
+  (shop: Shop, order: Int)
+    OrderEmail: String @subject(Customer)?  <- @order.contact.recorded
+    OrderSeenAt: Timestamp?                 <- @order.placed
+    OrderTotal: Money(2)                    <- @order.placed
 
   not stored, because no event supplies the key:
     OrdersSince  (at)
 ```
 
-**Run it whenever you add or rename a fold.** It is the only way to see which table a fold landed
-in, and a fold that quietly moved tables is a column a deployment has to rebuild.
+**Run it whenever you add or rename a fold.** It shows which folds share a row and which are not
+stored at all. `--ids` adds each group's storage id (a hash of its key's part names and types), for
+someone looking at the store itself.
 
 ## 2. How the names are derived
 
@@ -67,17 +72,12 @@ Nothing here is written by an author, so knowing the derivation is how you predi
 **parameter** with one trailing `_id` dropped. So `(shop_id: Shop, order_id: Int)` keys a table on
 `(shop, order)`, and `(shop_id: Shop)` and `(shop: Shop)` are the *same* key.
 
-**A table** is its parts' names joined with `__`, and **`global`** when the fold has no parameters,
-which is a single-row table holding one value. Subject parts lead, ordered so a parent sits above
-the children whose keys wrap under it; plain parts follow alphabetically.
+**The key's order** is the store's: subject parts lead, ordered so a parent sits above the children
+whose keys wrap under it, and plain parts follow alphabetically. No author writes it, since every
+read passes a fold's arguments by name, and `@index` takes its parameters as a set.
 
-Two refinements you will only meet by hitting them:
-
-- **Where two parts would take one name**, by repeating a subject or spelling it two ways, each is
-  named by its **parameter** instead: `(to_id: Region, from_id: Region)` is `(from, to)`.
-- **Where two key signatures would take one table name**, because a part is told apart by name
-  *and* type, each takes the part types into its name: `(day: String)` and `(day: Int)` are
-  `day_string` and `day_int`.
+**Where two parts would take one name**, by repeating a subject or spelling it two ways, each is
+named by its **parameter** instead: `(to_id: Region, from_id: Region)` is `(from, to)`.
 
 ## 3. The naming rules this forces on you
 
@@ -257,10 +257,10 @@ is the fix; and a lookup may not be written **under a binder**, because it is ho
 expression and a comprehension's name does not exist where it lands.
 
 **`hek check --tables` prints the dependency**, transitively, which is how you see why editing one
-column refolds another:
+fold refolds another:
 
 ```
-    genre_units: Int  <- @game.purchased, @game.refunded  (reads game_genre, receipt_game)
+    GenreUnits: Int  <- @game.purchased, @game.refunded  (reads GameGenre, ReceiptGame)
 ```
 
 That list is also what moves the dependent's digest `hash` when a looked-up fold changes, and what a
@@ -357,13 +357,13 @@ while an unstored fold has no column at all and can only be folded over the log 
 caller supplies.
 
 **A fold is testable two ways**, and `reference/testing.md` sections 8 and 9 have both: `fold Name
-{ args }` with `expect <value>` asserts one column at one key, and `fill` with `expect
-<table>[key] { column: value }` asserts a row of the whole read model.
+{ args }` with `expect <value>` asserts one fold at one key by scanning, and `fill` with `expect
+Fold { args } == value` asserts what the sink stored for it.
 
 ## 8. The runtime half
 
-Everything above is the language and `hek`. What a deployment does with it, the `/tables/{table}`
-and `/tables/{table}/row` endpoints, the Tables console page, column rebuilds, and the key-part
+Everything above is the language and `hek`. What a deployment does with it, the routes that serve a
+stored fold by name, which folds it serves, the console, column rebuilds, and the key-part
 names a runtime refuses, belongs to **hekla** and its own skill. Do not guess at it from here.
 
 `docs/folds.md` in the heklang repository is the contract for this file, and `docs/cli.md` for
@@ -441,40 +441,38 @@ a `key` clause.
 ## 11. `@index` says a column may be sorted on
 
 ```hek
-fold GameUnits(game_id: Game) -> n: Int @index = 0 {              // index (game_units)
+fold GameUnits(game_id: Game) -> n: Int @index = 0 {              // index (GameUnits)
   on @game.purchased(game_id) => n + 1
 }
 
 fold ReviewHelpful(game_id: Game, user_id: User) -> n: Int @index(game_id) = 0 {
-  on @review.voted(game_id, user_id) => n + 1                     // index (game, review_helpful)
+  on @review.voted(game_id, user_id) => n + 1                     // index (game, ReviewHelpful)
 }
 ```
 
 After the **type**, where every annotation in the language sits. The parameters it names lead
-the index and the column is implied last, so a bare `@index` is "best sellers across the
+the index and the fold's own value is implied last, so a bare `@index` is "best sellers across the
 catalogue" and `@index(game_id)` is "this game's most helpful reviews". A host serves
 `order_by` only over what is declared, as it does for a projector's `@index`.
 
-Four refusals:
+Four refusals. The parameters are a **set**: any of the fold's own, in any order, and
+`@index(user_id)` on `(game, user)` is as good as `@index(game_id)`.
 
 - a name that is not one of the fold's own parameters;
 - a fold no column is kept for, which has nothing to index at all;
-- names that are not a **leading run of the table's key, in key order**. The key's order is
-  the layout's (a subject part leads a plain one, then alphabetical), so `@index(user_id)` on
-  `(game, user)` is refused even though `user_id` is a real parameter. `hek check --tables`
-  prints the key;
 - a column type that does not **order**, which is the same `>` gate `max` and `min` use, so a
   `List`, `Map`, `Json` or `Bool` column is refused by it. It reads through one optional, so a
   `Timestamp?` column is indexable and where the absent rows sort is the store's to document;
 - a **sealed** column, because a store holds the ciphertext: index something derived from it.
 
-An exact repeat on one fold is refused, and nothing else is a duplicate: `@index` beside
-`@index(game_id)` is two indexes, and so is `@index(game_id)` on two columns of one table,
-since the column is the last position of each.
+A repeat on one fold is refused **as a set**, so `@index(a, b)` beside `@index(b, a)` is one
+index written twice, and nothing else is a duplicate: `@index` beside `@index(game_id)` is two
+indexes, and so is `@index(game_id)` on two folds of one key, since the fold's value is the last
+position of each.
 
-`hek check --tables` prints `(sorts by (game, review_helpful))`. The index is in the fold's own
-digest hash and not in its signature hash, and nothing in the interpreter reads it: a fold's
-value is the same value whether or not a store can sort on it.
+`hek check --tables` prints `(sorts by (game, ReviewHelpful))`, the lead in key order. The index is
+in the fold's own digest hash and not in its signature hash, and nothing in the interpreter reads
+it: a fold's value is the same value whether or not a store can sort on it.
 
 ## 12. A column's history
 

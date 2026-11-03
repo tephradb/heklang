@@ -36,8 +36,8 @@ action.
 may not share a name inside one program.
 
 `given`, `respond`, `erased`, `secret`, `run`, `project`, `deliver`, `fill`, `expect`, `no`,
-`nothing`, `skipped` and `global` are claimed **only inside a test body**, so an entity field called
-`given` or a parameter called `no` stays writable elsewhere. The last three are claimed in one
+`nothing` and `skipped` are claimed **only inside a test body**, so an entity field called
+`given` or a parameter called `no` stays writable elsewhere. The last two are claimed in one
 position only, directly after `expect`, where each would otherwise read as an expression. `test` is
 the only word this construct reserves outright. The `fold` action is the keyword a declaration already starts with, and nothing is
 ambiguous: a statement's `fold` binds a local and the action does not, so `=` against `{` decides
@@ -276,9 +276,9 @@ not a decision, and the envelope is exactly predictable under the harness: one m
 
 | Expectation | Matches |
 | --- | --- |
-| `expect <table>[key] { column: value, ... }` | the row exists and the listed columns match |
-| `expect no <table>[key]` | no key like that was ever written |
-| `expect global { column: value, ... }` | the single-row table's listed columns match |
+| `expect Fold { param: value, ... } == value` | what the stored fold holds at that key |
+| `expect Fold == value` | the same, for a fold with no parameters |
+| `expect no Fold { param: value, ... }` | no arm of that fold ever wrote that key |
 
 ```hek
 test "a cancellation nets off the order's total" {
@@ -287,46 +287,38 @@ test "a cancellation nets off the order's total" {
 
   fill
 
-  expect shop__order[1, 9001] { order_total: 40.00, order_cancelled: true }
-  expect no shop__order[1, 9002]
+  expect OrderTotal { shop_id: 1, order_id: 9001 } == 40.00
+  expect OrderCancelled { shop_id: 1, order_id: 9001 } == true
+  expect no OrderTotal { shop_id: 1, order_id: 9002 }
 }
 ```
 
-This is section 6 over a derived table, and the two are the same assertion: a row of N columns is N
-fold reads, so where a projector's row test became N `fold` tests, `fill` puts it back. The subscript
-is the whole key in key order and the listed columns only, exactly as section 6 has them.
+**Addressed by the fold, never by a table.** The arguments are exactly the `fold` action's, by
+name and all of them, and the fold and the value's type are checked when the test is parsed. Which
+folds share a row is the layout's business and never appears in a test. Write as many as the
+scenario needs: unlike the `fold` action, `fill` takes any number of expectations.
 
-**The names are the ones `hek check --tables` prints**, and both are checked when the test is
-parsed, so a typo is a `hek check` error naming the tables that do exist. Run `--tables` to get them
-rather than guessing; `reference/folds.md` section 2 is the derivation.
+The value is an operand of `==`, so parenthesise one with `||` or `&&` in it.
 
-**One thing reads differently from a projector's row, and it is the fold's own rule.** An entity has
-no field it was never given, and a fold over no matching events folds to **its seed**, so a column
-no arm wrote still has a value and you may assert it:
+**A key no arm wrote reads as the fold's seed**, not as nothing, which is the one way this differs
+from a projector's row:
 
 ```hek
-expect plan[7] { plan_revenue: 0, plan_last_sold_at: none }
+expect PlanRevenue { plan_id: 7 } == 0
+expect PlanLastSoldAt { plan_id: 7 } == none
 ```
 
 `expect nothing` is therefore refused here, as under `project` and `fold`: the question it would ask
-is whether a key exists, and `expect no` asks it.
+is whether a key was written, and `expect no` asks it.
 
-**A fold with no parameters has no key, so its row is written without one:**
+**`no` is per fold.** It holds when no arm of *that* fold wrote the key, even if a sibling fold of
+the same key did. The one exception is a ranged arm (one leaving a key part open): it covers every
+key its group holds, including one a sibling minted.
 
-```hek
-expect global { store_units: 3, store_gross: 2600 }
-```
+**A fold with no parameters is written bare**, `expect StoreUnits == 3`. There is no key to be
+without, so `expect no StoreUnits` is refused: such a fold reads as its seed from the start.
 
-Several columns in one expectation is the point: the `fold` action takes one `expect` per test, so
-eight parameterless folds otherwise cost eight tests over a scenario one `fill` already sets up.
-
-Its row is there from the start, since there is no key to mint, so `expect no global` is refused and
-a log that moved none of its columns reads every one as its seed. `global` is claimed as a word
-directly after `expect`, like `nothing` and `skipped`: a record type spelled `global` cannot be
-asserted under the `fold` action, which is what keeps `expect Shape { a: 1 }` from being derivable
-two ways.
-
-Sealed columns and query-only columns behave as in sections 6 and 8: opened through the world's key
+Sealed folds and query-only folds behave as in sections 6 and 8: opened through the world's key
 store, and readable here.
 
 ## 10. What a test cannot assert

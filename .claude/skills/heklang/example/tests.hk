@@ -195,27 +195,26 @@ test "a booked seat fills the row it is keyed by" {
 
   fill
 
-  // The column names are `hek check --tables`', and the subscript is the whole key in
-  // the order that listing prints: the subject part leads.
-  expect attendee__workshop[7, RUST] {
-    attendee_seats: 1,
-    // Sealed on the event and sealed in the column, and compared on its plaintext: the
-    // runner opens it through the world's key store, so a test writes what it put in.
-    attendee_email: "ada@example.com",
-    // Query-only, readable here and by nothing that decides. The harness stamps one
-    // minute per event from 2020-01-01T00:00:00Z, so this is the second `given`.
-    attendee_booked_at: "2020-01-01T00:01:00Z",
-  }
-  expect no attendee__workshop[8, RUST]
+  // Each stored fold is read by its own name and its own parameters, the arguments the
+  // `fold` action takes. Which folds share a row is the layout's business, not the test's.
+  expect AttendeeSeats { attendee_id: 7, workshop_id: RUST } == 1
+  // Sealed on the event and sealed in the column, and compared on its plaintext: the
+  // runner opens it through the world's key store, so a test writes what it put in.
+  expect AttendeeEmail { attendee_id: 7, workshop_id: RUST } == "ada@example.com"
+  // Query-only, readable here and by nothing that decides. The harness stamps one
+  // minute per event from 2020-01-01T00:00:00Z, so this is the second `given`.
+  expect AttendeeBookedAt { attendee_id: 7, workshop_id: RUST } == "2020-01-01T00:01:00Z"
+  // `no` is per fold: this one never wrote attendee 8.
+  expect no AttendeeSeats { attendee_id: 8, workshop_id: RUST }
 
-  // A column no arm wrote is at its seed rather than missing, which is the one way a
-  // derived row reads differently from a projector's.
-  expect workshop[RUST] { workshop_seats_left: 1, workshop_revenue: 40.00 }
+  // Folds of another key are asserted the same way, in the same test.
+  expect WorkshopSeatsLeft { workshop_id: RUST } == 1
+  expect WorkshopRevenue { workshop_id: RUST } == 40.00
 
-  // The single-row table, written with no subscript because it has no key. One `fill`
-  // asserts the keyed rows and the store-wide totals together, which is the whole reason
-  // this form exists: the `fold` action takes one `expect` per test.
-  expect global { seats_booked: 1 }
+  // A fold with no parameters is written bare, since it has no key. One `fill`
+  // asserts the keyed folds and the store-wide totals together, which is why this
+  // reads better than the `fold` action, which takes one `expect` per test.
+  expect SeatsBooked == 1
 }
 
 // The computed key part, read back by the bucket it computed. The harness stamps one
@@ -239,7 +238,7 @@ test "revenue is grouped by a title the booking event does not carry" {
 
   fill
 
-  expect title["Rust"] { title_revenue: 40.00 }
+  expect TitleRevenue { title: "Rust" } == 40.00
 }
 
 test "a seat booked before the workshop was opened reads the title it had then" {

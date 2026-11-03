@@ -14,8 +14,8 @@ language for [hekla](https://git.tqwewe.com/tephra/hekla). Six declaration kinds
   reaches the network;
 - a **guard** is a named proposition about the log that several commands share;
 - a **fold** is a named slice of the log and the value it folds to, read by name by several
-  commands, guards and effect arms, and **also the read model**: one table per key signature, a row
-  per key, a column per fold;
+  commands, guards and effect arms, and **also the read model**: one stored value per key, read
+  back by the fold's own name;
 - a **refusal** is a named reason one said no.
 
 **The restrictions are the point.** A command cannot call out, read a clock in a fold, or decrypt.
@@ -345,7 +345,9 @@ A comment is `//` to the end of the line. Put one on its own line, leading whate
    bare `T` does fill a `T?` at every declared position, wrapping once at the outside. `==` and `!=`
    are the one exception to needing either: they take a `T?` against a bare `T`, and an absent value
    is unequal to every present one. Ordering an optional is still an error. Narrowing is about a
-   **name**: `if item.plan_id.is_some()` narrows nothing, so bind it with a `let` first.
+   **name**: `if item.plan_id.is_some()` narrows nothing, so bind it with a `let` first. A fold
+   arm's filter is the same `==`: `on @x.failed(shop_id, fo)` over a field `fo: Int?` into a bare
+   `fo: Int` parameter keys a present value and skips a `none` record, with no `else skip` needed.
 7. **Sealed content may only be moved, asked about, or revealed.** A field with `@subject(...)`
    cannot be interpolated, compared, sent in a body, passed to `invoke`, `unwrap_or`ed, read through
    a method or a field, or walked by `for`. Move it into a same-subject position, ask `.is_some()`,
@@ -424,37 +426,39 @@ command GrantTier(customer_id: Customer, tier: String) {
 ```
 
 **A named fold is also the read model.** Nothing declares a table: a fold says what a value is,
-which events change it and what it is keyed by, so its **parameters are the key**, the fold is **one
-column**, and folds sharing one key signature are **one table** with a row per key. That is why the
-read side of an application is folds rather than projectors, and why `hek check --tables` is the
-command to run after adding or renaming one:
+which events change it and what it is keyed by, so its **parameters are the key**, the fold is one
+stored value per key, and folds sharing one key signature share a row. That is why the read side of
+an application is folds rather than projectors, and why `hek check --tables` is the command to run
+after adding or renaming one:
 
 ```
-  TABLE shop__order  (shop: Shop, order: Int)  3 columns
-    order_email: String @subject(Customer)?  <- @order.contact.recorded
-    order_seen_at: Timestamp?                <- @order.placed
-    order_total: Money(2)                    <- @order.placed
+  (shop: Shop, order: Int)
+    OrderEmail: String @subject(Customer)?  <- @order.contact.recorded
+    OrderSeenAt: Timestamp?                 <- @order.placed
+    OrderTotal: Money(2)                    <- @order.placed
 
   not stored, because no event supplies the key:
     OrdersSince  (at)
 ```
 
-A column is the fold's name in `snake_case`; a key part is named for its **subject**, or for its
-parameter with one trailing `_id` dropped; a table is its parts joined with `__`, or **`global`**
-for a fold with no parameters. A fold whose key no event supplies is listed rather than refused.
+**A stored fold is addressed by its own name, never by a table.** The groups have no names: a test
+writes `expect OrderTotal { shop_id: 1, order_id: 9001 } == 40.00` and a host route names the fold.
+The key's order (subject parts first, the rest alphabetical) is the store's and never needs to be
+known. `--ids` adds each group's storage id, for someone looking at the store itself. A fold whose
+key no event supplies is listed rather than refused.
 
 Rules that carry their weight:
 
 - **One accumulator, no `return`**, and its name is written only where an arm reads the running
   value. `-> spend: Money(2) = 0` because `=> spend + total` reads it; `-> Bool = false` when the
   arm only replaces the value. Writing a name no arm reads is `unused-accumulator`.
-- **Spelled like a type: an initial capital, and no `_`.** The underscores go in the derived column.
+- **Spelled like a type: an initial capital, and no `_`.** The underscores go in the derived storage column.
   Both are refusals, and they are what keeps `snake_case` reversible so two folds cannot arrive as
   one column.
 - **Named for the VALUE, never the entity.** `OrderName`, `ShopAccessToken`, `OpenProposal`. Not
   `Order`, not `Shop`. One value out, so two facts about an order are two folds and the command
   conflicts on exactly the two slices it read. Naming one after a part of its own key is refused
-  outright, since the table would need two columns of one name.
+  outright, since the row would need two columns of one name.
 - **A fold may not refuse.** It computes; a guard refuses. A fold's body is arms only, so a
   `reject` in one is unwritable rather than reported.
 - **An arm binding the envelope with `as` makes the fold query-only**: stored and readable by a
@@ -469,7 +473,7 @@ Rules that carry their weight:
 sealed content for its caller to `reveal`. The subject need not be in the key and usually is not.
 
 `reference/folds.md` has all of this; `docs/folds.md` is the contract. For what a deployment serves
-the tables over, use the **hekla** skill rather than guessing from here.
+stored folds over, use the **hekla** skill rather than guessing from here.
 
 ## Compound keys
 
