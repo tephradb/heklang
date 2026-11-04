@@ -498,9 +498,9 @@ indexes, `@index(shop_id)` beside `@index(shop_id, HoldState)` is two, and so is
 on two folds of one key, since the fold's value is the last position of each.
 
 `hek check --tables` prints `(sorts by (game, ReviewHelpful))`, the lead in key order and then any
-siblings by name. The index is
-in the fold's own digest hash and not in its signature hash, and nothing in the interpreter reads
-it: a fold's value is the same value whether or not a store can sort on it.
+siblings by name. The index is in the fold's own digest hash and not in its signature hash, and
+nothing in the interpreter reads it: a fold's value is the same value whether or not a store can
+sort on it.
 
 ## 12. A column's history
 
