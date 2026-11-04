@@ -1292,7 +1292,9 @@ pub struct Lookup {
     /// Parameter name to value, in the order written.
     pub args: Vec<(Ident, ExprId)>,
     pub slot: Slot,
-    /// The looked-up fold's declared return type, which is what the slot holds.
+    /// The looked-up fold's declared return type, which is what the slot holds, made optional
+    /// when an argument is an optional its parameter is not, since a `none` there answers
+    /// `none` without reading anything.
     pub ty: Type,
     pub span: Span,
 }

@@ -1306,6 +1306,30 @@ on @game.purchased(shop_id) { shop_id, game_id } key genre = GameGenre { shop_id
 The filter still narrows and the arm still pins the part from it; what changes is that `shop_id`
 inside the clause is the record's field rather than the key's part, which is what the sink has.
 
+**An optional argument makes the lookup optional.** A field declared `fo: Int?` may be passed to a
+parameter declared `fo: Int`, and a record holding `none` there reads nothing: no key is `none`, so
+there is no row to read, and the lookup answers `none`. Its type says so, one level of optional
+over the looked-up fold's own (a `Shop?` fold stays `Shop?`), so every reader has to say what
+absent means and nothing is skipped behind the author's back:
+
+```hek
+on @hold.failed(fo) { fo } key shop_id = FoShop { fo } else skip => n + 1
+```
+
+That arm keys a failure by the shop its fulfilment order belongs to, from an event whose order is
+sometimes absent. The bare `fo` part skips a `none` record already (rule 19), and so does
+`else skip` on the looked-up part. Before this the argument had to be `fo.unwrap_or(0)`, which
+looked up key `0` and relied on the other part's skip to throw the answer away; a fold with a row at
+`0` made that a real read with nothing to show for it. A parameter that is itself optional takes the
+optional as the key, `none` included, exactly as it did.
+
+Reading the **key part** instead, which would be the other way out (`FoShop { fo }` with no
+destructure, reading the part the filter pins), stays refused by the rule above. The sink evaluates
+every lookup before it has a key, so a part is not in its frame to read, and binding the parts an
+arm pins from fields before the lookups run is the feature rule 14 declines for its own reasons.
+Wherever the arm writes a row, the destructured field holds that row's part, so nothing is lost by
+reading it.
+
 **And a lookup may not be written under a binder.** It is hoisted out of the expression onto the arm
 and evaluated once per record, which is what lets one chain into another, so a comprehension's name
 does not exist yet at that point: `key p = [One { x: i } for i in ids].len()` checked clean and

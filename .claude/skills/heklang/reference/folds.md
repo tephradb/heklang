@@ -438,6 +438,17 @@ It works on any computed part, not only a lookup, and a part whose value is neve
 refused because the `else skip` could not fire. `skip` is soft, claimed only after `else` in
 a `key` clause.
 
+**An optional field passes straight to a lookup.** A destructured `fo: Int?` may fill a lookup
+parameter declared `fo: Int`; a record holding `none` reads nothing and the lookup answers
+`none`, so its type is optional and the part needs `else skip`. Never write `fo.unwrap_or(0)`
+there, which looks up key `0`:
+
+```hek
+on @hold.failed(fo) { fo } key shop_id = FoShop { fo } else skip => n + 1
+```
+
+The bare `fo` part skips a `none` record by itself, with no `key` clause.
+
 ## 11. `@index` says a column may be sorted on
 
 ```hek

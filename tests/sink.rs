@@ -485,6 +485,65 @@ fold ByKind(shop_id: Shop, fo: Int, k: String) -> n: Int = 0 {
 }
 
 #[test]
+fn an_absent_lookup_argument_is_an_absent_answer() {
+    // `fo` is optional on the event and not on `FoRegion`'s key, so a record holding `none`
+    // reads nothing and the lookup answers `none`: the key part skips it, and the value
+    // takes it as written. Both drivers have to agree, and `agrees` is the claim. The
+    // by-hand spelling this replaces looked up `fo.unwrap_or(0)`, which reads key `0`.
+    let source = "subject Shop(Int)
+event @fo.created { fo: Int, region: String }
+event @hold.failed { shop_id: Shop, fo: Int? }
+
+fold FoRegion(fo: Int) -> String = \"unknown\" {
+  on @fo.created(fo) { region } => region
+}
+
+fold FailuresByRegion(region: String) -> n: Int = 0 {
+  on @hold.failed { fo } key region = FoRegion { fo } else skip => n + 1
+}
+
+fold LastRegion(shop_id: Shop) -> String? = none {
+  on @hold.failed(shop_id) { fo } => FoRegion { fo }
+}
+";
+    let program = program(source);
+    let mut interpreter = Interpreter::new(&program);
+    given(
+        &mut interpreter,
+        "fo.created",
+        [("fo", Value::Int(0)), ("region", Value::str("zero"))],
+    );
+    given(
+        &mut interpreter,
+        "fo.created",
+        [("fo", Value::Int(1)), ("region", Value::str("eu"))],
+    );
+    for fo in [Value::some(Value::Int(1)), Value::none(Type::Int)] {
+        given(
+            &mut interpreter,
+            "hold.failed",
+            [("shop_id", Value::Int(7)), ("fo", fo)],
+        );
+    }
+    let cells = agrees(&program, &interpreter);
+    let regions = named(&program, "region");
+    assert_eq!(
+        cells.get(&regions, &[Key::Str("eu".into())], "failures_by_region"),
+        Some(&Value::Int(1))
+    );
+    assert_eq!(
+        cells.rows(&regions).count(),
+        1,
+        "the absent record lands under no region, neither the seed's nor key 0's"
+    );
+    assert_eq!(
+        cells.get(&named(&program, "shop"), &[Key::Int(7)], "last_region"),
+        Some(&Value::none(Type::String)),
+        "the last record's lookup answered none"
+    );
+}
+
+#[test]
 fn the_subscription_is_every_event_any_column_folds_and_each_once() {
     let program = program(SHOP);
     let tables = Tables::new(&program);

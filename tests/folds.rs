@@ -2406,6 +2406,81 @@ fold GenreUnits(shop_id: Int, genre: String) -> n: Int = 0 {{
     program(&source("shop_id, game_id"));
 }
 
+/// **An optional argument to a parameter that is not one makes the lookup optional**, so
+/// a record holding `none` there reads nothing and answers `none`. Not silent, because the
+/// type says so: a `key` clause has to write `else skip`, and the value has to be one that
+/// holds an absent answer. A parameter that is itself optional takes the optional as it
+/// always did, and a literal argument is not an optional one.
+#[test]
+fn an_optional_lookup_argument_makes_the_lookup_optional() {
+    let source = |arm: &str| {
+        format!(
+            "\
+event @fo.created {{ fo: Int, region: String }}
+event @hold.failed {{ fo: Int? }}
+
+fold FoRegion(fo: Int) -> String = \"unknown\" {{
+  on @fo.created(fo) {{ region }} => region
+}}
+
+fold FoSeen(fo: Int?) -> n: Int = 0 {{
+  on @hold.failed(fo) => n + 1
+}}
+
+fold Held(region: String) -> n: Int = 0 {{
+  {arm}
+}}
+"
+        )
+    };
+    program(&source(
+        "on @hold.failed { fo } key region = FoRegion { fo } else skip => n + 1",
+    ));
+    assert_eq!(
+        error(&source(
+            "on @hold.failed { fo } key region = FoRegion { fo } => n + 1"
+        )),
+        "expected String, found String?",
+        "the lookup is optional, so the part has to say what absent means"
+    );
+    program(&source(
+        "on @hold.failed { fo } key region = FoRegion { fo: 3 } => n + 1",
+    ));
+    // Through an optional parameter the argument is the key, absent included, so nothing
+    // about the answer becomes optional.
+    let program = program(&source(
+        "on @hold.failed { fo } key region = \"r{FoSeen { fo }}\" => n + FoSeen { fo }",
+    ));
+    let held = program.fold("Held").expect("declared");
+    assert!(
+        held.stage.slices[0]
+            .lookups
+            .iter()
+            .all(|lookup| lookup.ty == Type::Int),
+        "{:?}",
+        held.stage.slices[0].lookups
+    );
+}
+
+/// The unwrap is of one level: an `Int?` argument fills an `Int` parameter, and anything
+/// else is the ordinary mismatch against the parameter's own type.
+#[test]
+fn an_optional_lookup_argument_still_has_to_be_the_parameters_type() {
+    let source = "\
+event @fo.created { fo: Int, region: String }
+event @hold.failed { code: String? }
+
+fold FoRegion(fo: Int) -> String = \"unknown\" {
+  on @fo.created(fo) { region } => region
+}
+
+fold Held(region: String) -> n: Int = 0 {
+  on @hold.failed { code } key region = FoRegion { fo: code } else skip => n + 1
+}
+";
+    assert_eq!(error(source), "expected Int, found String?");
+}
+
 /// A lookup is **hoisted** out of the key expression onto the slice and evaluated once per
 /// record, which is what lets one chain into another. A binder's name does not exist at
 /// that point, so a lookup under one is refused rather than read before its argument is

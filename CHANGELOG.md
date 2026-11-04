@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is the sibling, which has to be stored, keyed as this fold is, not the fold itself, and of a type
   that orders and is not sealed. It is in the fold's digest as `(index shop_id (fold HoldState))`,
   and an index naming none packs as it did, so `hek-digest 6` stands.
+- a lookup argument may be an optional where the looked-up fold's parameter is not, so
+  `FoShop { fo }` over a field `fo: Int?` replaces `FoShop { fo: fo.unwrap_or(0) }`, which looked
+  up key `0`. A `none` argument reads nothing and the lookup answers `none`, so its type is
+  optional and a `key` clause says `else skip`. Nothing that checked before changes meaning, since
+  such an argument used to be a type mismatch, so the digest is untouched.
 
 ### Changed
 

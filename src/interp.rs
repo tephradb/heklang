@@ -2596,6 +2596,10 @@ impl Asof<'_> {
 /// In the list's own order, which is evaluation order: an inner link of a chain was pushed
 /// before the outer one that takes it as an argument, so by the time the outer one's
 /// arguments are evaluated the inner slot is filled.
+///
+/// An optional argument to a parameter that is not one is unwrapped, and a `none` there
+/// fills the slot with `none` without reading anything: no key is `none`, and the parser
+/// made the slot optional for exactly this (`Parser::lookup_argument`).
 fn lookups(
     program: &Program,
     exprs: &Exprs,
@@ -2603,10 +2607,29 @@ fn lookups(
     frame: &mut Frame,
     asof: &Asof<'_>,
 ) -> Result<(), Error> {
-    for lookup in &slice.lookups {
+    'lookup: for lookup in &slice.lookups {
+        let params = &program
+            .fold(&lookup.fold)
+            .ok_or(ErrorKind::MalformedIr)?
+            .params;
         let mut args: Vec<(Ident, Value)> = Vec::with_capacity(lookup.args.len());
         for (name, value) in &lookup.args {
-            args.push((name.clone(), eval(program, exprs, frame, *value, None)?));
+            let optional = params
+                .iter()
+                .find(|param| &param.name == name)
+                .is_none_or(|param| matches!(param.ty, Type::Opt(_)));
+            let value = match eval(program, exprs, frame, *value, None)? {
+                Value::Opt { value, .. } if !optional => value.map(|value| *value),
+                value => Some(value),
+            };
+            let Some(value) = value else {
+                let Type::Opt(inner) = &lookup.ty else {
+                    return Err(ErrorKind::MalformedIr.into());
+                };
+                frame.set(lookup.slot, Value::none(inner.as_ref().clone()))?;
+                continue 'lookup;
+            };
+            args.push((name.clone(), value));
         }
         let value = asof.value(program, &lookup.fold, &args)?;
         let value = fitted_at(value, &lookup.ty, lookup.span)?;

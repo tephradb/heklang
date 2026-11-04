@@ -10980,6 +10980,9 @@ impl Parser {
         }
 
         let mut args: Vec<(Ident, ExprId)> = Vec::new();
+        // Whether some argument is an optional where its parameter is not, which makes the
+        // lookup absent for a record that holds `none` there.
+        let mut absent = false;
         self.expect_sym(Sym::LBrace)?;
         while !self.at_sym(Sym::RBrace) {
             let at = self.span_here();
@@ -11001,11 +11004,18 @@ impl Parser {
             }
             let expected = declared.clone();
             let value = if self.eat_sym(Sym::Colon) {
-                self.expr(lower, Some(expected.clone()))?
+                let start = self.here();
+                let value = self.or_expr(lower, Some(expected.clone()))?;
+                let at = self.span_from(start);
+                absent |= self.lookup_argument(lower, value, &expected, at);
+                value
             } else if lower.b.lookup(&field).is_none() {
                 return Err(self.not_in_scope(&field, at));
             } else {
-                self.shorthand(lower, &field, &expected, at)
+                lower.b.at(at);
+                let value = lower.b.load(&field);
+                absent |= self.lookup_argument(lower, value, &expected, at);
+                value
             };
             args.push((field, self.lifted(lower, value, &expected, at)));
             if !self.eat_sym(Sym::Comma) {
@@ -11049,6 +11059,14 @@ impl Parser {
                 ));
         }
 
+        // An absent argument is an absent answer, so the slot is optional whenever an argument
+        // is, and one level of it: `none` because the argument was and `none` because the
+        // looked-up fold held it are one answer to whatever reads the slot.
+        let ret = match ret {
+            Type::Opt(_) => ret,
+            ret if absent => Type::opt(ret),
+            ret => ret,
+        };
         // Allocated under a name no source token can spell, as `hidden_bind` does and for
         // the same reason: the slot is the fold's own frame and nothing may shadow or read
         // it by name.
@@ -11068,6 +11086,34 @@ impl Parser {
         }
         lower.b.at(span);
         Ok(lower.b.read(slot))
+    }
+
+    /// One argument of a lookup, checked as [`Self::expr`] checks a declared position,
+    /// except that an optional over a parameter that is not one is accepted. Whether it
+    /// was is what comes back.
+    ///
+    /// **A `none` argument is an absent answer**, decided where the lookup is evaluated:
+    /// no key can be `none`, so there is no row to read, and the slot gets the optional's
+    /// `none`. That is what an optional field filling a bare key part already does (rule
+    /// 19), one position over, and it is what the author wrote by hand before: `key fo =
+    /// fo else skip` to skip the record, and `fo.unwrap_or(0)` to get past this check,
+    /// which looked up key `0` and relied on the skip to discard the answer. Nothing is
+    /// hidden by it, since the lookup's type becomes optional and every reader has to say
+    /// what absent means: `else skip` in a `key` clause, a fallback in a value.
+    fn lookup_argument(&self, lower: &Lower, value: ExprId, expected: &Type, at: Span) -> bool {
+        let absent = !matches!(expected, Type::Opt(_))
+            && matches!(
+                self.type_of(lower, value),
+                Some(Type::Opt(inner)) if inner.unsealed() == expected.unsealed()
+            );
+        let want = match absent {
+            true => Type::opt(expected.clone()),
+            false => expected.clone(),
+        };
+        self.check_secret(lower, value, &want, at);
+        self.check_seal(lower, value, &want, at);
+        self.check_type(lower, value, &want, at);
+        absent
     }
 
     /// `Name { field: value }`, with the same bare-name shorthand `emit` and `put`
