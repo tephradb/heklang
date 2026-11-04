@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `hek check --tables` prints the sibling folds an `@index` names between its lead and the fold,
+  as `(sorts by (shop, HoldState, HoldChangedAt))`
+
 ## [0.6.0](https://git.tqwewe.com/tephra/heklang/compare/v0.5.6...v0.6.0) - 2026-11-03
 
 ### Added

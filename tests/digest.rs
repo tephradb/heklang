@@ -2226,3 +2226,43 @@ fn an_index_reads_back_from_a_packed_form() {
         "both indexes are there, in written order: {packed}"
     );
 }
+
+/// **A sibling fold an index names is part of the declaration**, as a `(fold ..)` node after
+/// the parameters: `(shop, state, column)` and `(shop, column)` are two indexes a store
+/// builds and two questions a reader may ask. An index naming none packs as it did, which
+/// the test above already pins.
+#[test]
+fn a_sibling_in_an_index_is_part_of_the_declaration() {
+    let folds = |annotation: &str| {
+        format!(
+            "fold PairCount(customer_id: Customer, order_id: Uuid) -> n: Int = 0 {{
+               on @order.placed(customer_id, order_id) => n + 1
+             }}
+
+             fold PairTotal(customer_id: Customer, order_id: Uuid) -> spend: Money(2) {annotation} = 0 {{
+               on @order.placed(customer_id, order_id) {{ total }} => spend + total
+             }}"
+        )
+    };
+    differs(
+        &folds("@index(customer_id)"),
+        &folds("@index(customer_id, PairCount)"),
+        "a sibling between the lead and the column is another index",
+    );
+    let digest = with_events(&folds("@index(customer_id, PairCount)"));
+    let (before, after) = (
+        entry(&with_events(&folds("@index(customer_id)")), "PairTotal").clone(),
+        entry(&digest, "PairTotal"),
+    );
+    assert_eq!(
+        before.signature_hash, after.signature_hash,
+        "the column's table, key and type did not move"
+    );
+    let packed = after.form.packed();
+    assert!(
+        packed.contains("(index customer_id (fold PairCount))"),
+        "{packed}"
+    );
+    let read = Digest::from_packed(&digest.packed()).expect("its own output parses");
+    assert_eq!(read.hash(), digest.hash());
+}

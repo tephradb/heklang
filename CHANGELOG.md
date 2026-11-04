@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- an `@index` may name a sibling fold of the same table after its lead, so
+  `@index(shop_id, HoldState)` on `HoldChangedAt` is the index `(shop, HoldState, HoldChangedAt)`:
+  a list filtered on one column and ordered by another. A capitalised name that is not a parameter
+  is the sibling, which has to be stored, keyed as this fold is, not the fold itself, and of a type
+  that orders and is not sealed. It is in the fold's digest as `(index shop_id (fold HoldState))`,
+  and an index naming none packs as it did, so `hek-digest 6` stands.
+
+### Changed
+
+- **Breaking:** `Column::indexes` is a `Vec<ColumnIndex>` rather than a `Vec<Vec<usize>>`. A
+  `ColumnIndex` holds the lead's key positions as `parts`, exactly what each inner list was, and
+  the sibling folds as `folds`, sorted by name. `FoldIndex` gains `folds` beside `params`.
+
 ## [0.13.0](https://git.tqwewe.com/tephra/heklang/compare/heklang-v0.12.0...heklang-v0.13.0) - 2026-11-03
 
 ### Added

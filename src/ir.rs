@@ -1049,16 +1049,20 @@ pub struct Fold {
 /// One `@index` on a fold's value, which declares that the stored column can be **sorted**
 /// on (`docs/folds.md` rule 20).
 ///
-/// The parameters it names lead the index and the column itself is implied last, so
-/// `@index(game_id)` on `ReviewHelpful(game_id, user_id)` is the index `(game, n)`. A host
-/// reads it off [`crate::tables::Column::indexes`] as key positions rather than from here,
-/// because what leads an index has to be stated in the table's key order and only the
-/// layout knows that order.
+/// The parameters it names lead the index, the sibling folds it names follow them, and the
+/// column itself is implied last, so `@index(game_id)` on `ReviewHelpful(game_id, user_id)`
+/// is the index `(game, n)`. A host reads it off [`crate::tables::Column::indexes`] as key
+/// positions and fold names rather than from here, because what leads an index has to be
+/// stated in the table's key order and only the layout knows that order.
 #[derive(Debug, Clone)]
 pub struct FoldIndex {
     /// The fold's own parameter names, in written order. Empty for a bare `@index`, which
     /// is the column alone.
     pub params: Vec<Ident>,
+    /// The other folds of this fold's table whose values follow the lead, in written
+    /// order. A name in `@index(..)` is one of these when it is not a parameter of the
+    /// fold, and only a capitalised name can be one, since a fold is named like a type.
+    pub folds: Vec<Ident>,
     pub span: Span,
 }
 

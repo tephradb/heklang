@@ -756,14 +756,25 @@ fn fold(def: &Fold, reads: &[(String, Hash)]) -> Sexp {
     // index. Written order across them for the same reason `arms` keeps one, and absent
     // when there are none, so a fold declaring no index packs byte for byte as it did.
     //
+    // The sibling folds follow as one `(fold ..)` node, in written order for the same
+    // reason, and absent when an index names none, so an index without one packs as it did.
+    //
     // It is in the local form and therefore in `hash`, not in `signature_hash`: adding an
     // index changes what a store has to build and what a reader may sort on, and changes
     // nothing a caller passes or reads back.
     for index in &def.indexes {
-        parts.push(node(
-            "index",
-            index.params.iter().map(|param| atom(param.clone())),
-        ));
+        let mut names: Vec<Sexp> = index
+            .params
+            .iter()
+            .map(|param| atom(param.clone()))
+            .collect();
+        if !index.folds.is_empty() {
+            names.push(node(
+                "fold",
+                index.folds.iter().map(|fold| atom(fold.clone())),
+            ));
+        }
+        parts.push(node("index", names));
     }
     // Before the stage, because an arm reads these slots and a slot is numbered by first
     // appearance. One list for the whole fold rather than one per arm, which is how the IR

@@ -455,22 +455,39 @@ the index and the fold's own value is implied last, so a bare `@index` is "best 
 catalogue" and `@index(game_id)` is "this game's most helpful reviews". A host serves
 `order_by` only over what is declared, as it does for a projector's `@index`.
 
-Four refusals. The parameters are a **set**: any of the fold's own, in any order, and
-`@index(user_id)` on `(game, user)` is as good as `@index(game_id)`.
+A capitalised name that is not a parameter names a **sibling fold of the same table** (same key),
+whose value sits between the lead and this column. That is "this shop's holds in this state, most
+recently changed first", with no combined fold to build it from:
 
-- a name that is not one of the fold's own parameters;
-- a fold no column is kept for, which has nothing to index at all;
+```hek
+fold HoldState(shop_id: Shop, hold_id: Int) -> String = "" { ... }
+
+fold HoldChangedAt(shop_id: Shop, hold_id: Int) -> Timestamp? @index(shop_id, HoldState) = none {
+  ...                                                // index (shop, HoldState, HoldChangedAt)
+}
+```
+
+The parameters are a **set**, and so are the siblings: any of the fold's own, in any order, and
+`@index(user_id)` on `(game, user)` is as good as `@index(game_id)`. Refused:
+
+- a lowercase name that is not one of the fold's own parameters;
+- a capitalised one that is neither a parameter nor a declared fold, or is the fold itself;
+- a fold no column is kept for, which has nothing to index at all, and a sibling likewise;
+- a sibling kept in another table, which is one with a different key;
 - a column type that does not **order**, which is the same `>` gate `max` and `min` use, so a
   `List`, `Map`, `Json` or `Bool` column is refused by it. It reads through one optional, so a
   `Timestamp?` column is indexable and where the absent rows sort is the store's to document;
 - a **sealed** column, because a store holds the ciphertext: index something derived from it.
 
+The last two hold for a sibling too, since a store sorts on it as well.
+
 A repeat on one fold is refused **as a set**, so `@index(a, b)` beside `@index(b, a)` is one
 index written twice, and nothing else is a duplicate: `@index` beside `@index(game_id)` is two
-indexes, and so is `@index(game_id)` on two folds of one key, since the fold's value is the last
-position of each.
+indexes, `@index(shop_id)` beside `@index(shop_id, HoldState)` is two, and so is `@index(game_id)`
+on two folds of one key, since the fold's value is the last position of each.
 
-`hek check --tables` prints `(sorts by (game, ReviewHelpful))`, the lead in key order. The index is
+`hek check --tables` prints `(sorts by (game, ReviewHelpful))`, the lead in key order and then any
+siblings by name. The index is
 in the fold's own digest hash and not in its signature hash, and nothing in the interpreter reads
 it: a fold's value is the same value whether or not a store can sort on it.
 

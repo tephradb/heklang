@@ -5,7 +5,7 @@
 //! source cannot check by eye: which parameter an arm actually supplies, which event
 //! field fills it, and what orders a key once it has more than one part.
 
-use heklang::{ArmMatch, Layout, Program, Value, fixed, layout, parse};
+use heklang::{ArmMatch, ColumnIndex, Layout, Program, Value, fixed, layout, parse};
 
 fn program(source: &str) -> Program {
     match parse(source) {
@@ -712,9 +712,51 @@ fold Third(from_id: Region, to_id: Region) -> n: Int @index = 0 {
     let layout = read(&source);
     // One table, since a key is a set of parts and not an argument list.
     assert_eq!(tables(&source), ["from__to  first, second, third"]);
-    let indexes = |name: &str| layout.column(name).expect("the column").1.indexes.clone();
+    let indexes = |name: &str| -> Vec<Vec<usize>> {
+        let (_, column) = layout.column(name).expect("the column");
+        column
+            .indexes
+            .iter()
+            .map(|index| {
+                assert!(index.folds.is_empty(), "no index here names a sibling");
+                index.parts.clone()
+            })
+            .collect()
+    };
     assert_eq!(indexes("First"), [vec![0]]);
     assert_eq!(indexes("Second"), [vec![0, 1]]);
     // The column alone, which is the whole of a bare `@index`.
     assert_eq!(indexes("Third"), [Vec::<usize>::new()]);
+}
+
+/// Rule 20: a capitalised name in `@index(..)` is a sibling fold of the same table, whose
+/// value sits between the lead and this column. Recorded by name and sorted, since the
+/// siblings are a set the way the lead is, and the lead stays key positions.
+#[test]
+fn an_index_records_its_sibling_folds_by_name() {
+    let source = app("
+fold OrderTotal(shop_id: Shop, order_id: Int) -> sum: Int = 0 {
+  on @order.placed(shop_id, order_id) { total } => sum + total
+}
+
+fold OrderState(order_id: Int, shop_id: Shop) -> String = \"\" {
+  on @order.placed(shop_id, order_id) => \"placed\"
+  on @order.cancelled(shop_id, order_id) => \"cancelled\"
+}
+
+fold OrderCancels(shop_id: Shop, order_id: Int) -> n: Int @index(OrderTotal, shop_id, OrderState) = 0 {
+  on @order.cancelled(shop_id, order_id) => n + 1
+}
+");
+
+    let layout = read(&source);
+    let (table, column) = layout.column("OrderCancels").expect("the column");
+    assert_eq!(table.key[0].name, "shop");
+    assert_eq!(
+        column.indexes,
+        [ColumnIndex {
+            parts: vec![0],
+            folds: vec!["OrderState".to_string(), "OrderTotal".to_string()],
+        }]
+    );
 }

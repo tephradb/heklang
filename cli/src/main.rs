@@ -625,7 +625,7 @@ fn tables(program: &Program, ids: bool) {
                 ),
             };
             // Rule 20, printed as the index a store builds rather than as the annotation
-            // the author wrote: the lead in key order, then the fold.
+            // the author wrote: the lead in key order, then the sibling folds, then the fold.
             let sorted = match column.indexes.is_empty() {
                 true => String::new(),
                 false => format!(
@@ -635,8 +635,10 @@ fn tables(program: &Program, ids: bool) {
                         .iter()
                         .map(|index| {
                             let mut parts: Vec<&str> = index
+                                .parts
                                 .iter()
                                 .map(|&at| table.key[at].name.as_str())
+                                .chain(index.folds.iter().map(String::as_str))
                                 .collect();
                             parts.push(column.fold.as_str());
                             format!("({})", parts.join(", "))

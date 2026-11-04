@@ -220,7 +220,10 @@ entity's `index (a, b)`, and for the same reason: adding one changes what a stor
 what a reader may sort on, and changes nothing a caller passes or reads back, so it moves `hash` and
 leaves `signature_hash` where it was. By parameter rather than by key position because `params`
 above is by name and the two have to agree; renaming a parameter already moves both through that
-section. A fold declaring none emits no node, so `hek-digest 6` stands here as well.
+section. A sibling fold an index names follows the parameters as one `(fold <Name> ..)` node, in
+written order for the same reason, so `@index(shop_id, HoldState)` is
+`(index shop_id (fold HoldState))`; an index naming none emits no such node. A fold declaring none
+emits no node, so `hek-digest 6` stands here as well.
 
 ## 8. Every entry carries its own hash
 

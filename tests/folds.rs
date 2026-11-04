@@ -3231,7 +3231,7 @@ fold Held(customer_id: Customer) -> Sealed(String, Customer) @index = \"\" {
 fn an_index_is_checked_where_it_is_written() {
     for (annotation, expected) in [
         ("@index(nope)", "has no parameter `nope`"),
-        ("@index(shop_id, shop_id)", "leads this index twice"),
+        ("@index(shop_id, shop_id)", "is in this index twice"),
         ("@index @index", "declares `@index` twice"),
         (
             "@index(shop_id) @index(shop_id)",
@@ -3284,7 +3284,8 @@ fold ReviewHelpful(game_id: Game, user_id: User) -> n: Int {annotation} = 0 {{
         let program = program(&source(annotation));
         let layout = heklang::layout(&program);
         let (_, column) = layout.column("ReviewHelpful").expect("kept");
-        assert_eq!(column.indexes, [positions], "for `{annotation}`");
+        assert_eq!(column.indexes.len(), 1, "for `{annotation}`");
+        assert_eq!(column.indexes[0].parts, positions, "for `{annotation}`");
     }
     let message = error(&source("@index(game_id, user_id) @index(user_id, game_id)"));
     assert!(
@@ -3375,6 +3376,141 @@ fold Held(shop_id: Int, period: String) -> n: Int @index = 0 {
         message.contains("no event supplies `period`"),
         "it names the part that has to change: {message}"
     );
+}
+
+/// **A capitalised name in `@index(..)` is a sibling fold**, whose value sits between the
+/// lead and this column: the shape a list of "holds in this state, newest first" needs,
+/// which pins a shop and a state and orders by the change time. A parameter is found first,
+/// so one spelled with a capital is still the parameter.
+#[test]
+fn an_index_may_name_a_sibling_fold_of_its_table() {
+    let program = program(
+        "\
+subject Shop(Int)
+
+event @hold.placed { shop_id: Shop, hold_id: Int, at: Timestamp }
+event @hold.released { shop_id: Shop, hold_id: Int, at: Timestamp }
+
+fold HoldState(shop_id: Shop, hold_id: Int) -> String = \"\" {
+  on @hold.placed(shop_id, hold_id) => \"held\"
+  on @hold.released(shop_id, hold_id) => \"released\"
+}
+
+fold HoldChangedAt(shop_id: Shop, hold_id: Int) -> Timestamp? @index(shop_id, HoldState) = none {
+  on @hold.placed(shop_id, hold_id) { at } => at
+  on @hold.released(shop_id, hold_id) { at } => at
+}
+
+fold HoldCount(Shop: Shop) -> n: Int @index(Shop) = 0 {
+  on @hold.placed(shop_id: Shop) => n + 1
+}
+",
+    );
+    let index = &program.fold("HoldChangedAt").expect("the fold").indexes[0];
+    assert_eq!(index.params, ["shop_id"]);
+    assert_eq!(index.folds, ["HoldState"]);
+    let index = &program.fold("HoldCount").expect("the fold").indexes[0];
+    assert_eq!(index.params, ["Shop"], "a parameter wins over a fold");
+    assert!(index.folds.is_empty());
+
+    let layout = heklang::layout(&program);
+    let (_, column) = layout.column("HoldChangedAt").expect("kept");
+    assert_eq!(column.indexes[0].parts, [0]);
+    assert_eq!(column.indexes[0].folds, ["HoldState"]);
+}
+
+/// Every way a sibling can fail to be a column this one can be sorted beside, each with its
+/// own reason: it does not exist, it is the fold itself, it is not stored, it is kept in
+/// another table, or its value does not order. The last reuses the indexed column's own
+/// gate, so a sealed sibling is refused for the seal.
+#[test]
+fn an_index_names_only_a_sortable_sibling_of_its_table() {
+    let source = |annotation: &str| {
+        format!(
+            "\
+subject Shop(Int)
+subject Customer(Int)
+
+event @hold.placed {{ shop_id: Shop, hold_id: Int, customer_id: Customer, note: String @subject(customer_id), at: Timestamp }}
+
+fold HoldState(shop_id: Shop, hold_id: Int) -> String = \"\" {{
+  on @hold.placed(shop_id, hold_id) => \"held\"
+}}
+
+fold HoldOpen(shop_id: Shop, hold_id: Int) -> Bool = false {{
+  on @hold.placed(shop_id, hold_id) => true
+}}
+
+fold HoldTags(shop_id: Shop, hold_id: Int) -> tags: List(String) = [] {{
+  on @hold.placed(shop_id, hold_id) => tags.push(\"x\")
+}}
+
+fold HoldNote(shop_id: Shop, hold_id: Int) -> Sealed(String, Customer)? = none {{
+  on @hold.placed(shop_id, hold_id) {{ note }} => note
+}}
+
+fold ShopHolds(shop_id: Shop) -> n: Int = 0 {{
+  on @hold.placed(shop_id) => n + 1
+}}
+
+fold Unkept(shop_id: Shop, period: String) -> n: Int = 0 {{
+  on @hold.placed(shop_id) => n + 1
+}}
+
+fold HoldChangedAt(shop_id: Shop, hold_id: Int) -> Timestamp? {annotation} = none {{
+  on @hold.placed(shop_id, hold_id) {{ at }} => at
+}}
+"
+        )
+    };
+    for (annotation, expected) in [
+        (
+            "@index(Nope)",
+            "`Nope` is neither a parameter of fold `HoldChangedAt` nor a fold",
+        ),
+        (
+            "@index(nope)",
+            "fold `HoldChangedAt` has no parameter `nope`",
+        ),
+        (
+            "@index(shop_id, HoldChangedAt)",
+            "fold `HoldChangedAt` names itself in its own `@index`",
+        ),
+        (
+            "@index(Unkept)",
+            "`Unkept` is not stored, so there is no column of it to index `HoldChangedAt` by: no event supplies `period`",
+        ),
+        (
+            "@index(ShopHolds)",
+            "`ShopHolds` is kept in a different table from `HoldChangedAt`, so one index cannot hold both",
+        ),
+        (
+            "@index(HoldOpen)",
+            "fold `HoldOpen` is a Bool, which does not order",
+        ),
+        (
+            "@index(HoldTags)",
+            "fold `HoldTags` is a List(String), which does not order",
+        ),
+        ("@index(HoldNote)", "fold `HoldNote` is sealed"),
+        (
+            "@index(shop_id, HoldState) @index(HoldState, shop_id)",
+            "declares `@index(shop_id, HoldState)` twice",
+        ),
+        ("@index(HoldState, HoldState)", "is in this index twice"),
+    ] {
+        let message = error(&source(annotation));
+        assert!(message.contains(expected), "for `{annotation}`: {message}");
+    }
+    assert!(
+        hint(&source("@index(ShopHolds)"))
+            .contains("`HoldChangedAt` is keyed (shop, hold) and `ShopHolds` is keyed (shop)"),
+        "{}",
+        hint(&source("@index(ShopHolds)"))
+    );
+
+    // Not a repeat: the set of siblings differs, so these are two indexes.
+    program(&source("@index(shop_id) @index(shop_id, HoldState)"));
 }
 
 /// **The declared type is asked by containment too**, which is the other half of the box

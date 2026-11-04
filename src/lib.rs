@@ -36,7 +36,8 @@ pub use ir::{
 };
 pub use parse::{check_files, parse, parse_files};
 pub use tables::{
-    ArmMatch, Column, ColumnArm, KeyPart, Layout, Table, Unstored, fixed, layout, part_names,
+    ArmMatch, Column, ColumnArm, ColumnIndex, KeyPart, Layout, Table, Unstored, fixed, layout,
+    part_names,
 };
 pub use testing::{TestOutcome, TestResult, World, run_tests, run_tests_in};
 pub use value::{Defs, Event, Invoked, Json, Key, Mismatch, Record, Value};

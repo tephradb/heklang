@@ -409,12 +409,17 @@ request, which is the same cost a by-key read already has and the reason a store
 value from the table instead.
 
 **A column may declare that it can be sorted on** (`docs/folds.md` rule 20), and
-`Column::indexes` is what a host builds its DDL and its `order_by` surface from. Each entry is the
-**set** of key positions that lead the index, sorted into the table's key order, with the column
-itself implied last: `[1]` on a table keyed `(game, user)` is the index `(user, <this column>)`, and
-an empty entry is the column on its own. Build the lead in that sorted order, and serve a sort when
-the parts a read pins are **exactly** that set: the lead is a set to the author, so the order inside
-it is the store's and never part of what a reader asks for.
+`Column::indexes` is what a host builds its DDL and its `order_by` surface from. Each entry is a
+`ColumnIndex`: `parts`, the **set** of key positions that lead the index, sorted into the table's
+key order, and `folds`, the **set** of sibling columns of the same table that follow them, sorted by
+fold name, with the column itself implied after both: `parts: [1]` on a table keyed `(game, user)` is
+the index `(user, <this column>)`, and an entry with neither is the column on its own. Build the
+parts in that sorted order, then the siblings, then the column, then the key parts not named, which
+makes each entry one row. Serve a sort when the parts and the siblings a read pins are **exactly**
+those two sets: both are sets to the author, so the order inside them is the store's and never part
+of what a reader asks for. A sibling is always a stored column of the same table with a type that
+orders, and never the column itself; the parser refuses anything else, and `layout` drops an index
+that breaks it whole rather than build a shorter one.
 
 Two things a host has to decide for itself, because nothing here can. **An optional column may be
 indexed**, so where the absent rows sort is the store's choice and belongs in its own documentation:

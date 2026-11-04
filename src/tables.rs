@@ -194,8 +194,9 @@ pub struct Column {
     /// what `hek check --tables` prints.
     pub reads: Vec<Ident>,
     /// The indexes this column declares (`docs/folds.md` rule 20), each as the **key
-    /// positions** that lead it, in the table's key order, with the column itself implied
-    /// last. Empty for almost every column.
+    /// positions** that lead it, in the table's key order, then the sibling folds whose
+    /// values follow them, with the column itself implied after both. Empty for almost every
+    /// column.
     ///
     /// Positions into [`Table::key`] rather than the parameter names the author wrote,
     /// because what an index can answer is decided by the order its columns sit in, and
@@ -209,11 +210,28 @@ pub struct Column {
     /// `@index(game_id)` on two columns of `(game, user)` is `(game, a)` and `(game, b)`,
     /// which are two indexes answering two questions. An exact repeat on one fold is
     /// refused where it is written instead.
-    pub indexes: Vec<Vec<usize>>,
+    pub indexes: Vec<ColumnIndex>,
     /// The events this column folds, first written first, each once.
     pub events: Vec<EventPath>,
     /// One per `on`, in source order.
     pub arms: Vec<ColumnArm>,
+}
+
+/// One index a column declares: the key parts that lead it, then the sibling folds whose
+/// values follow them, then this column.
+///
+/// The physical order a host builds is the parts in key order, the folds in name order,
+/// this column, and then the key parts not named, which makes each entry unique per row.
+/// So `@index(shop_id, HoldState)` on `HoldChangedAt(shop_id, hold_id)` is
+/// `(shop, hold_state, hold_changed_at, hold)`, which serves a read pinning a shop and a
+/// state and ordering by the change time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnIndex {
+    /// Positions into [`Table::key`], sorted ascending (key order). A set.
+    pub parts: Vec<usize>,
+    /// Sibling fold names in the same [`Table`], sorted by name. A set, and never this
+    /// column's own fold.
+    pub folds: Vec<String>,
 }
 
 /// One arm, as whatever writes the row sees it.
@@ -398,20 +416,21 @@ pub fn layout(program: &Program) -> Layout {
         // An index naming something that is not a parameter is dropped **whole** rather
         // than shortened, because a shorter index is a different index and would answer
         // questions this one cannot. The parser makes that unreachable; `layout` also runs
-        // over programs nothing parsed.
-        let indexes: Vec<Vec<usize>> = fold
+        // over programs nothing parsed. A sibling fold is held to the same below, once
+        // every table is assembled and its columns can be asked for.
+        let indexes: Vec<ColumnIndex> = fold
             .indexes
             .iter()
             .filter_map(|index| {
-                index
+                let mut parts = index
                     .params
                     .iter()
                     .map(|param| args.iter().position(|arg| arg == param))
-                    .collect::<Option<Vec<usize>>>()
-                    .map(|mut positions| {
-                        positions.sort_unstable();
-                        positions
-                    })
+                    .collect::<Option<Vec<usize>>>()?;
+                parts.sort_unstable();
+                let mut folds = index.folds.clone();
+                folds.sort_unstable();
+                Some(ColumnIndex { parts, folds })
             })
             .collect();
         let column = Column {
@@ -440,6 +459,15 @@ pub fn layout(program: &Program) -> Layout {
     tables.sort_by(|a, b| parts(a).cmp(&parts(b)).then_with(|| a.id.cmp(&b.id)));
     for table in &mut tables {
         table.columns.sort_by(|a, b| a.name.cmp(&b.name));
+        let held: Vec<Ident> = table.columns.iter().map(|at| at.fold.clone()).collect();
+        for column in &mut table.columns {
+            column.indexes.retain(|index| {
+                index
+                    .folds
+                    .iter()
+                    .all(|fold| fold != &column.fold && held.contains(fold))
+            });
+        }
     }
     Layout { tables, unstored }
 }

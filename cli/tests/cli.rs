@@ -693,6 +693,34 @@ fn check_prints_the_table_layout_when_asked() {
     );
 }
 
+/// An index is printed as the index a store builds: the lead in key order, then any sibling
+/// fold it names, then the fold itself.
+#[test]
+fn check_prints_an_index_with_its_sibling_folds() {
+    let source = "\
+subject Shop(Int)
+
+event @hold.placed { shop_id: Shop, hold_id: Int, at: Timestamp }
+
+fold HoldState(shop_id: Shop, hold_id: Int) -> String = \"\" {
+  on @hold.placed(shop_id, hold_id) => \"held\"
+}
+
+fold HoldChangedAt(hold_id: Int, shop_id: Shop) -> Timestamp? @index(HoldState, shop_id) = none {
+  on @hold.placed(shop_id, hold_id) { at } => at
+}
+";
+    let root = project("sibling-index", &[("app.hk", source)]);
+    let output = hek(&["check", "--tables", root.to_str().expect("a utf-8 path")]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.contains("(sorts by (shop, HoldState, HoldChangedAt))"),
+        "{text}"
+    );
+}
+
 /// A column asserted the way a user does: `hek test` over a `fold` action. The same
 /// folds the listing above derives, read back by name through the built binary.
 #[test]

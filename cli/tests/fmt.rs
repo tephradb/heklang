@@ -944,3 +944,20 @@ fold Monthly(month: String, kind: String) -> cents: Int = 0 {
     let twice = hek::fmt::format(&once).expect("formatted output parses");
     assert_eq!(once, twice, "not a fixed point:\n{once}\n---\n{twice}");
 }
+
+/// A sibling fold in `@index(..)` is one more argument to the annotation, so it prints in
+/// place beside the parameters and the seed stays after it.
+#[test]
+fn an_index_naming_a_sibling_fold_survives_the_formatter() {
+    let source = "fold Changed(shop_id: Shop, hold: Int) -> Timestamp?   @index( shop_id,HoldState )   = none {
+  on @hold.placed(shop_id, hold) { at } => at
+}
+";
+    let once = hek::fmt::format(source).expect("the source parses");
+    assert!(
+        once.contains("fold Changed(shop_id: Shop, hold: Int) -> Timestamp? @index(shop_id, HoldState) = none {"),
+        "{once}"
+    );
+    let twice = hek::fmt::format(&once).expect("formatted output parses");
+    assert_eq!(once, twice, "not a fixed point:\n{once}\n---\n{twice}");
+}

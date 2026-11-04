@@ -489,3 +489,46 @@ fold ReviewHelpful(game_id: Game, user_id: User) -> n: Int @index(game_id) = 0 {
         value: (binary_expression
           left: (identifier)
           right: (integer_literal))))))
+
+================================================================================
+an index naming a sibling fold
+================================================================================
+
+fold HoldChangedAt(shop_id: Shop, hold_id: Int) -> Timestamp? @index(shop_id, HoldState) = none {
+  on @hold.placed(shop_id, hold_id) { at } => at
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fold_definition
+    name: (type_identifier)
+    parameters: (parameters
+      (parameter
+        name: (identifier)
+        type: (type
+          (type_identifier)))
+      (parameter
+        name: (identifier)
+        type: (type
+          (primitive_type))))
+    type: (fold_type
+      (type
+        (primitive_type)))
+    (annotation
+      (annotation_name)
+      (annotation_arguments
+        (identifier)
+        (identifier)))
+    seed: (none_literal)
+    body: (fold_body
+      (fold_arm
+        (slice_reference
+          path: (event_path)
+          (filter
+            field: (identifier))
+          (filter
+            field: (identifier)))
+        destructure: (destructure
+          (identifier))
+        value: (identifier)))))

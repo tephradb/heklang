@@ -1625,8 +1625,8 @@ entity field is `customer_id: Int @index` and a parameter is `shop_id: Shop @sub
 **The parameters it names lead the index and the column itself is implied last.** `@index`
 alone is the column on its own, which answers "the best sellers across the catalogue";
 `@index(game_id)` is `(game, ReviewHelpful)`, which answers "this game's most helpful
-reviews". A host reads them off `Column::indexes` as **key positions**, sorted into the key's
-order, rather than as the names written here.
+reviews". A host reads them off `Column::indexes` as **key positions** (`ColumnIndex::parts`),
+sorted into the key's order, rather than as the names written here.
 
 **The parameters are a set.** `@index(user_id, game_id)` is `@index(game_id, user_id)`, and
 `@index(user_id)` is as good as `@index(game_id)` although `user` is not the key's first part.
@@ -1636,12 +1636,46 @@ used to have to be a leading run of the key in key order, which made the layout'
 parts first, the rest alphabetical) a rule every author of an index had to learn and a hint every
 refusal had to explain.
 
-**Four rules, and each one is somebody's mistake caught early:**
+**A sibling fold may follow the lead.** A capitalised name in `@index(..)` that is not one of the
+fold's parameters names another fold of the **same table**, and its value sits between the lead
+and this column. That is the shape of a list filtered on one column and ordered by another:
 
-- **The names are the fold's own parameters.** Anything else is refused where it is written.
+```hek
+fold HoldState(shop_id: Shop, hold_id: Int) -> String = "" {
+  on @hold.placed(shop_id, hold_id) => "held"
+  on @hold.released(shop_id, hold_id) => "released"
+}
+
+fold HoldChangedAt(shop_id: Shop, hold_id: Int) -> Timestamp? @index(shop_id, HoldState) = none {
+  on @hold.placed(shop_id, hold_id) { at } => at     // index (shop, HoldState, HoldChangedAt)
+  on @hold.released(shop_id, hold_id) { at } => at
+}
+```
+
+which answers "this shop's holds in this state, most recently changed first" with one index scan.
+Without it the two values have to be folded into one column of their own, keyed or concatenated so
+that its order is the order wanted, which is a second copy of both and a fold nobody reads for its
+value. The parameter is looked for first, so a parameter spelled with a capital is still the
+parameter; a fold is named like a type, so only a capitalised name can be a fold at all.
+
+A host reads the siblings off `ColumnIndex::folds`, by name and sorted, beside the key positions in
+`ColumnIndex::parts`. The index it builds is the parts in key order, then the siblings in name
+order, then this column, then the key parts not named, which makes each entry one row. Both are
+**sets**: the order they are written in means nothing, and the order inside each is the store's.
+
+**Seven rules, and each one is somebody's mistake caught early:**
+
+- **A lowercase name is one of the fold's own parameters.** Anything else is refused where it is
+  written.
+- **A capitalised name that is not a parameter is a declared fold**, and not this fold itself,
+  whose value is already the last position of every index it declares.
 - **The fold has to be stored at all.** A fold no column is kept for has nothing to index, and the
   refusal names the key part no event supplies, since that is what has to change. It is rule 15's
-  refusal of a lookup on an unstored fold, one declaration over.
+  refusal of a lookup on an unstored fold, one declaration over. A sibling is held to the same,
+  for the same reason.
+- **A sibling is kept in the same table**, which is to say it has the same key: an index is built
+  over one table's rows, and a value kept in another table is not on them. The refusal prints both
+  keys, since that is what differs.
 - **The column's type has to order.** Read off `types::comparable` against `>`, the same line
   that decides whether `max` and `min` exist, so there is one answer to "can this be sorted"
   and it cannot drift from the operators. That refuses a `List` or `Map` column, which lives
@@ -1653,17 +1687,21 @@ refusal had to explain.
 - **A sealed column is refused**, with its own reason rather than the type's: a store holds
   the ciphertext, so sorting would mean opening every row to compare two, which is the thing a
   sealed column exists to avoid. Index something derived from it instead.
+- **A sibling's type is held to the same two rules**, by the same check, since a store sorts on
+  it just as it sorts on the column.
 
 **A repeat on one fold is refused, as a set**, and nothing else is a duplicate:
-`@index(game_id, user_id)` beside `@index(user_id, game_id)` is one index written twice.
-`@index` beside `@index(game_id)` is two indexes, and so is `@index(game_id)` on two folds of
-one key, because the fold's own value is the last position of each: `(game, a)` and `(game, b)`
-answer two questions.
+`@index(game_id, user_id)` beside `@index(user_id, game_id)` is one index written twice, and so is
+`@index(shop_id, HoldState)` beside `@index(HoldState, shop_id)`. `@index` beside `@index(game_id)`
+is two indexes, `@index(shop_id)` beside `@index(shop_id, HoldState)` is two, and so is
+`@index(game_id)` on two folds of one key, because the fold's own value is the last position of
+each: `(game, a)` and `(game, b)` answer two questions.
 
 An index is in the fold's **own** digest hash and not in its signature hash, exactly as an
 entity's `index (a, b)` is: adding one changes what a store builds and what a reader may sort
-on, and changes nothing a caller passes or reads back. `hek check --tables` prints each one as
-the index a store would build, which is the form the annotation does not say on its face.
+on, and changes nothing a caller passes or reads back. A sibling is in it by name.
+`hek check --tables` prints each one as the index a store would build, which is the form the
+annotation does not say on its face.
 
 **Nothing in the interpreter reads it**, which is true of a projector's indexes too. A fold's
 value is the same value whether or not a store can sort on it; this is a declaration about the

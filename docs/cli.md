@@ -154,9 +154,10 @@ hash moves, and what `Layout::closure` adds to a rebuild.
 
 Printed as the index a store would build rather than as the annotation the author wrote: the
 parameters it names become key parts, **in the key's order whatever order they were written in**,
-and the fold's own value is the last position. That is also exactly what `Column::indexes` holds,
-as sorted positions into the key, so a host reading this listing and a host reading the layout see
-one answer.
+any sibling folds it names follow them in name order, and the fold's own value is the last
+position, so `@index(shop_id, HoldState)` prints `(sorts by (shop, HoldState, HoldChangedAt))`.
+That is also exactly what `Column::indexes` holds, as sorted positions into the key and sorted
+fold names, so a host reading this listing and a host reading the layout see one answer.
 
 **A key part and a fold's column may not take one name**, and that one is refused rather than
 disambiguated. `fold Shop(shop_id: Shop)` wants a row whose key column and whose only value
