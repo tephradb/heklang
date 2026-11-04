@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://git.tqwewe.com/tephra/heklang/compare/v0.6.0...v0.7.0) - 2026-11-04
+
+### Added
+
+- [**breaking**] an @index may name a sibling fold of the same table between its lead and the column
+
 ### Added
 
 - `hek check --tables` prints the sibling folds an `@index` names between its lead and the fold,

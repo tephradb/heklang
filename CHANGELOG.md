@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0](https://git.tqwewe.com/tephra/heklang/compare/heklang-v0.13.0...heklang-v0.14.0) - 2026-11-04
+
+### Added
+
+- an @index sibling need only be matchable by value, so a Bool or an enum may follow the lead
+- a lookup argument may be optional where its parameter is not, and an absent one answers none
+- [**breaking**] an @index may name a sibling fold of the same table between its lead and the column
+
+### Other
+
+- reflow the heklang skill's @index paragraph
+
 ### Added
 
 - an `@index` may name a sibling fold of the same table after its lead, so
