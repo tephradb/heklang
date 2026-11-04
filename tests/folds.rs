@@ -3496,17 +3496,32 @@ fold HoldCount(Shop: Shop) -> n: Int @index(Shop) = 0 {
 
 /// Every way a sibling can fail to be a column this one can be sorted beside, each with its
 /// own reason: it does not exist, it is the fold itself, it is not stored, it is kept in
-/// another table, or its value does not order. The last reuses the indexed column's own
-/// gate, so a sealed sibling is refused for the seal.
+/// another table, or its value cannot be matched by value. A sibling is pinned and never
+/// sorted on, so the last is equality rather than the indexed column's ordering gate: a
+/// `Bool` and an enum pass it, and a `Money` does not, since a key is never one.
 #[test]
-fn an_index_names_only_a_sortable_sibling_of_its_table() {
+fn an_index_names_only_a_matchable_sibling_of_its_table() {
     let source = |annotation: &str| {
         format!(
             "\
 subject Shop(Int)
 subject Customer(Int)
 
-event @hold.placed {{ shop_id: Shop, hold_id: Int, customer_id: Customer, note: String @subject(customer_id), at: Timestamp }}
+enum Phase {{ @default Held, Released }}
+
+event @hold.placed {{ shop_id: Shop, hold_id: Int, customer_id: Customer, note: String @subject(customer_id), at: Timestamp, total: Money(2) }}
+
+fold HoldPhase(shop_id: Shop, hold_id: Int) -> Phase = Held {{
+  on @hold.placed(shop_id, hold_id) => Released
+}}
+
+fold HoldKnown(shop_id: Shop, hold_id: Int) -> Bool? = none {{
+  on @hold.placed(shop_id, hold_id) => true
+}}
+
+fold HoldTotal(shop_id: Shop, hold_id: Int) -> Money(2) = 0 {{
+  on @hold.placed(shop_id, hold_id) {{ total }} => total
+}}
 
 fold HoldState(shop_id: Shop, hold_id: Int) -> String = \"\" {{
   on @hold.placed(shop_id, hold_id) => \"held\"
@@ -3560,12 +3575,12 @@ fold HoldChangedAt(shop_id: Shop, hold_id: Int) -> Timestamp? {annotation} = non
             "`ShopHolds` is kept in a different table from `HoldChangedAt`, so one index cannot hold both",
         ),
         (
-            "@index(HoldOpen)",
-            "fold `HoldOpen` is a Bool, which does not order",
+            "@index(HoldTags)",
+            "fold `HoldTags` is a List(String), which cannot be matched by value",
         ),
         (
-            "@index(HoldTags)",
-            "fold `HoldTags` is a List(String), which does not order",
+            "@index(HoldTotal)",
+            "fold `HoldTotal` is a Money(2), which cannot be matched by value",
         ),
         ("@index(HoldNote)", "fold `HoldNote` is sealed"),
         (
@@ -3586,6 +3601,15 @@ fold HoldChangedAt(shop_id: Shop, hold_id: Int) -> Timestamp? {annotation} = non
 
     // Not a repeat: the set of siblings differs, so these are two indexes.
     program(&source("@index(shop_id) @index(shop_id, HoldState)"));
+
+    // A flag, an optional flag and an enum are what a list is filtered on, and none orders.
+    let program = program(&source("@index(shop_id, HoldOpen, HoldKnown, HoldPhase)"));
+    let layout = heklang::layout(&program);
+    let (_, column) = layout.column("HoldChangedAt").expect("kept");
+    assert_eq!(
+        column.indexes[0].folds,
+        ["HoldKnown", "HoldOpen", "HoldPhase"]
+    );
 }
 
 /// **The declared type is asked by containment too**, which is the other half of the box

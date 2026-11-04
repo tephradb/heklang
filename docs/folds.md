@@ -1711,8 +1711,12 @@ order, then this column, then the key parts not named, which makes each entry on
 - **A sealed column is refused**, with its own reason rather than the type's: a store holds
   the ciphertext, so sorting would mean opening every row to compare two, which is the thing a
   sealed column exists to avoid. Index something derived from it instead.
-- **A sibling's type is held to the same two rules**, by the same check, since a store sorts on
-  it just as it sorts on the column.
+- **A sibling has to be matchable by value, and need not order.** A read pins a sibling to one
+  value and orders by the column, so the gate is equality: a scalar a key part could be
+  (`value::can_key`) or a `Bool`, through one optional. That admits the two things a list is
+  most often filtered on, a flag and an enum, which the column's own gate refuses, and refuses a
+  collection, a record, `Json`, a `Money` and a `Decimal`, none of which a key can be. A sealed
+  sibling is refused with its own reason, as a sealed column is.
 
 **A repeat on one fold is refused, as a set**, and nothing else is a duplicate:
 `@index(game_id, user_id)` beside `@index(user_id, game_id)` is one index written twice, and so is

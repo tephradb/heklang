@@ -490,7 +490,9 @@ The parameters are a **set**, and so are the siblings: any of the fold's own, in
   `Timestamp?` column is indexable and where the absent rows sort is the store's to document;
 - a **sealed** column, because a store holds the ciphertext: index something derived from it.
 
-The last two hold for a sibling too, since a store sorts on it as well.
+A sibling is pinned to one value and never sorted on, so it only has to be **matchable by value**:
+a `Bool`, an enum, or any scalar a key part could be, through one optional. A collection, a record,
+`Json`, a `Money`, a `Decimal` and a sealed fold are refused as siblings.
 
 A repeat on one fold is refused **as a set**, so `@index(a, b)` beside `@index(b, a)` is one
 index written twice, and nothing else is a duplicate: `@index` beside `@index(game_id)` is two

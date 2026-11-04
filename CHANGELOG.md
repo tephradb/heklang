@@ -12,8 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - an `@index` may name a sibling fold of the same table after its lead, so
   `@index(shop_id, HoldState)` on `HoldChangedAt` is the index `(shop, HoldState, HoldChangedAt)`:
   a list filtered on one column and ordered by another. A capitalised name that is not a parameter
-  is the sibling, which has to be stored, keyed as this fold is, not the fold itself, and of a type
-  that orders and is not sealed. It is in the fold's digest as `(index shop_id (fold HoldState))`,
+  is the sibling, which has to be stored, keyed as this fold is, not the fold itself, and
+  matchable by value: a scalar a key part could be or a `Bool`, so a flag or an enum, and not
+  sealed. It is pinned rather than sorted on, so it need not order. It is in the fold's digest as `(index shop_id (fold HoldState))`,
   and an index naming none packs as it did, so `hek-digest 6` stands.
 - a lookup argument may be an optional where the looked-up fold's parameter is not, so
   `FoShop { fo }` over a field `fo: Int?` replaces `FoShop { fo: fo.unwrap_or(0) }`, which looked

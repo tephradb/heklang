@@ -417,8 +417,9 @@ the index `(user, <this column>)`, and an entry with neither is the column on it
 parts in that sorted order, then the siblings, then the column, then the key parts not named, which
 makes each entry one row. Serve a sort when the parts and the siblings a read pins are **exactly**
 those two sets: both are sets to the author, so the order inside them is the store's and never part
-of what a reader asks for. A sibling is always a stored column of the same table with a type that
-orders, and never the column itself; the parser refuses anything else, and `layout` drops an index
+of what a reader asks for. A sibling is always a stored column of the same table whose type a key
+part could be, or a `Bool`, possibly optional, and never the column itself. It is matched by
+equality and never sorted on, so it need not order; the parser refuses anything else, and `layout` drops an index
 that breaks it whole rather than build a shorter one.
 
 Two things a host has to decide for itself, because nothing here can. **An optional column may be

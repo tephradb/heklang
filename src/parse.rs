@@ -4296,8 +4296,9 @@ impl Parser {
         Ok(())
     }
 
-    /// Whether a column `@index` sorts on has a type that **orders**: the indexed fold's
-    /// own, and each sibling fold an index names, since a store sorts on all of them.
+    /// Whether the column `@index` sorts on has a type that **orders**. Only the indexed
+    /// fold's own: a sibling is pinned rather than sorted on, which [`Self::index_matches`]
+    /// asks instead.
     ///
     /// The ordering gate is `types::comparable` against `>`, the same line that decides
     /// whether `max` and `min` exist, so there is one answer to "can this be sorted" and
@@ -4336,6 +4337,42 @@ impl Parser {
                     a(ret)
                 ),
                 "`@index` declares that a host may sort on the column, so the value has to be one `<` and `>` accept: an Int, a Decimal, a Money, a String, a Timestamp, or a subject over one of those",
+            ),
+        };
+        Err(self.err(Code::FoldRestriction, why, span).with_hint(hint))
+    }
+
+    /// Whether a sibling fold an `@index` names can be **matched by value**, which is all a
+    /// read does with one: it pins `HoldState = "held"` and orders by the indexed column, so
+    /// a sibling needs equality and not an order. That is why a `Bool` or an enum, the
+    /// commonest thing to filter a list on, is a sibling and not an indexed column.
+    ///
+    /// The gate is `value::can_key` plus `Bool`: a scalar a key part could be, so a
+    /// collection, a record and `Json` are refused, and a `Money` or a `Decimal` is too,
+    /// since a key is never one. Through one optional and with the seal named first, as
+    /// [`Self::index_orders`] reads its column, so an absent sibling is a value a read pins
+    /// like any other.
+    fn index_matches(&self, name: &str, ret: &Type, span: Span) -> Result<(), Diagnostic> {
+        let column = match ret {
+            Type::Opt(inner) => inner.as_ref(),
+            ret => ret,
+        };
+        if value::can_key(column) || matches!(column.as_scalar(), Type::Bool) {
+            return Ok(());
+        }
+        let (why, hint) = match column {
+            Type::Sealed(..) => (
+                format!(
+                    "fold `{name}` is sealed, so a store holds its ciphertext and there is no value to match a row by"
+                ),
+                "matching it would mean opening every row to compare one, which is the thing a sealed column exists to avoid: name a fold derived from it instead",
+            ),
+            _ => (
+                format!(
+                    "fold `{name}` is {}, which cannot be matched by value, so it cannot follow the lead of an index",
+                    a(ret)
+                ),
+                "a sibling in `@index` is a column a read pins to one value, so it has to be a scalar a key part could be: a Bool, an Int, a String, a Uuid, a Timestamp, an enum, or a subject over one of those",
             ),
         };
         Err(self.err(Code::FoldRestriction, why, span).with_hint(hint))
@@ -12317,7 +12354,7 @@ impl Parser {
                         )
                         .with_related(declared));
                     }
-                    self.index_orders(name, &sibling.ret, index.span)
+                    self.index_matches(name, &sibling.ret, index.span)
                         .map_err(|error| in_file(error, &def.module).with_related(declared))?;
                 }
             }
